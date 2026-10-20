@@ -17,6 +17,20 @@ type_checker = "mypy-strict"
 codex_workers = "explicit-make-targets"
 claude_workers = ".claude/agents"
 
+[development.context]
+scope = "coding-sessions-only"
+strategy = "native-compaction-plus-source-linked-task-state"
+automatic_resets = false
+lifecycle_controller_implemented = false
+handoff_template = "docs/development/handoff-template.md"
+evaluation_plan = "docs/development/context-management.md"
+experimental_checkpoint_percent = 60
+checkpoint_action = "assess-at-safe-boundary-only-no-automatic-reset"
+comparison_routing = "fixed-model-provider-effort-per-paired-batch"
+budget_accounting = "total-goal-across-all-continuations-and-reviews"
+observations = "manual-sanitized-task-boundary-records"
+evidence_root = "artifacts/context-policy"
+
 [model_tests]
 provider = "openrouter"
 credential_env = "OPENROUTER_API_KEY"

@@ -37,6 +37,7 @@ docs/development/CONTEXT.md           short development index and current state
 docs/development/tasks/<task-id>/
   brief.md                           inputs, work, acceptance and ownership
   result.md                          implementation result and evidence links
+  handoff.md                         only when a coding-session transfer is needed
 docs/decisions/                      shared decisions linked by briefs
 artifacts/model-tests/               local test evidence, outside brief context
 ```
@@ -69,3 +70,9 @@ Assess usefulness after a few completed tasks using context rereads, repeated
 clarifications, stale-predecessor mistakes, integration defects and time spent
 maintaining the briefs. If upkeep exceeds the benefit, reduce the structure.
 No token or speed saving has been measured.
+
+The [coding-session context policy](development/context-management.md) extends
+this existing ICM layer with stable ownership and resumable task state. Use its
+[handoff template](development/handoff-template.md) when a transfer is needed;
+there is no second memory hierarchy or product context-management feature.
+The 60% proposal is an experimental assessment checkpoint, not an enabled reset.

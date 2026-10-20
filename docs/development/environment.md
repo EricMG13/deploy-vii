@@ -106,3 +106,8 @@ enforcement. Do not merge on an unstarted or failed required check.
 Global plugins/MCP/hooks remain host state; this project does not disable them.
 See the [assessment](../plugins-hooks.md). Raw output can still be observed by
 enabled host tooling; sanitized ICM summaries do not change that host behavior.
+
+For coding-session continuity, use the [development context policy](context-management.md)
+and its optional handoff template. Native compaction remains in place. The 60%
+proposal is a development experiment only; no automatic reset or lifecycle hook
+is installed. Product analysis and its model-test pool are unaffected.

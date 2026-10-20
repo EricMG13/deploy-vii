@@ -6,7 +6,8 @@
 
 ## Inputs
 
-- Owner: this session's coordinator. Working directory: `/Users/ericguei/Documents/DEPLOY VII`.
+- Task ID: `dvii-environment-001`. Owner session: `01a15b2e-4bf1-72f1-bf44-e6abbfff34cc`.
+  Working directory: `/Users/ericguei/Documents/DEPLOY VII`.
 - Base: existing private `EricMG13/deploy-vii`, clean root `f49845d`.
 - Read set: all research linked by README and decision 0002.
 - Protected sources: Deploy VI, the separate lowercase checkout and the supplied

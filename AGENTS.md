@@ -15,6 +15,12 @@ Development conventions:
   once per checkout, `make check` for hygiene, `make secrets` before publication
   and `make audit` for dependency changes. Activate product checks with real code.
 - Keep task context in docs/development/tasks; ICM is for development only.
+- For coding-session handoffs, use docs/development/handoff-template.md. Preserve
+  the task/goal, constraints, user corrections, budgets, pauses, pending actions
+  and outstanding reviews; verify the current tree before continuing.
+- Context policy concerns code development only. Keep native compaction;
+  automatic percentage-triggered resets are not enabled. A proposed 60% checkpoint
+  is experimental, not a quality boundary or permission to restart.
 - Keep credentials, issuer packs and raw run/telemetry artifacts out of Git.
 - One owner per worktree. Workers return local commits; the coordinator owns
   publication and integration. Delegation requires explicit task or skill scope.

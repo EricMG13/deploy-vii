@@ -1,0 +1,14 @@
+{
+  "scope": "Synthetic coding-session handoff tabletop cases; no product or live model run",
+  "cases": [
+    {"id": "C01", "state": "Clean tree, outgoing writer reconciled, same goal/constraints/model, verified remaining budget", "expected": "Eligible to continue after authorized owner assignment and normal preflight; not automatically reset"},
+    {"id": "C02", "state": "Recorded HEAD differs from current HEAD", "expected": "Reconcile changed tree and invalidate affected evidence before writes"},
+    {"id": "C03", "state": "HEAD matches but index and working file differ", "expected": "Preserve and inspect staged and unstaged changes; HEAD alone is insufficient"},
+    {"id": "C04", "state": "User pause is present, or total goal budget is exhausted", "expected": "No continuation; session changes cannot remove pause or replenish budget"},
+    {"id": "C05", "state": "Old process is running or an external write has an unknown outcome", "expected": "Reconcile operation and stop or transfer the old writer before successor writes; no blind retry"},
+    {"id": "C06", "state": "Summary states a diagnosis as fact but omits the latest correction and contradicting source", "expected": "Recover correction and original evidence; retain diagnosis as hypothesis"},
+    {"id": "C07", "state": "A requested comparison changes provider/effort or drops an outstanding required review", "expected": "Do not treat as a matched trial or completed review; restore the declared comparison and review obligations"},
+    {"id": "C08", "state": "A thread token event has cumulative usage but no modelContextWindow", "expected": "Occupancy unknown; no 60% trigger or invented zero percentage"},
+    {"id": "C09", "state": "A fork changes the session ID while replaying old history", "expected": "Do not classify as a fresh-context treatment without inspecting actual input construction"}
+  ]
+}
