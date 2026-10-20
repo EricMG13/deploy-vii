@@ -25,6 +25,7 @@ exclude = ["^artifacts/", "^private/", "^design/reference/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "src"]
 addopts = "-ra --strict-config --strict-markers"
 markers = [
   "live: explicit provider/network test; excluded from ordinary CI",

@@ -28,6 +28,7 @@ jobs:
           python-version: '3.13.15'
       - run: uv sync --locked
       - run: make check
+      - run: make dev-check
   secrets:
     name: Secrets
     runs-on: ubuntu-24.04

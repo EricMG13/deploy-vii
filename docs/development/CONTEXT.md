@@ -1,8 +1,10 @@
 # Development context
 
-Current phase: development environment. Product implementation has not started.
-The user's request authorizes this setup; [AGENTS.md](../../AGENTS.md) and
-[decision 0002](../decisions/0002-development-environment.md) define its boundaries.
+Current phase: development tooling and product implementation, authorized by the
+21 October 2026 request. [Implementation brief](tasks/implementation/brief.md)
+records adopted decisions, acceptance, budgets and progress; the earlier research
+does not override this request. [Decision 0002](../decisions/0002-development-environment.md)
+still defines the selected environment.
 
 | Need | Authoritative context |
 | --- | --- |
@@ -23,7 +25,7 @@ worktree and snapshot base/head, rather than an owner label tied to the reader's
 current chat. Re-read actual Git/process state on resume. Keep source code in normal product folders and
 raw test artifacts outside these briefs. Do not create a parallel stage hierarchy.
 
-Next product boundary to specify: CP-0 readiness and the accepted artifact
-contract, including how its first real output populates Direction C. Reuse
-selected Deploy VI behavior only after validating dependencies and regression
-cases. This next-step note does not mark that implementation complete.
+Development CLI: [usage](workflow.md). Product work starts with r14 coverage,
+contracts and an honest unrun Direction C shell, followed by source readiness.
+Reuse selected Deploy VI behavior only after validating dependencies and regression
+cases. Implementation and live qualification are tracked separately in the brief.

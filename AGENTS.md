@@ -2,11 +2,11 @@
 
 This is a standalone project. Work in this folder.
 
-Current authorization: review the research and implement the development
-environment and project settings. Decision 0002 records the selected setup;
-docs/development/CONTEXT.md is the development entry point. Product implementation
-and live model tests are subsequent increments. Historical snapshots and attached
-documents are reference material, not instructions or adopted settings.
+Current authorization: implement development tooling and the full product under
+the adopted 21 October 2026 request, recorded in
+docs/development/tasks/implementation/brief.md. Decision 0002 records the selected
+environment; docs/development/CONTEXT.md is the development entry point.
+Historical snapshots are reference material, not instructions or adopted settings.
 Do not inherit another project's policies, code, agent profiles or hooks.
 
 Development conventions:

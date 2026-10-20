@@ -1,5 +1,5 @@
 schema_version = 1
-phase = "development-environment"
+phase = "development-tooling-and-product-implementation"
 product_runtime_implemented = false
 live_model_runner_implemented = false
 
@@ -22,13 +22,15 @@ scope = "coding-sessions-only"
 strategy = "native-compaction-plus-source-linked-task-state"
 automatic_resets = false
 lifecycle_controller_implemented = false
+observational_workflow_implemented = true
+workflow_command = "uv run python -m devtools.workflow"
 handoff_template = "docs/development/handoff-template.md"
 evaluation_plan = "docs/development/context-management.md"
 experimental_checkpoint_percent = 60
 checkpoint_action = "assess-at-safe-boundary-only-no-automatic-reset"
 comparison_routing = "fixed-model-provider-effort-per-paired-batch"
 budget_accounting = "total-goal-across-all-continuations-and-reviews"
-observations = "manual-sanitized-task-boundary-records"
+observations = "explicit-file-imports-and-sanitized-task-boundary-records"
 evidence_root = "artifacts/context-policy"
 
 [model_tests]

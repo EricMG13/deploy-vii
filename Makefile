@@ -1,4 +1,4 @@
-.PHONY: setup check format types test coverage audit secrets diff
+.PHONY: setup check format types test coverage audit secrets diff dev-check dev-test
 .PHONY: codex-scaffold codex-feature codex-sensitive codex-research codex-architect
 
 setup:
@@ -14,15 +14,24 @@ check:
 format:
 	uv run --locked ruff format .
 
+dev-check:
+	uv run --locked ruff check devtools tests/devtools
+	uv run --locked ruff format --check devtools tests/devtools
+	uv run --locked mypy devtools
+	$(MAKE) dev-test
+
+dev-test:
+	uv run --locked pytest tests/devtools
+
 # Product targets intentionally fail until actual source/tests exist.
 types:
 	uv run --locked mypy src
 
 test:
-	uv run --locked pytest -m 'not live and not private'
+	uv run --locked pytest tests/product -m 'not live and not private'
 
 coverage:
-	uv run --locked pytest -m 'not live and not private' --cov --cov-branch --cov-report=term-missing
+	uv run --locked pytest tests/product -m 'not live and not private' --cov --cov-branch --cov-report=term-missing
 
 audit:
 	uv run --locked pip-audit --strict --progress-spinner off
