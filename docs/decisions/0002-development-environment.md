@@ -14,6 +14,7 @@ workflow recommendations. It authorizes environment setup, not analytical produc
 | Dependency manager | uv 0.12.5; committed lock; `uv sync --locked` | Repeatable project environment without global package changes. |
 | Development tools | Ruff, strict mypy, pytest/coverage/Hypothesis, prek, pre-commit-hooks, pip-audit | Retain the research's explicit strict-type decision. Use prek to run small deterministic hooks. No runtime library or agent framework yet. |
 | Current gates | Repository hygiene and Secrets; dependency audit separately | Checks match environment/configuration work. Product tests/types/coverage become blocking with the first product code. No empty suite is labelled a pass. |
+| Hosted OS | Ubuntu 24.04 label | Avoid the announced ubuntu-latest migration while retaining supported hosted images; image contents still receive updates. |
 | Size/complexity | Report full diff; no arbitrary blocking line cap or duplicate complexity gate | Task scope and coherence matter more than inherited 800/4000 limits. Large changes need a clear rationale in the PR. |
 | Development ICM | One index, per-task brief/result, shared decisions | Separate development context from product architecture; avoid a second mirrored plan hierarchy. |
 | Workers | Explicit Claude subagents and Codex Make launch targets with model/effort; coordinator keeps current selected model | Installed Codex uses global profile-v2 files, so native CLI flags avoid global changes. No recursive task expansion; one owner per worktree; coordinator owns publication. |

@@ -21,7 +21,7 @@
   settings and a portable Direction C reference with verified hash.
 - [x] Reconcile research/status claims with active configuration and verify local checks.
 - [x] Run confidence-review; classify rewrite-tournament applicability.
-- [ ] Commit and publish one draft PR; inspect hosted checks and read back supported
+- [x] Commit and publish one draft PR; inspect hosted checks and read back supported
   repository settings. Record unavailable enforcement accurately.
 
 Commands: `uv sync --locked`, `make check`, `make secrets`, `make audit`,

@@ -92,8 +92,10 @@ exactly. It depends on missing companion assets, so it is not a functional repor
 Each implemented Module must later populate its mapped fields and pass factual
 and browser checks. Keep sample figures separate from real accepted outputs.
 
-GitHub Actions defines **Repository hygiene** and **Secrets** on PRs and main
-pushes. The separate audit runs for dependency-change PRs and on a weekly/manual
+GitHub Actions uses `ubuntu-24.04` and defines **Repository hygiene** and **Secrets**
+on PRs and main pushes. The OS label avoids the moving `ubuntu-latest` migration;
+the [runner image documentation](https://github.com/actions/runner-images) lists
+supported labels. The separate audit runs for dependency-change PRs and on a weekly/manual
 schedule. Its schedule becomes active only after the workflow reaches main.
 [Desired repository settings](../../settings/repository.json) and
 [desired ruleset](../../settings/github-ruleset.json) are reviewable API payloads;

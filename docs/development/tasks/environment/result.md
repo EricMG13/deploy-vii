@@ -1,6 +1,8 @@
 # Environment setup result
 
-Status: environment implemented and locally verified; draft publication pending.
+Status: environment implemented and locally verified. Published as
+[draft PR #1](https://github.com/EricMG13/deploy-vii/pull/1); unmerged.
+Hosted acceptance is blocked by GitHub account billing/spending eligibility.
 
 The setup implements decision 0002: pinned Python/uv and development tools,
 deterministic Git hooks and CI, development ICM, explicit worker launch settings,
@@ -14,6 +16,8 @@ product, model runner or renderer has been implemented or qualified.
 - `make setup`, `make check` and `make secrets` pass. Ruff reports no applicable
   Python files; this is not a linted or tested product implementation.
 - actionlint 1.7.12 accepts both workflows; its downloaded archive checksum was verified.
+- CI selects `ubuntu-24.04` to avoid the announced `ubuntu-latest` OS migration.
+  This pins the OS series, not every hosted-image package.
 - All configuration formats and five Claude frontmatters parse.
 - Invalid JSON/TOML/YAML and synthetic private-key inputs are rejected.
 - Synthetic secret probes identified a gap between staged and working content;
@@ -37,6 +41,20 @@ automatic merging is disabled. The Actions default token was already read-only
 and cannot approve PRs. The desired branch ruleset is saved but not applied:
 the private-repository API returns HTTP 403 under the current account plan.
 
+The initial PR head `5cf03a9c101a2657adb1b1c45146c760839b49ea` triggered
+[development checks](https://github.com/EricMG13/deploy-vii/actions/runs/39505911468)
+and [dependency audit](https://github.com/EricMG13/deploy-vii/actions/runs/39505911810).
+All three jobs report failure with **zero steps executed**. Their annotations say
+GitHub could not start the jobs because recent account payments failed or the
+spending limit needs increasing. That is the provider's alternative explanation;
+this setup has not inspected or changed billing. It is not a test failure or a
+hosted pass. Re-enable account runner eligibility and rerun the current PR head
+before treating hosted validation as complete.
+
+The publication also confirmed the workflow blob on GitHub matches the local
+committed file. A status listing initially displayed the old workflow label;
+the run detail and exact blob identify the actual workflow as Development checks.
+
 ## Confidence review — complete environment candidate
 
 Least confident about, in priority order:
@@ -59,8 +77,8 @@ Least confident about, in priority order:
    without product inputs. No product, live-model or browser pass is claimed.
 5. **Lock/hooks/workflows could disagree.** **Verified fine:** locked sync, actual
    prek execution, format parsers, negative input probes and actionlint pass.
-   Actions/Gitleaks downloads use verified pins/checksums. Hosted execution is
-   checked separately after publication; local success cannot establish it.
+   Actions/Gitleaks downloads use verified pins/checksums. Hosted jobs were
+   requested but blocked before any step. Local success cannot establish them.
 6. **Reference or unrelated checkout could be changed.** **Verified fine:** the
    supplied/copy SHA-256 and bytes match; the lowercase checkout is still clean;
    this branch retains the existing `f49845d` ancestor. No Deploy VI code is copied.
