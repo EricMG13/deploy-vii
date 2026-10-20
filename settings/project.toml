@@ -1,0 +1,75 @@
+schema_version = 1
+phase = "development-environment"
+product_runtime_implemented = false
+live_model_runner_implemented = false
+
+[development]
+context_index = "docs/development/CONTEXT.md"
+task_root = "docs/development/tasks"
+publication_owner = "coordinator"
+worker_publication = "local-commits-only"
+confidence_review = "after-code-changes"
+rewrite_tournament = "non-trivial-code-changes"
+size_gate = "advisory-full-diff-no-hard-cap"
+python = "3.13.15"
+uv = "0.12.5"
+type_checker = "mypy-strict"
+codex_workers = "explicit-make-targets"
+claude_workers = ".claude/agents"
+
+[model_tests]
+provider = "openrouter"
+credential_env = "OPENROUTER_API_KEY"
+selection = "uniform-random-among-eligible"
+record_selection_seed = true
+default_effort = "high"
+complex_effort = "xhigh"
+unsupported_xhigh = "use-supported-high-and-record-mapping"
+unavailable_route = "record-ineligible-before-draw"
+retries = "same-model-new-attempt"
+cross_model_comparison = "same-frozen-case-randomized-order"
+artifact_root = "artifacts/model-tests"
+retain_failures = true
+retain_requests_outputs_metrics_events = true
+missing_metrics = "null-with-reason"
+provider_fallback = "observable-and-separately-classified"
+version_policy = "resolve-and-pin-per-comparison-batch"
+
+[[model_tests.candidates]]
+key = "luna"
+model_id = "openai/gpt-6-luna"
+resolution = "explicit-version"
+
+[[model_tests.candidates]]
+key = "glm"
+model_id = "z-ai/glm-5.3-flash"
+resolution = "explicit-version"
+
+[[model_tests.candidates]]
+key = "deepseek"
+model_id = "deepseek/deepseek-v4.1-flash-1017"
+resolution = "refresh-latest-suitable-deepseek-before-batch"
+catalog_checked = "2026-10-20"
+
+[frontend]
+direction = "C-Workbench"
+reference = "design/reference/direction-c-workbench.dc.html"
+incremental_module_rendering = true
+accepted_artifacts_only = true
+candidate_preview_labelled = true
+viewports = ["1440x900", "1280x800"]
+
+[ci]
+required_contexts = ["Repository hygiene", "Secrets"]
+model_calls = false
+private_packs = false
+provider_credentials = false
+dependency_audit = "separate-manual-or-weekly"
+product_gates = "activate-with-first-product-increment"
+
+[runtime_design]
+delivery_target = "github-copilot-cli"
+arithmetic_owner = "python"
+execution = "dependency-aware-sequential-first"
+framework = "none-selected"
+methodology = "preserve-meaning-adapt-boundaries"

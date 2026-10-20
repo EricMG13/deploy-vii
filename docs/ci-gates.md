@@ -1,0 +1,107 @@
+# CI gates: purpose, issues and new settings
+
+Updated 20 October 2026. The environment now includes local checks and GitHub
+workflows. [Decision 0002](decisions/0002-development-environment.md) selects the
+current gates; the [setup result](development/tasks/environment/result.md) records
+execution and enforcement status. Historical settings under `docs/research-settings/`
+remain inactive snapshots. Future product gates below are not yet executable.
+
+Review date: 2026-10-20. Inspected Deploy VI's working-tree CI, pre-commit,
+pyproject and gate scripts plus locally recorded `origin/main` at
+`bd71346301b373afa72655916a4c1b42bf4c9823`. This is not a fresh remote audit.
+
+## Findings from Deploy VI
+
+| Existing gate | Purpose | Observed issue or trade-off | Deploy VII treatment |
+| --- | --- | --- | --- |
+| Locked dependency sync/check | Reproducible tools and runtime | Sync and lock-check partly overlap; both run even for docs | Keep when dependencies exist; no runtime install in research CI. |
+| Ruff lint/format | Catch likely defects and keep readable diffs | Whole-tree work repeats in hooks and CI | Keep; fast local scope, full applicable CI. |
+| Strict mypy | Contract/type correctness | Includes test helpers; migration cost can dominate small changes | Strict product code first; expand intentionally. |
+| pytest + 80% branch coverage | Functional behavior and missed branches | One percentage is not proof of financial correctness | Keep functional/property checks; coverage is a floor, not acceptance. |
+| Corpus replay | Real document/calculation regressions | Private data unavailable on hosted runners; synthetic corpus reruns after pytest | Synthetic CI; required private acceptance locally. Never equate them. |
+| Contract/catalog checker | Match prompts, tables and consumers | Can couple every small change to unused future Modules | Validate implemented core and actual declared dependencies only. |
+| Suppression-count ceiling | Prevent accumulating ignored warnings | Counts can encourage code contortions without judging justification | Require targeted reasoned suppressions; report growth, review substance. |
+| Ruff complexity + complexipy 15 | Identify difficult logic | Overlapping blockers can force superficial splitting | One advisory complexity report; financial/error behavior remains blocking. |
+| Bandit + scan floor | Detect risky Python and silent empty scans | Blanket findings/fixed LOC floor can misfit a tiny new repo | Activate with Python code; findings triaged explicitly, parse/scan errors block. |
+| pip-audit --strict | Known dependency vulnerabilities | Registry/network failures differ from vulnerabilities | Lock-change and scheduled audit; failed scan is unknown, never clean. |
+| jscpd 3% incl tests | Detect copy/paste | Repeated test cases may be clearer than abstractions; adds Node setup | Advisory for product code when it exists; no research-phase dependency. |
+| Gitleaks | Keep secrets out of history | Long custom range/floor logic has maintenance cost | Pinned full reachable-history scan initially; no provider secret in CI. |
+| PR line cap | Keep changes reviewable | Historical policies used 800 and separately authorized 4000 | Advisory full-diff reporting, no arbitrary blocking cap; justify scope in the PR. |
+| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/15-minute limits; investigate timeouts. |
+
+The existing checks protect valuable invariants. The concern is overlapping
+execution and misleading proxies for quality, not the existence of validation.
+No CI timing distribution was collected, so this review claims no measured saving.
+
+## Current environment checks
+
+The workflow defines two named jobs:
+
+1. **Repository hygiene:** YAML/JSON/TOML syntax, merge markers, file endings,
+   trailing whitespace, private-key patterns and unexpected large files. Ruff
+   applies when Python files exist; the committed lock is checked.
+2. **Secrets:** checksum-pinned Gitleaks scans all fetched reachable history,
+   redacts output and refuses scan errors. A shallow/empty scan is not accepted.
+
+Use read-only contents permissions and checkout without persistent credentials.
+Pin Actions to verified commits. Keep model calls, private packs, publication and
+provider credentials outside hosted CI. The old tool pins in decision 0001 are
+historical, not newly installed or qualified by this document.
+
+`make diff` reports the whole candidate against origin/main, including docs/tests.
+There is no inherited hard line cap or excluded-path loophole. A separate audit
+checks dependency-change PRs and supports weekly/manual runs; it is not a required
+status context because unrelated PRs do not run it. Network errors fail that audit.
+
+Prefer PR checks plus default-branch pushes to avoid redundant full runs on every
+worker push. Manual dispatch can cover a deliberate standalone candidate. Bind
+results to the actual tested commit; a prior head's green check is insufficient.
+
+## Introduce these gates with the first relevant code
+
+| Change / milestone | Blocking evidence required |
+| --- | --- |
+| Python implementation | Ruff, strict types, affected functional tests and locked dependencies. |
+| Module prompt/schema | Contract validation, missing/conflicting inputs, citation fidelity and live layer rubric. |
+| Financial calculation | Exact expected values, reconciliation, properties and sensitive changed-code mutations. |
+| Source/parser changes | Source hashes, page/row boundaries, hostile text, unreadable/partial inputs and corpus cases. |
+| Renderer | Direction C field/number/limitation parity, HTML escaping, source links, offline behavior and browser visual/accessibility checks after each tested Module. |
+| Layer completion | Applicable local tests plus a real run from the user's Luna/GLM/DeepSeek pool; retained outputs/telemetry, factual source checks, analytical rubric and incremental HTML acceptance. |
+| Final delivery | Complete applicable corpus/integration/security gates and native Copilot CLI acceptance. |
+| Integrated worker commits | Combined contracts, ordering and affected consumers on the actual publication candidate. |
+| Refactoring/optimisation | Affected behavior/properties plus baseline/output parity; measured evidence for speed claims. |
+
+These are selected future acceptance requirements, not executable checks. Introduce
+relevant commands with the first applicable code increment. A research check
+cannot qualify future product behavior. Select coverage/security thresholds
+against the actual code; previous numeric floors are not inherited automatically.
+
+Private/live tests run outside hosted CI against agreed packs. Record method and
+input hashes, requested/returned models, actual command/exit, outputs and limits.
+Use the [testing and telemetry policy](testing-and-telemetry.md) and
+[Direction C acceptance](frontend-direction-c.md). An LLM evaluator supplements
+deterministic checks and never proves arithmetic.
+Missing private inputs or live access leave the relevant acceptance pending.
+
+## Branch settings
+
+The [desired ruleset](../settings/github-ruleset.json) requires PRs, resolved
+review threads and the two exact Actions job contexts; it blocks deletion and
+force-push. It chooses zero mandatory human approvals for the current solo-owner
+workflow, with no bypass actors or extra agent approval chain. This is a deliberate
+new setting, not inherited authority from the old snapshot. The user's required
+review skills remain applicable. GitHub Actions app ID 15368 was verified through
+the GitHub API. A JSON file does not establish branch enforcement.
+
+The current private ruleset API returns HTTP 403 requiring a different account
+plan or public repository. Neither is changed. Earlier hosted jobs were unable
+to start; the [historical status](setup-status.md) and
+[later findings](recovered-follow-up-findings.md) describe different stages of that
+attempt. Neither proves current checks/protection. Current outcomes belong in
+the setup result, independently from the workflow and desired ruleset files.
+
+Use the [PR/worktree workflow](pr-worktree-workflow.md) for publication and
+[maintenance sweeps](maintenance-sweeps.md) for bounded refactoring/optimisation.
+
+Not verified: new hosted execution, current branch enforcement, future code/domain
+gates, private corpus coverage or latency improvement.

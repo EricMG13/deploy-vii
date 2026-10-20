@@ -1,0 +1,293 @@
+{
+  "review_date": "2026-10-20",
+  "captured_at_utc": "2026-10-20T21:43:05.531902+00:00",
+  "scope": "Source inspection and public model metadata only; no product or live model test executed. Hashes identify reviewed source versions, not qualification.",
+  "deploy_vi_root": "/Users/ericguei/Documents/Deploy VI",
+  "working_head": "5c491b715aecdba8cc1d5e5db804928569f95e67",
+  "locally_recorded_origin_main": "bd71346301b373afa72655916a4c1b42bf4c9823",
+  "remote_fetched": false,
+  "sources": [
+    {
+      "path": "docs/development/task-brief-template.md",
+      "source": "working tree; sampled source review",
+      "sha256": "15bade21d2f1690c7467cfab6256c8e328eb11637ddd23f2a346504dc7251e05",
+      "bytes": 2068
+    },
+    {
+      "path": "docs/development/2026-10-18-performance-architecture-review.md",
+      "source": "working tree; sampled source review",
+      "sha256": "6c2ce64ce6bc95d626661306bf0190a4a1d40e8068a4a184ddace19358c4490e",
+      "bytes": 12772
+    },
+    {
+      "path": "scripts/dev_evidence.py",
+      "source": "working tree; sampled source review",
+      "sha256": "06aeebb11f05160aaddd5c5a85d0619a81f54c0e543b31697a458aeb32db6825",
+      "bytes": 20426
+    },
+    {
+      "path": "simple-pathways/pathways/credit.py",
+      "source": "working tree; sampled source review",
+      "sha256": "8873587234182f108c36190783ceb01eceb9ee766472e8f95f5cb162ce6c369c",
+      "bytes": 12633
+    },
+    {
+      "path": "simple-pathways/report-app/build.py",
+      "source": "working tree; sampled source review",
+      "sha256": "b9a3373df2a594ee435715d4d5fb8e8aca94ff6662598275e6e0e6a7711133c4",
+      "bytes": 17713
+    },
+    {
+      "path": "simple-pathways/report-app/DESIGN.md",
+      "source": "working tree; sampled source review",
+      "sha256": "7c8ab408b0384eb8876cbff660c43ed6c1a7927862970db14fe51b7297e62ef0",
+      "bytes": 8964
+    },
+    {
+      "path": "simple-pathways/report-app/SHELL-API.md",
+      "source": "working tree; sampled source review",
+      "sha256": "de48f514472520cef9a5e437ca9157d93f7aa8615bdd137ebeec9b1a04131c14",
+      "bytes": 5706
+    },
+    {
+      "path": "simple-pathways/report-app/provenance.js",
+      "source": "working tree; sampled source review",
+      "sha256": "ab7602149f12f36ab2209339888e4825df8a2dd0f5830914d538590a8a4202ad",
+      "bytes": 19239
+    },
+    {
+      "path": "simple-pathways/report-app/tests/test_shell.py",
+      "source": "working tree; sampled source review",
+      "sha256": "0e96ded327c3031437c82f99fe3a87fcfaa809f5d1ac64e8bbbec53635a6d23b",
+      "bytes": 4025
+    },
+    {
+      "path": "simple-pathways/report-app/tokens.css",
+      "source": "working tree; sampled source review",
+      "sha256": "c117cbda85456d98b6a51b601f9c02177fed1a153a3501a9167452e609eebea2",
+      "bytes": 1252
+    },
+    {
+      "path": "rbot/scripts/rbotlib/contract.py",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "4a18a7026c9c6b7aa5b03d7fe49656c5e2bdb8fb",
+      "sha256": "482c199334d54e16115fc4143a158f6a54b153722853bf4b0092a3480a5eb1e6",
+      "bytes": 8489
+    },
+    {
+      "path": "rbot/scripts/rbotlib/calc/bond_analytics.py",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "64ebd9c1d1984e9d9775c22e8ccbbda467fb6e11",
+      "sha256": "9bdd44cbeebe0c6617d2528ee7d50e757b89527e43c45aca00d79033c50565d7",
+      "bytes": 25295
+    },
+    {
+      "path": "rbot/scripts/rbotlib/model/metrics.py",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "15eeba2b52e13982816394d0a030df5a31a21ef2",
+      "sha256": "c6930078c8eca901ac8e2507c5c6b43f80e7793176ba8993607cc77863bde9fd",
+      "bytes": 14065
+    },
+    {
+      "path": "rbot/scripts/rbotlib/prepare.py",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "92c7d584661e1be3fd1ab108cbc1e354acb778ab",
+      "sha256": "70ef6dcbb8526ec67313322eafeadda5df568a3275b95f7583a443c3f165ffd0",
+      "bytes": 27034
+    },
+    {
+      "path": "rbot/scripts/rbotlib/report/render.py",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "e7f5c69a890e768a2b1b30db9896c60020735ddb",
+      "sha256": "12047d3937eaa2ef6cb6524c7758d5e0efd30eea1e9f640906d4fe6349293903",
+      "bytes": 4221
+    },
+    {
+      "path": "rbot/modules/CP-1/contract.json",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "c4f5f0e3a0fd6781dd2311f7edd7e6f9fd034f4c",
+      "sha256": "cbc81ae014201993683c319af03abb008538693f52222e774aa8204bb45aff20",
+      "bytes": 27875
+    },
+    {
+      "path": "rbot/modules/CP-2/contract.json",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "ee66d31340958e3edcc0fb2f3fd277e0b312b7ba",
+      "sha256": "0f26c3307d4e46e8091bcd105889252808119e3424cee202ca55157690eeeaed",
+      "bytes": 9874
+    },
+    {
+      "path": "rbot/modules/CP-3/contract.json",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "ad63298607f6fae66f012245fbbc1c78801c3609",
+      "sha256": "a7a31438bbffb7303dcf12d8f9ea9c0ab2e9661a8a1658c56bfc778b2dfe7d1c",
+      "bytes": 15661
+    },
+    {
+      "path": "rbot/modules/CP-4/contract.json",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "6a9ef33fe5c844b2384a6ff326edbdfcf7de34d5",
+      "sha256": "e7002a4527b8825155636946c66a76d80da5a5c2ee47ca91a7b59a80bcfe47d0",
+      "bytes": 18351
+    },
+    {
+      "path": "rbot/modules/CP-5/contract.json",
+      "source": "pinned Git object; sampled source review",
+      "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+      "git_blob": "98c8c90ca73baa106082be0fcde3fae242aa8144",
+      "sha256": "01ad3609f6a59c78e7aa1a282e699eda5f4055e8cf1fd29e5c73daa19bcaa34e",
+      "bytes": 10216
+    }
+  ],
+  "direction_c": {
+    "path": "/Users/ericguei/Downloads/Direction C - Workbench.dc.html",
+    "sha256": "bcd9dec94f44c6a3c8356823619031d3d721d70ede9aafefd53a4dc67d34da85",
+    "bytes": 127349,
+    "relative_dependencies": [
+      {
+        "path": "support.js",
+        "exists_relative_to_attachment": false
+      },
+      {
+        "path": "data/rbot-data.js",
+        "exists_relative_to_attachment": false
+      },
+      {
+        "path": "lib/vm.js",
+        "exists_relative_to_attachment": false
+      },
+      {
+        "path": "lib/charts.js",
+        "exists_relative_to_attachment": false
+      },
+      {
+        "path": "uploads/rbot-claude-design-pack/brand/ssim-logo-horizontal-white.png",
+        "exists_relative_to_attachment": false
+      }
+    ]
+  },
+  "model_catalog": {
+    "url": "https://openrouter.ai/api/v1/models",
+    "metadata": [
+      {
+        "id": "deepseek/deepseek-v4.1-flash-1017",
+        "canonical_slug": "deepseek/deepseek-v4.1-flash-20261017",
+        "created": 1792225624,
+        "context_length": 1048576,
+        "supported_parameters": [
+          "frequency_penalty",
+          "include_reasoning",
+          "logit_bias",
+          "logprobs",
+          "max_completion_tokens",
+          "max_tokens",
+          "min_p",
+          "parallel_tool_calls",
+          "presence_penalty",
+          "reasoning",
+          "reasoning_effort",
+          "repetition_penalty",
+          "response_format",
+          "seed",
+          "stop",
+          "structured_outputs",
+          "temperature",
+          "tool_choice",
+          "tools",
+          "top_k",
+          "top_logprobs",
+          "top_p"
+        ]
+      },
+      {
+        "id": "openai/gpt-6-luna",
+        "canonical_slug": "openai/gpt-6-luna-20260922",
+        "created": 1790100786,
+        "context_length": 1050000,
+        "supported_parameters": [
+          "include_reasoning",
+          "max_completion_tokens",
+          "max_tokens",
+          "reasoning",
+          "reasoning_effort",
+          "response_format",
+          "seed",
+          "structured_outputs",
+          "tool_choice",
+          "tools",
+          "verbosity"
+        ]
+      },
+      {
+        "id": "~deepseek/deepseek-flash-latest",
+        "canonical_slug": "~deepseek/deepseek-flash-latest",
+        "created": 1789399150,
+        "context_length": 1048576,
+        "supported_parameters": [
+          "frequency_penalty",
+          "include_reasoning",
+          "logit_bias",
+          "logprobs",
+          "max_completion_tokens",
+          "max_tokens",
+          "min_p",
+          "parallel_tool_calls",
+          "presence_penalty",
+          "reasoning",
+          "reasoning_effort",
+          "repetition_penalty",
+          "response_format",
+          "seed",
+          "stop",
+          "structured_outputs",
+          "temperature",
+          "tool_choice",
+          "tools",
+          "top_k",
+          "top_logprobs",
+          "top_p"
+        ]
+      },
+      {
+        "id": "z-ai/glm-5.3-flash",
+        "canonical_slug": "z-ai/glm-5.3-flash-20260826",
+        "created": 1787752741,
+        "context_length": 1048576,
+        "supported_parameters": [
+          "frequency_penalty",
+          "include_reasoning",
+          "logit_bias",
+          "logprobs",
+          "max_tokens",
+          "min_p",
+          "parallel_tool_calls",
+          "presence_penalty",
+          "reasoning",
+          "reasoning_effort",
+          "repetition_penalty",
+          "response_format",
+          "seed",
+          "stop",
+          "structured_outputs",
+          "temperature",
+          "tool_choice",
+          "tools",
+          "top_k",
+          "top_logprobs",
+          "top_p"
+        ]
+      }
+    ],
+    "effort_enum_per_provider_confirmed": false,
+    "account_access_tested": false
+  }
+}

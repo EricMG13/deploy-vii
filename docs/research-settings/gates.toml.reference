@@ -1,0 +1,39 @@
+schema_version = 1
+phase = "research"
+product_implementation_authorized = false
+live_model_tests_authorized = false
+delivery_target = "github-copilot-cli"
+live_test_provider = "openrouter"
+
+[active]
+required_ci_contexts = ["Repository hygiene", "Secrets"]
+pr_changed_lines_limit = 800
+line_exclusions = ["*.lock", "reference/**", "tests/golden/**/documents/**", "tests/corpus/synthetic/**"]
+confidence_review = "after code or policy changes"
+independent_review_required = false
+rewrite_tournament_required = false
+
+[future_code]
+status = "requirements-only; implement with first relevant code"
+blocking = ["lint-format", "strict-product-types", "functional", "locked-dependencies", "module-contracts"]
+coverage_branch_floor = 80
+advisory = ["complexity", "duplication", "suppression-growth"]
+
+[future_sensitive]
+blocking = ["exact-calculations", "financial-properties", "changed-code-mutations", "citation-fidelity", "source-integrity", "explicit-gaps"]
+
+[future_acceptance]
+layer_order = ["CP-0", "CP-1", "CP-2", "CP-3", "CP-4", "CP-5"]
+mandatory_dependencies_retained = true
+live_layer_gate_before_dependent_build = true
+optional_extensions_after_core = true
+private_corpus_location = "external-local"
+missing_required_inputs = "block-acceptance"
+native_copilot_cli_qualification = "separate-final-gate"
+
+[ci_security]
+token_permissions = "contents:read"
+persist_checkout_credentials = false
+model_calls = false
+private_source_packs = false
+provider_secrets = false

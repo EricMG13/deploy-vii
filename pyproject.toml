@@ -1,0 +1,54 @@
+[project]
+name = "deploy-vii"
+version = "0.1.0"
+description = "Deploy VII development environment"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[tool.uv]
+package = false
+required-version = "==0.12.5"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["design/reference", "artifacts", "private", "source-packs", "runs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ANN", "BLE", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+exclude = ["^artifacts/", "^private/", "^design/reference/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-config --strict-markers"
+markers = [
+  "live: explicit provider/network test; excluded from ordinary CI",
+  "private: requires private input packs; excluded from ordinary CI",
+  "browser: actual browser rendering acceptance",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+# Set a justified floor when the first product code and tests exist.
+show_missing = true
+skip_covered = true
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.5",
+    "mypy>=2.4.0",
+    "pip-audit>=2.10.1",
+    "pre-commit-hooks>=6.0.0",
+    "prek>=0.5.6",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.1",
+]
