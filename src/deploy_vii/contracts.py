@@ -46,6 +46,15 @@ class Span(Contract):
     formula: str | None = None
     cached_value: str | None = None
     hidden: bool = False
+    data_type: str | None = None
+    number_format: str | None = None
+    note: str | None = None
+
+
+class Coverage(Contract):
+    locator: Text
+    status: Literal["retained", "unreadable", "empty"]
+    limitation: str | None = None
 
 
 class Source(Contract):
@@ -57,6 +66,9 @@ class Source(Contract):
     media_type: str | None = None
     spans: tuple[Span, ...] = ()
     limitation: str | None = None
+    extractor: Text = "supplied-representation"
+    extraction_status: Literal["complete", "degraded", "blocked"] = "degraded"
+    coverage: tuple[Coverage, ...] = ()
 
     @model_validator(mode="after")
     def evidence_status(self) -> Self:
@@ -68,6 +80,14 @@ class Source(Contract):
             raise ValueError("missing source cannot have content")
         if len({span.locator for span in self.spans}) != len(self.spans):
             raise ValueError("duplicate source locators")
+        if len({item.locator for item in self.coverage}) != len(self.coverage):
+            raise ValueError("duplicate coverage locators")
+        if self.status == "ready" and self.extraction_status == "blocked":
+            raise ValueError("blocked extraction cannot supply ready evidence")
+        if self.extraction_status == "complete" and (
+            self.status != "ready" or any(item.status != "retained" for item in self.coverage)
+        ):
+            raise ValueError("complete extraction requires readable and retained coverage")
         return self
 
 

@@ -30,7 +30,7 @@ Native identifiers: `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`,
 the local Codex catalog dated 2026-10-20; official sources are linked below.
 These are not automatically OpenRouter slugs or Copilot labels. Verify the actual
 interface and account entitlement. One implementation owner carries each task
-through its checks. The user's confidence-review and non-trivial-code
+through its checks. The user's confidence-review and key-area
 rewrite-tournament requirements apply; this matrix adds no extra approval chain.
 
 ## Routing rules

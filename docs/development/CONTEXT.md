@@ -25,7 +25,7 @@ worktree and snapshot base/head, rather than an owner label tied to the reader's
 current chat. Re-read actual Git/process state on resume. Keep source code in normal product folders and
 raw test artifacts outside these briefs. Do not create a parallel stage hierarchy.
 
-Development CLI: [usage](workflow.md). Product work starts with r14 coverage,
+Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
 Reuse selected Deploy VI behavior only after validating dependencies and regression
 cases. Implementation and live qualification are tracked separately in the brief.

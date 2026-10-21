@@ -95,8 +95,8 @@
       groups.get(fact.table_id).push(fact);
     });
     groups.forEach((facts, id) => content.append(panel(id, table(
-      ["Field", "Value", "Period / units", "Status"], facts.map(fact => [
-        fact.label, factButton(fact, module),
+      ["Record", "Field", "Value", "Period / units", "Status"], facts.map(fact => [
+        fact.row_id, fact.label, factButton(fact, module),
         [fact.period, fact.unit, fact.currency, "scale " + fact.scale].filter(Boolean).join(" · "),
         status(fact.status)
       ]), id + " · artifact values"
@@ -123,8 +123,12 @@
     if (!report.sources.length) return panel("Source inventory", node("p", "No source pack has been prepared. Readability and source readiness are unrun.", "empty-state"));
     return panel("Source inventory", table(["Source", "Readiness", "Limitation"], report.sources.map(source => {
       const button = node("button", source.name, "source-button"); button.type = "button";
+      button.dataset.sourceId = source.source_id;
       button.addEventListener("click", () => inspect({"Source": source.source_id, "SHA-256": source.sha256,
-        "Status": source.status, "Content": source.spans.map(span => span.locator + "\n" + span.text).join("\n\n"), "Limitation": source.limitation}));
+        "Status": source.status, "Extractor": source.extractor, "Extraction": source.extraction_status,
+        "Coverage": source.coverage.map(item => `${item.locator}: ${item.status}${item.limitation ? ' · ' + item.limitation : ''}`).join("\n"),
+        "Content": source.spans.map(span => `${span.locator}\n${span.text}\nType: ${span.data_type ?? 'text'}; format: ${span.number_format ?? 'not supplied'}; hidden: ${span.hidden}\nFormula: ${span.formula ?? 'none'}\nStored cache: ${span.cached_value ?? 'not supplied'}\nNote: ${span.note ?? 'none'}`).join("\n\n"),
+        "Limitation": source.limitation}));
       return [button, status(source.status), source.limitation || "—"];
     }), "Prepared evidence"));
   };

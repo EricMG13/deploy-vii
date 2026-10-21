@@ -58,7 +58,8 @@ No successor assigned. Current coordinator model and global host settings stay a
   sources, review/routing preservation, unknown occupancy and replayed forks.
 - [x] A: map pinned r14 packages/aliases and adapt reviewed Direction C shell,
   with no fixture verdicts. Establish contract and dependency tests.
-- [ ] B: PDF/text/XLSX preparation and CP-0, hash/locator/missing/unreadable tests.
+- [x] B implementation: PDF/text/XLSX preparation and CP-0 review/assembly,
+  hash/locator/missing/unreadable tests. Live analytical qualification pending.
 - [ ] C: canonical registers, reviewed deterministic Model, CP-1A, regressions
   for periods/units/conflicts/overrides/fallbacks and field parity.
 - [ ] D: CP-2, CP-4, CP-3, CP-5, CP-6 and final integrity in dependency order.
@@ -95,6 +96,9 @@ inputs/rubrics but retain distinct cohort identity and telemetry availability.
 Development review evidence is in `tooling-review.md`. No product/live analytical
 qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; all product modules remain unrun.
-Milestone A: see shell-review.md; 27 product tests pass. Next: source preparation,
-CP-0 and immutable validation/promotion. User narrowed tournaments to key areas;
-confidence review remains required for all code changes.
+Milestones A/B implementation: see shell-review.md and preparation-review.md.
+60 product tests pass; CP-0 synthetic output is restricted, other modules unrun.
+Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
+live qualification remain pending. Next: canonical registers, deterministic
+calculations, CP-1A and execution state/invalidation. Tournaments remain key-area
+only; confidence review applies to all code changes.
