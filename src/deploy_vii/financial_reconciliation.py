@@ -17,6 +17,7 @@ from deploy_vii.audit_basis import annual_warning
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
 from deploy_vii.financial_contracts import (
     AuditBasisExplanation,
+    BalanceMovementBridge,
     CashMovementBridge,
     FinancialBook,
     FinancialPeriod,
@@ -41,6 +42,7 @@ CheckType = Literal[
     "NCF_CASH_MOVEMENT",
     "FY_QUARTERS",
     "SOURCE_STATEMENT_IDENTITY",
+    "BALANCE_MOVEMENT",
     "REPORTED_DERIVED_PERIOD",
 ]
 
@@ -80,10 +82,11 @@ class Reconciliation(Contract):
     context_citations: tuple[Citation, ...]
     audit_basis_explanation: AuditBasisExplanation | None = None
     cash_movement_bridges: tuple[CashMovementBridge, ...] = ()
+    balance_movement_bridge: BalanceMovementBridge | None = None
 
 
 class ReconciliationReport(Contract):
-    schema_version: Literal["financial-reconciliation/4"] = "financial-reconciliation/4"
+    schema_version: Literal["financial-reconciliation/5"] = "financial-reconciliation/5"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -529,6 +532,103 @@ def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation,
     )
 
 
+def _statement_balance(book: FinancialBook, day: date | None, item: str) -> ReconciliationTerm:
+    """Exact dated BS observation, retaining same-date conflicts and all evidence."""
+    ids = {p.period_id for p in book.periods if day is not None and p.end_date == day}
+    rows = [
+        r.value
+        for r in book.statement_lines
+        if r.period_id in ids and r.statement == "BS" and r.item_id == item
+    ]
+    conflict = next((v for v in rows if v.status == "conflicting"), None)
+    value = conflict or next((v for v in rows if v.amount is not None), next(iter(rows), None))
+    term = _term(item, value)
+    return term.model_copy(
+        update={
+            "citations": tuple(dict.fromkeys(c for v in rows for c in _term(item, v).citations))
+        }
+    )
+
+
+def _balance_movements(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
+    """Step 7: equity always checked; other sourced opening/closing bridges retained."""
+    bridges = {
+        bridge.balance_item_id: bridge
+        for bridge in book.balance_movement_bridges
+        if bridge.period_id == period.period_id
+    }
+    movements = {
+        movement.movement_id: movement
+        for movement in book.balance_movements
+        if movement.period_id == period.period_id
+    }
+    opening_date = (
+        period.start_date - timedelta(days=1)
+        if period.start_date and period.start_date.toordinal() > 1
+        else None
+    )
+    items = tuple(dict.fromkeys(("total_equity", *bridges)))
+    reconciliations = []
+    for item in items:
+        bridge = bridges.get(item)
+        components = [_statement_balance(book, opening_date, item)]
+        if item == "total_equity":
+            income = next(
+                (
+                    row
+                    for row in book.statement_lines
+                    if row.period_id == period.period_id
+                    and row.statement == "IS"
+                    and row.item_id == "net_income"
+                ),
+                None,
+            )
+            components.append(
+                _term(
+                    "IS net income",
+                    income.value if income else None,
+                    outflow=income is not None and income.sign_convention == "outflow_magnitude",
+                )
+            )
+        selected_movements = tuple(movements[i] for i in bridge.movement_ids) if bridge else ()
+        components.extend(
+            _term(
+                movement.movement_id,
+                movement.value,
+                outflow=movement.sign_convention == "outflow_magnitude",
+            )
+            for movement in selected_movements
+        )
+
+        blockers = []
+        if opening_date is None or period.end_date is None:
+            blockers.append("Exact opening and closing balance dates are unavailable")
+        if bridge is None or bridge.disclosure.status != "complete":
+            blockers.append(
+                "A complete sourced balance movement assessment is required; "
+                "no inferred zero movements"
+            )
+        sign_citations = tuple(
+            citation for movement in selected_movements for citation in movement.sign_citations
+        )
+        if item == "total_equity" and income is not None:
+            sign_citations = (*sign_citations, *income.sign_citations)
+        check = _check(
+            period,
+            "BALANCE_MOVEMENT",
+            item,
+            _statement_balance(book, period.end_date, item),
+            tuple(components),
+            "opening BS balance + IS net income + signed sourced movements"
+            if item == "total_equity"
+            else "opening BS balance + signed sourced movements",
+            blocker="; ".join(blockers) or None,
+            context=(*sign_citations, *(bridge.disclosure.citations if bridge else ())),
+        )
+        reconciliations.append(check.model_copy(update={"balance_movement_bridge": bridge}))
+    return tuple(reconciliations)
+
+
 def _year(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
     quarters = sorted(
         (
@@ -611,6 +711,7 @@ def reconcile_financials(
         )
         if period.period_type != "PERIOD_END":
             checks.extend((_segments(book, period), *_income(book, period), *_cash(book, period)))
+            checks.extend(_balance_movements(book, period))
         if period.period_type == "FY":
             checks.extend(_year(book, period))
     return ReconciliationReport(

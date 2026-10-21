@@ -305,6 +305,34 @@ class CashMovementBridge(Contract):
     citations: Located
 
 
+class BalanceMovement(Contract):
+    """One sourced equity/other balance movement, never a calculated residual."""
+
+    movement_id: Identifier
+    label: Text
+    period_id: Identifier
+    role: Literal["distribution", "capital_transaction", "oci", "perimeter", "period_flow", "other"]
+    value: Observation
+    sign_convention: Literal["signed", "outflow_magnitude"] = "signed"
+    sign_citations: tuple[Citation, ...] = ()
+
+    @model_validator(mode="after")
+    def sign_evidence(self) -> Self:
+        if self.sign_convention == "outflow_magnitude" and not self.sign_citations:
+            raise ValueError("balance movement outflow normalization requires source evidence")
+        return self
+
+
+class BalanceMovementBridge(Contract):
+    """Closing BS = opening BS + IS net income for total equity + named movements."""
+
+    bridge_id: Identifier
+    period_id: Identifier
+    balance_item_id: Identifier
+    movement_ids: Annotated[tuple[Identifier, ...], Field(max_length=20000)]
+    disclosure: Disclosure
+
+
 class AuditBasisExplanation(Contract):
     """Located explanation for one audited FY versus four unaudited quarters."""
 
@@ -335,6 +363,10 @@ class FinancialBook(Contract):
     statement_identities: Annotated[tuple[StatementIdentity, ...], Field(max_length=20000)] = ()
     statement_disclosures: tuple[StatementDisclosure, ...] = ()
     cash_movement_bridges: Annotated[tuple[CashMovementBridge, ...], Field(max_length=200)] = ()
+    balance_movements: Annotated[tuple[BalanceMovement, ...], Field(max_length=20000)] = ()
+    balance_movement_bridges: Annotated[
+        tuple[BalanceMovementBridge, ...], Field(max_length=20000)
+    ] = ()
     audit_basis_explanations: Annotated[
         tuple[AuditBasisExplanation, ...], Field(max_length=20000)
     ] = ()
@@ -343,9 +375,15 @@ class FinancialBook(Contract):
     segment_disclosure: Disclosure
     limitations: tuple[Text, ...] = ()
 
+    @model_validator(mode="after")
+    def movement_expansion(self) -> Self:
+        if sum(len(b.movement_ids) for b in self.balance_movement_bridges) > 20000:
+            raise ValueError("Expanded balance movements exceed 20000 terms")
+        return self
+
 
 class FinancialReview(Contract):
-    schema_version: Literal["financial-review/3"] = "financial-review/3"
+    schema_version: Literal["financial-review/4"] = "financial-review/4"
     pack_sha256: Hash
     run_id: Identifier
     issuer_id: Identifier

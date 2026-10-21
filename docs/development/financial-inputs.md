@@ -1,6 +1,6 @@
 # CP-1 financial input boundary
 
-The `financial-review/3` contract now preserves source observations in canonical
+The `financial-review/4` contract now preserves source observations in canonical
 register sets and converts validated sets to the internal deterministic Model.
 This is an internal API, not a completed CP-1 Module or a financial acceptance
 decision. The CLI, execution journal and report adapter are not yet connected.
@@ -95,3 +95,6 @@ rebuilt and dependent outputs regenerated.
 Current evidence is deterministic synthetic testing only. Exact quote matching
 does not prove that a number or classification was interpreted correctly.
 No live model call or analytical qualification is claimed.
+
+Source-backed [balance movement checks](balance-movements.md) now cover equity
+and explicitly declared other BS bridges, with source audit and readiness binding.

@@ -275,7 +275,7 @@ def test_growth_uses_canonical_like_period_and_resolvable_prior_values() -> None
         if not isinstance(item, dict):
             return item
         result = {key: previous(part) for key, part in item.items()}
-        for key in ("period_id", "observation_id", "identity_id", "locator"):
+        for key in ("period_id", "observation_id", "identity_id", "bridge_id", "locator"):
             if key in result:
                 result[key] = "prior." + result[key]
         if "fiscal_year" in result:
@@ -283,6 +283,10 @@ def test_growth_uses_canonical_like_period_and_resolvable_prior_values() -> None
         for key in ("start_date", "end_date"):
             if result.get(key):
                 result[key] = str(int(result[key][:4]) - 1) + result[key][4:]
+        if result.get("statement") == "BS" and result.get("item_id") == "total_equity":
+            # The prior year's closing balance must equal the current opening
+            # balance; shift the entire synthetic equity series, preserving flows.
+            result["value"]["amount"] = str(Decimal(result["value"]["amount"]) - 160)
         return result
 
     prior = FinancialBook.model_validate_json(json.dumps(previous(payload)))
@@ -299,6 +303,7 @@ def test_growth_uses_canonical_like_period_and_resolvable_prior_values() -> None
                 "statement_lines",
                 "statement_identities",
                 "statement_disclosures",
+                "balance_movement_bridges",
             )
         }
     )

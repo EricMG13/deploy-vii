@@ -132,6 +132,7 @@ def _positions(book: FinancialBook) -> tuple[SourcePosition, ...]:
         ("facilities", "facility_id"),
         ("pro_forma", "adjustment_id"),
         ("statement_lines", "line_id"),
+        ("balance_movements", "movement_id"),
     ):
         for row in getattr(book, register):
             for field in type(row).model_fields:
@@ -336,6 +337,24 @@ def _normalizations(
                     after=cell.normalized_amount,
                     rationale="Canonical outflow sign; source statement and sign evidence retained",
                     citations=cell.citations,
+                )
+            )
+    for movement in book.balance_movements:
+        value = movement.value
+        if (
+            movement.sign_convention == "outflow_magnitude"
+            and value.amount is not None
+            and value.amount > 0
+        ):
+            rows.append(
+                NormalizationRow(
+                    normalization_id=_id("normalization", value.observation_id),
+                    observation_id=value.observation_id,
+                    period_id=movement.period_id,
+                    before=value.amount,
+                    after=value.amount.copy_abs().copy_negate(),
+                    rationale="Explicit source balance-movement outflow sign",
+                    citations=tuple(dict.fromkeys((*value.citations, *movement.sign_citations))),
                 )
             )
     for account in book.accounts:

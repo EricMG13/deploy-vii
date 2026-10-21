@@ -358,9 +358,9 @@ def test_ncf_reports_recompute_and_do_not_use_ambient_precision() -> None:
         assert reconcile_periods(pack, review, value.book_id) == periods
     assert validate_reconciliation_report(pack, review, source) == ()
     assert validate_period_reconciliation(pack, review, periods) == ()
-    assert source.schema_version == "financial-reconciliation/4"
+    assert source.schema_version == "financial-reconciliation/5"
     assert periods.schema_version == "period-reconciliation/4"
-    assert assess(ready_case()).schema_version == "model-readiness/2"
+    assert assess(ready_case()).schema_version == "model-readiness/3"
     check = next(c for c in source.checks if c.check_type == "NCF_IDENTITY")
     altered = check.model_copy(update={"calculated_value": Decimal("999")})
     assert validate_reconciliation_report(

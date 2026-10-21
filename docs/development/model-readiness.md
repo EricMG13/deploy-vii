@@ -1,7 +1,7 @@
 # Historical Model readiness
 
 `model_readiness.assess_model_readiness(pack, review, book_id, quarter_ids=None)`
-returns a hash-bound `model-readiness/2` report with exactly one CP-MODEL row.
+returns a hash-bound `model-readiness/3` report with exactly one CP-MODEL row.
 The row assesses **selected historical quarters**. It does not qualify forecasts,
 pro forma adjustments, analytical interpretation, other consumers or report
 presentation. Full CP-1 acceptance remains pending.
@@ -74,3 +74,6 @@ See [review evidence](tasks/implementation/model-readiness-review.md).
 This is an internal API. Binding the readiness result to a published Calculation,
 Module and Direction C view, broader canonical CP-1 registers/KPIs and CP-1A remain
 pending. No module or analytical acceptance is claimed by a synthetic ready row.
+
+Source-backed [balance movement checks](balance-movements.md) now cover equity
+and explicitly declared other BS bridges, with source audit and readiness binding.

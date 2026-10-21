@@ -8,6 +8,7 @@ import pytest
 from deploy_vii.financial_contracts import (
     ACCOUNT_IDS,
     AccountObservation,
+    BalanceMovementBridge,
     FinancialBook,
     StatementDisclosure,
 )
@@ -51,11 +52,13 @@ def ready_case() -> FinancialBook:
         effective_tax_rate="0.25",
         pretax_income="20.00",
         income_tax_expense="-5.00",
+        net_income="40.00",
     )
     rows = []
     lines = []
     identities = []
     disclosures = []
+    bridges = []
     for period in value.periods:
         scale = 4 if period.period_type == "FY" else 1
         for key, amount in amounts.items():
@@ -79,7 +82,45 @@ def ready_case() -> FinancialBook:
                     value=observed(period.period_id + "." + key, str(number)),
                 )
             )
+        quarter = (
+            0
+            if period.period_id == "OPEN"
+            else 4
+            if period.period_type == "FY"
+            else period.fiscal_quarter
+        )
+        lines.append(
+            line(
+                "equity",
+                "total_equity",
+                str(100 + 40 * quarter),
+                1,
+                statement="BS",
+                kind="total",
+                pid=period.period_id,
+            )
+        )
         if period.period_type != "PERIOD_END":
+            lines.append(
+                line(
+                    "income",
+                    "net_income",
+                    str(40 * scale),
+                    1,
+                    statement="IS",
+                    kind="total",
+                    pid=period.period_id,
+                )
+            )
+            bridges.append(
+                BalanceMovementBridge(
+                    bridge_id="equity." + period.period_id,
+                    period_id=period.period_id,
+                    balance_item_id="total_equity",
+                    movement_ids=(),
+                    disclosure=value.addback_disclosure,
+                )
+            )
             lines.extend(
                 (
                     line("cfo", "cfo_ncfo", str(60 * scale), 1, kind="total", pid=period.period_id),
@@ -126,6 +167,7 @@ def ready_case() -> FinancialBook:
             "statement_lines": tuple(lines),
             "statement_identities": tuple(identities),
             "statement_disclosures": tuple(disclosures),
+            "balance_movement_bridges": tuple(bridges),
         }
     )
 
@@ -303,6 +345,7 @@ def test_derived_quarters_qualify_without_requiring_direct_source_quarters() -> 
         "statement_lines",
         "statement_identities",
         "statement_disclosures",
+        "balance_movement_bridges",
     ):
         rows = []
         for row in getattr(value, key):
@@ -324,7 +367,7 @@ def test_derived_quarters_qualify_without_requiring_direct_source_quarters() -> 
                             )
                         }
                     )
-                elif key == "statement_lines":
+                elif key == "statement_lines" and row.statement != "BS":
                     row = row.model_copy(
                         update={
                             "value": observed(

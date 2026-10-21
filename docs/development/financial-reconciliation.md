@@ -1,7 +1,7 @@
 # CP-1 source-register reconciliation
 
 `reconcile_financials(pack, review, book_id)` now produces the immutable
-`financial-reconciliation/4` internal artifact. It binds the prepared pack and
+`financial-reconciliation/5` internal artifact. It binds the prepared pack and
 financial review hashes, run, issuer, as-of date, book, currency, scale,
 accounting basis and entity perimeter. It is not a Module acceptance or Model
 readiness decision. No CLI, journal or renderer consumes it yet.
@@ -72,3 +72,6 @@ unexplained differences are never forced to zero.
 There is no live model qualification or new completed-module rendering claim.
 All current evidence is explicitly synthetic. This artifact advances milestone
 C; the full CP-1, Model report and CP-1A deliverables remain unfinished.
+
+Source-backed [balance movement checks](balance-movements.md) now cover equity
+and explicitly declared other BS bridges, with source audit and readiness binding.

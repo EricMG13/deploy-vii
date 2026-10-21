@@ -38,6 +38,7 @@ CP-1 KPI register: [canonical debt, income selection and ratio operands](canonic
 Annual audit differences: [sourced explanations and scope](audit-basis.md).
 Cash movement: [explicit source adjustments and period combinations](cash-movement.md).
 Net cash flow: [independent source equations and readiness](net-cash-flow.md).
+Cross-statement checks: [equity and sourced balance movements](balance-movements.md).
 CP-1 source audit: [normalizations, definition conflicts and gap ledger](canonical-audit.md).
 CP-1 source context: [evidence tiers, entity scopes and event binding](source-context.md).
 CP-1 cumulative gaps: [source, period and KPI coverage](canonical-gaps.md).

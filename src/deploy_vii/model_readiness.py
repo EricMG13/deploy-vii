@@ -77,7 +77,7 @@ class ModelReadinessRow(Contract):
 
 
 class ModelReadinessReport(Contract):
-    schema_version: Literal["model-readiness/2"] = "model-readiness/2"
+    schema_version: Literal["model-readiness/3"] = "model-readiness/3"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -295,7 +295,7 @@ def _evaluate(
             source_check.period_id in used_periods
             and source_check.check_type != "FY_QUARTERS"
             and (
-                source_check.check_type == "SOURCE_STATEMENT_IDENTITY"
+                source_check.check_type in {"SOURCE_STATEMENT_IDENTITY", "BALANCE_MOVEMENT"}
                 or source_check.difference is not None
             )
         ):

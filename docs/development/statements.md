@@ -1,6 +1,6 @@
 # CP-1 source statements and independent equations
 
-The internal `financial-review/3` input includes full source statement lines,
+The internal `financial-review/4` input includes full source statement lines,
 source-supported component equations and disclosure assessments per statement and
 period. `statement_report(pack, review, book_id)` produces the immutable
 `financial-statements/1` projection for T4.4 income statements, T4.5 cash-flow
@@ -75,3 +75,6 @@ Model readiness and CP-1A are still pending. Candidate/cumulative HTML field
 parity and public-case model qualification must follow actual integration. All
 current statement evidence is deterministic and synthetic; no completed Module
 or live analytical claim is made.
+
+Source-backed [balance movement checks](balance-movements.md) now cover equity
+and explicitly declared other BS bridges, with source audit and readiness binding.
