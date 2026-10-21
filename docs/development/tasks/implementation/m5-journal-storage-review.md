@@ -71,11 +71,32 @@ exit 0 (see the report for the final run).
 
 ## Measurement (coordinator)
 
-To be filled by the coordinator: bytes written and wall time per `begin`, `submit_step`
-and `finish` on the hash-pinned Caesars pack, before (M4 lane head `bc9328c`) and after
-(this head). Helper: `TransitionMeter` in `tests/product/test_execution.py`
-(`from tests.product.test_execution import TransitionMeter`; call `meter()` after each
-transition for the bytes of new or changed files since its previous call).
+Script: `measure_journal.py` (SDD plan workspace, not committed; no network, no models,
+no credentials). Real pack `artifacts/public-case/caesars-fy2025-preparation-1/pack.json`
+(880,304 bytes, git-ignored), 12 attempts, 20,000-byte unique payload per attempt, three
+pack replacements; 32 transitions in each run. Bytes are files new or changed since the
+previous transition. Before = M4 lane head `0e56757` (`execution/4`); after = `b735e83`
+(`execution/5`, fix round 3). Run on 21 October 2026.
+
+| Transition | Before (bytes / ms) | After (bytes / ms) |
+| :--- | ---: | ---: |
+| 1 `create` | 884,455 / 8.2 | 884,801 / 7.4 |
+| 2 first `begin` (CP-0) | 884,862 / 7.9 | 911 / 0.9 |
+| 3 first `finish` (CP-0) | 1,773,302 / 15.3 | 3,974 / 5.6 |
+| 5 first `submit_step` (CP-1) | 1,816,585 / 11.5 | 24,481 / 5.1 |
+| 29 last `submit_step` (CP-1) | 2,093,679 / 12.7 | 19,477 / 4.9 |
+| 31 last `begin` (CP-1) | 1,068,735 / 8.8 | 10,594 / 0.8 |
+| 32 last `finish` (CP-1) | 2,139,207 / 17.1 | 22,415 / 5.6 |
+| Directory total after 32 transitions | 46,926,444 | 3,874,318 |
+
+Reading: before, every transition rewrote the pack (≈0.88 MB) and every accumulated
+payload; after, `begin` writes the small snapshot only, and `finish`/`submit_step` write
+the snapshot plus the new payload and result blobs (≈20 kB payload each here, stored once).
+The residual growth from 911 to 10,594 bytes per `begin` over 12 attempts is the attempt
+records (bound inputs and capped issue lines), independent of pack, payload, result and
+output size (`test_snapshot_bytes_do_not_grow_with_attempts`, 25 kB vs 200 B content).
+Wall time per transition fell from 8–17 ms to 1–6 ms on this machine (single run, not a
+benchmark).
 
 ## Not verified
 

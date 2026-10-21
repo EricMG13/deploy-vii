@@ -106,7 +106,10 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   Schema errors of a malformed response are `loc: message` lines with no input value or
   URL, and pass through the same cap; citation and validator findings may quote caller
   text (a locator, a field name) and are cut by it. The cap hides lines beyond the
-  twentieth from the stored record; the response itself is kept whole as a payload blob.
+  twentieth from the stored record; the response itself is kept whole as a payload blob,
+  so schema and citation findings can be re-derived from it, but dropped validator and
+  step-validator lines are not recoverable without rerunning the validator, and a long
+  interruption reason survives only in its 300-character form.
   Each attempt record also repeats its bound `inputs` (a few hundred bytes of hashes), so
   bytes per transition still grow by one such record per attempt, and by nothing else.
 - Compatibility. A store written by the first `execution/5` commit (9a3f0c7: inline
