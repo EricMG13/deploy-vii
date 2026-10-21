@@ -1,10 +1,10 @@
 # CP-1 source and entity context
 
-`source_context(pack, review)` produces `source-context/1` from an explicit
+`source_context(pack, review)` produces `source-context/2` from an explicit
 `source-context-review/1`. It can run before financial extraction and does not
 require a financial book. Every prepared source has exactly one assessment,
 including missing/unreadable sources. The report binds the run, pack and review
-hashes. Source filename, original hash, availability and extraction fidelity are
+hashes. Context gaps retain explicit reporting-scope IDs where applicable. Source filename, original hash, availability and extraction fidelity are
 retained separately from the analyst's classification and evidence quality.
 
 ## Source register — T4.1

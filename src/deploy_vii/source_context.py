@@ -109,6 +109,7 @@ class ContextGap(Contract):
     reference: Text
     description: Text
     citations: tuple[Citation, ...]
+    scope_ids: tuple[Identifier, ...] = ()
 
 
 class SourceRegisterRow(Contract):
@@ -129,7 +130,7 @@ class EntityRegisterRow(Contract):
 
 
 class SourceContextReport(Contract):
-    schema_version: Literal["source-context/1"] = "source-context/1"
+    schema_version: Literal["source-context/2"] = "source-context/2"
     run: Run
     pack_sha256: Hash
     context_review_sha256: Hash
@@ -315,6 +316,7 @@ def source_context(pack: PreparedPack, review: SourceContextReview) -> SourceCon
         reference: str,
         description: str,
         citations: tuple[Citation, ...] = (),
+        scope_ids: tuple[str, ...] = (),
     ) -> None:
         gaps.append(
             ContextGap(
@@ -323,6 +325,7 @@ def source_context(pack: PreparedPack, review: SourceContextReview) -> SourceCon
                 reference=reference,
                 description=description,
                 citations=citations,
+                scope_ids=scope_ids,
             )
         )
 
@@ -391,9 +394,10 @@ def source_context(pack: PreparedPack, review: SourceContextReview) -> SourceCon
                     scope.scope_id,
                     "Unresolved scope: " + ", ".join(missing),
                     scope.citations,
+                    (scope.scope_id,),
                 )
             for limitation in scope.limitations:
-                gap("scope", scope.scope_id, limitation, scope.citations)
+                gap("scope", scope.scope_id, limitation, scope.citations, (scope.scope_id,))
         if assessment.event_scan == "unassessed":
             gap(
                 "event_scan",
@@ -433,6 +437,7 @@ def source_context(pack: PreparedPack, review: SourceContextReview) -> SourceCon
                     entity.entity_id,
                     f"Different source {field} values require normalization review",
                     tuple(dict.fromkeys(c for _, scope in mapped for c in scope.citations)),
+                    tuple(scope.scope_id for _, scope in mapped),
                 )
         if not mapped:
             gap(
@@ -460,6 +465,7 @@ def source_context(pack: PreparedPack, review: SourceContextReview) -> SourceCon
             f"Subsequent event ({event.status}) excluded from historical figures: "
             f"{event.description}; {event.effect}",
             event.citations,
+            (event.reporting_scope_id,),
         )
     for limitation in review.limitations:
         gap("limitation", "review", limitation)

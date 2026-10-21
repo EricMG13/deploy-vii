@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-648 product tests pass (97.38% combined coverage); CP-0 synthetic output is
+669 product tests pass (97.46% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -205,9 +205,21 @@ covers only the two provenance validators using the explicit Sol/high review
 matrix; routine assembly uses focused tests and confidence review. Source-first
 execution ordering, CP-1/Model delivery and analytical acceptance remain pending.
 
+The cumulative CP-1 gap API now combines every implemented source context/audit
+warning with missing adapter/calculated values, operand scopes, non-PASS period
+checks, unassessed KPI evidence and artifact limitations. Invalid bindings stay
+BLOCK rows; incomplete add-back disclosure retains source gaps without inventing
+calculations. Confidence review fixed missing operand scopes and a context
+entity/scope ID collision; source-context output advances to /2 with explicit
+scope IDs. A further method check fixes false gaps for r14's optional facility-term
+nulls while preserving conflicts and unknown amortisation (`canonical-audit/2`).
+See canonical-gaps-review.md and ../../canonical-gaps.md. The Sol/high
+tournament covers only the two aggregation/provenance functions. This register
+confers no consumer readiness or Module acceptance.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: combine derived-period/KPI gaps, add the
-evidence-risk-credit narrative and full consumer readiness, then bind CP-1/Model
+live qualification remain pending. Next: add the evidence-risk-credit narrative
+and full consumer readiness, then bind CP-1/Model
 outputs to the execution journal and Workbench. Remaining cross-statement checks, foreign-currency debt treatment
 and CP-1A remain explicit
 requirements; current selected historical readiness is not full CP-1 acceptance.

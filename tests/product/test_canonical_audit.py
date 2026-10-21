@@ -57,7 +57,9 @@ def test_empty_review_never_means_definitions_align_and_retains_every_observatio
     report = canonical_audit(pack, review, definition)
     original = tuple(records(review.books[0], Observation))
     assert tuple(p.observation for p in report.source_positions) == original
-    assert set(report.unassessed_observation_ids) == {v.observation_id for v in original}
+    assert set(report.unassessed_observation_ids) == {v.observation_id for v in original} - {
+        "loan.Q2.floor"
+    }
     assert not any(r.status == "aligned" for r in report.definitions)
     assert {g.reference for g in report.gaps if g.origin == "definition_coverage"} == set(
         report.unassessed_observation_ids
@@ -339,3 +341,41 @@ def test_invalid_nested_contract_does_not_reach_register_traversal() -> None:
     malformed = review.model_copy(update={"books": ({"book_id": "incomplete"},)})
     with pytest.warns(UserWarning):
         assert validate_definition_review(pack, malformed, definition)
+
+
+@pytest.mark.parametrize(
+    ("rate_type", "excluded"),
+    [("FIXED", "spread_bps"), ("FLOATING", "fixed_rate"), ("NOT_STATED", "floor_bps")],
+)
+def test_inapplicable_null_facility_terms_are_not_missing_data_gaps(
+    rate_type: str, excluded: str
+) -> None:
+    value = book()
+    facility = value.facilities[0].model_copy(update={"rate_type": rate_type})
+    value = value.model_copy(update={"facilities": (facility,)})
+    pack, review, definition = case(value)
+    report = canonical_audit(pack, review, definition)
+    exempt_id = getattr(facility, excluded).observation_id
+    assert exempt_id not in report.unassessed_observation_ids
+    assert not any(g.reference == exempt_id for g in report.gaps)
+    assert any(g.reference == facility.annual_amortisation.observation_id for g in report.gaps)
+    assert any(p.observation.observation_id == exempt_id for p in report.source_positions)
+
+
+@pytest.mark.parametrize("field", ["floor_bps", "fixed_rate", "spread_bps"])
+def test_optional_term_exception_never_hides_conflicting_evidence(field: str) -> None:
+    value = book()
+    facility = value.facilities[0]
+    observation = getattr(facility, field)
+    facility = facility.model_copy(
+        update={
+            "rate_type": "FIXED" if field == "spread_bps" else "FLOATING",
+            field: conflict(observation.observation_id),
+        }
+    )
+    value = value.model_copy(update={"facilities": (facility,)})
+    report = canonical_audit(*case(value))
+    assert observation.observation_id in report.unassessed_observation_ids
+    assert any(
+        g.reference == observation.observation_id and g.severity == "BLOCK" for g in report.gaps
+    )

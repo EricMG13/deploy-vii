@@ -1,7 +1,7 @@
 # CP-1 source audit registers
 
 `canonical_audit(pack, financial_review, definition_review)` returns the immutable
-`canonical-audit/1` report. `DefinitionReview` (`definition-review/1`) binds the
+`canonical-audit/2` report. `DefinitionReview` (`definition-review/1`) binds the
 exact financial-review hash and one book. The report embeds the current statement
 and reconciliation artifacts, which bind run, issuer, as-of date, method, source
 pack, financial review and canonical dimensions. It is an internal source-stage
@@ -30,11 +30,19 @@ The report supplies:
   explanation, citations and downstream impact. Values are referenced directly
   from the original observations, never copied into model-authored numeric fields
   or combined across different accounting meanings.
-- A source-stage gap ledger covering unsettled observations (including explicit
-  not-applicable reasons), missing required statement items, every non-PASS source
-  reconciliation, definition differences and unassessed observations, period
+- A source-stage gap ledger covering unsettled observations (retaining explicit
+  not-applicable reasons except the pinned facility-term exclusions), missing
+  required statement items, every non-PASS source reconciliation, definition differences and unassessed observations, period
   limitations, unknown facility terms, disclosure limitations and supplied review
   limitations. Gaps retain affected periods and evidence where available.
+
+The pinned model-interface exceptions exclude an unstated floor, a missing fixed
+coupon on a FLOATING facility, and a missing spread on a FIXED facility from
+missing-value and unassessed-definition gaps. Original observations remain in the
+source register. Conflicting evidence is never exempt; null annual amortisation
+always remains a gap. These exceptions use explicit rate classification, never
+the facility name. This behavior advances the output to `canonical-audit/2`;
+`definition-review/1` is unchanged.
 
 An empty definition review means **unassessed**, never "no conflicts identified."
 Even when all supplied observations have an assessment, completeness of extracted
@@ -49,9 +57,10 @@ expected input. Missing rows, reordered/replaced values, altered evidence and
 substituted assessments are detectable.
 
 This increment implements source-stage portions of r14 T4.3, T4.11 and T4.12.
-Derived-period/KPI gaps, source-tier/entity metadata, the evidence → risk → credit
-narrative, full consumer readiness, execution binding and Workbench fields remain
-required work. No complete CP-1 delivery or analytical qualification is claimed.
+The [cumulative ledger](canonical-gaps.md) now combines these gaps with source
+context and constructed-period/KPI gaps. The evidence → risk → credit narrative,
+full consumer readiness, execution binding and Workbench fields remain required
+work. No complete CP-1 delivery or analytical qualification is claimed.
 
 Method source: Deploy VI `bd71346301b373afa72655916a4c1b42bf4c9823`, CP-1 reference
 Steps 03 (normalization), 10 (definition conflicts, multi-figure events, carrying

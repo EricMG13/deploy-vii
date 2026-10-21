@@ -109,7 +109,7 @@ class AuditGap(Contract):
 
 
 class CanonicalAuditReport(Contract):
-    schema_version: Literal["canonical-audit/1"] = "canonical-audit/1"
+    schema_version: Literal["canonical-audit/2"] = "canonical-audit/2"
     # These existing artifacts bind run, issuer, dates, dimensions and hashes.
     statements: StatementReport
     reconciliation: ReconciliationReport
@@ -389,10 +389,26 @@ def canonical_audit(
     positions = _positions(book)
     definitions = _definitions(book, positions, definition)
     assessed = {oid for a in definition.assessments for oid in a.observation_ids}
+    # r14 exceptions: an unstated floor, fixed coupon on FLOATING debt, or
+    # spread on FIXED debt is not a missing value. Conflicts still are.
+    optional_terms = {
+        value.observation_id
+        for facility in book.facilities
+        for field in ("floor_bps", "fixed_rate", "spread_bps")
+        for value in (getattr(facility, field),)
+        if value.amount is None
+        and value.status in {"missing", "not_applicable"}
+        and (
+            field == "floor_bps"
+            or (field == "fixed_rate" and facility.rate_type == "FLOATING")
+            or (field == "spread_bps" and facility.rate_type == "FIXED")
+        )
+    }
+    assessed_or_optional = assessed | optional_terms
     unassessed = tuple(
         p.observation.observation_id
         for p in positions
-        if p.observation.observation_id not in assessed
+        if p.observation.observation_id not in assessed_or_optional
     )
     gaps: list[AuditGap] = []
 
@@ -422,7 +438,7 @@ def canonical_audit(
 
     for position in positions:
         value = position.observation
-        if value.status != "known":
+        if value.status != "known" and value.observation_id not in optional_terms:
             gap(
                 "observation",
                 value.observation_id,
@@ -453,7 +469,7 @@ def canonical_audit(
         if row.status != "aligned":
             gap("definition", row.row_id, row.explanation, row.period_ids, citations=row.citations)
     for position in positions:
-        if position.observation.observation_id not in assessed:
+        if position.observation.observation_id not in assessed_or_optional:
             gap(
                 "definition_coverage",
                 position.observation.observation_id,
