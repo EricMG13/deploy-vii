@@ -1,6 +1,7 @@
 schema_version = 1
 phase = "development-tooling-and-product-implementation"
 product_runtime_implemented = false
+execution_journal_implemented = true
 product_shell_implemented = true
 live_model_runner_implemented = false
 

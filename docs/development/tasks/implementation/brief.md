@@ -60,6 +60,8 @@ No successor assigned. Current coordinator model and global host settings stay a
   with no fixture verdicts. Establish contract and dependency tests.
 - [x] B implementation: PDF/text/XLSX preparation and CP-0 review/assembly,
   hash/locator/missing/unreadable tests. Live analytical qualification pending.
+- [x] Execution substrate: immutable snapshots, current lineage, one targeted repair,
+  stale propagation and cumulative views. Internal API; live adapters still pending.
 - [ ] C: canonical registers, reviewed deterministic Model, CP-1A, regressions
   for periods/units/conflicts/overrides/fallbacks and field parity.
 - [ ] D: CP-2, CP-4, CP-3, CP-5, CP-6 and final integrity in dependency order.
@@ -97,8 +99,10 @@ Development review evidence is in `tooling-review.md`. No product/live analytica
 qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; all product modules remain unrun.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-60 product tests pass; CP-0 synthetic output is restricted, other modules unrun.
+82 product tests pass; CP-0 synthetic output is restricted, other modules unrun.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
 live qualification remain pending. Next: canonical registers, deterministic
-calculations, CP-1A and execution state/invalidation. Tournaments remain key-area
+calculations, CP-1A and module-adapter integration with the tested execution journal. Tournaments remain key-area
 only; confidence review applies to all code changes.
+
+Execution review: execution-review.md. Native/live qualification remains unrun.
