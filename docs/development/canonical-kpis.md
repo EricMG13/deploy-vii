@@ -1,6 +1,6 @@
 # Canonical CP-1 KPI register
 
-`canonical_kpis(pack, review, book_id)` returns a `canonical-kpis/1` artifact.
+`canonical_kpis(pack, review, book_id)` returns a `canonical-kpis/2` artifact.
 It retains the frozen historical input report, period bases, every value used by
 KPI operands, arithmetic graphs, calculation rows and unresolved definitions.
 `validate_canonical_kpis` regenerates the complete report before hash comparison.

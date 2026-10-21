@@ -1,7 +1,7 @@
 # CP-1 source audit registers
 
 `canonical_audit(pack, financial_review, definition_review)` returns the immutable
-`canonical-audit/2` report. `DefinitionReview` (`definition-review/1`) binds the
+`canonical-audit/3` report. `DefinitionReview` (`definition-review/1`) binds the
 exact financial-review hash and one book. The report embeds the current statement
 and reconciliation artifacts, which bind run, issuer, as-of date, method, source
 pack, financial review and canonical dimensions. It is an internal source-stage
@@ -16,7 +16,9 @@ The report supplies:
 - Normalization rows for actual canonical sign changes, with original and final
   values, period, rationale and source/sign evidence. Statement rows retain their
   existing normalization IDs. Compact accounts have their own stable IDs. Source
-  values remain unchanged. There is no inferred FX, unit or perimeter conversion.
+  values remain unchanged. Separate [facility FX records](facility-fx.md) retain
+  source-bound conversions and unknown results. There is no inferred FX, unit
+  or perimeter conversion.
 - Definition assessments scoped to explicit observation IDs, including canonical
   and issuer definitions, materiality, downstream impact and recommendation.
   These are analyst judgements; their text cannot change Python formulas or

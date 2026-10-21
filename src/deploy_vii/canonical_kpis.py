@@ -7,6 +7,7 @@ from typing import Literal
 
 from deploy_vii.calculation_trace import Computation, trace_cells
 from deploy_vii.contracts import Contract, Identifier, Text
+from deploy_vii.facility_fx import normalize_facilities
 from deploy_vii.financial_adapter import kernel_registers
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview, Observation
 from deploy_vii.financial_model import (
@@ -51,7 +52,7 @@ class CanonicalKpi(Contract):
 
 
 class CanonicalKpiReport(Contract):
-    schema_version: Literal["canonical-kpis/1"] = "canonical-kpis/1"
+    schema_version: Literal["canonical-kpis/2"] = "canonical-kpis/2"
     historical: HistoricalReport
     debt_basis: Literal["carrying_value_excluding_both_lease_types"] = (
         "carrying_value_excluding_both_lease_types"
@@ -261,7 +262,8 @@ def _kpi_rows(
     book: FinancialBook,
     observations: dict[str, Observation],
 ) -> tuple[CanonicalKpi, ...]:
-    evidence = _evidence(book)
+    normalizations = {n.normalization_id: n for n in normalize_facilities(book)}
+    evidence = _evidence(book, normalizations)
     rows: list[CanonicalKpi] = []
     operands = {
         _value_id(_basis_id(c, rolling_basis), key): cell
@@ -295,7 +297,7 @@ def _kpi_rows(
         cell: Cell,
     ) -> None:
         basis = _basis_id(column)
-        value = _value(cell, observations, evidence)
+        value = _value(cell, observations, evidence, normalizations)
         if operation == "unavailable":
             value = value.model_copy(update={"calculation_status": "Not Available"})
         if value.amount is None and any(
@@ -433,7 +435,8 @@ def canonical_kpis(pack: PreparedPack, review: FinancialReview, book_id: str) ->
         for key, cell in data[c.column_id].items()
     }
     computations, roots = trace_cells(value_cells, book)
-    evidence = _evidence(book)
+    normalizations = {n.normalization_id: n for n in normalize_facilities(book)}
+    evidence = _evidence(book, normalizations)
     values = []
     for is_rolling, group, data in ((False, columns, frame), (True, rolling_columns, rolling)):
         for column in group:
@@ -448,7 +451,7 @@ def canonical_kpis(pack: PreparedPack, review: FinancialReview, book_id: str) ->
                         key=key,
                         unit=unit,
                         currency=currency,
-                        value=_value(cell, observations, evidence),
+                        value=_value(cell, observations, evidence, normalizations),
                         residual_formula=None,
                         computation_id=roots[value_id],
                     )

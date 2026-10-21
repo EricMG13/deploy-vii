@@ -1,6 +1,6 @@
 # Reconciliation across historical constructions
 
-`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/4`.
+`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/5`.
 It embeds the complete hash-bound historical report, including source and review
 identity, currency/scale, original observations, period constructions and input
 values. This adds comparisons over constructed quarters and LTM periods to the

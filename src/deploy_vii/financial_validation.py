@@ -10,6 +10,7 @@ from deploy_vii.audit_basis import audit_explanation_issues
 from deploy_vii.balance_movement import balance_movement_issues
 from deploy_vii.cash_bridge import cash_bridge_issues
 from deploy_vii.contracts import Citation
+from deploy_vii.facility_fx import fx_conversion_issues
 from deploy_vii.financial_contracts import (
     AccountObservation,
     AddbackObservation,
@@ -135,6 +136,7 @@ def book_issues(book: FinancialBook) -> tuple[str, ...]:
         *audit_explanation_issues(book),
         *cash_bridge_issues(book),
         *balance_movement_issues(book),
+        *fx_conversion_issues(book),
     ]
     periods = {period.period_id: period for period in book.periods}
     dimensions = book.currency, book.unit, book.accounting_basis, book.entity_perimeter

@@ -218,6 +218,22 @@ class FacilityObservation(Contract):
         return self
 
 
+class FacilityFxConversion(Contract):
+    """Source-backed closing FX quote: target currency units per source unit."""
+
+    conversion_id: Identifier
+    facility_id: Identifier
+    period_id: Identifier
+    facility_sha256: Hash
+    source_currency: Currency
+    target_currency: Currency
+    rate_date: date
+    rate_kind: Literal["period_end_spot"]
+    rate: Observation
+    rationale: Text
+    citations: Located
+
+
 class ProFormaObservation(Contract):
     adjustment_id: Identifier
     event_id: Identifier
@@ -358,6 +374,9 @@ class FinancialBook(Contract):
     segments: Annotated[tuple[SegmentObservation, ...], Field(max_length=20000)]
     kpis: Annotated[tuple[KpiObservation, ...], Field(max_length=20000)]
     facilities: Annotated[tuple[FacilityObservation, ...], Field(max_length=20000)]
+    facility_fx_conversions: Annotated[
+        tuple[FacilityFxConversion, ...], Field(max_length=20000)
+    ] = ()
     pro_forma: Annotated[tuple[ProFormaObservation, ...], Field(max_length=20000)]
     statement_lines: Annotated[tuple[StatementLine, ...], Field(max_length=20000)] = ()
     statement_identities: Annotated[tuple[StatementIdentity, ...], Field(max_length=20000)] = ()
@@ -383,7 +402,7 @@ class FinancialBook(Contract):
 
 
 class FinancialReview(Contract):
-    schema_version: Literal["financial-review/4"] = "financial-review/4"
+    schema_version: Literal["financial-review/5"] = "financial-review/5"
     pack_sha256: Hash
     run_id: Identifier
     issuer_id: Identifier

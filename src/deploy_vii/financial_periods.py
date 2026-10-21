@@ -11,6 +11,7 @@ from decimal import Decimal, localcontext
 from typing import Literal
 
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
+from deploy_vii.facility_fx import FacilityNormalization, normalize_facilities
 from deploy_vii.financial_adapter import kernel_registers
 from deploy_vii.financial_contracts import (
     FinancialBook,
@@ -70,6 +71,7 @@ class PeriodValue(Contract):
     note: Text | None
     observation_ids: tuple[Identifier, ...]
     issuance_facility_ids: tuple[Identifier, ...]
+    normalization_ids: tuple[Identifier, ...] = ()
     citations: tuple[Citation, ...]
 
 
@@ -98,10 +100,11 @@ class HistoricalInput(Contract):
     adapter_amount: Decimal | None
     observation_id: Identifier | None
     issuance_facility_id: Identifier | None
+    normalization_id: Identifier | None = None
 
 
 class HistoricalReport(Contract):
-    schema_version: Literal["financial-periods/1"] = "financial-periods/1"
+    schema_version: Literal["financial-periods/2"] = "financial-periods/2"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -115,6 +118,7 @@ class HistoricalReport(Contract):
     scale: Text
     periods: tuple[FinancialPeriod, ...]
     observations: tuple[Observation, ...]
+    facility_normalizations: tuple[FacilityNormalization, ...]
     input_rows: tuple[HistoricalInput, ...]
     columns: tuple[Identifier, ...]
     constructions: tuple[PeriodConstruction, ...]
@@ -196,11 +200,22 @@ def _value(
     cell: Cell,
     observations: dict[str, Observation],
     evidence: dict[tuple[str, str], tuple[Citation, ...]],
+    normalizations: dict[str, FacilityNormalization],
 ) -> PeriodValue:
     sources: tuple[SourceRef, ...] = cell.sources or cell.input_sources
+    normalized = tuple(
+        dict.fromkeys(
+            ref.source_id for ref in sources if ref.source_locator == "facility-normalization"
+        )
+    )
     ids = tuple(
         dict.fromkeys(
-            ref.source_id for ref in sources if ref.source_locator == "financial-observation"
+            [ref.source_id for ref in sources if ref.source_locator == "financial-observation"]
+            + [
+                oid
+                for identity in normalized
+                for oid in normalizations[identity].input_observation_ids
+            ]
         )
     )
     issuance = tuple(
@@ -212,7 +227,9 @@ def _value(
     classification: Literal["source", "normalized", "calculated"] = "calculated"
     if cell.basis == "REPORTED" or cell.input_sources:
         classification = (
-            "source" if source is not None and cell.value == source.amount else "normalized"
+            "source"
+            if not normalized and source is not None and cell.value == source.amount
+            else "normalized"
         )
     status: CalculationStatus = "Calculated"
     if cell.value is None:
@@ -232,6 +249,7 @@ def _value(
         note=cell.note,
         observation_ids=ids,
         issuance_facility_ids=issuance,
+        normalization_ids=normalized,
         citations=tuple(
             dict.fromkeys(
                 citation
@@ -242,7 +260,9 @@ def _value(
     )
 
 
-def _evidence(book: FinancialBook) -> dict[tuple[str, str], tuple[Citation, ...]]:
+def _evidence(
+    book: FinancialBook, normalizations: dict[str, FacilityNormalization]
+) -> dict[tuple[str, str], tuple[Citation, ...]]:
     result = {
         ("financial-observation", value.observation_id): (
             *value.citations,
@@ -257,6 +277,8 @@ def _evidence(book: FinancialBook) -> dict[tuple[str, str], tuple[Citation, ...]
         if facility.issued_on:
             key = f"facility-issuance:{book.book_id}", facility.facility_id
             result[key] = (*result.get(key, ()), *facility.issuance_citations)
+    for value in normalizations.values():
+        result["facility-normalization", value.normalization_id] = value.citations
     return result
 
 
@@ -282,6 +304,9 @@ def _inputs(regs: Cp1Registers) -> tuple[HistoricalInput, ...]:
             issuance_facility_id=ref.source_id
             if ref and ref.source_locator.startswith("facility-issuance:")
             else None,
+            normalization_id=ref.source_id
+            if ref and ref.source_locator == "facility-normalization"
+            else None,
         )
         for key, period, amount, ref in rows
     )
@@ -293,11 +318,6 @@ def _unit(book: FinancialBook, key: str) -> tuple[str, str | None]:
         return row.unit, None
     if key == "acct:effective_tax_rate":
         return "PERCENT", None
-    if key.startswith("fac:"):
-        facility = next(
-            row for row in book.facilities if row.facility_id == key.removeprefix("fac:")
-        )
-        return book.unit, facility.currency
     return book.unit, book.currency
 
 
@@ -308,7 +328,8 @@ def historical_report(
     review = FinancialReview.model_validate_json(review.model_dump_json())
     book = next(book for book in review.books if book.book_id == book_id)
     observations = {value.observation_id: value for value in records(book, Observation)}
-    evidence = _evidence(book)
+    normalizations = {n.normalization_id: n for n in normalize_facilities(book)}
+    evidence = _evidence(book, normalizations)
     specs = _plan(regs)
     series = history._series(regs)
     register = history._register(regs)
@@ -322,7 +343,10 @@ def historical_report(
                         ConstructionOperand(
                             reference=_reference(ref, sign),
                             value=_value(
-                                history._term(data, register, ref), observations, evidence
+                                history._term(data, register, ref),
+                                observations,
+                                evidence,
+                                normalizations,
                             ),
                         )
                         for ref, sign in spec.terms
@@ -340,7 +364,7 @@ def historical_report(
                         series_kind=data.kind,
                         unit=unit,
                         currency=currency,
-                        value=_value(cell, observations, evidence),
+                        value=_value(cell, observations, evidence, normalizations),
                         operands=operands,
                         formula=(
                             "sum(coefficient * operand amount); "
@@ -367,6 +391,7 @@ def historical_report(
         scale=book.unit,
         periods=book.periods,
         observations=tuple(records(book, Observation)),
+        facility_normalizations=tuple(normalizations.values()),
         input_rows=_inputs(regs),
         columns=tuple(_id("period", spec.column.column_id) for spec in specs),
         constructions=_constructions(specs),

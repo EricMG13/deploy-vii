@@ -174,8 +174,10 @@ def _calculation_gaps(
             "BLOCK",
         )
     observations = {o.observation_id: o for o in historical.observations}
+    normalizations = {n.normalization_id: n for n in historical.facility_normalizations}
     for i, input_row in enumerate(historical.input_rows):
         if input_row.adapter_amount is None:
+            normalization = normalizations.get(input_row.normalization_id or "")
             observation = (
                 observations.get(input_row.observation_id) if input_row.observation_id else None
             )
@@ -185,11 +187,19 @@ def _calculation_gaps(
                 f"input:{i}",
                 input_row.series_key,
                 (source_periods[input_row.period_id],),
-                observation.reason
+                normalization.reason
+                if normalization and normalization.reason
+                else observation.reason
                 if observation and observation.reason
                 else "Adapter input unavailable",
-                "BLOCK" if observation and observation.status == "conflicting" else "WARN",
-                tuple(records(observation, Citation)) if observation else (),
+                "BLOCK"
+                if normalization or (observation and observation.status == "conflicting")
+                else "WARN",
+                normalization.citations
+                if normalization
+                else tuple(records(observation, Citation))
+                if observation
+                else (),
             )
     for node in historical.constructions:
         period = constructions[node.construction_id]

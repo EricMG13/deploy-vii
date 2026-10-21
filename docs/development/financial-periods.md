@@ -1,7 +1,7 @@
 # Historical series and constructed periods
 
 `historical_report(pack, review, book_id)` now exposes the validated historical
-input series as a hash-bound `financial-periods/1` artifact. It supplies the
+input series as a hash-bound `financial-periods/2` artifact. It supplies the
 period-construction layer needed by CP-1 T4.8 and later Model output/readiness.
 It does not yet assemble statement/ratio calculations, grant Model readiness,
 or connect to the CLI, journal or Workbench.
@@ -10,8 +10,9 @@ The report binds run, issuer, as-of date, method, prepared-pack/review hashes,
 book, perimeter, accounting basis, currency and scale. It carries the original
 period records, source observations (including explicit gaps/conflict alternatives),
 and the adapter inputs before kernel normalization. Input rows identify the
-original observation or the facility issuance evidence responsible for a
-source-backed zero. An omitted input row is represented explicitly where the
+original observation, explicit FX normalization record, or facility issuance
+evidence responsible for a source-backed zero. Facility amounts in this artifact
+use the book currency; [normalization records](facility-fx.md) retain originals. An omitted input row is represented explicitly where the
 validated adapter requires it; omission does not imply zero.
 
 Each historical column has a stable construction ID and retains its original

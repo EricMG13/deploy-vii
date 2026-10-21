@@ -11,6 +11,7 @@ from typing import Literal
 
 from deploy_vii.calculation_trace import Computation, trace_cells
 from deploy_vii.contracts import Contract, Identifier, Text
+from deploy_vii.facility_fx import normalize_facilities
 from deploy_vii.financial_adapter import kernel_registers
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview, Observation
 from deploy_vii.financial_periods import (
@@ -85,7 +86,7 @@ class ModelMetric(Contract):
 
 
 class ModelReport(Contract):
-    schema_version: Literal["financial-model/2"] = "financial-model/2"
+    schema_version: Literal["financial-model/3"] = "financial-model/3"
     historical: HistoricalReport
     exclude_unrealised: bool
     bases: tuple[ModelBasis, ...]
@@ -200,7 +201,8 @@ def _metric_rows(
     book: FinancialBook,
     observations: dict[str, Observation],
 ) -> tuple[ModelMetric, ...]:
-    evidence = _evidence(book)
+    normalizations = {n.normalization_id: n for n in normalize_facilities(book)}
+    evidence = _evidence(book, normalizations)
     corporate = frozenset(
         s.segment_id for s in book.segments if s.segment_type == "CORPORATE_ELIMINATION"
     )
@@ -252,7 +254,7 @@ def _metric_rows(
                     numerator=numerator,
                     denominator=denominator,
                     offset=offset,
-                    value=_value(cell, observations, evidence),
+                    value=_value(cell, observations, evidence, normalizations),
                 )
             )
     return tuple(rows)
@@ -281,7 +283,8 @@ def model_report(
     )
     result = metrics.metric_frame(columns, frame, rolling, corporate=corporate)
     observations = {o.observation_id: o for o in records(book, Observation)}
-    evidence = _evidence(book)
+    normalizations = {n.normalization_id: n for n in normalize_facilities(book)}
+    evidence = _evidence(book, normalizations)
     value_cells = {
         _id("model-value", _basis_id(column, is_rolling), key): cell
         for is_rolling, group, data in ((False, columns, frame), (True, rolling_columns, rolling))
@@ -302,7 +305,7 @@ def model_report(
                         key=key,
                         unit=unit,
                         currency=currency,
-                        value=_value(cell, observations, evidence),
+                        value=_value(cell, observations, evidence, normalizations),
                         residual_formula=_RESIDUALS.get(key),
                         computation_id=computation_roots[_id("model-value", basis, key)],
                     )

@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 from pydantic import Field, ValidationError
 
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
+from deploy_vii.facility_fx import FacilityNormalization, normalize_facilities
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview, Located, Observation
 from deploy_vii.financial_periods import _id
 from deploy_vii.financial_reconciliation import ReconciliationReport, reconcile_financials
@@ -109,13 +110,14 @@ class AuditGap(Contract):
 
 
 class CanonicalAuditReport(Contract):
-    schema_version: Literal["canonical-audit/2"] = "canonical-audit/2"
+    schema_version: Literal["canonical-audit/3"] = "canonical-audit/3"
     # These existing artifacts bind run, issuer, dates, dimensions and hashes.
     statements: StatementReport
     reconciliation: ReconciliationReport
     definition_review: DefinitionReview
     source_positions: tuple[SourcePosition, ...]
     normalizations: tuple[NormalizationRow, ...]
+    facility_normalizations: tuple[FacilityNormalization, ...]
     definitions: tuple[DefinitionRow, ...]
     unassessed_observation_ids: tuple[Identifier, ...]
     gaps: tuple[AuditGap, ...]
@@ -130,6 +132,7 @@ def _positions(book: FinancialBook) -> tuple[SourcePosition, ...]:
         ("segments", "segment_id"),
         ("kpis", "kpi_id"),
         ("facilities", "facility_id"),
+        ("facility_fx_conversions", "conversion_id"),
         ("pro_forma", "adjustment_id"),
         ("statement_lines", "line_id"),
         ("balance_movements", "movement_id"),
@@ -143,6 +146,8 @@ def _positions(book: FinancialBook) -> tuple[SourcePosition, ...]:
                 currency: str | None = book.currency
                 if register == "kpis":
                     unit, currency = row.unit, None
+                elif register == "facility_fx_conversions":
+                    unit, currency = f"{row.target_currency} per {row.source_currency}", None
                 elif register == "facilities":
                     currency = row.currency
                     if field in {"spread_bps", "floor_bps", "fixed_rate"}:
@@ -430,6 +435,7 @@ def canonical_audit(
         if p.observation.observation_id not in assessed_or_optional
     )
     gaps: list[AuditGap] = []
+    facility_normalizations = normalize_facilities(book)
 
     def gap(
         origin: str,
@@ -455,6 +461,16 @@ def canonical_audit(
             )
         )
 
+    for normalization in facility_normalizations:
+        if normalization.reason:
+            gap(
+                "facility_fx",
+                normalization.normalization_id,
+                normalization.reason,
+                (normalization.period_id,),
+                "BLOCK" if normalization.field == "carrying_value" else "WARN",
+                normalization.citations,
+            )
     for position in positions:
         value = position.observation
         if value.status != "known" and value.observation_id not in optional_terms:
@@ -553,6 +569,7 @@ def canonical_audit(
         definition_review=definition,
         source_positions=positions,
         normalizations=_normalizations(book, statements),
+        facility_normalizations=facility_normalizations,
         definitions=definitions,
         unassessed_observation_ids=unassessed,
         gaps=tuple(gaps),

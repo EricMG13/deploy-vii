@@ -15,6 +15,7 @@ from pydantic import model_validator
 
 from deploy_vii.audit_basis import annual_warning
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
+from deploy_vii.facility_fx import FacilityNormalization, normalize_facilities
 from deploy_vii.financial_contracts import (
     AuditBasisExplanation,
     BalanceMovementBridge,
@@ -55,6 +56,7 @@ class ReconciliationTerm(Contract):
     coefficient: Literal[-1, 1] = 1
     reason: Text | None = None
     citations: tuple[Citation, ...]
+    normalization: FacilityNormalization | None = None
 
     @model_validator(mode="after")
     def missing_reason(self) -> Self:
@@ -86,7 +88,7 @@ class Reconciliation(Contract):
 
 
 class ReconciliationReport(Contract):
-    schema_version: Literal["financial-reconciliation/5"] = "financial-reconciliation/5"
+    schema_version: Literal["financial-reconciliation/6"] = "financial-reconciliation/6"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -284,19 +286,27 @@ def _income(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliatio
     return ebitda, adjusted
 
 
-def _debt(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
+def _debt(
+    book: FinancialBook,
+    period: FinancialPeriod,
+    normalized: dict[tuple[str, str], FacilityNormalization],
+) -> Reconciliation:
     """Use same-date carrying values, excluding both lease classes; no FX inference."""
     ids = {p.period_id for p in book.periods if period.end_date and p.end_date == period.end_date}
     templates = {r.facility_id: r for r in book.facilities}
     values_by_id: dict[str, list[Observation]] = {}
+    normalized_by_id: dict[str, list[FacilityNormalization]] = {}
     citations_by_id: dict[str, list[Citation]] = {}
     for row in book.facilities:
         if row.period_id in ids:
             values_by_id.setdefault(row.facility_id, []).append(row.carrying_value)
             citations_by_id.setdefault(row.facility_id, []).extend(row.terms_citations)
+            if row.currency != book.currency:
+                normalized_by_id.setdefault(row.facility_id, []).append(
+                    normalized[row.facility_id, row.period_id]
+                )
     terms: list[ReconciliationTerm] = []
     context: list[Citation] = []
-    blockers: list[str] = []
     for fid, template in templates.items():
         context.extend(citations_by_id.get(fid, ()))
         if template.facility_type != "DEBT ADJUSTMENT" and template.lease_classification in {
@@ -308,7 +318,24 @@ def _debt(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
         value = next((v for v in values if v.status == "conflicting"), None)
         value = value or next((v for v in values if v.amount is not None), next(iter(values), None))
         if template.currency != book.currency:
-            blockers.append(f"{fid}: foreign currency has no explicit conversion")
+            candidates = normalized_by_id.get(fid, [])
+            # The normalizer propagates source/rate conflicts to every alias.
+            selected = next(
+                (n for n in candidates if n.amount is not None), next(iter(candidates), None)
+            )
+            if selected is not None:
+                terms.append(
+                    ReconciliationTerm(
+                        label=fid,
+                        observation_id=selected.source_observation_id,
+                        original_amount=selected.original_amount,
+                        amount=selected.amount,
+                        reason=selected.reason,
+                        citations=selected.citations,
+                        normalization=selected,
+                    )
+                )
+                continue
         terms.append(_term(fid, value))
     return _check(
         period,
@@ -317,7 +344,6 @@ def _debt(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
         _balance(book, period.end_date, "total_debt"),
         tuple(terms),
         "sum(non-lease carrying values, including separately sourced debt adjustments)",
-        blocker="; ".join(blockers) or None,
         context=tuple(context),
     )
 
@@ -698,9 +724,14 @@ def reconcile_financials(
     book = next((b for b in review.books if b.book_id == book_id), None)
     if book is None:
         raise ValueError(f"Unknown financial book: {book_id}")
+    normalized = {
+        (n.facility_id, n.period_id): n
+        for n in normalize_facilities(book)
+        if n.field == "carrying_value"
+    }
     checks: list[Reconciliation] = []
     for period in book.periods:
-        checks.append(_debt(book, period))
+        checks.append(_debt(book, period, normalized))
         targets = {
             r.target_line_id for r in book.statement_identities if r.period_id == period.period_id
         }

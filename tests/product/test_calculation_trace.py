@@ -21,7 +21,7 @@ def test_every_statement_root_resolves_and_arithmetic_reproduces_exact_results()
     report = model_report(pack, review, value.book_id)
     nodes = {n.computation_id: n for n in report.computations}
     assert len(nodes) == len(report.computations)
-    assert report.schema_version == "financial-model/2"
+    assert report.schema_version == "financial-model/3"
     for row in report.values:
         assert nodes[row.computation_id].value == row.value
     with localcontext(CONTEXT):

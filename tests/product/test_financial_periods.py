@@ -363,8 +363,10 @@ def test_facility_issuance_evidence_and_foreign_currency_are_retained() -> None:
     assert opening.value.amount == 0
     assert opening.value.value_class == "normalized"
     assert opening.value.issuance_facility_ids == ("loan",)
-    assert opening.value.citations and opening.currency == "EUR"
-    assert entry(report, "Q:H1-Q1", "fac:loan").value.amount == 100
+    assert opening.value.citations and opening.currency == "USD"
+    assert entry(report, "Q:H1-Q1", "fac:loan").value.amount is None
+    assert report.facility_normalizations[0].original_amount == 100
+    assert report.facility_normalizations[0].source_currency == "EUR"
 
 
 def test_stated_ltm_dates_cannot_relabel_the_computed_span() -> None:
@@ -446,6 +448,7 @@ def test_unresolved_provenance_refuses_instead_of_dropping_citations() -> None:
                 basis="REPORTED",
                 sources=(SourceRef("unknown", "financial-observation", "1"),),
             ),
+            {},
             {},
             {},
         )

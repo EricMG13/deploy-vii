@@ -254,7 +254,7 @@ def test_house_addback_variant_is_explicit_and_keeps_negative_deductions() -> No
     assert validate_model_report(pack, review, house) == ()
 
 
-def test_foreign_facility_exclusion_is_retained_in_ratio_and_original_currency() -> None:
+def test_unconverted_foreign_facility_blocks_model_ratio_and_retains_original() -> None:
     value = model_case()
     foreign = tuple(
         facility(p.period_id, "euro").model_copy(update={"currency": "EUR"}) for p in value.periods
@@ -263,9 +263,12 @@ def test_foreign_facility_exclusion_is_retained_in_ratio_and_original_currency()
     pack, review = frozen(value)
     report = model_report(pack, review, value.book_id)
     row = metric(report, "Q:Q4", "metric:total_leverage_adjusted")
-    assert row.numerator.amount == 100
-    assert "excludes facility in another currency" in (row.value.note or "")
-    assert all(v.currency == "EUR" for v in report.values if v.key == "fac:euro")
+    assert row.numerator.amount is None and row.value.amount is None
+    assert all(v.currency == "USD" for v in report.values if v.key == "fac:euro")
+    assert all(
+        n.source_currency == "EUR" and n.amount is None
+        for n in report.historical.facility_normalizations
+    )
 
 
 def test_model_report_rejects_tampering_and_is_context_independent() -> None:

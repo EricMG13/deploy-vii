@@ -1,7 +1,7 @@
 # CP-1 source-register reconciliation
 
 `reconcile_financials(pack, review, book_id)` now produces the immutable
-`financial-reconciliation/5` internal artifact. It binds the prepared pack and
+`financial-reconciliation/6` internal artifact. It binds the prepared pack and
 financial review hashes, run, issuer, as-of date, book, currency, scale,
 accounting basis and entity perimeter. It is not a Module acceptance or Model
 readiness decision. No CLI, journal or renderer consumes it yet.

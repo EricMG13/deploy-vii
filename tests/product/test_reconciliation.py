@@ -262,7 +262,8 @@ def test_debt_uses_carrying_excludes_both_leases_and_retains_cost_adjustments() 
     row = check(value, "DEBT_TOTAL_EX_LEASES")
     assert row.status == "BLOCK"
     assert row.calculated_value is None
-    assert "foreign" in row.explanation
+    assert row.components[-1].normalization is not None
+    assert "FX conversion" in row.components[-1].reason
 
 
 def test_same_date_conflict_blocks_cash_without_first_known_value_winning() -> None:

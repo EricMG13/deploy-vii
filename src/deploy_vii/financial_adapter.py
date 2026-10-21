@@ -7,6 +7,7 @@ SourceRefs point to its observation IDs, never masquerade as original documents.
 from decimal import Decimal
 
 from deploy_vii.contracts import Citation
+from deploy_vii.facility_fx import FacilityNormalization, normalize_facilities
 from deploy_vii.financial_contracts import (
     ACCOUNT_IDS,
     FacilityObservation,
@@ -80,6 +81,7 @@ def _accounts(book: FinancialBook) -> tuple[AccountRow, ...]:
 
 
 def _facilities(book: FinancialBook) -> tuple[FacilityRow, ...]:
+    normalized = {(n.facility_id, n.period_id, n.field): n for n in normalize_facilities(book)}
     supplied = {(row.facility_id, row.period_id): row for row in book.facilities}
     templates = {row.facility_id: row for row in book.facilities}
     # Prefer the last dated row, retaining each facility's first insertion position.
@@ -97,6 +99,10 @@ def _facilities(book: FinancialBook) -> tuple[FacilityRow, ...]:
             row = supplied_row or template
             carrying = row.carrying_value.amount if supplied_row else None
             source = _ref(row.carrying_value) if supplied_row else None
+            if supplied_row and row.currency != book.currency:
+                value = normalized[facility_id, period.period_id, "carrying_value"]
+                carrying = value.amount
+                source = SourceRef(value.normalization_id, "facility-normalization", str(carrying))
             if (facility_id, period.end_date) in conflicted:
                 carrying = None
             elif (
@@ -108,7 +114,15 @@ def _facilities(book: FinancialBook) -> tuple[FacilityRow, ...]:
                 carrying = Decimal(0)
                 source = SourceRef(facility_id, f"facility-issuance:{book.book_id}", "0")
             result.append(
-                _facility(row, period.period_id, supplied_row is not None, carrying, source)
+                _facility(
+                    row,
+                    period.period_id,
+                    supplied_row is not None,
+                    carrying,
+                    source,
+                    book.currency,
+                    normalized,
+                )
             )
     return tuple(result)
 
@@ -119,16 +133,26 @@ def _facility(
     supplied: bool,
     carrying: Decimal | None,
     source: SourceRef | None,
+    currency: str,
+    normalized: dict[tuple[str, str, str], FacilityNormalization],
 ) -> FacilityRow:
+    def money(field: str) -> Decimal | None:
+        if not supplied:
+            return None
+        if row.currency != currency:
+            return normalized[row.facility_id, period_id, field].amount
+        observation: Observation = getattr(row, field)
+        return observation.amount
+
     return FacilityRow(
         facility_id=row.facility_id,
         facility_name=row.facility_name,
         period_id=period_id,
         facility_type=row.facility_type,
-        currency=row.currency,
+        currency=currency,
         carrying_value=carrying,
-        commitment=row.commitment.amount if supplied else None,
-        drawn_amount=row.drawn_amount.amount if supplied else None,
+        commitment=money("commitment"),
+        drawn_amount=money("drawn_amount"),
         secured_status=row.secured_status,
         seniority=row.seniority,
         lease_classification=row.lease_classification,
@@ -139,7 +163,7 @@ def _facility(
         spread_bps=row.spread_bps.amount if supplied else None,
         floor_bps=row.floor_bps.amount if supplied else None,
         fixed_rate=row.fixed_rate.amount if supplied else None,
-        annual_amortisation=row.annual_amortisation.amount if supplied else None,
+        annual_amortisation=money("annual_amortisation"),
         source=source,
         terms_out_of_range=row.fixed_rate.amount is not None
         and not Decimal("0.5") <= row.fixed_rate.amount <= Decimal(30),
@@ -274,6 +298,11 @@ def source_citations(review: FinancialReview, refs: tuple[SourceRef, ...]) -> tu
     unknown reference raises; it cannot silently become an uncited output.
     """
     index = {value.observation_id: value for value in records(review, Observation)}
+    normalizations = (
+        {n.normalization_id: n for book in review.books for n in normalize_facilities(book)}
+        if any(ref.source_locator == "facility-normalization" for ref in refs)
+        else {}
+    )
     citations: list[Citation] = []
     for ref in refs:
         if ref.source_locator == "financial-observation":
@@ -291,6 +320,8 @@ def source_citations(review: FinancialReview, refs: tuple[SourceRef, ...]) -> tu
             if not matching:
                 raise ValueError(f"Unknown facility issuance provenance: {ref.source_id}")
             citations.extend(citation for row in matching for citation in row.issuance_citations)
+        elif ref.source_locator == "facility-normalization":
+            citations.extend(normalizations[ref.source_id].citations)
         else:
             raise ValueError(f"Unknown kernel provenance: {ref.source_locator}")
     return tuple(dict.fromkeys(citations))

@@ -1,7 +1,7 @@
 # Historical Model calculation artifact
 
 `model_report(pack, review, book_id, exclude_unrealised=False)` produces the
-immutable `financial-model/2` internal artifact. It embeds the complete
+immutable `financial-model/3` internal artifact. It embeds the complete
 hash-bound historical input/period report, including run, issuer, as-of date,
 method, source/review hashes, perimeter, accounting basis, currency and scale.
 It does not grant Model readiness or complete CP-1 delivery.
@@ -11,8 +11,10 @@ statement cell. Each has a stable ID, basis, key, unit/currency, amount,
 source/normalized/calculated category, independent stated amount, calculation
 status, reason, note and original observation/issuance citations. Quarter-own
 and rolling values occupy separate ID namespaces even when the kernel uses the
-same quarter key. Foreign facilities retain their currency and exclusion notes;
-there is no inferred FX conversion. Model debt includes finance leases, while
+same quarter key. [Explicit facility FX normalization](facility-fx.md) preserves
+original amounts/currencies while Model values use book currency. Missing or
+conflicted conversion evidence leaves the facility aggregate unknown. Model debt
+includes finance leases, while
 canonical CP-1 debt excludes both types of lease.
 
 Each ratio records the displayed period, signed numerator and denominator

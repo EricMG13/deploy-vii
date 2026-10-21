@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-751 product tests pass (97.40% combined coverage); CP-0 synthetic output is
+774 product tests pass (97.49% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -247,8 +247,13 @@ bridge validator and arithmetic assembler receive the scoped Sol/high tournament
 No analytical, rendering or native-host acceptance is implied.
 
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: implement explicit foreign-currency debt
-normalization, then bind CP-1/Model outputs to the execution
+live qualification remain pending. Source-bound facility FX normalization now
+preserves originals and exact-date quotes through the Model, reconciliation, audit
+and gap APIs. Missing/conflicting conversions keep aggregates unknown. Confidence
+review fixed period identity and gap-provenance omissions; only the validator and
+normalizer received the Sol/high tournament. See facility-fx-review.md and
+../../facility-fx.md. No analytical, rendering or native-host acceptance is implied.
+Next: bind CP-1/Model outputs to the execution
 journal, canonical Markdown and Workbench. CP-1A remains an explicit requirement;
 current internal readiness decisions are not full CP-1 acceptance.
 Tournaments remain key-area only; confidence review applies to all code changes.

@@ -398,5 +398,5 @@ def test_bridge_cannot_supply_a_numeric_plug_or_coerce_a_sign() -> None:
     _, review = frozen(direct_case())
     with pytest.raises(ValidationError):
         FinancialReview.model_validate_json(
-            review.model_dump_json().replace("financial-review/4", "financial-review/2")
+            review.model_dump_json().replace("financial-review/5", "financial-review/2")
         )

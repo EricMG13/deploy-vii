@@ -299,11 +299,7 @@ def test_constructed_segment_bridge_debt_excludes_both_leases_and_no_fx(lease_cl
         }
     )
     debt = check(run(value), "Q:H1-Q1", "DEBT_TOTAL_EX_LEASES")
-    assert (
-        debt.status == "BLOCK"
-        and debt.calculated_value is None
-        and "conversion" in debt.explanation
-    )
+    assert debt.status == "BLOCK" and debt.calculated_value is None
 
 
 def test_cash_bridge_uses_quarter_opening_and_preserves_unexplained_difference() -> None:

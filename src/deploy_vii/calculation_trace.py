@@ -5,6 +5,7 @@ from dataclasses import replace
 from typing import Literal
 
 from deploy_vii.contracts import Contract, Identifier, Text
+from deploy_vii.facility_fx import normalize_facilities
 from deploy_vii.financial_contracts import FinancialBook, Observation
 from deploy_vii.financial_periods import PeriodValue, _evidence, _id, _value
 from deploy_vii.financial_validation import records
@@ -28,7 +29,9 @@ class Computation(Contract):
 _FORMULAS = {
     "sum": "sum(coefficient * operand value) in operand order; unknown component yields null",
     "ratio_times": "operand[0] / operand[1] * operand[2]; denominator must be positive",
-    "input": "located input, retaining any recorded sign normalization",
+    "input": (
+        "located input, retaining sign changes and referenced facility FX normalization records"
+    ),
     "constant": "kernel constant; not a sourced observation",
     "unavailable": "no calculable value; retain the missing reason and limitation",
 }
@@ -43,7 +46,8 @@ def trace_cells(
     nodes are deduplicated by complete content. No Python object IDs escape.
     """
     observations = {o.observation_id: o for o in records(book, Observation)}
-    evidence = _evidence(book)
+    normalizations = {n.normalization_id: n for n in normalize_facilities(book)}
+    evidence = _evidence(book, normalizations)
     nodes: dict[str, Computation] = {}
     visited: dict[int, str] = {}
     active: set[int] = set()
@@ -69,7 +73,7 @@ def trace_cells(
             if cell.input_sources
             else cell
         )
-        value = _value(located, observations, evidence)
+        value = _value(located, observations, evidence, normalizations)
         operation: Literal["sum", "ratio_times", "input", "constant", "unavailable"]
         if arithmetic is not None:
             operation = arithmetic.operation

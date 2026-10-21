@@ -71,7 +71,7 @@ class PeriodCheck(Contract):
 
 
 class PeriodReconciliationReport(Contract):
-    schema_version: Literal["period-reconciliation/4"] = "period-reconciliation/4"
+    schema_version: Literal["period-reconciliation/5"] = "period-reconciliation/5"
     historical: HistoricalReport
     checks: tuple[PeriodCheck, ...]
     limitations: tuple[Text, ...]
@@ -352,7 +352,6 @@ def _bridges(
         if row.facility_type == "DEBT ADJUSTMENT"
         or row.lease_classification not in {"FINANCE_LEASE", "OPERATING_LEASE"}
     )
-    foreign = any(facilities[fid].currency != book.currency for fid in debt)
     undisclosed = not segments and book.segment_disclosure.status in {
         "not_disclosed",
         "not_applicable",
@@ -405,7 +404,6 @@ def _bridges(
             account("total_debt"),
             series("fac:", debt),
             "closing non-lease facility carrying values including debt adjustments",
-            blocker="Foreign carrying value requires explicit conversion" if foreign else None,
             context=tuple(c for row in book.facilities for c in row.terms_citations),
         ),
         _cfo(book, report, node, account("cfo_ncfo")),
