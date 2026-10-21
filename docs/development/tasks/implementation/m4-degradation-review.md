@@ -36,4 +36,9 @@ confidence-review run inline, no confirmed defect. rewrite-tournament run inline
 ## Not verified
 
 r14 shared files and LITE_CREDIT_22 behaviour; runtime behaviour on a real pack;
-a blocked ancestor head replaced outside the journal (the journal stales consumers).
+a blocked ancestor head replaced outside the journal (the journal stales consumers);
+the CP-8 (block on CP-6), CP-MEMO (restricted on CP-6) and CP-MODEL edges: the encoded
+rules are unit-tested in the registry but never exercised end to end through the journal
+(CP-MODEL's r14 upstreams are still unencoded, decision 0007 "Recorded, not adopted").
+M4 follow-up (M5 pre-step): the blocked-ancestor walk now tracks visited modules, so a
+diamond is traversed once and a corrupted cyclic store cannot hang it.

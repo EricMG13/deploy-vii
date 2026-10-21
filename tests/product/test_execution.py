@@ -1,6 +1,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -628,3 +629,92 @@ def test_blocked_ancestor_marker_cannot_be_spoofed_by_limitation_text(tmp_path: 
     cp2 = settle_clean(store, "CP-2")
     assert cp2.status == "accepted"
     assert "Upstream CP-4 blocked: plain text" in cp2.inherited_limitations
+
+
+def test_blocked_ancestors_terminates_on_diamond_and_cycle(tmp_path: Path) -> None:
+    """A corrupted store with an input cycle must not hang; a diamond is walked once."""
+    import signal
+
+    from deploy_vii.execution import blocked_ancestors
+
+    store = public_store_after_cp0(tmp_path)
+    run = store.read().pack.run
+
+    def head(module_id: str, *upstream: Input) -> Module:
+        return Module(
+            run_id=run.run_id,
+            issuer_id=run.issuer_id,
+            as_of=run.as_of,
+            module_id=module_id,
+            status="accepted",
+            inputs=upstream,
+        )
+
+    def link(module_id: str, status: Literal["accepted", "blocked"] = "accepted") -> Input:
+        return Input(input_id=module_id, sha256="0" * 64, status=status)
+
+    # CP-1 and CP-1A reference each other (a cycle); CP-2 -> {CP-1, CP-1A} -> CP-4 is a diamond.
+    heads = (
+        head("CP-1", link("CP-1A"), link("CP-4", "blocked")),
+        head("CP-1A", link("CP-1"), link("CP-4", "blocked")),
+        head("CP-2", link("CP-1"), link("CP-1A")),
+    )
+    snapshot = store.read().model_copy(update={"heads": heads})
+    clean = store.read().model_copy(
+        update={"heads": (head("CP-1", link("CP-1A")), head("CP-1A", link("CP-1")))}
+    )
+
+    def expired(*_: object) -> None:
+        raise TimeoutError("blocked_ancestors did not terminate")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(5)
+    try:
+        assert blocked_ancestors(snapshot, (link("CP-2"),)) == {"CP-4"}
+        assert blocked_ancestors(snapshot, (link("CP-1"),)) == {"CP-4"}
+        assert blocked_ancestors(clean, (link("CP-1"),)) == set()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_consumer_over_blocked_producer_is_staled_when_producer_changes(tmp_path: Path) -> None:
+    from deploy_vii.execution import invalidate
+
+    store = fixture_store(tmp_path)
+    settle_through(store, "CP-1", "CP-1A", "CP-2")
+    blocked = block_module(store, "CP-4")
+    assert settle_module(store, "CP-3").status == "restricted"
+
+    # A change to the blocked producer stales its restricted consumer, not the producer itself.
+    changed = {item.module_id: item for item in invalidate(store.read().heads, "CP-4")}
+    assert changed["CP-3"].status == "stale"
+    assert "Input changed: CP-4; rerun required" in changed["CP-3"].limitations
+    assert changed["CP-4"] == blocked
+    assert changed["CP-2"].status == "restricted"  # not downstream of CP-4
+
+    # Through the journal: replacing the pack stales the blocked producer and its consumer.
+    pack = store.read().pack
+    source = pack.sources[0].model_copy(update={"limitation": "New fidelity restriction"})
+    store.replace_pack(pack.model_copy(update={"sources": (source,)}))
+    heads = {item.module_id: item for item in store.read().heads}
+    assert heads["CP-3"].status == heads["CP-4"].status == "stale"
+    with pytest.raises(ValueError, match="upstream"):
+        current_inputs(store.read(), "CP-3")
+
+
+def test_omitted_input_status_is_rejected_for_restricted_producer(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)  # CP-0 settles restricted (synthetic run)
+    ticket = store.begin("CP-1")
+    candidate = candidate_for(store, "CP-1")
+    assert bound(candidate, "CP-0").status == "restricted"
+    assert candidate_issues(store.read(), ticket, candidate) == ()
+    raw = json.loads(candidate.model_dump_json())
+    for item in raw["inputs"]:
+        item.pop("status", None)  # omission defaults to accepted
+    omitted = Module.model_validate_json(json.dumps(raw))
+    assert bound(omitted, "CP-0").status == "accepted"
+    assert candidate_issues(store.read(), ticket, omitted) == (
+        "Candidate does not bind the exact current upstream inputs",
+    )

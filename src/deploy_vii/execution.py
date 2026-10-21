@@ -179,12 +179,14 @@ def blocked_ancestors(snapshot: ExecutionSnapshot, inputs: tuple[Input, ...]) ->
     """
     heads = {item.module_id: item for item in snapshot.heads}
     found: set[str] = set()
+    seen: set[str] = set()  # a diamond is walked once and a corrupted cycle cannot hang
     pending = list(inputs)
     while pending:
         item = pending.pop()
         if item.status == "blocked":
             found.add(item.input_id)
-        elif item.input_id in heads:
+        elif item.input_id in heads and item.input_id not in seen:
+            seen.add(item.input_id)
             pending.extend(heads[item.input_id].inputs)
     return frozenset(found)
 
