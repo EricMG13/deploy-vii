@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-563 product tests pass (97.46% combined coverage); CP-0 synthetic output is
+579 product tests pass (97.44% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -176,11 +176,22 @@ cash assembly (fresh Sol/high roles); 149 focused tests and 1,144 coordinator
 comparisons verify the selected rewrite. All code received confidence review.
 No new Module or live analytical/rendering/native-host qualification is claimed.
 
+Independent NCF reconciliation now requires operating/investing/financing source
+totals, explicit FX inclusion and passing intermediate equations. Equal subtotal
+or source-period errors cannot cancel into a pass. It is mandatory for selected
+historical Model quarters. Source/period report versions advance to /4 and
+readiness to /2; financial-review/3 remains unchanged. See
+net-cash-flow-review.md and ../../net-cash-flow.md. The Sol/high tournament covered
+only the two financial checking functions; 165 focused tests and 378 coordinator
+comparisons verified the chosen rewrite. Full product checks pass. This remains
+synthetic implementation evidence, with no new Module or live qualification.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: independent operating/investing/financing
-to net-cash-change reconciliation, remaining canonical registers and full consumer
-readiness, including explicit foreign-currency debt treatment.
-Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
-only; confidence review applies to all code changes.
+live qualification remain pending. Next: assemble the remaining canonical
+normalization, gap/definition/conflict and narrative registers, and bind CP-1/Model
+outputs to the execution journal and Workbench. Remaining cross-statement checks,
+foreign-currency debt treatment, full consumer readiness and CP-1A remain explicit
+requirements; current selected historical readiness is not full CP-1 acceptance.
+Tournaments remain key-area only; confidence review applies to all code changes.
 
 Execution review: execution-review.md. Native/live qualification remains unrun.

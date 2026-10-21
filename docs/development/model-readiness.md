@@ -1,7 +1,7 @@
 # Historical Model readiness
 
 `model_readiness.assess_model_readiness(pack, review, book_id, quarter_ids=None)`
-returns a hash-bound `model-readiness/1` report with exactly one CP-MODEL row.
+returns a hash-bound `model-readiness/2` report with exactly one CP-MODEL row.
 The row assesses **selected historical quarters**. It does not qualify forecasts,
 pro forma adjustments, analytical interpretation, other consumers or report
 presentation. Full CP-1 acceptance remains pending.
@@ -43,7 +43,9 @@ as blocked with source checks rather than fabricated historical calculations.
 ## Checks and conservative boundaries
 
 Each selected quarter requires segment/revenue, EBITDA, adjusted EBITDA, CFO,
-debt excluding leases and cash-movement checks. Relevant fiscal-year checks cover
+[independent NCF](net-cash-flow.md), debt excluding leases and cash-movement
+checks. NCF must trace to operating, investing and financing source categories;
+agreeing cash balances alone are insufficient. Relevant fiscal-year checks cover
 required flows plus independently stated values; independently stated FY/LTM
 comparisons remain visible. Fiscal-year spelling is normalized when selecting
 checks. Source statement identities and numerical source checks for contributing
@@ -52,8 +54,9 @@ periods also remain mandatory, so errors cannot disappear through subtraction.
 Any mandatory BLOCK prevents readiness. Shared-source construction-only agreement
 is still WARN, not independent proof. Every unresolved observation conflict in the
 book blocks conservatively, including conflicts outside a selected window;
-consumer-specific conflict materiality and source-backed cash/FX treatment remain
-later work. A located, exact-scope [annual audit explanation](audit-basis.md) now
+consumer-specific conflict materiality remains later work. Explicit
+[source-backed cash/FX bridges](cash-movement.md) are implemented. A located,
+exact-scope [annual audit explanation](audit-basis.md) now
 permits its eligible annual comparison to remain WARN. No other failure is waived,
 and no automatic exception or conflict resolution is introduced.
 

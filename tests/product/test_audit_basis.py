@@ -24,6 +24,7 @@ from deploy_vii.period_reconciliation import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.statement_validation import effective_accounts
+from tests.product.test_cash_bridge import ncf_amount
 from tests.product.test_financial_periods import frozen as freeze_case
 from tests.product.test_financials import _C, conflict
 from tests.product.test_model_readiness import ready_case
@@ -125,8 +126,8 @@ def test_explicit_explanation_warns_without_changing_values_or_readiness_require
     assert validate_reconciliation_report(pack, review, source) == ()
     assert validate_period_reconciliation(pack, review, periods) == ()
     assert validate_model_readiness(pack, review, ready) == ()
-    assert source.schema_version == "financial-reconciliation/3"
-    assert periods.schema_version == "period-reconciliation/3"
+    assert source.schema_version == "financial-reconciliation/4"
+    assert periods.schema_version == "period-reconciliation/4"
     assert review.schema_version == "financial-review/3"
 
 
@@ -136,7 +137,7 @@ def test_explanation_is_not_a_blanket_metric_or_cash_override() -> None:
     _, _, rows = annual_checks(pack, review, value.book_id, "cash_taxes_paid")
     assert all(row.status == "BLOCK" and row.audit_basis_explanation is None for row in rows)
     assert assess_model_readiness(pack, review, value.book_id).readiness.status == "blocked"
-    value = explain(accounts(ready_case(), "FY", net_cash_change="81.00"), "net_cash_change")
+    value = explain(ncf_amount(ready_case(), "FY", "81.00"), "net_cash_change")
     pack, review = frozen(value)
     source = reconcile_financials(pack, review, value.book_id)
     cash = next(

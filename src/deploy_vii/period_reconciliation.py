@@ -26,10 +26,12 @@ from deploy_vii.financial_periods import (
 )
 from deploy_vii.financial_reconciliation import (
     CheckType,
+    Reconciliation,
     ReconciliationTerm,
     _account,
     _balance,
     _cash_movement,
+    _ncf,
     _statement_check,
 )
 from deploy_vii.model._cells import CONTEXT
@@ -69,7 +71,7 @@ class PeriodCheck(Contract):
 
 
 class PeriodReconciliationReport(Contract):
-    schema_version: Literal["period-reconciliation/3"] = "period-reconciliation/3"
+    schema_version: Literal["period-reconciliation/4"] = "period-reconciliation/4"
     historical: HistoricalReport
     checks: tuple[PeriodCheck, ...]
     limitations: tuple[Text, ...]
@@ -225,6 +227,39 @@ def _cfo(
     )
 
 
+def _period_ncf(
+    book: FinancialBook, report: HistoricalReport, node: PeriodConstruction, reported: PeriodTerm
+) -> PeriodCheck:
+    periods = {p.period_id: p for p in book.periods}
+    terms: list[PeriodTerm] = []
+    contexts: list[Citation] = []
+    blockers: list[str] = []
+    sources: dict[str, Reconciliation] = {}
+    for pid, sign in _source_periods(report, node):
+        if pid is None:
+            terms.append(_cell(None, "Missing period component", 1 if sign == 1 else -1))
+            blockers.append("Missing period component")
+            continue
+        source = sources.get(pid)
+        if source is None:
+            source = _ncf(book, periods[pid])
+            sources[pid] = source
+        terms.extend(_source(term, sign) for term in source.components)
+        contexts.extend(source.context_citations)
+        if source.status != "PASS":
+            blockers.append(f"{pid}: {source.explanation}")
+    return _compare(
+        node,
+        "NCF_IDENTITY",
+        "net_cash_change",
+        reported,
+        tuple(terms),
+        "signed period combination of independently reconciled source NCF equation leaves",
+        blocker=node.limitation or "; ".join(blockers) or None,
+        context=tuple(contexts),
+    )
+
+
 def _period_cash(
     book: FinancialBook,
     report: HistoricalReport,
@@ -374,6 +409,7 @@ def _bridges(
             context=tuple(c for row in book.facilities for c in row.terms_citations),
         ),
         _cfo(book, report, node, account("cfo_ncfo")),
+        _period_ncf(book, report, node, account("net_cash_change")),
         _period_cash(
             book,
             report,

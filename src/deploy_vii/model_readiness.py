@@ -49,6 +49,7 @@ _MANDATORY_CHECKS = frozenset(
         "EBITDA_BRIDGE",
         "ADJUSTED_EBITDA_BRIDGE",
         "CFO_IDENTITY",
+        "NCF_IDENTITY",
         "DEBT_TOTAL_EX_LEASES",
         "NCF_CASH_MOVEMENT",
     }
@@ -76,7 +77,7 @@ class ModelReadinessRow(Contract):
 
 
 class ModelReadinessReport(Contract):
-    schema_version: Literal["model-readiness/1"] = "model-readiness/1"
+    schema_version: Literal["model-readiness/2"] = "model-readiness/2"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -246,7 +247,7 @@ def _evaluate(
                 "Tax rate requires a source rate or both pretax income and tax expense",
                 cid,
             )
-    # Every selected quarter must carry the six mandatory comparisons, including
+    # Every selected quarter must carry all mandatory comparisons, including
     # a WARN/null segment comparison for genuine non-disclosure.
     mandatory = []
     selected_ids = {q.construction_id for q in quarters}

@@ -1,6 +1,6 @@
 # Reconciliation across historical constructions
 
-`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/3`.
+`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/4`.
 It embeds the complete hash-bound historical report, including source and review
 identity, currency/scale, original observations, period constructions and input
 values. This adds comparisons over constructed quarters and LTM periods to the
@@ -21,6 +21,9 @@ For every exposed historical column, checks compare:
   Every contributing source equation must be complete and free of an unresolved
   numeric difference. Equal source errors cannot cancel into acceptance. Missing
   period references remain explicit missing terms.
+- Net cash change with signed combinations of [independent source cash-flow
+  equations](net-cash-flow.md). Every contributing source must pass before errors
+  can be combined into a constructed result.
 - Net cash change with closing less opening cash for the actual constructed span.
   Explicit [source cash bridges](cash-movement.md) contribute signed adjustments;
   every contributing source assessment must reconcile before they can be combined.

@@ -36,6 +36,7 @@ CheckType = Literal[
     "EBITDA_BRIDGE",
     "ADJUSTED_EBITDA_BRIDGE",
     "CFO_IDENTITY",
+    "NCF_IDENTITY",
     "DEBT_TOTAL_EX_LEASES",
     "NCF_CASH_MOVEMENT",
     "FY_QUARTERS",
@@ -82,7 +83,7 @@ class Reconciliation(Contract):
 
 
 class ReconciliationReport(Contract):
-    schema_version: Literal["financial-reconciliation/3"] = "financial-reconciliation/3"
+    schema_version: Literal["financial-reconciliation/4"] = "financial-reconciliation/4"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -406,6 +407,80 @@ def _statement_check(
     )
 
 
+def _ncf(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
+    """Prove reported NCF from the three source cash-flow categories.
+
+    Source identities operate on printed amounts. Only the completed equation is
+    converted to the canonical target sign; leaf amounts and source signs remain
+    visible. Nested source errors cannot disappear in an agreeing parent sum.
+    """
+    source = _statement_check(book, period, "CFS", "net_cash_change", "NCF_IDENTITY")
+    lines = {r.line_id: r for r in book.statement_lines if r.period_id == period.period_id}
+    equations = {
+        r.target_line_id: r for r in book.statement_identities if r.period_id == period.period_id
+    }
+    target = next(
+        (r for r in lines.values() if r.statement == "CFS" and r.item_id == "net_cash_change"),
+        None,
+    )
+    root = equations.get(target.line_id) if target else None
+    required = {"cfo_ncfo", "investing_cash_flow", "financing_cash_flow"}
+    components = tuple(lines[c.line_id] for c in root.components) if root else ()
+    items = {r.item_id for r in components}
+    blockers: list[str] = []
+    if (
+        not required <= items
+        or not items <= required | {"fx_cash_effect"}
+        or any(r.line_kind == "detail" for r in components if r.item_id in required)
+    ):
+        blockers.append(
+            "NCF equation requires operating, investing and financing totals; "
+            "only explicitly included source FX may accompany them"
+        )
+    if source.calculated_value is None or source.reported_value is None:
+        blockers.append(source.explanation)
+    contexts = list(source.context_citations)
+    pending = [c.line_id for c in root.components] if root else []
+    checked: set[str] = set()
+    while pending:
+        line_id = pending.pop()
+        if line_id in checked:
+            continue
+        equation = equations.get(line_id)
+        if equation is None:
+            continue
+        checked.add(line_id)
+        row = lines[line_id]
+        child = _statement_check(book, period, "CFS", row.item_id, "SOURCE_STATEMENT_IDENTITY")
+        contexts.extend(child.context_citations)
+        if child.status != "PASS":
+            blockers.append(f"{line_id}: {child.explanation}")
+        pending.extend(c.line_id for c in equation.components)
+    flip = (
+        account_outflow(book, period.period_id, "net_cash_change")
+        and source.reported_value is not None
+        and source.reported_value >= 0
+    )
+    terms = (
+        tuple(
+            term.model_copy(update={"coefficient": -term.coefficient}) for term in source.components
+        )
+        if flip
+        else source.components
+    )
+    return _check(
+        period,
+        "NCF_IDENTITY",
+        "net_cash_change",
+        _account(book, period.period_id, "net_cash_change"),
+        terms,
+        "independent operating + investing + financing source equation leaves; "
+        "FX only if explicitly in the equation; canonical target sign conversion",
+        blocker="; ".join(blockers) or None,
+        context=(*contexts, *(target.sign_citations if target else ())),
+    )
+
+
 def _cash_movement(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
     opening = (
         period.start_date - timedelta(days=1)
@@ -449,6 +524,7 @@ def _cash_movement(book: FinancialBook, period: FinancialPeriod) -> Reconciliati
 def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
     return (
         _statement_check(book, period, "CFS", "cfo_ncfo", "CFO_IDENTITY"),
+        _ncf(book, period),
         _cash_movement(book, period),
     )
 

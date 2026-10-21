@@ -85,9 +85,36 @@ def ready_case() -> FinancialBook:
                     line("cfo", "cfo_ncfo", str(60 * scale), 1, kind="total", pid=period.period_id),
                     line("profit", "net_income", str(40 * scale), 2, pid=period.period_id),
                     line("noncash", "other:noncash", str(20 * scale), 3, pid=period.period_id),
+                    line(
+                        "cfi",
+                        "investing_cash_flow",
+                        str(-10 * scale),
+                        10,
+                        kind="subtotal",
+                        pid=period.period_id,
+                    ),
+                    line(
+                        "cff",
+                        "financing_cash_flow",
+                        str(-30 * scale),
+                        11,
+                        kind="subtotal",
+                        pid=period.period_id,
+                    ),
+                    line(
+                        "ncf",
+                        "net_cash_change",
+                        str(20 * scale),
+                        12,
+                        kind="total",
+                        pid=period.period_id,
+                    ),
                 )
             )
             identities.append(identity("cfo", ("profit", 1), ("noncash", 1), pid=period.period_id))
+            identities.append(
+                identity("ncf", ("cfo", 1), ("cfi", 1), ("cff", 1), pid=period.period_id)
+            )
             disclosures.append(
                 StatementDisclosure(
                     statement="CFS", period_id=period.period_id, disclosure=value.addback_disclosure

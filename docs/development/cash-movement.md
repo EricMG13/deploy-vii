@@ -41,14 +41,16 @@ Historical Model readiness consumes these checks without weakening its other
 conditions. This is an internal deterministic API, not completed CP-1 delivery.
 It does not supply debt FX conversion, infer restricted-cash balances, implement
 new Model cash forecasts or prove that the analytical classification is correct.
-Independent operating/investing/financing-to-NCF completeness remains separate
-from this cash-balance bridge. All new evidence is explicitly synthetic; no
+Independent [operating/investing/financing-to-NCF checking](net-cash-flow.md)
+is now implemented separately from this cash-balance bridge. All new evidence is
+explicitly synthetic; no
 live model, module rendering or native-host qualification is claimed.
 
 ## Versions and provenance
 
-Inputs use `financial-review/3`; affected reports use
-`financial-reconciliation/3` and `period-reconciliation/3`. Explicit older
+This increment introduced `financial-review/3` and version 3 of both
+reconciliation reports. The subsequent [NCF increment](net-cash-flow.md) keeps
+the input version and advances the reports to version 4. Explicit older
 versions are rejected. Rebuild reviews and regenerate dependent artifacts from
 the frozen pack; do not relabel old artifacts. The review hash covers the bridge,
 source amounts and citations. Both report validators recompute every result;

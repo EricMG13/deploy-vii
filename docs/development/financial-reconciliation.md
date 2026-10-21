@@ -1,7 +1,7 @@
 # CP-1 source-register reconciliation
 
 `reconcile_financials(pack, review, book_id)` now produces the immutable
-`financial-reconciliation/3` internal artifact. It binds the prepared pack and
+`financial-reconciliation/4` internal artifact. It binds the prepared pack and
 financial review hashes, run, issuer, as-of date, book, currency, scale,
 accounting basis and entity perimeter. It is not a Module acceptance or Model
 readiness decision. No CLI, journal or renderer consumes it yet.
@@ -31,6 +31,9 @@ The implementation adds these source-register comparisons:
 - Independent source statement equations, recursively expanded to original leaves.
   CFO identity requires a complete source cash-flow disclosure and independent
   components; the Model residual is never used to prove its own construction.
+- Net cash change from the operating, investing and financing source equation,
+  including checks of every supplied intermediate equation. See
+  [independent NCF](net-cash-flow.md).
 - Net cash change against closing less opening cash, including explicitly sourced
   [cash movement adjustments](cash-movement.md); no invented FX plug.
 - Each controlled flow metric's reported FY against four directly supplied,

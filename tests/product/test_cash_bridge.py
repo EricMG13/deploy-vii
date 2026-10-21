@@ -34,6 +34,21 @@ def bridge(pid: str, *parts: tuple[str, int]) -> CashMovementBridge:
     )
 
 
+def ncf_amount(value: FinancialBook, pid: str, amount: str) -> FinancialBook:
+    """Keep both synthetic representations aligned when varying the cash test."""
+    value = accounts(value, pid, net_cash_change=amount)
+    return value.model_copy(
+        update={
+            "statement_lines": tuple(
+                r.model_copy(update={"value": observed(r.value.observation_id, amount)})
+                if r.period_id == pid and r.item_id == "net_cash_change"
+                else r
+                for r in value.statement_lines
+            )
+        }
+    )
+
+
 def direct_case() -> FinancialBook:
     value = ready_case()
     # FX adds 2 to each quarter's cash delta, but is outside reported NCF.
@@ -100,7 +115,7 @@ def test_present_fx_line_does_not_implicitly_change_cash_or_double_count() -> No
     assert row.status == "BLOCK" and row.difference == 2
     assert row.cash_movement_bridges == ()
     # The alternative reporting convention already includes FX in NCF.
-    value = accounts(value, "Q2", net_cash_change="22")
+    value = ncf_amount(value, "Q2", "22")
     value = value.model_copy(update={"cash_movement_bridges": (bridge("Q2"),)})
     row = source_check(value, "NCF_CASH_MOVEMENT")
     assert row.status == "PASS" and len(row.components) == 2
@@ -113,7 +128,7 @@ def test_signed_perimeter_adjustment_and_explicit_outflow_convention(sign: int) 
     adjustment = line("restricted", "other:restricted_cash_movement", "3", 4).model_copy(
         update={"sign_convention": "outflow_magnitude", "sign_citations": (_C,)}
     )
-    value = accounts(value, "Q2", net_cash_change=str(20 + sign * 3))
+    value = ncf_amount(value, "Q2", str(20 + sign * 3))
     value = value.model_copy(
         update={
             "statement_lines": (*value.statement_lines, adjustment),
