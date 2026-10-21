@@ -97,17 +97,23 @@ inputs/rubrics but retain distinct cohort identity and telemetry availability.
 `make setup` and `make dev-check` passed (26 tests, strict typing, lint/format).
 Development review evidence is in `tooling-review.md`. No product/live analytical
 qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
-map is in `docs/methodology/r14-coverage.json`; all product modules remain unrun.
+map is in `docs/methodology/r14-coverage.json`; live analytical qualification
+remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-356 product tests pass (96.74% combined coverage); CP-0 synthetic output is
+372 product tests pass (96.95% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
 financial-input-review.md and ../../financial-inputs.md. Output reconciliation,
-Model readiness, artifact binding and CP-1A remain pending.
+Model readiness, artifact binding and CP-1A remain pending. Independent
+source-register comparisons now exist; see reconciliation-review.md and
+../../financial-reconciliation.md. CFO identity remains blocked until full source
+operating components exist; no final readiness or analytical claim is made.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: canonical registers, deterministic
-calculations, CP-1A and module-adapter integration with the tested execution journal. Tournaments remain key-area
+live qualification remain pending. Next: full source statement components and
+source/normalized/calculated/judgment output registers; finish independent CFO,
+source-backed cash/FY explanations, derived-period checks and Model readiness.
+Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.
 
 Execution review: execution-review.md. Native/live qualification remains unrun.

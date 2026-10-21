@@ -65,6 +65,11 @@ evidence alongside these numeric references. Raw kernel cells are not accepted
 report artifacts. The raw kernel remains an internal dependency; use the
 validated adapter for model-response data.
 
+The [source-register reconciliation API](financial-reconciliation.md) now performs
+independent comparisons where source components are available. CFO identity
+remains explicitly blocked pending full statement components; this does not
+provide a final readiness or report acceptance decision.
+
 ## Remaining milestone C work
 
 - Complete all required CP-1 narrative and T4 tables, gap/definition/conflict
