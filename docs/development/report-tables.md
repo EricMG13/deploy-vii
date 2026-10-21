@@ -64,9 +64,10 @@ not qualify analytical judgments or a completed Module.
 ## Format boundary
 
 Layouts and additional fact provenance fields change serialized artifact hashes.
-New artifacts use `module/4`, `view/3` and `execution/4` after adding stated
+New artifacts use `module/5`, `view/4` and `execution/5` after adding stated
 comparisons and calculation status. Explicit previous versions
-are rejected. There is no automatic migration: retain old stores and outputs.
+are rejected; an `execution/5` store embedding `module/4` or older is rejected inside
+Module validation. There is no automatic migration: retain old stores and outputs.
 This boundary does not authorize a new provider budget or discard earlier spend.
 
 Original table validation: [review](tasks/implementation/report-tables-review.md).

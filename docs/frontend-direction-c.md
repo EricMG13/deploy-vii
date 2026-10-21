@@ -101,6 +101,77 @@ across models. Review screenshot differences before accepting a new baseline.
 Keep rendering correctness, analytical quality and model performance as separate
 results. Overall completion requires all applicable results.
 
-This document establishes the requested acceptance behavior. As of 21 October 2026
-the shell predates the design system and is being re-baselined (plan M3). No reviewed
-screenshot baseline, design-system binding or live rendering test exists yet.
+## Acceptance implemented in M3 (tasks 3.8 and 3.9)
+
+The Credit Snapshot Front Page is built, not idle: `report_view.build(view, pathway, maps)`
+fills each block from the bound registers (`bindings/cp0.py`, `bindings/cp1.py`; the
+shipped set is `bindings/shipped.py`) and `render()` calls it whenever no report view is
+passed, so every preview writer (`delivery`, `statement_view`, `interface_view`,
+`register_view`) shows real blocks. A fact no map names, or two maps name, stops the build.
+A binding to a block the active Pathway does not compose (for example the Model chart strip
+under Earnings Update) is listed under Limitations as an absent entry ("bound to <block>,
+not in this Pathway"), never dropped.
+Blocks no binding fills show their honest state (`not_run`, `not_in_pathway`, `blocked`,
+`absent`). CP-0 binds to the rail destinations (`bindings.RAIL_DESTINATIONS`: Evidence,
+Limitations, the issuer header): those bindings are accounted for; shown on the module page,
+not rendered from these facts by the Front Page or the rail pages. FP 01 has no separate
+metric strip: T4.10 feeds the Model chart strip, and Capital structure is tabbed (debt facilities, T4.17 EBITDA adjustments,
+pro forma). Cell classes come from the fact unit: MILLIONS, currency, UNITS, THOUSANDS
+amount; PERCENT and decimal_fraction percent; MULTIPLE multiple; basis_points,
+decimal_percent and FX quotes keep their exact value and unit as text.
+
+Browser acceptance (`tests/product/test_browser.py`, marker `browser`, offline) runs on the
+labelled SYNTHETIC fixture `tests/product/credit_snapshot.py`:
+
+- **Structure against the reference:** block order, heads, states, chart kinds, figure
+  numbers, titles and units, the "condition" outline word and rail labels are parsed from
+  `design/reference/rbot-fp-01-credit-snapshot.dc.html` (`html.parser` and regular
+  expressions) and compared with the rendered DOM.
+- **Screenshots:** 1440×900 (fold) and 1280×800, compared with `tests/product/png.py`, a
+  stdlib PNG decoder, because Playwright's `to_have_screenshot` needs a plugin that is not
+  a dependency. A page matches when at most 0.5% of pixels differ by more than 24 in any
+  channel. Baselines live in `tests/product/baselines/<sys.platform>/` because glyph
+  rasterisation differs per operating system; a platform without a reviewed baseline skips (darwin fails)
+  with that reason. `UPDATE_BASELINES=1` writes new ones, which are reviewed by eye before
+  commit.
+- **Zoom:** 125% and 200% of a 1440×900 window (layout viewport 1152×720 and 720×450 at
+  device scale 1.25 and 2): no horizontal overflow.
+- **Keyboard:** Tab from the rail through the navigator to a figure; Enter opens the
+  inspector with focus inside, Escape returns to the figure; Tab to a chart mark, arrows
+  move along the chart, Enter and Escape as before. Each step asserts
+  `document.activeElement`.
+- **Parity:** every chart mark and table-twin cell equals `display.format_value` of the
+  mark's value (or its gap spelling); every fact cell on the register pages equals
+  `tests/product/oracle.py`, an oracle that restates the unit-class table and recounts
+  `G#` without the renderer's code. Each browser test writes a computed `field_parity`
+  record (`compared`, `matched`, `mismatches`) and fails when `mismatches` is not empty.
+- **Network and text:** zero requests beyond the file and embedded data URLs; the visible
+  text, titles and labels never contain `null` or an internal status name.
+
+Fidelity to FP 01 (fix round 1): Key findings (numbered, "pinned") sit 5fr beside the
+operating model 7fr; Capital structure puts its tabs in the block head with the owner, as-of
+date and scale at the right, subtotal and total rows, greyed absent columns with the producer's
+reason and the debt stack as S.6; Financials sets S.5 beside the grid (7fr/5fr) with a summary
+slot that says so when empty; collapsed blocks show one line and an Expand link; the chart
+strip shows per-figure legends with gap lines and "Open in Model"; Strengths and weaknesses
+shows a thesis and tick/cross columns; the call band renders populated items and lines from
+`CallItem`s; the navigator logo is the provenanced SSIM image (`assets/brand/provenance.json`).
+Amounts state their scale once in the block head and mixing amount units in one table fails
+closed. Unit tokens never reach the page (`basis_points` is "bp", `decimal_percent` is "%").
+A missing darwin baseline fails; other platforms skip with the reason.
+
+Out of scope here, by design:
+
+- The navigator lists in-Pathway rows only (decision 0009).
+- FP 01's "Primary · ..." pill and the "Watch" rail dot need fields no module supplies yet.
+- A populated call band on real data arrives with CP-2 and CP-3 (M8); real runs show the honest
+  no-judgement state. The populated state is exercised once, labelled SYNTHETIC, by the fixture.
+- The chart strip on real data shows four n/a frames over the KPI table until a producer
+  supplies S.1 to S.4 series.
+
+Why CP-0 `rendering_acceptance` is `partial`: CP-0 reaches the page only through rail
+destinations (header, Evidence, Limitations); no Front Page block shows its facts, and its
+register preview has been exercised on the synthetic readiness fixture, not on real source-pack
+output, so the shell's rendering of live CP-0 results is untested. Live rendering of real CP-0
+and CP-1 output (M7) and Linux baselines remain outstanding; `rendering_acceptance` for CP-0
+and CP-1 is `partial` (synthetic fixture plus candidate registers) until then.

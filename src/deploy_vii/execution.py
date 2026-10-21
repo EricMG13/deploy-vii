@@ -35,7 +35,7 @@ from deploy_vii.contracts import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import citation_issues
-from deploy_vii.registry import canonical, dependencies, edge_rule, modules, plan
+from deploy_vii.registry import canonical, dependencies, edge_rule, idle_statuses, modules, plan
 
 Validator = Callable[[Module], tuple[str, ...]]
 SCHEMA = "execution/5"
@@ -767,6 +767,7 @@ class Execution:
                 raise ValueError("Invalid candidate identity or provenance cannot render")
             heads[attempt.module_id] = candidate
         views: list[ModuleView] = []
+        idle = idle_statuses(pack.run)
         for entry in modules():
             module = heads.get(entry.module_id)
             visible = module is not None and module.status in {
@@ -779,7 +780,7 @@ class Execution:
                     module_id=entry.module_id,
                     title=entry.title,
                     aliases=entry.aliases,
-                    status=module.status if module else "unrun",
+                    status=module.status if module else idle[entry.module_id],
                     artifact_sha256=module.content_hash() if module else None,
                     facts=module.facts if visible and module else (),
                     tables=module.tables if visible and module else (),

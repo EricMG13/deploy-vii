@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -264,3 +265,15 @@ def test_path_escape_and_duplicate_source_ids_fail(tmp_path: Path) -> None:
     ready = prepare_source(source, b"test")
     with pytest.raises(ValidationError, match="duplicate"):
         PreparedPack(run=request.run, sources=(ready, ready))
+
+
+def test_documents_carrying_a_run_1_run_are_rejected_through_the_run_2_literal() -> None:
+    """``run/2`` changes the hash of every document that embeds a Run; old ones are refused."""
+    source = SourceRequest(source_id="s", path="s.txt", media_type="text/plain")
+    request = PreparationRequest(run=synthetic_view().run, sources=(source,))
+    pack = PreparedPack(run=request.run, sources=(prepare_source(source, b"test"),))
+    for document in (request, pack):
+        old = json.loads(document.model_dump_json())
+        old["run"]["schema_version"] = "run/1"
+        with pytest.raises(ValidationError, match="run/2"):
+            type(document).model_validate(old)

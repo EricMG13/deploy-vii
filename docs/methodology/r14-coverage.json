@@ -36,7 +36,7 @@
       },
       "implementation": "implemented",
       "analytical_qualification": "unrun",
-      "rendering_acceptance": "unrun",
+      "rendering_acceptance": "partial (synthetic fixture; real output in M7)",
       "native_host_qualification": "unrun"
     },
     {
@@ -74,7 +74,7 @@
       },
       "implementation": "partial",
       "analytical_qualification": "unrun",
-      "rendering_acceptance": "unrun",
+      "rendering_acceptance": "partial (synthetic fixture; real output in M7)",
       "native_host_qualification": "unrun"
     },
     {

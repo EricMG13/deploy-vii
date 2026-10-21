@@ -10,7 +10,7 @@ from playwright.sync_api import expect, sync_playwright
 from deploy_vii.contracts import View
 from deploy_vii.cp1_workflow import cp1_statement_preview, submit_cp1_step
 from deploy_vii.interface_view import write_interface_preview
-from deploy_vii.render import table_display
+from tests.product.oracle import expected_by_fact, front_blocks, parity_record
 from tests.product.test_financials import book, freeze, observed
 from tests.product.test_workflow import cp1_case
 
@@ -48,6 +48,10 @@ def test_interface_preview_cli_retains_snapshot_and_hashes_all_outputs(
     assert receipt["module_acceptance"] == receipt["analytical_qualification"] == "unrun"
     for name, digest in receipt["files"].items():
         assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
+    blocks = front_blocks((output / "candidate.html").read_text())
+    assert blocks["financials-credit-metrics"]["state"] == "populated"
+    assert blocks["financials-credit-metrics"]["tab_label"] == "Income statement"
+    assert all(b["owner"] != "Unbound" for b in blocks.values())
     markdown = (output / "tables.md").read_text()
     assert markdown.count("<!-- table-id: cp1.model_period_register -->") == 1
     assert "## Gaps & Conflicts" in markdown and "annual_amortisation" in markdown
@@ -89,16 +93,20 @@ def test_interface_fields_offline_and_coupon_inspection(
             "(nodes) => nodes.map(n => [n.dataset.factId, n.textContent])"
         )
         assert len(actual) == len(module.facts)
-        assert dict(actual) == {f.fact_id: table_display(f) for f in module.facts}
+        oracle = expected_by_fact(view)
+        parity = parity_record({f.fact_id: oracle[f.fact_id] for f in module.facts}, dict(actual))
+        assert parity["compared"] == len(module.facts) and not parity["mismatches"]
+        assert all(text and text != "null" for _, text in actual)
         coupon = next(f for f in module.facts if f.table_id == "T4.18" and f.field == "fixed_rate")
         target = page.locator(f'[data-fact-id="{coupon.fact_id}"]')
         assert (
             target.evaluate(
                 "node => { const range = document.createRange(); "
-                "range.selectNodeContents(node); return range.getClientRects().length; }"
+                "range.setStart(node.firstChild, 0); range.setEnd(node.firstChild, 5); "
+                "return range.getClientRects().length; }"
             )
             == 1
-        ), "A short coupon must remain readable on one line"
+        ), "The coupon's number must stay whole; only its unit may wrap"
         target.focus()
         page.keyboard.press("Enter")
         inspector = page.get_by_role("complementary", name="Evidence inspector")
@@ -115,7 +123,7 @@ def test_interface_fields_offline_and_coupon_inspection(
             json.dumps(
                 {
                     "viewport": [width, height],
-                    "field_parity": "passed",
+                    "field_parity": parity,
                     "errors": errors,
                     "requests": requests,
                     "css_zoom": 1.25,

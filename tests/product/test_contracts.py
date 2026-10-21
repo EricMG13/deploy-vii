@@ -108,7 +108,7 @@ def test_module_duplicate_and_unrun_contracts() -> None:
         Module(**base, claims=(claim, claim))
 
 
-def test_module_v4_inherited_limitations_input_status_and_old_store_rejection() -> None:
+def test_module_v5_inherited_limitations_input_status_and_old_store_rejection() -> None:
     base = {"run_id": "r", "issuer_id": "i", "as_of": date(2026, 10, 21), "module_id": "CP-3"}
     assert Input(input_id="CP-4", sha256="a" * 64).status == "accepted"
     with pytest.raises(ValidationError):
@@ -119,8 +119,8 @@ def test_module_v4_inherited_limitations_input_status_and_old_store_rejection() 
         **base, status="restricted", inherited_limitations=("Upstream CP-4 blocked",)
     )
     assert inherited.limitations == ()
-    raw = inherited.model_dump_json().replace("module/4", "module/3")
-    with pytest.raises(ValidationError, match="module/4"):
+    raw = inherited.model_dump_json().replace("module/5", "module/3")
+    with pytest.raises(ValidationError, match="module/5"):
         Module.model_validate_json(raw)
 
 
@@ -153,3 +153,14 @@ def test_cycle_rejected_and_empty_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, "modules", lambda: cyclic)
     with pytest.raises(ValueError, match="cyclic"):
         plan(("CP-1",))
+
+
+@pytest.mark.parametrize("status", ["unrun", "not_in_pathway"])
+def test_module_outside_a_run_state_carries_no_outputs(status: str) -> None:
+    base = {"run_id": "r", "issuer_id": "i", "as_of": date(2026, 10, 21), "module_id": "CP-1"}
+    fact = Fact(fact_id="x", label="Test", text="One")
+    claim = Claim(claim_id="c", text="claim", citations=())
+    for outputs in ({"facts": (fact,)}, {"claims": (claim,)}):
+        with pytest.raises(ValidationError, match=f"{status} module cannot carry outputs"):
+            Module(**base, status=status, **outputs)  # type: ignore[arg-type]
+    assert Module(**base, status=status).status == status  # type: ignore[arg-type]

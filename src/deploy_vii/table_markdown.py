@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from html import escape, unescape
 
 from deploy_vii.contracts import Module, ReportTable
-from deploy_vii.render import table_display
+from deploy_vii.render import markdown_display
 
 
 def markdown_cell(value: str) -> str:
@@ -50,7 +50,7 @@ def table_markdown(module: Module, table_id: str) -> str:
             for fact in (facts[identity] for identity in row.fact_ids)
         ):
             raise ValueError("Known interface text would be confused with a null marker")
-        values = [table_display(facts[identity]) for identity in row.fact_ids]
+        values = [markdown_display(facts[identity]) for identity in row.fact_ids]
         if table.row_header:
             values.insert(0, row.label)
         lines.append("| " + " | ".join(markdown_cell(v) for v in values) + " |")
