@@ -1,7 +1,7 @@
 ---
 name: dv-sensitive
 description: Explicitly assigned financial, parser, provenance or shared-state change.
-model: claude-sonnet-5-5
+model: claude-opus-5-5
 effort: high
 tools: Read, Glob, Grep, Bash, Edit, Write, Skill
 ---
