@@ -107,5 +107,25 @@ Preserve a labelled candidate preview when inspectable; promote only validated
 artifacts to the accepted report. Other modules remain visibly not run, blocked,
 stale or outside scope. A rendering pass does not qualify analytical correctness.
 
+## Regular cadence
+
+[Decision 0005](decisions/0005-methodology-changes-and-regular-testing.md), adopted
+21 October 2026, makes this testing regular:
+
+- **Internal tiers.** I1 runs on every change. I2 is the offline replay of recorded
+  responses, run on every change to a model-facing contract, validator or prompt. I3
+  runs at each milestone.
+- **External tiers (this pool, via OpenRouter).** E1 is a module qualification case.
+  E2 is the milestone regression with a matched three-model comparison. E3 is a weekly
+  drift canary.
+
+Each batch writes a summary without raw data, and its validated responses join the
+replay corpus. Beyond the first US$50 batch, the recurring caps and the US$200
+cumulative ceiling of [decision 0006](decisions/0006-delegated-choices-and-orchestration.md) DC-6 apply. The key is read
+from the DC-7 credential file at dispatch time and never recorded. Without credit, the
+DC-8 proxy cohort applies and is never pooled with pool results.
+The runner disables tools: Luna's Chat Completions tool-calling limit above does not
+apply until a tool-using module is admitted.
+
 Not verified: account entitlement, per-provider effort mapping, adapter/tool
 behavior, live quality, cost or performance. These require working tests and inputs.

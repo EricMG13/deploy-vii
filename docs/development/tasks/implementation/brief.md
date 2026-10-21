@@ -26,7 +26,8 @@ dependencies, invalidation and at most one targeted repair.
 - CP-1A precedes core synthesis; CP-3 requires CP-2; CP-5 precedes CP-6.
   Final integrity validation does not make CP-5 consume CP-6.
 - Every completed module test: labelled preview, artifact/field parity, browser
-  evidence, cumulative accepted report. Test 1440×900, 1280×800, zoom, keyboard,
+  evidence, cumulative accepted report. Parity is checked against the module's bound
+  design-system Front Page blocks (decision 0004). Test 1440×900, 1280×800, zoom, keyboard,
   long content, provenance, chart/table parity and offline behavior.
 - Frozen public Caesars case; explicitly synthetic market/portfolio/adversarial
   cases. Raw sources/telemetry/credentials stay ignored and local.
@@ -44,13 +45,19 @@ dependencies, invalidation and at most one targeted repair.
 
 ## Execution plan
 
-Implementation is inline; discovery/rewrite review may delegate within skill scope.
+Since 21 October 2026 implementation runs through the `dv-*` workers; the coordinator
+plans, integrates and publishes (decision 0003). Milestones, acceptance and sequencing
+now live in [plan.md](plan.md); this brief is the progress log.
 User correction: use the development model matrix. Initial discovery workers
 inherited the coordinator route before this correction. Until 21 October 2026,
 state/provenance rewrite roles ran on GPT-6.1 Sol/high (Codex). Since then the routes
 are the `dv-*` agents in ../../../model-matrix.md: tournament roles on Sonnet 5.5/high,
 research on Sonnet 5.5/medium, mechanical work on low, and escalation or architecture
 on Fable 5.1/high only after two failed repairs or an evidenced blocker.
+
+Original milestone checklist, superseded by [plan.md](plan.md) on 21 October 2026 and
+kept as history. A and B record implementation only: their adopted completion
+conditions are unmet (A is reopened as plan M3; B closes in M7).
 
 - [x] Inspect clean Git, project instructions, context, settings, architecture,
   methodology, reuse, frontend, telemetry and maintenance documents; run setup.
@@ -366,3 +373,42 @@ Environment, 21 October 2026 (decision 0003): Claude Code coordinates from `main
 CLAUDE.md is the only instruction file, and Codex routes are retired. The setup branch
 was squash-merged into `main`. The next session resumes at the canonical envelope/handoff
 for CP-1.
+
+Plan v2, 21 October 2026: an adversarial review of `7526dbc`
+(../../reviews/2026-10-21-adversarial-review.md) returned BLOCK on three findings:
+- no model runner or live probe behind the CP-1 contracts;
+- one blocked module halts CP-3, CP-5 and CP-6 (reproduced with the test fixtures);
+- the frontend follows the superseded phase-1 reference.
+
+On the user's instruction "Apply your recommendations and create the new development
+plan", [plan.md](plan.md) replaces the milestone checklist and
+[decision 0004](../../../decisions/0004-design-system-frontend.md) makes the user's
+Direction C design system normative. The design-system file is snapshotted under
+`design/reference/`. The canonical envelope moves to M6, after the runner probe (M2),
+the design re-baseline (M3) and the degradation semantics (M4). Next:
+M1, FFO interest coverage (brief since renamed [m1-kpi-definitions-brief.md](m1-kpi-definitions-brief.md)).
+
+The same day the user added: "Your also authorised to alter the methodology to improve
+performance and reliability. Include regular internal and external testing of modules
+(with open router and stated model choice from my codex chats)."
+[Decision 0005](../../../decisions/0005-methodology-changes-and-regular-testing.md)
+records this:
+- guardrailed methodology changes MC-1 to MC-10;
+- testing tiers I1–I3 (internal) and E1–E3 (external, with the Luna/GLM/DeepSeek pool);
+- recurring external caps, proposed and awaiting confirmation.
+
+CLAUDE.md now references decisions 0004 and 0005. No product code changed. 978 product
+tests pass locally. OpenRouter spend: $0/$50.
+
+Later on 21 October 2026 the user wrote: "Main orchestration session will be set by me
+using fable. But all PR work to be handled by a sub-session. … Apply your
+recommendations (but keep a record of your choices)", named the OpenRouter key file
+("if no credit use agent as proxy") and asked to merge this work.
+[Decision 0006](../../../decisions/0006-delegated-choices-and-orchestration.md) records
+each choice (DC-1 to DC-10): a Fable orchestrator, a PR session that squash-merges after
+local gates and reviews, DCF = FCF − dividends paid (M1, brief renamed
+[m1-kpi-definitions-brief.md](m1-kpi-definitions-brief.md)), the HTML Model destination
+for CP-MODEL, recurring caps under a US$200 ceiling, runtime-only key handling, and a
+labelled Claude-agent proxy cohort without credit. Plan decisions are renumbered
+(degradation 0007, contract shape 0008). The project now denies `Read` on the key file;
+its contents were not read. No product code changed. OpenRouter spend: $0/$50.

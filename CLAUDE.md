@@ -28,7 +28,8 @@ defaults apply only where this file is silent.
   experimental assessment point at a safe boundary, not a quality boundary or
   permission to restart.
 - Keep credentials, issuer packs and raw run/telemetry artifacts out of Git.
-- One owner per worktree. The coordinator plans, integrates and owns publication;
+- One owner per worktree. The coordinator plans and integrates; a separate PR session
+  owns publication (pushes, PRs, merges) under decision 0006;
   workers return local commits. Delegation requires explicit task or skill scope.
 - Worker routes are explicit `dv-*` subagents in `.claude/agents/` per
   docs/model-matrix.md: scaffold, feature, sensitive, research, architect, and
@@ -43,11 +44,15 @@ defaults apply only where this file is silent.
 
 - Model-assisted tests randomly select an eligible Luna, GLM 5.3 Flash or latest
   DeepSeek model at appropriate high/xhigh effort; retain outputs, metrics and
-  telemetry under docs/testing-and-telemetry.md.
+  telemetry under docs/testing-and-telemetry.md. Run the regular internal and
+  external module tests (tiers I1–I3, E1–E3) of decision 0005.
 - Preserve Direction C Workbench and test each completed Module's output in its
-  relevant HTML fields under docs/frontend-direction-c.md.
-- Preserve analytical meaning while adapting execution boundaries. Python owns
-  arithmetic; models supply evidence-grounded analysis. Follow the reuse review
+  relevant HTML fields under docs/frontend-direction-c.md; the user's design system
+  is the reference (decision 0004).
+- Preserve analytical meaning while adapting execution boundaries. Methodology
+  changes that improve performance or reliability are authorized under decision
+  0005, within its guardrails and records. Python owns arithmetic; models supply
+  evidence-grounded analysis. Follow the reuse review
   before selecting any Deploy VI code.
 
 ## Review regime

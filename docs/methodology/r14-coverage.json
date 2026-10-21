@@ -34,7 +34,7 @@
           "T8"
         ]
       },
-      "implementation": "unrun",
+      "implementation": "implemented",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"
@@ -72,7 +72,7 @@
           "T4.9"
         ]
       },
-      "implementation": "unrun",
+      "implementation": "partial",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"

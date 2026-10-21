@@ -4,7 +4,8 @@ Date: 21 October 2026. Status: adopted under the user's request to consolidate t
 workflow findings, the Codex chats and this documentation into coherent global and
 project settings, with Claude in control and one instruction file. Supersedes the
 Workers, Reviews and Plugins/hooks rows of [0002](0002-development-environment.md);
-its other rows stand.
+its other rows stand. Its Coordinator row's publication duty moved to the PR session
+under [decision 0006](0006-delegated-choices-and-orchestration.md).
 
 Underlying goal, as the chats and documents state it: reproducible,
 evidence-preserving development in which calculations, provenance and gaps stay

@@ -23,7 +23,9 @@ See [Git's documentation](https://git-scm.com/docs/git-worktree).
 
 ## Default: one publication owner
 
-The coordinator owns remote branches, pushes, PR creation/updates and integration.
+Since [decision 0006](decisions/0006-delegated-choices-and-orchestration.md) (21 October 2026), one long-lived PR session
+started by the coordinator owns remote branches, pushes, PR creation/updates and
+squash merges after local gates and reviews; the coordinator owns integration.
 Workers implement and make local commits in assigned worktrees, returning commit
 IDs and results. They do not independently push and open PRs by default.
 This reduces races over publication, retargeting and branch updates.
@@ -61,7 +63,8 @@ development documentation, independent of the product's runtime folder layout.
 7. **Manage:** attach the PR to its task and retain its URL. Repair the same PR;
    track checks for the current candidate, not a green predecessor. Changed head/base
    invalidates affected evidence. Missing, cancelled or blocked checks are incomplete.
-8. **Merge/clean up:** merge only when authorized and applicable checks pass.
+8. **Merge/clean up:** the PR session merges when decision 0006 DC-3 is met (local
+   gates exit 0, reviews recorded, diff inspected; hosted CI noted if it did not run).
    Match expected head SHA where supported. Preserve result/needed artifacts, then
    archive completed managed worktrees. Check unpushed commits/ignored files first;
    do not blanket-prune work that belongs to other sessions.

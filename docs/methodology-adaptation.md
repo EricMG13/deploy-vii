@@ -65,6 +65,16 @@ analytical semantics. Record its reason and downstream effects. Semantic changes
 need an explicit methodological decision rather than an infrastructure shortcut.
 Plan the next layer; do not create a complete rewrite/documentation programme.
 
+Since 21 October 2026, [decision 0005](decisions/0005-methodology-changes-and-regular-testing.md)
+authorizes methodology changes that improve performance or reliability, within its
+guardrails. Definitions, scales, judgment vocabularies, missing-data meaning and r14
+coverage stay fixed unless the user decides otherwise. Record each change here when it
+lands:
+
+| ID | Method clause | Change | Class | Gain | Evidence before/after | Consumers | Tests |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| — | — | Rows are added as MC-1 to MC-10 are implemented (plan M2–M9) | — | — | — | — | — |
+
 Later qualification uses the same authorized pack, method version and scope:
 exact calculation/source checks plus comparisons of material claims, conflicting
 evidence, refusals and limitations. Wording may vary. A schema or HTML pass does

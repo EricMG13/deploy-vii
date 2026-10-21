@@ -1,9 +1,11 @@
 # Development context
 
 Current phase: development tooling and product implementation, authorized by the
-21 October 2026 request. [Implementation brief](tasks/implementation/brief.md)
-records adopted decisions, acceptance, budgets and progress; the earlier research
-does not override this request. [Decision 0002](../decisions/0002-development-environment.md)
+21 October 2026 request. [Development plan](tasks/implementation/plan.md) (v2, adopted
+21 October 2026 after the [adversarial review](reviews/2026-10-21-adversarial-review.md))
+holds milestones, acceptance, sequencing, budgets and open decisions. The
+[implementation brief](tasks/implementation/brief.md) records the fixed decisions and
+the progress log. The earlier research does not override this request. [Decision 0002](../decisions/0002-development-environment.md)
 still defines the selected environment.
 
 | Need | Authoritative context |
@@ -13,8 +15,8 @@ still defines the selected environment.
 | Coding-session context evaluation | [Brief](tasks/context-policy/brief.md) · [Result](tasks/context-policy/result.md); task ID: `dvii-dev-context-001`, same owner session |
 | Context continuity and handoffs | [Policy/evaluation](context-management.md) · [Handoff template](handoff-template.md); development only |
 | Product architecture and method | [Architecture](../architecture.md) · [Methodology adaptation](../methodology-adaptation.md) |
-| Model roles and test pool | [Worker matrix](../model-matrix.md) · [Test/telemetry contract](../testing-and-telemetry.md) · [Settings](../../settings/project.toml) |
-| Frontend and reuse | [Direction C](../frontend-direction-c.md) · [Deploy VI assessment](../deploy-vi-reuse.md) |
+| Model roles and test pool | [Worker matrix](../model-matrix.md) · [Test/telemetry contract](../testing-and-telemetry.md) · [Decision 0005: methodology changes and regular testing](../decisions/0005-methodology-changes-and-regular-testing.md) · [Decision 0006: delegated choices](../decisions/0006-delegated-choices-and-orchestration.md) · [Settings](../../settings/project.toml) |
+| Frontend and reuse | [Decision 0004](../decisions/0004-design-system-frontend.md) · [Direction C contract](../frontend-direction-c.md) · [Design references](../../design/reference/README.md) · [Deploy VI assessment](../deploy-vi-reuse.md) |
 | Quality and publication | [CI](../ci-gates.md) · [Sweeps](../maintenance-sweeps.md) · [PR/worktrees](../pr-worktree-workflow.md) |
 | Historical context | [Research index](../../README.md) · [Sources](../research-sources.md) |
 
@@ -51,7 +53,8 @@ CP-1 narrative: [prior evidence, analytical chains and story coverage](narrative
 CP-1 narrative delivery: [finding, evidence-trace and coverage projection](narrative-projection.md).
 CP-1 readiness: [consumer sufficiency and historical Model gate](downstream-readiness.md).
 CP-1 QA: [hash-bound judgments, r14 numeric confidence and pre-handoff scope](quality.md).
-Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
-contracts and an honest unrun Direction C shell, followed by source readiness.
+Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Next product
+work follows the plan's order: M1 FFO coverage and DCF; then, in parallel, M2 runner and probe,
+M3 design re-baseline and M4 degradation semantics.
 Reuse selected Deploy VI behavior only after validating dependencies and regression
 cases. Implementation and live qualification are tracked separately in the brief.
