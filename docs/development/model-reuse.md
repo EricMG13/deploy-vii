@@ -3,7 +3,8 @@
 Selected 21 October 2026 against Deploy VI commit
 `bd71346301b373afa72655916a4c1b42bf4c9823`, from clean Deploy VII base `9199be4`.
 This is milestone C's internal arithmetic slice, not a completed CP-1 or Model
-module. No product CLI, execution adapter or report currently calls it.
+module. The validated financial and historical-period APIs now call it; no product CLI,
+execution adapter or Workbench delivery consumes those outputs yet.
 
 The selected eight modules are `_cells`, `frame`, `registers`, `periods`,
 `history`, `debt`, `statements` and `metrics`. Only three date functions and
@@ -66,7 +67,11 @@ they are not independent analytical qualification. Matching old assembly tests
 were excluded because assembly/layout was not selected. No new public module
 output exists, so no completed-module browser or analytical acceptance is claimed.
 
-The port changes imports, documentation and formatting only. Per the user's
+The original port changed imports, documentation and formatting only.
+Subsequent period integration adapts `_calculated_quarters` and `_host_ltm`
+to reject mismatched stub subtraction, preserve component-owned LTM dates and
+require a proven twelve-month span. See [period integration](financial-periods.md)
+and tasks/implementation/period-review.md for reproduced cases and verification. Per the user's
 key-area tournament limit and the skill's vendored/mechanical exclusion, no
 tournament is run over unchanged imported algorithms. New calculation or
 provenance logic will receive the scoped tournament and confidence review.

@@ -147,7 +147,7 @@ def test_a_register_ltm_ending_elsewhere_is_not_the_columns() -> None:
     assert (ltm.value, ltm.stated, ltm.note) == (Decimal(420), None, None)
 
 
-def test_the_register_ltm_supplies_its_days_and_its_own_rates() -> None:
+def test_constructed_ltm_supplies_its_days_but_retains_source_period_rates() -> None:
     regs = _regs(
         fy={"FY2025": {"revenue": 400}},
         ytd={"H1_2025": {"revenue": 190}, "H1_2026": {"revenue": 210}},
@@ -163,7 +163,8 @@ def test_the_register_ltm_supplies_its_days_and_its_own_rates() -> None:
     columns = historical_columns(regs)
     frame = account_frame(regs, columns)
 
-    assert columns[-1].days == 364
+    # Deploy VII: source metadata cannot relabel a 365-day construction.
+    assert columns[-1].days == 365
     assert frame["LTM:LTM_Q2_2026"]["kpi:occupancy"].value == Decimal("90.5")
 
     undated = replace(regs, periods=(fy, pytd, ytd, replace(ltm, day_count=None)))
@@ -331,7 +332,8 @@ def test_quarters_to_date_make_the_ytd_and_pytd_without_ytd_rows() -> None:
     assert frame["YTD:Q2_2026"]["acct:revenue"].value == Decimal(32)
     assert frame["PYTD:Q2_2025"]["acct:revenue"].value == Decimal(30)
     assert frame["LTM:Q2_2026"]["acct:revenue"].value == Decimal(102)
-    assert by_id["LTM:Q2_2026"].days is None
+    # Deploy VII: complete source dates establish days despite a missing count.
+    assert by_id["LTM:Q2_2026"].days == 365
 
 
 def test_an_undated_register_ltm_is_kept_unadopted() -> None:

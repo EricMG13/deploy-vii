@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-413 product tests pass (97.03% combined coverage); CP-0 synthetic output is
+432 product tests pass (97.15% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -109,11 +109,15 @@ Model readiness, artifact binding and CP-1A remain pending. Independent
 source-register comparisons now exist; see reconciliation-review.md and
 ../../financial-reconciliation.md. Full source statements and independent equations
 now exist; see statement-review.md and ../../statements.md. CFO can reconcile from original source components; no
-final readiness or analytical claim is made.
+final readiness or analytical claim is made. Hash-bound historical series and
+constructed-period operands now exist; see period-review.md and
+../../financial-periods.md. Three reproduced period/span defects are corrected.
+The tournament covered only the two changed date algorithms, using fresh
+GPT-6.1 Sol/high review roles; confidence review covered the complete increment.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
 live qualification remain pending. Next: complete
-source/normalized/calculated/judgment output registers,
-source-backed cash/FY explanations, derived-period checks and Model readiness.
+statement/ratio output registers with explicit numerators and denominators,
+source-backed cash/FY explanations, independent derived-period checks and Model readiness.
 Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.
 

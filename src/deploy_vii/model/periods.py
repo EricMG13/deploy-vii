@@ -147,18 +147,31 @@ def _calculated_quarters(regs: Cp1Registers) -> list[_Spec]:
     fiscal = {_year(p): p for p in _of_type(regs, "FY")}
     specs = []
     for year in dict.fromkeys(_year(p) for p in regs.periods):
-        pairs = {
-            2: (ytd.get((year, 2)), reported.get((year, 1))),
-            3: (ytd.get((year, 3)), ytd.get((year, 2))),
-            4: (fiscal.get(year), ytd.get((year, 3))),
-        }
-        for number, (minuend, subtrahend) in pairs.items():
-            if (year, number) in reported or minuend is None or subtrahend is None:
+        candidates = (
+            (2, ytd.get((year, 2)), reported.get((year, 1))),
+            (3, ytd.get((year, 3)), ytd.get((year, 2))),
+            (4, fiscal.get(year), ytd.get((year, 3))),
+        )
+        for number, whole_period, prefix_period in candidates:
+            if (year, number) in reported or whole_period is None or prefix_period is None:
                 continue
-            terms = ((minuend.period_id, 1), (subtrahend.period_id, -1))
-            spec = _quarter_spec(minuend, number, None, terms)
-            days = _days(minuend, subtrahend)
-            specs.append(replace(spec, column=replace(spec.column, days=days)))
+            terms = ((whole_period.period_id, 1), (prefix_period.period_id, -1))
+            spec = _quarter_spec(whole_period, number, None, terms)
+            whole, prefix = _dated(whole_period), _dated(prefix_period)
+            comparable = (
+                whole is not None
+                and prefix is not None
+                and whole[0] == prefix[0]
+                and prefix[1] < whole[1]
+            )
+            days = _days(whole_period, prefix_period) if comparable else None
+            specs.append(
+                replace(
+                    spec,
+                    column=replace(spec.column, days=days),
+                    unbuilt=None if comparable else UNSPANNED,
+                )
+            )
     return specs
 
 
@@ -432,9 +445,11 @@ def _host_ltm(
     fiscal: list[_Spec],
     to_date: tuple[_Spec | None, _Spec | None],
 ) -> _Spec:
-    """The LTM to the anchor: the FY ending then, or FY + YTD - PYTD with the
-    prior year's FY; named by CP-1's LTM row ending at the anchor. Unbuilt,
-    noted, where that FY, YTD and PYTD do not meet."""
+    """Build the LTM as the anchor FY or FY + YTD - PYTD.
+
+    A stated LTM row supplies its identity and comparison figure. Its dates
+    must agree with the computed span; its day count never replaces that span.
+    """
     unbuilt = None
     if anchor.period_type == "FY":
         own_fy = next(spec for spec in fiscal if spec.own == anchor.period_id)
@@ -444,11 +459,33 @@ def _host_ltm(
         terms, unbuilt = _rolled(regs, anchor, fiscal, to_date)
         number = _quarter_number(anchor)
     span = anchor.day_count if anchor.period_type == "FY" else _term_days(terms)
-    if span is not None and not LTM_DAYS[0] <= span <= LTM_DAYS[1]:
+    complete = all(isinstance(ref, _Spec) for ref, _ in terms)
+    if span is None and complete:
+        # Only complete, dated components can establish a missing day count.
+        periods: dict[str | None, PeriodRow] = {p.period_id: p for p in regs.periods}
+        dated_days = 0
+        for ref, sign in terms:
+            if isinstance(ref, _Spec):
+                start, end = _start(ref, periods), iso_date(ref.column.end_date)
+                if start is None or end is None or start > end.toordinal():
+                    break
+                dated_days += sign * (end.toordinal() - start + 1)
+        else:
+            span = dated_days
+    invalid_span = (span is None and complete) or (
+        span is not None and not LTM_DAYS[0] <= span <= LTM_DAYS[1]
+    )
+    if invalid_span:
         unbuilt = UNSPANNED  # Deploy VI: a stub year or a mislabelled interim
     stated = next((p for p in _of_type(regs, "LTM") if p.end_date == anchor.end_date), None)
     own = stated.period_id if stated is not None else None
-    days = stated.day_count if stated is not None else None
+    stated_span = _dated(stated)
+    if (
+        stated is not None
+        and span is not None
+        and (stated_span is None or stated_span[1] - stated_span[0] + 1 != span)
+    ):
+        unbuilt = UNSPANNED
     return _Spec(
         column=Column(
             column_id=f"LTM:{own or anchor.period_id}",
@@ -457,7 +494,7 @@ def _host_ltm(
             period_id=own,
             fiscal_year=anchor.fiscal_year,
             end_date=anchor.end_date,
-            days=_term_days(terms) if days is None else days,
+            days=span,
             case=None,
         ),
         own=own,

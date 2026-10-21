@@ -60,9 +60,10 @@ values are retained in the source review but cannot enter calculation.
 
 Kernel `SourceRef` IDs refer to canonical observation IDs. `source_citations`
 resolves them to the original quotations (or explicit issuance evidence), and
-raises on unknown provenance rather than dropping it. The future output adapter
-must bind the review's content hash and retain period/classification/disclosure
-evidence alongside these numeric references. Raw kernel cells are not accepted
+raises on unknown provenance rather than dropping it. Output adapters must bind
+the review's content hash and retain period/classification/disclosure evidence
+alongside these numeric references. The [historical-period artifact](financial-periods.md) now binds source inputs,
+normalizations and period constructions. Raw kernel cells are not accepted
 report artifacts. The raw kernel remains an internal dependency; use the
 validated adapter for model-response data.
 
