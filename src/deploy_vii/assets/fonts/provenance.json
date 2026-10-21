@@ -1,0 +1,40 @@
+[
+  {
+    "file": "RedHatMono-Regular.woff2",
+    "url": "https://raw.githubusercontent.com/RedHatOfficial/RedHatFont/6bb1048a6402b0076ea04f42951ec66263cd1437/fonts/Mono/RedHatMono/webfonts/RedHatMono-Regular.woff2",
+    "sha256": "ece73a116239035f1912428ed5ebe2ff3fc9c7add9d8040600495fa09a8ffabc",
+    "bytes": 26024
+  },
+  {
+    "file": "RedHatDisplay-Regular.woff2",
+    "url": "https://raw.githubusercontent.com/RedHatOfficial/RedHatFont/6bb1048a6402b0076ea04f42951ec66263cd1437/fonts/Proportional/RedHatDisplay/webfonts/RedHatDisplay-Regular.woff2",
+    "sha256": "715ec4f959514f335c3a7632f5258583369e55a5d27f1b2e773a4cb0f2577e30",
+    "bytes": 31828
+  },
+  {
+    "file": "RedHatText-Regular.woff2",
+    "url": "https://raw.githubusercontent.com/RedHatOfficial/RedHatFont/6bb1048a6402b0076ea04f42951ec66263cd1437/fonts/Proportional/RedHatText/webfonts/RedHatText-Regular.woff2",
+    "sha256": "8b6c947032e889935aeef9d3a987fe4760b5bb029af531f2511e5824602a550a",
+    "bytes": 31716
+  },
+  {
+    "file": "RedHatDisplay-Bold.woff2",
+    "url": "https://raw.githubusercontent.com/RedHatOfficial/RedHatFont/6bb1048a6402b0076ea04f42951ec66263cd1437/fonts/Proportional/RedHatDisplay/webfonts/RedHatDisplay-Bold.woff2",
+    "sha256": "a28973642bc0dc1404138a6b32031b5f1bbc131d1b5a92a0214d16cfe8091793",
+    "bytes": 33292
+  },
+  {
+    "file": "RedHatText-Medium.woff2",
+    "url": "https://raw.githubusercontent.com/RedHatOfficial/RedHatFont/6bb1048a6402b0076ea04f42951ec66263cd1437/fonts/Proportional/RedHatText/webfonts/RedHatText-Medium.woff2",
+    "sha256": "abfc3d5ff9e975d487ec295895efdc2e5848f804d0982bee87ce0d8f55c9a3d1",
+    "bytes": 33084
+  },
+  {
+    "file": "OFL.txt",
+    "url": "https://raw.githubusercontent.com/RedHatOfficial/RedHatFont/6bb1048a6402b0076ea04f42951ec66263cd1437/OFL.txt",
+    "sha256": "98eac4800faf2b800dfb11f82e38b779ebe473e05e343c18aeb65eabb74442ae",
+    "bytes": 4393,
+    "upstream_sha256": "4f1417e27511207cd217656c964f1b0d8b0c4a30156a1a699cf16dc5eba0dff6",
+    "adaptation": "Removed one trailing space; license text unchanged."
+  }
+]

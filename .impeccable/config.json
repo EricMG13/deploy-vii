@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/deploy_vii/assets/app.css"
+        ],
+        "createdAt": "2026-10-21T00:48:08.389Z",
+        "reason": "Agent triage: active-page navigation indicator in .module-link[aria-current=page], not a card accent. The user requires preserving Direction C; design/reference/direction-c-workbench.dc.html lines 243 and 291 retain navigation edge indicators."
+      }
+    ]
+  }
+}

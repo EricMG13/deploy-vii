@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Deploy VII · Credit Workbench</title><style>/*STYLES*/</style></head>
+<body><a class="skip" href="#workbench">Skip to analysis</a>
+<div class="app-shell" data-shell="direction-c">
+<nav class="icon-rail" aria-label="Report destinations"><div class="brand-mark">VII</div>
+<button type="button" id="toggle-nav" aria-label="Toggle module navigator" aria-expanded="false">☰</button>
+<a href="#overview" aria-label="Overview" title="Overview">⌂</a>
+<a href="#CP-1" aria-label="Financial model" title="Financial model">▦</a>
+<a href="#FIT" aria-label="Portfolio Fit" title="Portfolio Fit">⇄</a>
+<a href="#evidence" aria-label="Evidence" title="Evidence">▤</a>
+<a href="#limitations" aria-label="Limitations" title="Limitations">△</a>
+</nav>
+<aside class="navigator" id="navigator" aria-label="Module navigator">
+<header><p class="eyebrow">REPORT NAVIGATOR</p><h2 id="nav-issuer"></h2><p id="nav-date" class="muted"></p></header>
+<label for="module-filter">Filter modules</label><input id="module-filter" type="search" placeholder="Name, code or status">
+<div id="module-list" class="module-list"></div></aside>
+<main id="workbench" class="workbench" tabindex="-1">
+<header class="topbar"><span id="breadcrumb">Credit research / Overview</span><span class="toolbar"><button id="inspect-button" type="button">Evidence inspector</button><button id="print" type="button">Print</button></span></header>
+<div id="view-root" class="view-root" aria-live="polite"></div></main>
+<aside class="inspector" id="inspector" aria-label="Evidence inspector"><h2>Evidence inspector</h2><div id="inspector-content"><p class="muted">Select a figure or source to inspect its evidence, period, units and calculation basis.</p></div></aside>
+</div><noscript>This offline report requires JavaScript for navigation.</noscript>
+<script id="report-data" type="application/json">/*DATA*/</script><script>/*SCRIPT*/</script>
+<!-- Font license: /*LICENSE*/ -->
+</body></html>

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "task_id": "synthetic-example",
+  "goal": "Demonstrate an observational development checkpoint",
+  "owner": "replace-with-concrete-session",
+  "constraints": ["Native compaction; no automatic resets"],
+  "corrections": [],
+  "routing": {"host": null, "model": null, "effort": null, "reason": "fill from actual host"},
+  "budgets": [{"unit": "USD", "cap": null, "consumed": null, "reason": "example has no verified budget"}],
+  "paused": false,
+  "pending_operations": [],
+  "reviews": {"confidence-review": "pending", "rewrite-tournament": "pending"},
+  "authorization": "Synthetic example only; replace with actual scope",
+  "publication_owner": "coordinator",
+  "sources": ["CLAUDE.md", "docs/development/CONTEXT.md"],
+  "facts": [],
+  "hypotheses": [],
+  "failed_approaches": [],
+  "next_action": "Inspect original sources and actual host state",
+  "context_treatment": {"kind": "native", "input_verified": false}
+}

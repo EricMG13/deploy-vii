@@ -1,0 +1,12 @@
+{
+  "enabledPlugins": {
+    "firebase@firebase": false,
+    "fallow@fallow-skills": false
+  },
+  "env": {
+    "PONYTAIL_DEFAULT_MODE": "lite"
+  },
+  "permissions": {
+    "deny": ["Read(./.env)"]
+  }
+}

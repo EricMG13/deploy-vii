@@ -1,0 +1,4 @@
+* text=auto eol=lf
+design/reference/*.html -text
+*.png binary
+*.woff2 binary

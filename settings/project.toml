@@ -1,0 +1,96 @@
+schema_version = 1
+phase = "development-tooling-and-product-implementation"
+product_runtime_implemented = false
+execution_journal_implemented = true
+product_shell_implemented = true
+live_model_runner_implemented = false
+
+[development]
+instruction_file = "CLAUDE.md"
+coordinator = "claude-code"
+context_index = "docs/development/CONTEXT.md"
+task_root = "docs/development/tasks"
+publication_owner = "coordinator"
+worker_publication = "local-commits-only"
+confidence_review = "after-code-changes"
+rewrite_tournament = "key-areas-only"
+size_gate = "advisory-full-diff-no-hard-cap"
+python = "3.13.15"
+uv = "0.12.5"
+type_checker = "mypy-strict"
+claude_workers = ".claude/agents"
+
+[development.context]
+scope = "coding-sessions-only"
+strategy = "native-compaction-plus-source-linked-task-state"
+compaction_window_tokens = 500000
+occupancy_display = "context-meter-mod-display-only"
+automatic_resets = false
+lifecycle_controller_implemented = false
+observational_workflow_implemented = true
+workflow_command = "uv run python -m devtools.workflow"
+handoff_template = "docs/development/handoff-template.md"
+evaluation_plan = "docs/development/context-management.md"
+experimental_checkpoint_percent = 60
+checkpoint_action = "assess-at-safe-boundary-only-no-automatic-reset"
+comparison_routing = "fixed-model-provider-effort-per-paired-batch"
+budget_accounting = "total-goal-across-all-continuations-and-reviews"
+observations = "explicit-file-imports-and-sanitized-task-boundary-records"
+evidence_root = "artifacts/context-policy"
+
+[model_tests]
+provider = "openrouter"
+credential_env = "OPENROUTER_API_KEY"
+selection = "uniform-random-among-eligible"
+record_selection_seed = true
+default_effort = "high"
+complex_effort = "xhigh"
+unsupported_xhigh = "use-supported-high-and-record-mapping"
+unavailable_route = "record-ineligible-before-draw"
+retries = "same-model-new-attempt"
+cross_model_comparison = "same-frozen-case-randomized-order"
+artifact_root = "artifacts/model-tests"
+retain_failures = true
+retain_requests_outputs_metrics_events = true
+missing_metrics = "null-with-reason"
+provider_fallback = "observable-and-separately-classified"
+version_policy = "resolve-and-pin-per-comparison-batch"
+
+[[model_tests.candidates]]
+key = "luna"
+model_id = "openai/gpt-6-luna"
+resolution = "explicit-version"
+
+[[model_tests.candidates]]
+key = "glm"
+model_id = "z-ai/glm-5.3-flash"
+resolution = "explicit-version"
+
+[[model_tests.candidates]]
+key = "deepseek"
+model_id = "deepseek/deepseek-v4.1-flash-1017"
+resolution = "refresh-latest-suitable-deepseek-before-batch"
+catalog_checked = "2026-10-20"
+
+[frontend]
+direction = "C-Workbench"
+reference = "design/reference/direction-c-workbench.dc.html"
+incremental_module_rendering = true
+accepted_artifacts_only = true
+candidate_preview_labelled = true
+viewports = ["1440x900", "1280x800"]
+
+[ci]
+required_contexts = ["Repository hygiene", "Product checks", "Secrets"]
+model_calls = false
+private_packs = false
+provider_credentials = false
+dependency_audit = "separate-manual-or-weekly"
+product_gates = "lint-strict-types-unit-integration-browser-coverage"
+
+[runtime_design]
+delivery_target = "github-copilot-cli"
+arithmetic_owner = "python"
+execution = "dependency-aware-sequential-first"
+framework = "none-selected"
+methodology = "preserve-meaning-adapt-boundaries"

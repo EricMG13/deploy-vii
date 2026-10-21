@@ -1,0 +1,171 @@
+{
+  "repository": "/Users/ericguei/Documents/Deploy VI",
+  "commit": "bd71346301b373afa72655916a4c1b42bf4c9823",
+  "records": [
+    {
+      "source": "rbot/scripts/rbotlib/model/_cells.py",
+      "sha256": "21b430c69ba600a8b1a99c28cc27dbc0daf7026e5e6c09bd8d41ad9b63bf1a83",
+      "destination": "src/deploy_vii/model/_cells.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/frame.py",
+      "sha256": "964b5042068a16b3d47356a956523439657a31b93a3ccc684ea908531dce3f49",
+      "destination": "src/deploy_vii/model/frame.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/registers.py",
+      "sha256": "aceacfd6589ac70efa16b984dd22f4b46f2e8ce0f92ace5db2b947e3690de595",
+      "destination": "src/deploy_vii/model/registers.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/periods.py",
+      "sha256": "7c156849a40e714cb690ce3a7f1b7595bde85b7333e9f46584390195f843768d",
+      "destination": "src/deploy_vii/model/periods.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/history.py",
+      "sha256": "0f398c0a4585724267614c30bc479e2afd201ff9596a3de1fc1fa2564d2afbd3",
+      "destination": "src/deploy_vii/model/history.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/debt.py",
+      "sha256": "97098e1bf35c17018af79cd26f5e2693b179627bea9216bbf51d98f38c6ab1f1",
+      "destination": "src/deploy_vii/model/debt.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/statements.py",
+      "sha256": "d05dac2a2afab0712a9c0070c22b702fe25ee3d23ff10f3c0e23427b0a2ed41a",
+      "destination": "src/deploy_vii/model/statements.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/metrics.py",
+      "sha256": "c6930078c8eca901ac8e2507c5c6b43f80e7793176ba8993607cc77863bde9fd",
+      "destination": "src/deploy_vii/model/metrics.py"
+    },
+    {
+      "source": "rbot/scripts/rbotlib/model/reader.py",
+      "sha256": "bc7f33dbf84458152fa01dd0947a88b0f1c25ed1f018302b281531b860b3333a",
+      "destination": "src/deploy_vii/model/dates.py",
+      "symbols": [
+        "_end_year",
+        "fiscal_year_number",
+        "iso_date",
+        "_FOUR_DIGITS",
+        "_TWO_YEARS",
+        "_ISO_DATE"
+      ]
+    },
+    {
+      "source": "tests/model/test_credit_model_cells.py",
+      "sha256": "3442ef35044a922874725394e5b7261a9b8419a0d7516222835d699bc6f2a85e",
+      "destination": "tests/product/model/test_credit_model_cells.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_debt.py",
+      "sha256": "442099e523f054a6d218457d5b138e15f8bc5c9d45a06f8e6a9baf712a02a77e",
+      "destination": "tests/product/model/test_credit_model_debt.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_debt_flows.py",
+      "sha256": "577b10c9b3e255035ba622600124ff22f4588e6ef66e95601d4be9a8b5588d0a",
+      "destination": "tests/product/model/test_credit_model_debt_flows.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_history.py",
+      "sha256": "f74413eb041b02e7a11806f2c49837ad32d4435a7d96dbc1350e8b5ba7c15ea5",
+      "destination": "tests/product/model/test_credit_model_history.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_history_dates.py",
+      "sha256": "8c208b928cdeee25a063ebc40a574f5a0021c5ed4b80cc4d76dccbc23e2226a4",
+      "destination": "tests/product/model/test_credit_model_history_dates.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_history_flows.py",
+      "sha256": "ea1b22b3646bb9e012e9deca0da59b8ab417de77285909f4b97677c665c69adc",
+      "destination": "tests/product/model/test_credit_model_history_flows.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_history_interims.py",
+      "sha256": "968a07f26824e2c10e7b69150aa0a6af9ee9873a33652d9cbb99fb4f4119b39a",
+      "destination": "tests/product/model/test_credit_model_history_interims.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_history_registers.py",
+      "sha256": "f4407989229647261ef9f82efce10f8b0e43aac7c397f73adeaacc8ae0ced3fa",
+      "destination": "tests/product/model/test_credit_model_history_registers.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_history_sparse.py",
+      "sha256": "7a37f1b3f543fc93c319e506c4742d9df702d82d2673a4eb3ed66c62e3b9c799",
+      "destination": "tests/product/model/test_credit_model_history_sparse.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_metrics.py",
+      "sha256": "7b71a456b061da809670ed143dafe58f747a08b8848c7b555aaa50026e0fc930",
+      "destination": "tests/product/model/test_credit_model_metrics.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_metrics_growth.py",
+      "sha256": "3a5137f08dbc63f99a63ede64b4c70b9999d01f9d1cb2614f44f1609a73b8e45",
+      "destination": "tests/product/model/test_credit_model_metrics_growth.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_periods.py",
+      "sha256": "bf65254b6d5745cb645b328a046e4fccbbb881942ac81294259eda4b263d7453",
+      "destination": "tests/product/model/test_credit_model_periods.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_statements.py",
+      "sha256": "f0376550f3f3790d7feb2b913a80ca9d408d6d357e087e626ab186aa1dd1da4b",
+      "destination": "tests/product/model/test_credit_model_statements.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_statements_cases.py",
+      "sha256": "50f76e13676caf764ef1cdb55b5eb81e2ff839c06e912fdf7c53e348d9d91778",
+      "destination": "tests/product/model/test_credit_model_statements_cases.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_statements_nature.py",
+      "sha256": "ec83868382c27e70a9e29fc40b95b2c16b37a09daa40616670a740908b5eb09e",
+      "destination": "tests/product/model/test_credit_model_statements_nature.py"
+    },
+    {
+      "source": "tests/model/test_credit_model_statements_pro_forma.py",
+      "sha256": "2442aca7924b6940c0918f78698f79044a2814c320bc2e3feff6b7a666684dd5",
+      "destination": "tests/product/model/test_credit_model_statements_pro_forma.py"
+    },
+    {
+      "source": "tests/model/credit_model_fixture.py",
+      "sha256": "c7a23701281e5d5e28b0d661f9ca1c0f3ac317784b7e519d563b8d8b9e94c640",
+      "destination": "tests/product/model/credit_model_fixture.py"
+    },
+    {
+      "source": "tests/model/history_cases.py",
+      "sha256": "a2466e7548ee50aaeab64da4f2b41a4f2a4562d085a359f03f7ea3c78073f588",
+      "destination": "tests/product/model/history_cases.py"
+    },
+    {
+      "source": "tests/model/history_frames.py",
+      "sha256": "600a30e1dd7aec313c87e8a1368195483df77430777f89cfaddcfe2c0ca38d4e",
+      "destination": "tests/product/model/history_frames.py"
+    },
+    {
+      "source": "tests/model/debt_cases.py",
+      "sha256": "6a354dc611d585d2f18988c26249d8c0651d6df0bc7a64517c2152d4c479f2b6",
+      "destination": "tests/product/model/debt_cases.py"
+    },
+    {
+      "source": "tests/model/metrics_cases.py",
+      "sha256": "98a7c5df2ec32f727c6946de6c6d878a3c974269de945054c21a487f2c642b46",
+      "destination": "tests/product/model/metrics_cases.py"
+    },
+    {
+      "source": "tests/model/statements_cases.py",
+      "sha256": "5e76f72a6a0b4530f7c757bdabc6d2358e9a9d02ef3b7e8327cecd56c6a2ccb5",
+      "destination": "tests/product/model/statements_cases.py"
+    }
+  ],
+  "fixture_kind": "synthetic; Example Gaming Co is not Caesars",
+  "scope": "pure internal kernel; no old host/parser/state or qualification claims"
+}

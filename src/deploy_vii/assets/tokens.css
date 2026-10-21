@@ -1,0 +1,56 @@
+@font-face {
+  font-family:"Red Hat Text";
+  src:local("Red Hat Text");
+  font-weight:400 700;
+}
+@font-face {
+  font-family:"Red Hat Display";
+  src:local("Red Hat Display");
+  font-weight:500 700;
+}
+@font-face {
+  font-family:"Red Hat Mono";
+  src:local("Red Hat Mono");
+  font-weight:400 600;
+}
+:root {
+  --navy:#000533;
+  --blue:#0017E5;
+  --ground:#EEF0F5;
+  --white:#fff;
+  --ink:#000533;
+  --muted:#4A5068;
+  --rule:#DDE1EA;
+  --soft-rule:#EEF0F5;
+  --positive:#0E7A46;
+  --positive-bg:#DCF5E7;
+  --caution:#8A5300;
+  --caution-bg:#FFF1C7;
+  --negative:#B3261E;
+  --negative-bg:#FBE0DD;
+  --neutral:#4A5068;
+  --chart-blue:#0017E5;
+  --chart-orange:#C4410C;
+  --chart-teal:#007F87;
+  --chart-purple:#7654B8;
+  --signal-positive:#7EE2A8;
+  --signal-caution:#FFD166;
+  --signal-negative:#FFB4B0;
+  --font-body:"Red Hat Text",Arial,sans-serif;
+  --font-display:"Red Hat Display","Red Hat Text",Arial,sans-serif;
+  --font-mono:"Red Hat Mono",ui-monospace,monospace;
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:24px;
+  --space-6:32px;
+  --space-7:40px;
+  --radius:2px;
+  --rail:56px;
+  --navigator:236px;
+  --inspector:300px;
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  --motion-fast:140ms;
+  --motion-base:220ms;
+}
