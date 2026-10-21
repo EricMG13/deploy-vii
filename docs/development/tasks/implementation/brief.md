@@ -100,12 +100,12 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-480 product tests pass (97.34% combined coverage); CP-0 synthetic output is
+504 product tests pass (97.33% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
 financial-input-review.md and ../../financial-inputs.md. Output reconciliation,
-Model readiness, artifact binding and CP-1A remain pending. Independent
+full consumer readiness, artifact binding and CP-1A remain pending. Independent
 source-register comparisons now exist; see reconciliation-review.md and
 ../../financial-reconciliation.md. Full source statements and independent equations
 now exist; see statement-review.md and ../../statements.md. CFO can reconcile from original source components; no
@@ -134,6 +134,13 @@ comparison/traversal functions received a scoped Sol/high tournament; the static
 winner failed typing and the verified incumbent was retained. Remaining readiness
 and delivery work is not promoted by these synthetic checks.
 
+Historical CP-MODEL readiness now binds explicit quarter scope, complete input
+coverage and mandatory source/period reconciliations into one recomputable row.
+A reproduced short-year false-ready case and a fiscal-sequence gap were fixed.
+See model-readiness-review.md and ../../model-readiness.md. Only `_evaluate`
+received the scoped Sol/high tournament; verified Snippet A won. This does not
+qualify forecasts, pro forma, other consumers or a delivered Module.
+
 Pending user clarification: the pinned references name DCF without a formula.
 The question offered explicitly source-defined only, FCF less dividends, or FCF
 less dividends and buybacks. No answer has arrived; no default is adopted.
@@ -142,7 +149,7 @@ Continue independent work while that definition remains unresolved.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
 live qualification remain pending. Next: complete
 the remaining canonical CP-1 KPIs,
-source-backed cash/FY explanations and Model readiness.
+source-backed cash/FY explanations and full consumer readiness.
 Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.
 
