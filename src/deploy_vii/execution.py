@@ -172,6 +172,23 @@ def invalidate(heads: tuple[Module, ...], changed: str) -> tuple[Module, ...]:
     )
 
 
+def blocked_ancestors(snapshot: ExecutionSnapshot, inputs: tuple[Input, ...]) -> frozenset[str]:
+    """Blocked modules in the bound input chain, read from structured input statuses.
+
+    Never derived from limitation text, so plain wording cannot spoof or hide the marker.
+    """
+    heads = {item.module_id: item for item in snapshot.heads}
+    found: set[str] = set()
+    pending = list(inputs)
+    while pending:
+        item = pending.pop()
+        if item.status == "blocked":
+            found.add(item.input_id)
+        elif item.input_id in heads:
+            pending.extend(heads[item.input_id].inputs)
+    return frozenset(found)
+
+
 def inherited_limitations(
     snapshot: ExecutionSnapshot, attempt: Attempt, own: tuple[str, ...]
 ) -> tuple[str, ...]:
@@ -228,9 +245,9 @@ def settle(
         )
         own = tuple(dict.fromkeys((*candidate.limitations, *synthetic)))
         inherited = inherited_limitations(snapshot, attempt, own)
-        # Own findings or a blocked input (a material inherited gap) restrict the module;
-        # limitations inherited from accepted or restricted inputs are shown, not penalised.
-        material = any(item.status == "blocked" for item in attempt.inputs)
+        # Own findings or a blocked module anywhere up the input chain (a material inherited
+        # gap) restrict the module; other inherited limitations are shown, not penalised.
+        material = bool(blocked_ancestors(snapshot, attempt.inputs))
         result = candidate.model_copy(
             update={
                 "status": "restricted" if own or material else "accepted",

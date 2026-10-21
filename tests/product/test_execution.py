@@ -579,3 +579,52 @@ def test_blocked_input_restricts_a_clean_module_even_when_not_synthetic(tmp_path
     assert cp2.limitations == ()
     assert cp2.status == "restricted"
     assert any("Upstream CP-1A blocked" in text for text in cp2.inherited_limitations)
+
+
+def public_store_after_cp0(tmp_path: Path) -> Execution:
+    """Test fixture, not qualification: public-case run with CP-0 settled."""
+    pack, review = public_readiness_fixture()
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-0")
+    candidate = build_readiness(store.read().pack, review)
+    store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+    return store
+
+
+def settle_clean(store: Execution, module_id: str, *limitations: str) -> Module:
+    run = store.read().pack.run
+    candidate = Module(
+        run_id=run.run_id,
+        issuer_id=run.issuer_id,
+        as_of=run.as_of,
+        module_id=module_id,
+        inputs=current_inputs(store.read(), module_id),
+        limitations=limitations,
+    )
+    return settle_module(store, module_id, candidate)
+
+
+def test_blocked_ancestor_restricts_transitive_consumers(tmp_path: Path) -> None:
+    """Coordinator ruling on decision 0007 item 4: a blocked module anywhere up the chain."""
+    store = public_store_after_cp0(tmp_path)
+    for module_id in ("CP-1", "CP-1A", "CP-2"):
+        assert settle_clean(store, module_id).status == "accepted"
+    block_module(store, "CP-4")
+    cp3 = settle_clean(store, "CP-3")
+    cp5 = settle_clean(store, "CP-5")
+    cp6 = settle_clean(store, "CP-6")
+    assert bound(cp3, "CP-4").status == "blocked"
+    assert bound(cp6, "CP-5").status == "restricted"
+    assert not [item for item in cp6.inputs if item.status == "blocked"]  # indirect only
+    assert (cp3.status, cp5.status, cp6.status) == ("restricted", "restricted", "restricted")
+    assert cp6.limitations == ()
+    assert any("Upstream CP-4 blocked" in text for text in cp6.inherited_limitations)
+
+
+def test_blocked_ancestor_marker_cannot_be_spoofed_by_limitation_text(tmp_path: Path) -> None:
+    store = public_store_after_cp0(tmp_path)
+    assert settle_clean(store, "CP-1", "Upstream CP-4 blocked: plain text").status == "restricted"
+    assert settle_clean(store, "CP-1A").status == "accepted"
+    cp2 = settle_clean(store, "CP-2")
+    assert cp2.status == "accepted"
+    assert "Upstream CP-4 blocked: plain text" in cp2.inherited_limitations

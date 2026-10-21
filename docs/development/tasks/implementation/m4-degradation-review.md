@@ -13,7 +13,9 @@ MC-3, MC-4). Decision: [0007](../../../decisions/0007-degradation-and-status-sem
 - `execution.py`: `current_inputs` binds a settled blocked head under a restricted edge;
   `candidate_issues` binds hash and status exactly; `settle` separates own from inherited
   limitations (transitively displayed, never repeating own findings) and restricts only
-  for own findings, a blocked input or a synthetic run; `view` shows own then inherited.
+  for own findings, a blocked module anywhere up the input chain (`blocked_ancestors`,
+  from structured input statuses, never limitation text; fix round 1) or a synthetic
+  run; `view` shows own then inherited.
 - `cp1_quality.py`: `module_status` derives from the narrative's own findings.
 
 ## Evidence
@@ -22,10 +24,9 @@ MC-3, MC-4). Decision: [0007](../../../decisions/0007-degradation-and-status-sem
   "Upstream CP-4 blocked" (`test_blocked_optional_producer_does_not_halt_core_report`).
 - W1 probe: on a public-case test fixture (not qualification) CP-1 with no own findings
   settles `accepted` beside CP-0's note (`test_pass_reachable_with_immaterial_inherited_gap`).
-- Mutant check: forcing "no material blocked input" fails
-  `test_blocked_input_restricts_a_clean_module_even_when_not_synthetic`.
-- `make product-check` exit 0 (all product tests pass, coverage above the floor);
-  `make check` exit 0.
+- Transitive: `test_blocked_ancestor_restricts_transitive_consumers` (CP-4 blocked, CP-6
+  restricted) and a spoof test; forcing "not material" fails a non-synthetic test.
+- `make product-check` and `make check` exit 0.
 
 ## Reviews
 
@@ -34,6 +35,5 @@ confidence-review run inline, no confirmed defect. rewrite-tournament run inline
 
 ## Not verified
 
-r14 shared files and LITE_CREDIT_22 behaviour; runtime behaviour on a real pack; a
-material blocked gap two hops upstream (a restricted-because-blocked input) is displayed
-but does not itself restrict a module with no own findings, as decision 0007 item 4 states.
+r14 shared files and LITE_CREDIT_22 behaviour; runtime behaviour on a real pack;
+a blocked ancestor head replaced outside the journal (the journal stales consumers).

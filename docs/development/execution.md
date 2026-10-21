@@ -40,8 +40,9 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   unrun, stale or rejected producer blocks every consumer. A module's own findings are
   `limitations`; those carried from inputs are `inherited_limitations`, shown by
   `view()` after the own findings. The settled status is `restricted` for own
-  limitations, a blocked input or a synthetic run, otherwise `accepted`, so Pass stays
-  reachable downstream of an immaterial inherited note. A candidate must bind each
+  limitations, a blocked module anywhere up the bound input chain (found from the heads'
+  structured input statuses, not limitation text) or a synthetic run, otherwise
+  `accepted`, so Pass stays reachable downstream of an immaterial inherited note. A candidate must bind each
   input's hash and status exactly. CP-1 QA derives `module_status` from own findings.
 - `view()` returns a cumulative accepted View. Stale and blocked heads expose
   status/limitations but no findings. `view(ticket_id)` returns a labelled
