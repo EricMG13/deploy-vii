@@ -52,9 +52,10 @@ periods also remain mandatory, so errors cannot disappear through subtraction.
 Any mandatory BLOCK prevents readiness. Shared-source construction-only agreement
 is still WARN, not independent proof. Every unresolved observation conflict in the
 book blocks conservatively, including conflicts outside a selected window;
-consumer-specific conflict materiality and explicit source-backed audit/FX
-exceptions remain later work. No automatic exception or conflict resolution is
-introduced here.
+consumer-specific conflict materiality and source-backed cash/FX treatment remain
+later work. A located, exact-scope [annual audit explanation](audit-basis.md) now
+permits its eligible annual comparison to remain WARN. No other failure is waived,
+and no automatic exception or conflict resolution is introduced.
 
 Missing rate, amortisation or maturity terms warn because historical carrying
 values do not establish forecast inputs. The report never grants forecast

@@ -1,7 +1,7 @@
 # CP-1 source-register reconciliation
 
 `reconcile_financials(pack, review, book_id)` now produces the immutable
-`financial-reconciliation/1` internal artifact. It binds the prepared pack and
+`financial-reconciliation/2` internal artifact. It binds the prepared pack and
 financial review hashes, run, issuer, as-of date, book, currency, scale,
 accounting basis and entity perimeter. It is not a Module acceptance or Model
 readiness decision. No CLI, journal or renderer consumes it yet.
@@ -58,9 +58,12 @@ normalization registers and other consumer readiness remain separate work.
 Statement coverage now has its own
 hash-bound projection; it does not establish analytical or Module acceptance.
 Missing direct schedule rows remain blocked even where the kernel might derive
-a value. The output does not yet grant an audited/unaudited FY exception, infer
-pre-issuance zero balances, or absorb FX differences. Those cases require explicit
-source-backed treatment; unexplained differences are never forced to zero.
+a value. An explicit, sourced [annual audit explanation](audit-basis.md) can now
+make its exact audited-FY versus unaudited-quarter comparison WARN, retaining the
+actual difference. No automatic exception is inferred. Source-register comparisons
+still do not infer pre-issuance zero balances or absorb FX differences; those cases
+require explicit source-backed treatment. Unexplained differences are never forced
+to zero.
 
 There is no live model qualification or new completed-module rendering claim.
 All current evidence is explicitly synthetic. This artifact advances milestone

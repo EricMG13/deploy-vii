@@ -35,6 +35,7 @@ CP-1 arithmetic checks: [source-register reconciliation](financial-reconciliatio
 and [constructed-period reconciliation](period-reconciliation.md).
 CP-MODEL input gate: [selected historical readiness](model-readiness.md).
 CP-1 KPI register: [canonical debt, income selection and ratio operands](canonical-kpis.md).
+Annual audit differences: [sourced explanations and scope](audit-basis.md).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
 Reuse selected Deploy VI behavior only after validating dependencies and regression

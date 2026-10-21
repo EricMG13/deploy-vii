@@ -291,6 +291,19 @@ class StatementDisclosure(Contract):
     disclosure: Disclosure
 
 
+class AuditBasisExplanation(Contract):
+    """Located explanation for one audited FY versus four unaudited quarters."""
+
+    explanation_id: Identifier
+    annual_period_id: Identifier
+    metric_id: Identifier
+    quarter_period_ids: Annotated[tuple[Identifier, ...], Field(min_length=4, max_length=4)]
+    annual_observation_sha256: Hash
+    quarter_observation_sha256: Annotated[tuple[Hash, ...], Field(min_length=4, max_length=4)]
+    explanation: Text
+    citations: Located
+
+
 class FinancialBook(Contract):
     book_id: Identifier
     entity_perimeter: Text
@@ -307,6 +320,9 @@ class FinancialBook(Contract):
     statement_lines: Annotated[tuple[StatementLine, ...], Field(max_length=20000)] = ()
     statement_identities: Annotated[tuple[StatementIdentity, ...], Field(max_length=20000)] = ()
     statement_disclosures: tuple[StatementDisclosure, ...] = ()
+    audit_basis_explanations: Annotated[
+        tuple[AuditBasisExplanation, ...], Field(max_length=20000)
+    ] = ()
     segment_allocation: tuple[SegmentAllocation, ...]
     addback_disclosure: Disclosure
     segment_disclosure: Disclosure
@@ -314,7 +330,7 @@ class FinancialBook(Contract):
 
 
 class FinancialReview(Contract):
-    schema_version: Literal["financial-review/1"] = "financial-review/1"
+    schema_version: Literal["financial-review/2"] = "financial-review/2"
     pack_sha256: Hash
     run_id: Identifier
     issuer_id: Identifier

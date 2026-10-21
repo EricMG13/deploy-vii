@@ -1,6 +1,6 @@
 # CP-1 financial input boundary
 
-The `financial-review/1` contract now preserves source observations in canonical
+The `financial-review/2` contract now preserves source observations in canonical
 register sets and converts validated sets to the internal deterministic Model.
 This is an internal API, not a completed CP-1 Module or a financial acceptance
 decision. The CLI, execution journal and report adapter are not yet connected.
@@ -72,6 +72,11 @@ independent comparisons where source components are available. The
 [statement layer](statements.md) retains all required statement items, source
 amounts and sign normalizations, and supplies independent CFO components. These
 internal artifacts do not provide final readiness or report acceptance.
+
+[Annual audit explanations](audit-basis.md) bind explicit audited-FY versus
+unaudited-quarter differences to located evidence and the compared observation
+hashes. Only the exact eligible annual check may become WARN; other failures stay
+visible. Explicit version-1 inputs must be rebuilt and dependent outputs regenerated.
 
 ## Remaining milestone C work
 

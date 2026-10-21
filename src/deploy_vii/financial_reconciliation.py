@@ -13,8 +13,10 @@ from typing import Literal, Self
 
 from pydantic import model_validator
 
+from deploy_vii.audit_basis import annual_warning
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
 from deploy_vii.financial_contracts import (
+    AuditBasisExplanation,
     FinancialBook,
     FinancialPeriod,
     FinancialReview,
@@ -74,10 +76,11 @@ class Reconciliation(Contract):
     formula: Text
     explanation: Text
     context_citations: tuple[Citation, ...]
+    audit_basis_explanation: AuditBasisExplanation | None = None
 
 
 class ReconciliationReport(Contract):
-    schema_version: Literal["financial-reconciliation/1"] = "financial-reconciliation/1"
+    schema_version: Literal["financial-reconciliation/2"] = "financial-reconciliation/2"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -438,8 +441,9 @@ def _year(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation,
         a.end_date and b.start_date and a.end_date + timedelta(days=1) == b.start_date
         for a, b in pairwise(quarters)
     )
-    return tuple(
-        _check(
+    checks: list[Reconciliation] = []
+    for metric in sorted(FLOW_METRICS):
+        check = _check(
             period,
             "FY_QUARTERS",
             metric,
@@ -451,8 +455,28 @@ def _year(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation,
             else "Four dated discrete quarters do not span the reported FY",
             context=tuple(c for q in quarters for c in q.citations),
         )
-        for metric in sorted(FLOW_METRICS)
-    )
+        explanation = annual_warning(
+            book,
+            period.period_id,
+            metric,
+            tuple(q.period_id for q in quarters),
+            check.difference,
+            check.tolerance,
+        )
+        if explanation is not None:
+            check = check.model_copy(
+                update={
+                    "status": "WARN",
+                    "explanation": "Audited FY / unaudited quarter basis difference: "
+                    + explanation.explanation,
+                    "audit_basis_explanation": explanation,
+                    "context_citations": tuple(
+                        dict.fromkeys((*check.context_citations, *explanation.citations))
+                    ),
+                }
+            )
+        checks.append(check)
+    return tuple(checks)
 
 
 def reconcile_financials(
@@ -498,8 +522,8 @@ def reconcile_financials(
             "coverage remain separate",
             "CFO identity requires a complete source statement "
             "and an independent component identity",
-            "Unexplained FY and cash differences remain BLOCK; "
-            "no automatic audited/unaudited or FX exception",
+            "Only exact-scope sourced audited-FY explanations permit annual WARN; "
+            "unexplained differences, missing inputs and cash/FX differences remain BLOCK",
             *book.limitations,
         ),
     )

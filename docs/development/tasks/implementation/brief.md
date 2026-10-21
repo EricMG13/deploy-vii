@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-518 product tests pass (97.37% combined coverage); CP-0 synthetic output is
+536 product tests pass (97.42% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -156,9 +156,19 @@ The additional FFO coverage question offered (FFO + cash interest paid) / cash
 interest paid, FFO / cash interest paid, or source-defined only. No answer has
 arrived and no option is adopted. These definitions do not block independent work.
 
+Sourced annual audit-basis differences now have an explicit representation bound
+to one metric, audited FY, four independent unaudited quarters and the compared
+observation hashes. Both reconciliation APIs retain numeric differences while
+permitting eligible WARNs; unrelated/missing/conflicting/stale evidence cannot be
+waived. Input and affected reconciliation schemas advance to /2. See
+audit-basis-review.md and ../../audit-basis.md. The Sol/high tournament is limited
+to the two financial eligibility functions; report assembly receives confidence
+review and focused tests. Historical readiness consumes the warning without
+relaxing its other conditions. This remains deterministic synthetic evidence.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: complete source-backed cash/FY
-explanations, remaining canonical registers and full consumer readiness.
+live qualification remain pending. Next: complete source-backed cash/FX
+treatment, remaining canonical registers and full consumer readiness.
 Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.
 

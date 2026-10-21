@@ -9,8 +9,9 @@ from decimal import Decimal, localcontext
 from itertools import pairwise
 from typing import Literal
 
+from deploy_vii.audit_basis import annual_warning
 from deploy_vii.contracts import Citation, Contract, Identifier, Text
-from deploy_vii.financial_contracts import FinancialBook, FinancialReview
+from deploy_vii.financial_contracts import AuditBasisExplanation, FinancialBook, FinancialReview
 from deploy_vii.financial_periods import (
     HistoricalReport,
     HistoricalValue,
@@ -57,10 +58,11 @@ class PeriodCheck(Contract):
     formula: Text
     explanation: Text
     context_citations: tuple[Citation, ...]
+    audit_basis_explanation: AuditBasisExplanation | None = None
 
 
 class PeriodReconciliationReport(Contract):
-    schema_version: Literal["period-reconciliation/1"] = "period-reconciliation/1"
+    schema_version: Literal["period-reconciliation/2"] = "period-reconciliation/2"
     historical: HistoricalReport
     checks: tuple[PeriodCheck, ...]
     limitations: tuple[Text, ...]
@@ -362,20 +364,39 @@ def _years(
             for a, b in pairwise(quarters)
         )
         for metric in sorted(FLOW_METRICS):
-            checks.append(
-                _compare(
-                    node,
-                    "FY_QUARTERS",
-                    metric,
-                    _source(_account(book, node.own_period_id, metric)),
-                    tuple(
-                        _cell(rows.get((q.construction_id, "acct:" + metric)), q.column_key)
-                        for q in quarters
-                    ),
-                    "reported FY compared with four discrete constructed quarters",
-                    blocker=None if complete else "Four dated quarters do not span the reported FY",
-                )
+            check = _compare(
+                node,
+                "FY_QUARTERS",
+                metric,
+                _source(_account(book, node.own_period_id, metric)),
+                tuple(
+                    _cell(rows.get((q.construction_id, "acct:" + metric)), q.column_key)
+                    for q in quarters
+                ),
+                "reported FY compared with four discrete constructed quarters",
+                blocker=None if complete else "Four dated quarters do not span the reported FY",
             )
+            explanation = annual_warning(
+                book,
+                node.own_period_id,
+                metric,
+                tuple(q.own_period_id if not q.terms else None for q in quarters),
+                check.difference if check.independent else None,
+                check.tolerance,
+            )
+            if explanation is not None:
+                check = check.model_copy(
+                    update={
+                        "status": "WARN",
+                        "explanation": "Audited FY / unaudited quarter basis difference: "
+                        + explanation.explanation,
+                        "audit_basis_explanation": explanation,
+                        "context_citations": tuple(
+                            dict.fromkeys((*check.context_citations, *explanation.citations))
+                        ),
+                    }
+                )
+            checks.append(check)
     return tuple(checks)
 
 
@@ -418,7 +439,8 @@ def reconcile_periods(
             "Historical account/source-equation comparisons only; "
             "no Model readiness or analytical acceptance",
             "Shared observations imply construction agreement, never independent verification",
-            "No inferred FX, audited/unaudited exception or residual-defined proof",
+            "Only exact-scope sourced audited-FY explanations permit annual WARN; "
+            "no inferred FX or residual-defined proof",
             "Mixed expense presentations require an explicitly comparable source bridge",
         ),
     )

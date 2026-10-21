@@ -1,6 +1,6 @@
 # Reconciliation across historical constructions
 
-`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/1`.
+`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/2`.
 It embeds the complete hash-bound historical report, including source and review
 identity, currency/scale, original observations, period constructions and input
 values. This adds comparisons over constructed quarters and LTM periods to the
@@ -47,10 +47,13 @@ and compares its complete hash. Schema validity alone cannot authenticate a resu
 No raw model-authored amount, PASS label or independent flag is trusted.
 
 The API inherits the Model adapter's complete add-back disclosure requirement.
-Partial reviews remain retainable as source artifacts. Remaining work includes
-source-backed treatment of audited/unaudited and cash/FX differences, explicit
-comparability where presentation changes, the final four-quarter readiness gate,
-complete canonical KPIs, CP-1A and execution/Workbench integration. No new module
+Partial reviews remain retainable as source artifacts. Exact-scope, sourced
+[annual audit explanations](audit-basis.md) now permit eligible annual WARNs;
+the [historical readiness gate](model-readiness.md) and
+[canonical KPI register](canonical-kpis.md) are separate implemented layers.
+Remaining work includes source-backed cash/FX treatment, explicit comparability
+where presentation changes, pending KPI definitions, CP-1A and execution/Workbench
+integration. No new module
 analytical, rendering or native-host acceptance is claimed. Current evidence is
 synthetic; live-model spend remains zero.
 
