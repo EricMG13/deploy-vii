@@ -42,6 +42,7 @@ CP-1 source audit: [normalizations, definition conflicts and gap ledger](canonic
 CP-1 source context: [evidence tiers, entity scopes and event binding](source-context.md).
 CP-1 cumulative gaps: [source, period and KPI coverage](canonical-gaps.md).
 CP-1 narrative: [prior evidence, analytical chains and story coverage](narrative.md).
+CP-1 readiness: [consumer sufficiency and historical Model gate](downstream-readiness.md).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
 Reuse selected Deploy VI behavior only after validating dependencies and regression

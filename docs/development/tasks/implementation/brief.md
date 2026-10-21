@@ -100,12 +100,12 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-696 product tests pass (97.29% combined coverage); CP-0 synthetic output is
+724 product tests pass (97.37% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
-financial-input-review.md and ../../financial-inputs.md. Output reconciliation,
-full consumer readiness, artifact binding and CP-1A remain pending. Independent
+financial-input-review.md and ../../financial-inputs.md. Full Module delivery, artifact binding and CP-1A remain pending; the later
+increments below add independent reconciliation and consumer input readiness. Independent
 source-register comparisons now exist; see reconciliation-review.md and
 ../../financial-reconciliation.md. Full source statements and independent equations
 now exist; see statement-review.md and ../../statements.md. CFO can reconcile from original source components; no
@@ -227,12 +227,21 @@ only catalogue construction and narrative validation. Semantic qualification,
 canonical Markdown and Workbench delivery remain pending; this is internal
 protocol implementation, not a completed Module or analytical acceptance.
 
+CP-1 downstream readiness now preserves each requested logical consumer and
+its Step 12 dependencies, scopes every inherited gap, and derives statuses from
+explicit evidence-bound assessments. The CP-MODEL row is always present and
+retains its separate historical input/reconciliation gate. Source-integrity
+blocks cannot be excluded. Confidence review fixed null-only limited support,
+false complete-dashboard sufficiency and nested-book access before validation.
+See downstream-readiness-review.md and ../../downstream-readiness.md. Only review
+validation and status derivation receive the Sol/high tournament. Analytical
+sufficiency judgments, delivery and qualification remain separate and unrun.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: add full consumer readiness,
-then bind CP-1/Model
-outputs to the execution journal and Workbench. Remaining cross-statement checks, foreign-currency debt treatment
-and CP-1A remain explicit
-requirements; current selected historical readiness is not full CP-1 acceptance.
+live qualification remain pending. Next: complete remaining cross-statement and
+foreign-currency debt requirements, then bind CP-1/Model outputs to the execution
+journal, canonical Markdown and Workbench. CP-1A remains an explicit requirement;
+current internal readiness decisions are not full CP-1 acceptance.
 Tournaments remain key-area only; confidence review applies to all code changes.
 
 Execution review: execution-review.md. Native/live qualification remains unrun.
