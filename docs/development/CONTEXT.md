@@ -26,6 +26,7 @@ current chat. Re-read actual Git/process state on resume. Keep source code in no
 raw test artifacts outside these briefs. Do not create a parallel stage hierarchy.
 
 Execution substrate: [internal API](execution.md).
+Model kernel: [selected reuse and integration requirements](model-reuse.md).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
 Reuse selected Deploy VI behavior only after validating dependencies and regression
