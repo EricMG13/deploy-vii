@@ -77,8 +77,10 @@ as a source artifact but cannot enter this Model conversion. Full CP-1 delivery
 must show those input gaps separately.
 
 [Historical Model output](model-output.md) now retains statement values and
-explicit ratio numerators/denominators. Full canonical KPI and statement-formula
-coverage, independent reconciliation of derived periods, final four-quarter
+explicit ratio numerators/denominators and computation graphs.
+[Constructed-period reconciliation](period-reconciliation.md) now compares their
+underlying accounts and source equations, with circular agreement identified.
+Full canonical KPI coverage, source-backed difference treatment, final four-quarter
 readiness, CP-1A and execution/HTML binding remain pending. Synthetic tests verify deterministic
 behavior; public-case analytical qualification and native-host delivery remain
 unrun. No completed-module browser acceptance is claimed for this internal API.

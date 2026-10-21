@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-457 product tests pass (97.24% combined coverage); CP-0 synthetic output is
+480 product tests pass (97.34% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -126,6 +126,14 @@ are added. See computation-review.md. Only `trace_cells` received this increment
 scoped tournament (Sol/high review roles); the incumbent held. Confidence review
 covered all changes.
 
+Constructed-period reconciliation now compares historical account inputs and
+independent source CFO equations, retains separately stated LTM/FY comparisons,
+and labels shared-source FY agreement as construction-only WARN. See
+period-reconciliation-review.md and ../../period-reconciliation.md. The two key
+comparison/traversal functions received a scoped Sol/high tournament; the static
+winner failed typing and the verified incumbent was retained. Remaining readiness
+and delivery work is not promoted by these synthetic checks.
+
 Pending user clarification: the pinned references name DCF without a formula.
 The question offered explicitly source-defined only, FCF less dividends, or FCF
 less dividends and buybacks. No answer has arrived; no default is adopted.
@@ -134,7 +142,7 @@ Continue independent work while that definition remains unresolved.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
 live qualification remain pending. Next: complete
 the remaining canonical CP-1 KPIs,
-source-backed cash/FY explanations, independent derived-period checks and Model readiness.
+source-backed cash/FY explanations and Model readiness.
 Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.
 

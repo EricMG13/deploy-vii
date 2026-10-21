@@ -37,6 +37,7 @@ CheckType = Literal[
     "NCF_CASH_MOVEMENT",
     "FY_QUARTERS",
     "SOURCE_STATEMENT_IDENTITY",
+    "REPORTED_DERIVED_PERIOD",
 ]
 
 

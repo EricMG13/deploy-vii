@@ -31,7 +31,8 @@ CP-1 source boundary: [contracts, validation and remaining work](financial-input
 CP-1 statements: [source coverage and independent equations](statements.md).
 CP-1 constructed periods: [historical series and operands](financial-periods.md).
 Model historical output: [statement computations and ratio operands](model-output.md).
-CP-1 arithmetic checks: [source-register reconciliation](financial-reconciliation.md).
+CP-1 arithmetic checks: [source-register reconciliation](financial-reconciliation.md)
+and [constructed-period reconciliation](period-reconciliation.md).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
 Reuse selected Deploy VI behavior only after validating dependencies and regression

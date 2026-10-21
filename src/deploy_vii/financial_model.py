@@ -322,7 +322,7 @@ def model_report(
             "Residuals explain arithmetic differences, not their economic causes "
             "or independent reconciliation",
             "Evidence quality tiers and analytical KPI trends remain unassessed",
-            "Full canonical CP-1 KPI coverage, independent derived-period reconciliation, "
+            "Full canonical CP-1 KPI coverage, Model readiness, "
             "pro forma and projections remain pending",
             "No CLI, journal or Workbench binding yet",
             *book.limitations,

@@ -82,10 +82,14 @@ This is deterministic implementation evidence only. Evidence quality tiers
 remain null with an explicit unassessed reason; they are not inferred from a
 matched quotation. Analytical KPI trends and commentary remain separate model
 work. The complete canonical CP-1 KPI set,
-independent derived-period reconciliation, four-quarter readiness, pro forma,
+four-quarter readiness, pro forma,
 projection integration and CP-1A remain outstanding. No CLI, execution journal
 or Workbench consumer is connected to this API yet. No completed-Module browser,
 public-case analytical or native-host acceptance is claimed.
+
+[Constructed-period reconciliation](period-reconciliation.md) now checks the
+underlying historical accounts and source equations; it remains a separate artifact
+from this Model output and does not treat residuals as independent evidence.
 
 DCF is named in the pinned r14 references without a formula. Its definition is
 awaiting the user's answer; neither dividend-only nor dividend-plus-buyback

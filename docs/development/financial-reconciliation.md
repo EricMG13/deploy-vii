@@ -50,9 +50,10 @@ components, an equation or a complete disclosure assessment are absent. The
 compares every nested equation independently; missing leaves cannot disappear
 through signed cancellation.
 
-These checks compare supplied canonical periods and observations. Derived
-period construction, complete normalization registers and the final four-quarter
-readiness decision remain separate work. Statement coverage now has its own
+These checks compare supplied canonical periods and observations.
+[Constructed-period comparisons](period-reconciliation.md) now cover historical
+quarters and LTM separately. Complete normalization registers and the final
+four-quarter readiness decision remain separate work. Statement coverage now has its own
 hash-bound projection; it does not establish analytical or Module acceptance.
 Missing direct schedule rows remain blocked even where the kernel might derive
 a value. The output does not yet grant an audited/unaudited FY exception, infer
