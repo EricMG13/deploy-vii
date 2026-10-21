@@ -31,8 +31,9 @@ label the current input contract as the entire CP-1 deliverable.
 `validate_financial_review(pack, review)` in `financial_validation.py` revalidates
 both serialized contracts, then checks identity, every nested citation (including
 conflict alternatives), register keys, stable definitions, component graphs,
-same-date balances, dimensions and event relationships. Graphs have unique
-references, no cycles and at most four levels. Dates/quarters/units are not
+same-date balances, dimensions and event relationships. Period graphs have unique
+references, no cycles and at most four levels. Source statement equations have
+their own twelve-level bound and expansion limit. Dates/quarters/units are not
 guessed. Known conflicting same-date balances require explicit resolution;
 unresolved conflicts mask all same-date representations in the numeric adapter.
 
@@ -66,9 +67,10 @@ report artifacts. The raw kernel remains an internal dependency; use the
 validated adapter for model-response data.
 
 The [source-register reconciliation API](financial-reconciliation.md) now performs
-independent comparisons where source components are available. CFO identity
-remains explicitly blocked pending full statement components; this does not
-provide a final readiness or report acceptance decision.
+independent comparisons where source components are available. The
+[statement layer](statements.md) retains all required statement items, source
+amounts and sign normalizations, and supplies independent CFO components. These
+internal artifacts do not provide final readiness or report acceptance.
 
 ## Remaining milestone C work
 

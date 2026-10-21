@@ -19,12 +19,14 @@ from deploy_vii.financial_contracts import (
     FinancialPeriod,
     FinancialReview,
     Observation,
+    StatementIdentity,
 )
 from deploy_vii.financial_validation import validate_financial_review
 from deploy_vii.model._cells import CONTEXT
 from deploy_vii.model.dates import fiscal_year_number
-from deploy_vii.model.history import FLOW_METRICS, OUTFLOW_METRICS
+from deploy_vii.model.history import FLOW_METRICS
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.statement_validation import account_outflow, effective_accounts
 
 CheckType = Literal[
     "SEGMENT_REVENUE",
@@ -34,6 +36,7 @@ CheckType = Literal[
     "DEBT_TOTAL_EX_LEASES",
     "NCF_CASH_MOVEMENT",
     "FY_QUARTERS",
+    "SOURCE_STATEMENT_IDENTITY",
 ]
 
 
@@ -180,16 +183,23 @@ def _account(
     book: FinancialBook, period_id: str, metric: str, *, sign: Literal[-1, 1] = 1
 ) -> ReconciliationTerm:
     value = next(
-        (r.value for r in book.accounts if r.period_id == period_id and r.metric_id == metric), None
+        (
+            r.value
+            for r in effective_accounts(book)
+            if r.period_id == period_id and r.metric_id == metric
+        ),
+        None,
     )
-    return _term(metric, value, coefficient=sign, outflow=metric in OUTFLOW_METRICS)
+    return _term(metric, value, coefficient=sign, outflow=account_outflow(book, period_id, metric))
 
 
 def _balance(
     book: FinancialBook, day: date | None, metric: str, *, sign: Literal[-1, 1] = 1
 ) -> ReconciliationTerm:
     ids = {p.period_id for p in book.periods if day is not None and p.end_date == day}
-    rows = [r.value for r in book.accounts if r.period_id in ids and r.metric_id == metric]
+    rows = [
+        r.value for r in effective_accounts(book) if r.period_id in ids and r.metric_id == metric
+    ]
     conflict = next((v for v in rows if v.status == "conflicting"), None)
     value = conflict or next((v for v in rows if v.amount is not None), next(iter(rows), None))
     return _term(metric, value, coefficient=sign)
@@ -302,19 +312,96 @@ def _debt(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
     )
 
 
-def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
-    cfo = _check(
+def _identity_terms(
+    book: FinancialBook,
+    identity: StatementIdentity,
+) -> tuple[tuple[ReconciliationTerm, ...], tuple[Citation, ...]]:
+    """Expand validated identities to source leaves; never reuse a reported plug.
+
+    Repeated opposite-signed leaves stay present, so unknown operands cannot
+    disappear through algebraic cancellation. Validation bounds expansion/depth.
+    """
+    lines = {r.line_id: r for r in book.statement_lines if r.period_id == identity.period_id}
+    equations = {
+        r.target_line_id: r for r in book.statement_identities if r.period_id == identity.period_id
+    }
+    terms: list[ReconciliationTerm] = []
+    context: list[Citation] = []
+
+    def expand(equation: StatementIdentity, inherited_sign: Literal[-1, 1]) -> None:
+        context.extend(equation.citations)
+        source = lines[equation.target_line_id].value
+        context.extend(source.citations)
+        context.extend(c for alternative in source.alternatives for c in alternative.citations)
+        for component in equation.components:
+            # Multiplying two exact integer signs gives +1 when they agree.
+            coefficient: Literal[-1, 1] = 1 if component.coefficient == inherited_sign else -1
+            if component.line_id in equations:
+                expand(equations[component.line_id], coefficient)
+            else:
+                terms.append(
+                    _term(
+                        component.line_id, lines[component.line_id].value, coefficient=coefficient
+                    )
+                )
+
+    expand(identity, 1)
+    return tuple(terms), tuple(dict.fromkeys(context))
+
+
+def _statement_check(
+    book: FinancialBook,
+    period: FinancialPeriod,
+    statement: str,
+    item: str,
+    kind: CheckType,
+) -> Reconciliation:
+    lines = {r.line_id: r for r in book.statement_lines if r.period_id == period.period_id}
+    target = next(
+        (r for r in lines.values() if r.statement == statement and r.item_id == item), None
+    )
+    identity = next(
+        (
+            r
+            for r in book.statement_identities
+            if target is not None
+            and r.period_id == period.period_id
+            and r.target_line_id == target.line_id
+        ),
+        None,
+    )
+    disclosure = next(
+        (
+            r.disclosure
+            for r in book.statement_disclosures
+            if r.statement == statement and r.period_id == period.period_id
+        ),
+        None,
+    )
+    terms, context = ((), ()) if identity is None else _identity_terms(book, identity)
+    reported = _term(item, target.value) if target else _account(book, period.period_id, item)
+    complete = identity is not None and disclosure is not None and disclosure.status == "complete"
+    return _check(
         period,
-        "CFO_IDENTITY",
-        "cfo_ncfo",
-        _account(book, period.period_id, "cfo_ncfo"),
-        (),
-        "independent sum of source cash-flow statement operating components",
-        blocker=(
-            "Full source operating cash-flow components are not yet represented; "
-            "the Model residual is not independent evidence"
+        kind,
+        f"{statement}:{item}" if kind == "SOURCE_STATEMENT_IDENTITY" else item,
+        reported,
+        terms,
+        " + ".join(f"({term.coefficient}) * {term.label}" for term in terms)
+        if identity
+        else "independent source statement components",
+        blocker=None
+        if complete
+        else "Full source statement and independent component identity are not assessed complete",
+        context=(
+            *context,
+            *(disclosure.citations if disclosure else ()),
         ),
     )
+
+
+def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
+    cfo = _statement_check(book, period, "CFS", "cfo_ncfo", "CFO_IDENTITY")
     opening = period.start_date - timedelta(days=1) if period.start_date else None
     ncf = _check(
         period,
@@ -381,6 +468,14 @@ def reconcile_financials(
     checks: list[Reconciliation] = []
     for period in book.periods:
         checks.append(_debt(book, period))
+        targets = {
+            r.target_line_id for r in book.statement_identities if r.period_id == period.period_id
+        }
+        checks.extend(
+            _statement_check(book, period, row.statement, row.item_id, "SOURCE_STATEMENT_IDENTITY")
+            for row in book.statement_lines
+            if row.period_id == period.period_id and row.line_id in targets
+        )
         if period.period_type != "PERIOD_END":
             checks.extend((_segments(book, period), *_income(book, period), *_cash(book, period)))
         if period.period_type == "FY":
@@ -400,8 +495,8 @@ def reconcile_financials(
         limitations=(
             "Source-register checks only; derived-period calculation and full statement "
             "coverage remain separate",
-            "CFO identity cannot be independently verified from the current compact "
-            "account register",
+            "CFO identity requires a complete source statement "
+            "and an independent component identity",
             "Unexplained FY and cash differences remain BLOCK; "
             "no automatic audited/unaudited or FX exception",
             *book.limitations,

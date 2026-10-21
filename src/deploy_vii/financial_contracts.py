@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from deploy_vii.contracts import Citation, Claim, Contract, Hash, Identifier, Text
 from deploy_vii.model.dates import fiscal_year_number
@@ -239,6 +239,58 @@ class ProFormaObservation(Contract):
     event_citations: Located
 
 
+class StatementLine(Contract):
+    """One located source statement line; issuer-specific detail is never dropped."""
+
+    line_id: Identifier
+    statement: Literal["IS", "CFS", "BS"]
+    item_id: Identifier
+    label: Text
+    period_id: Identifier
+    display_priority: int = Field(ge=1)
+    line_kind: Literal["detail", "subtotal", "total"]
+    value: Observation
+    sign_convention: Literal["signed", "outflow_magnitude"] = "signed"
+    sign_citations: tuple[Citation, ...] = ()
+
+    @model_validator(mode="after")
+    def sign_evidence(self) -> Self:
+        if self.statement == "BS" and self.sign_convention == "outflow_magnitude":
+            raise ValueError("balance-sheet amounts are signed balances, not outflow magnitudes")
+        if self.sign_convention == "outflow_magnitude" and not self.sign_citations:
+            raise ValueError("outflow magnitude normalization requires source evidence")
+        return self
+
+
+class StatementContribution(Contract):
+    line_id: Identifier
+    coefficient: Literal[-1, 1]
+
+    @field_validator("coefficient", mode="before")
+    @classmethod
+    def integer_sign(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("coefficient must be the integer -1 or 1")
+        return value
+
+
+class StatementIdentity(Contract):
+    """Source-supported statement structure, not a model-supplied calculation."""
+
+    identity_id: Identifier
+    period_id: Identifier
+    target_line_id: Identifier
+    components: Annotated[tuple[StatementContribution, ...], Field(min_length=1)]
+    explanation: Text
+    citations: Located
+
+
+class StatementDisclosure(Contract):
+    statement: Literal["IS", "CFS", "BS"]
+    period_id: Identifier
+    disclosure: Disclosure
+
+
 class FinancialBook(Contract):
     book_id: Identifier
     entity_perimeter: Text
@@ -252,6 +304,9 @@ class FinancialBook(Contract):
     kpis: Annotated[tuple[KpiObservation, ...], Field(max_length=20000)]
     facilities: Annotated[tuple[FacilityObservation, ...], Field(max_length=20000)]
     pro_forma: Annotated[tuple[ProFormaObservation, ...], Field(max_length=20000)]
+    statement_lines: Annotated[tuple[StatementLine, ...], Field(max_length=20000)] = ()
+    statement_identities: Annotated[tuple[StatementIdentity, ...], Field(max_length=20000)] = ()
+    statement_disclosures: tuple[StatementDisclosure, ...] = ()
     segment_allocation: tuple[SegmentAllocation, ...]
     addback_disclosure: Disclosure
     segment_disclosure: Disclosure

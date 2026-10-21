@@ -23,6 +23,7 @@ from deploy_vii.model.dates import fiscal_year_number
 from deploy_vii.model.history import BALANCE_METRICS
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import citation_issues
+from deploy_vii.statement_validation import statement_accounts, statement_issues
 
 type PeriodRecord = (
     AccountObservation
@@ -125,7 +126,7 @@ def _series_issues(
 
 
 def book_issues(book: FinancialBook) -> tuple[str, ...]:
-    issues = list(period_issues(book.periods))
+    issues = [*period_issues(book.periods), *statement_issues(book)]
     periods = {period.period_id: period for period in book.periods}
     dimensions = book.currency, book.unit, book.accounting_basis, book.entity_perimeter
     for declared_period in book.periods:
@@ -162,7 +163,7 @@ def book_issues(book: FinancialBook) -> tuple[str, ...]:
     ):
         issues.extend(_series_issues(rows, identity, stable, set(periods)))
     balance_values: dict[tuple[str, object], set[object]] = defaultdict(set)
-    for account in book.accounts:
+    for account in (*book.accounts, *statement_accounts(book)):
         period = periods.get(account.period_id)
         if period is None:
             continue

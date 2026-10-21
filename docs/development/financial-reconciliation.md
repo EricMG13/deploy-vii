@@ -28,6 +28,9 @@ The implementation adds these source-register comparisons:
 - CP-1 debt from carrying values, excluding both lease types while retaining
   debt adjustments. Principal, drawn amounts and commitments never substitute.
   Same-date conflicts block; foreign amounts have no inferred conversion.
+- Independent source statement equations, recursively expanded to original leaves.
+  CFO identity requires a complete source cash-flow disclosure and independent
+  components; the Model residual is never used to prove its own construction.
 - Net cash change against closing less opening cash, with no invented FX plug.
 - Each controlled flow metric's reported FY against four directly supplied,
   contiguous quarters spanning exactly that FY. Reported FY remains independent.
@@ -41,15 +44,16 @@ precision still require analytical review; quote matching does not prove them.
 
 ## Explicit gaps
 
-CFO identity is currently BLOCK with a null calculated value: the compact
-account register lacks the independent full source operating cash-flow
-components. The Model's residual is defined using CFO, so testing that identity
-would prove only its construction. Full statement coverage must supply those
-components before this gate can pass.
+CFO identity remains BLOCK with a null calculated value when independent source
+components, an equation or a complete disclosure assessment are absent. The
+[source statement layer](statements.md) now supplies this representation and
+compares every nested equation independently; missing leaves cannot disappear
+through signed cancellation.
 
 These checks compare supplied canonical periods and observations. Derived
-period construction, source normalization registers, independent statement
-coverage and the final four-quarter readiness decision remain separate work.
+period construction, complete normalization registers and the final four-quarter
+readiness decision remain separate work. Statement coverage now has its own
+hash-bound projection; it does not establish analytical or Module acceptance.
 Missing direct schedule rows remain blocked even where the kernel might derive
 a value. The output does not yet grant an audited/unaudited FY exception, infer
 pre-issuance zero balances, or absorb FX differences. Those cases require explicit

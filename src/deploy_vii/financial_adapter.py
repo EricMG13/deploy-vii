@@ -16,7 +16,7 @@ from deploy_vii.financial_contracts import (
 )
 from deploy_vii.financial_validation import records, validate_financial_review
 from deploy_vii.model.frame import SourceRef
-from deploy_vii.model.history import BALANCE_METRICS
+from deploy_vii.model.history import BALANCE_METRICS, OUTFLOW_METRICS
 from deploy_vii.model.registers import (
     AccountRow,
     AddbackRow,
@@ -28,6 +28,7 @@ from deploy_vii.model.registers import (
     SegmentRow,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.statement_validation import account_outflow, effective_accounts
 
 
 def _ref(value: Observation | None) -> SourceRef | None:
@@ -39,11 +40,12 @@ def _ref(value: Observation | None) -> SourceRef | None:
 
 
 def _accounts(book: FinancialBook) -> tuple[AccountRow, ...]:
-    supplied = {(row.metric_id, row.period_id): row.value for row in book.accounts}
+    accounts = effective_accounts(book)
+    supplied = {(row.metric_id, row.period_id): row.value for row in accounts}
     periods = {period.period_id: period for period in book.periods}
     conflicted = {
         (row.metric_id, periods[row.period_id].end_date)
-        for row in book.accounts
+        for row in accounts
         if row.metric_id in BALANCE_METRICS and row.value.status == "conflicting"
     }
     result: list[AccountRow] = []
@@ -59,6 +61,15 @@ def _accounts(book: FinancialBook) -> tuple[AccountRow, ...]:
                 # omissions still become null, so partial components cannot sum.
                 continue
             value = observation.amount if observation else None
+            if (
+                value is not None
+                and metric not in OUTFLOW_METRICS
+                and account_outflow(book, period.period_id, metric)
+            ):
+                # Keep SourceRef.cell_text as the original observation. The
+                # statement normalization register records this extra convention;
+                # standard outflows remain normalized by the existing kernel.
+                value = value.copy_abs().copy_negate()
             if (metric, period.end_date) in conflicted:
                 value = None
             status = "VERIFIED" if value is not None else "PARTIAL"
