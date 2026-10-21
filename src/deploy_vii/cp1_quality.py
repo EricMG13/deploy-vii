@@ -1,0 +1,220 @@
+"""Producer-owned CP-1 QA scope, before final canonical handoff and acceptance."""
+
+from typing import Literal
+
+from deploy_vii.canonical_audit import DefinitionReview
+from deploy_vii.canonical_tables import CanonicalTables, canonical_tables
+from deploy_vii.context_binding import FinancialContextBinding
+from deploy_vii.contracts import Contract
+from deploy_vii.downstream_readiness import DownstreamReview
+from deploy_vii.financial_contracts import FinancialReview
+from deploy_vii.financial_periods import _id
+from deploy_vii.narrative import _DIMENSIONS, EvidencePart, NarrativeReview
+from deploy_vii.preparation import PreparedPack
+from deploy_vii.quality import (
+    ClaimCandidate,
+    CoverageField,
+    QualityInputs,
+    QualityReport,
+    QualityReview,
+    SourceGate,
+    assess_quality,
+)
+from deploy_vii.source_context import SourceContextReview
+
+REQUIRED_TABLES = tuple(f"T4.{i}" for i in range(1, 20) if i != 7)
+
+
+class CP1QualityReport(Contract):
+    schema_version: Literal["cp1-quality/1"] = "cp1-quality/1"
+    scope: Literal["pre_handoff"] = "pre_handoff"
+    registers: CanonicalTables
+    inputs: QualityInputs
+    quality: QualityReport
+
+
+def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
+    """Project scope from trusted registers; authenticate with canonical_quality.
+
+    Shape validation alone is not authentication. Review producers may use this
+    projection to prepare judgments; final consumers must recompute externally.
+    """
+    registers = CanonicalTables.model_validate_json(registers.model_dump_json())
+    narrative = registers.downstream.inputs.narrative
+    context = narrative.inputs.ledger.context
+    tables = {t.table_id: t for t in registers.module.tables}
+    coverage = [
+        CoverageField(
+            field_id=f"table:{table_id}",
+            present=table_id in tables,
+            rationale="Required r14 register exists; empty permitted registers remain explicit",
+        )
+        for table_id in REQUIRED_TABLES
+    ]
+    coverage.extend(
+        CoverageField(
+            field_id=_id("qa-cell", fact.fact_id),
+            present=fact.status in {"known", "not_applicable"},
+            rationale=f"{fact.table_id}/{fact.row_id}/{fact.field}: {fact.status}"
+            + (f"; {fact.limitation}" if fact.limitation else ""),
+        )
+        for fact in registers.module.facts
+        if fact.table_id in REQUIRED_TABLES
+    )
+    # Empty mandatory data registers must not improve coverage by losing their cells.
+    for table_id in ("T4.1", "T4.2", "T4.4", "T4.5", "T4.6", "T4.10"):
+        coverage.append(
+            CoverageField(
+                field_id=f"populated:{table_id}",
+                present=bool(tables.get(table_id) and tables[table_id].rows),
+                rationale="Source/entity/statements/KPI register requires populated rows",
+            )
+        )
+    dimensions = {c.dimension: c for c in narrative.review.coverage}
+    coverage.extend(
+        CoverageField(
+            field_id=f"dimension:{dimension}",
+            present=dimension in dimensions and dimensions[dimension].status != "unassessed",
+            rationale="Explicit addressed or justified not-applicable dimensional assessment",
+        )
+        for dimension in _DIMENSIONS
+    )
+    stories = {s.evidence_id for s in narrative.review.stories}
+    coverage.extend(
+        CoverageField(
+            field_id=_id("qa-story", evidence_id),
+            present=evidence_id in stories,
+            rationale="Required event/funding story is linked to a validated finding",
+        )
+        for evidence_id in narrative.required_story_ids
+    )
+    coverage.extend(
+        (
+            CoverageField(
+                field_id="source-gate",
+                present=context.status == "candidate",
+                rationale=f"Source context status: {context.status}",
+            ),
+            CoverageField(
+                field_id="funding-assessment",
+                present=narrative.review.funding.status != "unassessed",
+                rationale="Located balance-sheet funding classification has been assessed",
+            ),
+            CoverageField(
+                field_id="analytical-findings",
+                present=bool(narrative.review.findings),
+                rationale="At least one evidence-risk-credit chain is supplied",
+            ),
+            CoverageField(
+                field_id="canonical-handoff",
+                present=False,
+                rationale="Final canonical envelope and handoff verification remain pending",
+            ),
+        )
+    )
+    claims = tuple(
+        ClaimCandidate(
+            claim_id=f.finding_id,
+            evidence_ids=tuple(
+                dict.fromkeys(
+                    part.evidence_id
+                    for passage in (f.evidence, f.risk_mechanic, f.credit_implication)
+                    for part in passage
+                    if isinstance(part, EvidencePart)
+                )
+            ),
+        )
+        for f in narrative.review.findings
+    )
+    gate: SourceGate = (
+        "pass"
+        if context.status == "candidate"
+        else "partial"
+        if context.status == "restricted"
+        else "fail"
+    )
+    return QualityInputs(
+        artifact_sha256=registers.content_hash(),
+        coverage_policy="cp1-registers-pre-handoff/1",
+        claims=claims,
+        coverage=tuple(coverage),
+        source_gate=gate,
+        module_status="blocked" if narrative.status == "blocked" else "restricted",
+        references=tuple(
+            dict.fromkeys(
+                (
+                    *(r.evidence_id for r in narrative.inputs.catalogue),
+                    *(f.field_id for f in coverage),
+                    *(g.gap_id for g in narrative.gaps),
+                )
+            )
+        ),
+    )
+
+
+def canonical_quality(
+    pack: PreparedPack,
+    context: SourceContextReview,
+    financial: FinancialReview,
+    definition: DefinitionReview,
+    binding: FinancialContextBinding,
+    narrative: NarrativeReview,
+    requested_consumers: tuple[str, ...],
+    downstream: DownstreamReview,
+    review: QualityReview,
+    *,
+    quarter_ids: tuple[str, ...] | None = None,
+) -> CP1QualityReport:
+    """Recompute CP-1 registers and QA scope from external, validated inputs."""
+    registers = canonical_tables(
+        pack,
+        context,
+        financial,
+        definition,
+        binding,
+        narrative,
+        requested_consumers,
+        downstream,
+        quarter_ids=quarter_ids,
+    )
+    inputs = cp1_quality_inputs(registers)
+    return CP1QualityReport(
+        registers=registers, inputs=inputs, quality=assess_quality(inputs, review)
+    )
+
+
+def validate_canonical_quality(
+    pack: PreparedPack,
+    context: SourceContextReview,
+    financial: FinancialReview,
+    definition: DefinitionReview,
+    binding: FinancialContextBinding,
+    narrative: NarrativeReview,
+    requested_consumers: tuple[str, ...],
+    downstream: DownstreamReview,
+    review: QualityReview,
+    report: CP1QualityReport,
+    *,
+    quarter_ids: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    try:
+        report = CP1QualityReport.model_validate_json(report.model_dump_json())
+        expected = canonical_quality(
+            pack,
+            context,
+            financial,
+            definition,
+            binding,
+            narrative,
+            requested_consumers,
+            downstream,
+            review,
+            quarter_ids=quarter_ids,
+        )
+    except ValueError as error:
+        return (f"Invalid CP-1 QA report: {error}",)
+    return (
+        ()
+        if report.content_hash() == expected.content_hash()
+        else ("CP-1 QA report differs from trusted external recomputation",)
+    )
