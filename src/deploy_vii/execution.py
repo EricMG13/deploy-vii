@@ -75,7 +75,7 @@ class Attempt(Contract):
 
 
 class ExecutionSnapshot(Contract):
-    schema_version: Literal["execution/3"] = "execution/3"
+    schema_version: Literal["execution/4"] = "execution/4"
     parent: Hash | None = None
     pack: PreparedPack
     attempts: tuple[Attempt, ...] = ()

@@ -122,6 +122,8 @@ class Fact(Contract):
     calculation_id: Identifier | None = None
     value_class: Literal["source", "normalized", "calculated", "analyst_judgment"] | None = None
     source_amount: Decimal | None = None
+    stated_amount: Decimal | None = None
+    calculation_status: Text | None = None
     formula: Text | None = None
     limitation: str | None = None
 
@@ -225,7 +227,7 @@ def validate_tables(tables: tuple[ReportTable, ...], facts: tuple[Fact, ...]) ->
 
 
 class Module(Contract):
-    schema_version: Literal["module/2"] = "module/2"
+    schema_version: Literal["module/3"] = "module/3"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -280,7 +282,7 @@ class ModuleView(Contract):
 
 
 class View(Contract):
-    schema_version: Literal["view/2"] = "view/2"
+    schema_version: Literal["view/3"] = "view/3"
     run: Run
     mode: Literal["candidate", "accepted"]
     modules: tuple[ModuleView, ...]

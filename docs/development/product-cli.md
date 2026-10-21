@@ -104,6 +104,6 @@ counts. It does not reconcile provider spend. See [execution contracts](executio
 for format compatibility and the still-pending CP-1 delivery/promotion boundary.
 
 After the valid financial stage, `statement-preview --ticket TICKET --output
-runs/example/statements-1` creates a source-period statement candidate without
-settling the attempt. See [table projection and limits](report-tables.md); derived
-periods and complete CP-1 delivery remain pending.
+runs/example/statements-1` creates a source and constructed-period statement
+candidate without settling the attempt. See [table projection and limits](report-tables.md);
+complete CP-1 delivery remains pending.

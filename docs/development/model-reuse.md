@@ -3,8 +3,9 @@
 Selected 21 October 2026 against Deploy VI commit
 `bd71346301b373afa72655916a4c1b42bf4c9823`, from clean Deploy VII base `9199be4`.
 This is milestone C's internal arithmetic slice, not a completed CP-1 or Model
-module. The validated financial, historical-period and Model output APIs now call it; no product CLI,
-execution adapter or Workbench delivery consumes those outputs yet.
+module. The validated financial, historical-period and Model output APIs now call it.
+The journal retains internal calculations; candidate statement previews expose
+source and constructed periods. Complete Model/CP-1 delivery is still pending.
 
 The selected eight modules are `_cells`, `frame`, `registers`, `periods`,
 `history`, `debt`, `statements` and `metrics`. Only three date functions and
@@ -95,3 +96,10 @@ carrying debt excluding both lease types and source-first reported/adjusted
 earnings. Its rolling totals sum the selected canonical quarters; they never
 replace a reported quarter with an aggregate recalculation. Source evidence and
 the unresolved DCF/FFO coverage definitions are recorded in that increment's review.
+
+Full statement-line construction now reuses the selected period plan and
+arithmetic graph without applying the complete-addback Model gate to unrelated
+statements. The shared `_component` reader recursively requires nested YTD/FY
+inputs; a reproduced one-level subtotal plug is corrected. See
+[statement history](statement-history.md) and its review. No additional Deploy VI
+source or host policy was imported, and the original source manifest is unchanged.

@@ -69,12 +69,12 @@ analytical qualification; exact quote matching cannot prove them.
 
 ## Remaining integration
 
-These APIs have no CLI/journal/render consumer yet. The full normalization,
-constructed-period, calculation, gap/definition/conflict and narrative registers,
-Model readiness and CP-1A are still pending. Candidate/cumulative HTML field
-parity and public-case model qualification must follow actual integration. All
-current statement evidence is deterministic and synthetic; no completed Module
-or live analytical claim is made.
+The journal CLI now renders source and [constructed statement periods](statement-history.md)
+in T4.4–T4.6 candidate matrices with exact HTML field parity and provenance.
+See [table projection](report-tables.md). Other CP-1 registers, complete canonical
+Markdown/QA, Model presentation, final promotion and CP-1A remain pending.
+Current statement arithmetic/browser evidence is deterministic and synthetic;
+no completed Module or live analytical claim is made.
 
 Source-backed [balance movement checks](balance-movements.md) now cover equity
 and explicitly declared other BS bridges, with source audit and readiness binding.

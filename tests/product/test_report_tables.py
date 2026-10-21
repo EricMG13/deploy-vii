@@ -14,6 +14,7 @@ from deploy_vii.cp1_workflow import cp1_statement_preview, submit_cp1_step
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.render import display, render, table_display
+from deploy_vii.statement_history import statement_history
 from deploy_vii.statement_output import statement_report
 from deploy_vii.statement_view import statement_view, write_statement_preview
 from deploy_vii.table_markdown import markdown_cell, table_markdown
@@ -77,7 +78,10 @@ def test_source_statement_matrix_is_exact_and_missing_values_never_become_zero()
     record = statement_report(pack, financial, financial.books[0].book_id)
     projected = next(m for m in view.modules if m.module_id == "CP-1")
     assert view.mode == "candidate" and projected.status == "candidate"
-    assert projected.artifact_sha256 == record.content_hash()
+    assert (
+        projected.artifact_sha256
+        == statement_history(pack, financial, financial.books[0].book_id).content_hash()
+    )
     assert [t.table_id for t in projected.tables] == ["T4.4", "T4.5", "T4.6"]
     facts = {(f.table_id, f.row_id, f.field): f for f in projected.facts}
     for source in record.cells:
@@ -242,15 +246,16 @@ def test_statement_preview_cli_returns_file_and_preserves_journal(
     assert store.read().content_hash() == before
 
 
-def test_old_module_and_view_versions_are_rejected() -> None:
-    value = module().model_copy(update={"schema_version": "module/1"})
-    with pytest.raises(ValidationError, match="module/2"):
+@pytest.mark.parametrize("version", [1, 2])
+def test_old_module_and_view_versions_are_rejected(version: int) -> None:
+    value = module().model_copy(update={"schema_version": f"module/{version}"})
+    with pytest.raises(ValidationError, match="module/3"):
         Module.model_validate_json(value.model_dump_json())
     pack, financial = data()
     view = statement_view(pack, financial, financial.books[0].book_id)
-    with pytest.raises(ValidationError, match="view/2"):
+    with pytest.raises(ValidationError, match="view/3"):
         type(view).model_validate_json(
-            view.model_copy(update={"schema_version": "view/1"}).model_dump_json()
+            view.model_copy(update={"schema_version": f"view/{version}"}).model_dump_json()
         )
 
 
@@ -501,3 +506,100 @@ def test_not_applicable_statement_cell_retains_its_source_status() -> None:
     for update in ({"amount": Decimal(0)}, {"limitation": None}):
         with pytest.raises(ValidationError, match="unsettled fact"):
             Fact.model_validate_json(fact.model_copy(update=update).model_dump_json())
+
+
+def test_preview_reads_revalidated_history_instead_of_unvalidated_nested_objects() -> None:
+    pack, financial = data()
+    raw_book = json.loads(financial.books[0].model_dump_json())
+    copied = financial.model_copy(update={"books": (raw_book,)})
+    with pytest.warns(UserWarning, match="Pydantic serializer warnings"):
+        actual = statement_view(pack, copied, financial.books[0].book_id)
+    assert actual == statement_view(pack, financial, financial.books[0].book_id)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("width,height", [(1440, 900), (1280, 800)])
+def test_derived_statement_cells_show_comparison_and_actual_formula_offline(
+    tmp_path: Path, width: int, height: int
+) -> None:
+    from tests.product.test_financial_periods import frozen
+    from tests.product.test_statement_history import history_book, result
+
+    book = history_book(rolled=True)
+    pack, financial = frozen(book)
+    report = statement_history(pack, financial, book.book_id)
+    derived = result(report, "LTM:LTM")
+    view = statement_view(pack, financial, book.book_id)
+    module_view = next(m for m in view.modules if m.module_id == "CP-1")
+    fact = next(f for f in module_view.facts if f.fact_id == derived.value_id)
+    assert fact.amount == 110 and fact.stated_amount == 999
+    assert module_view.limitations[1].startswith("Source artifact: ")
+    assert fact.calculation_id == derived.computation_id
+    assert fact.citations == derived.value.citations
+    path = write_statement_preview(pack, financial, book.book_id, tmp_path / "derived")
+    receipt = json.loads((path.parent / "complete.json").read_text())
+    assert receipt["schema_version"] == "statement-preview/2"
+    assert receipt["history_sha256"] == report.content_hash() == module_view.artifact_sha256
+    evidence = Path("artifacts/rendering/statement-history") / tmp_path.parent.name / tmp_path.name
+    evidence.mkdir(parents=True)
+    for name in ("candidate.html", "view.json", "statement-history.json", "complete.json"):
+        (evidence / name).write_bytes((path.parent / name).read_bytes())
+    errors, network = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height}, offline=True)
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("request", lambda request: network.append(request.url))
+        page.goto(path.as_uri() + "#CP-1")
+        for value in module_view.facts:
+            button = page.locator(f'[data-fact-id="{value.fact_id}"]')
+            expect(button).to_have_text(table_display(value))
+            assert button.count() == 1
+        button = page.locator(f'[data-fact-id="{fact.fact_id}"]')
+        button.focus()
+        page.keyboard.press("Enter")
+        inspector = page.get_by_role("complementary", name="Evidence inspector")
+        for text in (
+            "110",
+            "999",
+            "Stated comparison",
+            "Calculation status",
+            "Calculated",
+            "100",
+            "30",
+            "20",
+            "all components required",
+            "differs",
+            "USD",
+            "1000000",
+            "2024-07-01",
+            "2025-06-30",
+            "US GAAP",
+            "Consolidated",
+        ):
+            expect(inspector).to_contain_text(text)
+        for citation in fact.citations:
+            expect(inspector).to_contain_text(citation.locator)
+        sheet = result(report, "LTM:LTM", "T4.6", "cash_and_equivalents")
+        page.locator(f'[data-fact-id="{sheet.value_id}"]').click()
+        expect(inspector).to_contain_text("Closing observation at period end; no flow subtraction")
+        expect(inspector).to_contain_text("30")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.screenshot(path=str(evidence / f"derived-{width}x{height}.png"), full_page=True)
+        page.evaluate("document.body.style.zoom='1.25'")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.screenshot(path=str(evidence / "zoom.png"), full_page=True)
+        assert not errors and not [u for u in network if u.startswith(("http:", "https:"))]
+        (evidence / "checks.json").write_text(
+            json.dumps(
+                {
+                    "viewport": [width, height],
+                    "field_parity": "passed",
+                    "css_zoom": 1.25,
+                    "errors": errors,
+                    "requests": network,
+                    "analytical_qualification": "unrun",
+                }
+            )
+        )
+        browser.close()

@@ -48,7 +48,8 @@ periods. Columns then add and subtract these resolved figures (the LTM is
 FY + YTD - PYTD of them).
 
 For any other flow, a component that is itself a YTD or FY with components
-is their sum, one level deep. A balance is the observation at the column's
+is their recursively validated sum, at most four period levels deep.
+A balance is the observation at the column's
 end date: the column's own period first, then any period ending that day, in
 register order. A RATE KPI, and an account in neither metric list, is shown
 only on its own period.
@@ -335,20 +336,27 @@ _UNSPANNED_PARTS = Cell(None, "COMPONENT_MISSING", note=UNSPANNED)
 
 
 def _component(series: _Series, register: _Register, period_id: str | None) -> Cell:
-    """A term's cell: the sum of a YTD or FY period's components where it
-    names them (`COMPONENT_MISSING`, noted, where they do not span it), else
-    the period's own; `COMPONENT_MISSING` for no period."""
-    period = register.periods.get(period_id)
-    if period is None:
+    """Resolve all declared flow components; a reported subtotal is not a plug."""
+    if period_id not in register.periods:
         return _MISSING
     if series.kind == "sparse":
-        return _resolved(series, register, period.period_id)
-    parts: tuple[str, ...] = (period.period_id,)
-    if period.period_type in _ADDITIVE and period.component_period_ids:
+        return _resolved(series, register, period_id)
+
+    def resolve(identity: str | None, ancestors: tuple[str, ...]) -> Cell:
+        period = register.periods.get(identity)
+        if period is None:
+            return _MISSING
+        if period.period_id in ancestors or len(ancestors) >= 4:
+            return _UNSPANNED_PARTS
+        if period.period_type not in _ADDITIVE or not period.component_period_ids:
+            return _sum(series, ((_reported(series, period.period_id), 1),))
         if not _spans(register, period):
             return _UNSPANNED_PARTS
-        parts = period.component_period_ids
-    return _sum(series, ((_reported(series, part), 1) for part in parts))
+        child_path = (*ancestors, period.period_id)
+        parts = ((resolve(part, child_path), 1) for part in period.component_period_ids)
+        return _sum(series, parts)
+
+    return resolve(period_id, ())
 
 
 def _resolved(series: _Series, register: _Register, period_id: str | None) -> Cell:

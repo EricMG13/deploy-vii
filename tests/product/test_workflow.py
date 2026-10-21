@@ -447,7 +447,7 @@ def test_cli_creates_and_replaces_only_frozen_pack(
             ],
         )
         main()
-        assert json.loads(capsys.readouterr().out)["schema_version"] == "execution/3"
+        assert json.loads(capsys.readouterr().out)["schema_version"] == "execution/4"
     assert Execution(directory).read().pack == second
 
 
@@ -517,11 +517,11 @@ def test_invalid_step_requests_do_not_mutate_journal(tmp_path: Path) -> None:
         assert store.read().content_hash() == before
 
 
-@pytest.mark.parametrize("version", ["execution/1", "execution/2"])
+@pytest.mark.parametrize("version", ["execution/1", "execution/2", "execution/3"])
 def test_legacy_snapshot_version_is_rejected_explicitly(tmp_path: Path, version: str) -> None:
     from deploy_vii.execution import ExecutionSnapshot
 
     store = fixture_store(tmp_path)
     legacy = store.read().model_copy(update={"schema_version": version})
-    with pytest.raises(ValidationError, match="execution/3"):
+    with pytest.raises(ValidationError, match="execution/4"):
         ExecutionSnapshot.model_validate_json(legacy.model_dump_json())

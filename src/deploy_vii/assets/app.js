@@ -69,7 +69,8 @@
     button.addEventListener("click", () => inspect({
       "Field": `${owner.module_id} / ${fact.table_id} / ${fact.row_id} / ${fact.field}`,
       "Label": fact.label, "Value class": fact.value_class,
-      "Source value": fact.source_amount, "Formula": fact.formula,
+      "Source value": fact.source_amount, "Stated comparison": fact.stated_amount,
+      "Calculation status": fact.calculation_status, "Formula": fact.formula,
       "Value": fact.display, "Status": fact.status, "Period": fact.period,
       "Unit": fact.unit, "Currency": fact.currency, "Scale": fact.scale,
       "Basis": fact.basis, "Denominator": fact.denominator,

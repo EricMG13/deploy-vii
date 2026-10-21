@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-828 product tests pass (97.48% branch-inclusive coverage); CP-0 synthetic output is
+843 product tests pass (97.46% branch-inclusive coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -283,3 +283,18 @@ canonical envelope/QA and reader interoperability, Model presentation and final
 promotion remain pending. This preview does not qualify a completed Module.
 Formats advance explicitly to module/2, view/2 and execution/3; no automatic
 migration or provider-budget reset. OpenRouter spend remains $0/$50.
+
+Full statement-line period construction now appends Q/YTD/FY/LTM derived columns
+to the candidate T4.4–T4.6 matrices, preserving source figures and independent
+comparisons, missing operands, sign normalizations, closing balances and actual
+arithmetic graphs. Incomplete Model add-back disclosure does not prevent statement
+arithmetic. Confidence review corrected a shared-kernel nested subtotal plug,
+post-validation caller-object access and a misleading source-only scope note.
+The one key-area Sol/high tournament targets only `_component`; routine assembly
+and UI use behavioral checks. See statement-history-review.md and
+../../statement-history.md. Formats advance to statement-history/1,
+statement-preview/2, module/3, view/3 and execution/4; old stores remain intact.
+Other CP-1 registers, canonical envelope/QA/reader, complete Model presentation,
+final promotion and CP-1A remain pending. OpenRouter spend remains $0/$50; no live
+or native analytical acceptance is claimed. Existing Direction C navigation
+exception retained; no CSS edit or new suppression.

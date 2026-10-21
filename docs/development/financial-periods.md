@@ -70,6 +70,12 @@ Deploy VI port; all other port behavior remains under regression tests. Two
 legacy day-count assertions were updated to require the computed 365-day span.
 No original source hash or historical port evidence has been rewritten.
 
+A later [full statement-line integration](statement-history.md) also corrects
+`history._component`: nested YTD/FY components are recursively required, rather
+than letting a reported intermediate subtotal hide a missing descendant.
+The original port evidence is preserved; the corrected shared behavior is
+covered by Model and statement regression tests.
+
 ## Remaining work
 
 The API inherits the validated Model input boundary, including the requirement
