@@ -11,8 +11,9 @@ missing historical adapter input, historical value and construction operand,
 canonical value and KPI, unassessed KPI evidence tier, non-PASS period check,
 construction/basis limitation and originating artifact limitation. Known numerical
 zero remains known. Optional absent comparison values and non-ratio denominator
-objects are not missing numerical observations. DCF and FFO coverage remain
-unavailable pending the outstanding definition decisions.
+objects are not missing numerical observations. DCF, DCF/debt and FFO interest
+coverage are defined in the [canonical KPI register](canonical-kpis.md), so no KPI
+gap cites a missing definition.
 
 Every gap retains origin, artifact hash, original reference, affected metric when
 applicable, explicit period kind/identity/dates, severity, downstream impact,

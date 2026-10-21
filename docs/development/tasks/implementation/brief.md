@@ -412,3 +412,18 @@ for CP-MODEL, recurring caps under a US$200 ceiling, runtime-only key handling, 
 labelled Claude-agent proxy cohort without credit. Plan decisions are renumbered
 (degradation 0007, contract shape 0008). The project now denies `Read` on the key file;
 its contents were not read. No product code changed. OpenRouter spend: $0/$50.
+
+M1, 21 October 2026 (`dvii-impl-m1-kpi-definitions`, `dv-sensitive`, base `1841ccf`, head
+`e272b6d`): FFO interest coverage = (FFO + cash interest paid) / cash interest paid (user
+answer) and DCF = FCF − dividends paid, DCF/debt = DCF / canonical total debt (decision 0006
+DC-4) are computed as ratio recipes plus one derived scalar in `_canonical_frame`; the
+`_UNDEFINED` rows and the false "definitions remain unresolved" limitation are gone, and no
+KPI row is `unavailable`. Tests cover the zero/missing denominator, the sign-normalization
+flip, missing dividends (Not Calculable, never FCF) and a sourced zero (DCF = FCF). Reviews:
+worker confidence-review (one dead branch removed); the `_canonical_frame` tournament was
+played inline (the worker may not spawn agents) and kept the incumbent; an independent task
+review approved with minor notes (a one-missing-quarter TTM case is untested; recorded).
+Coordinator reran `make product-check` (986 passed, 97.59% coverage), `make check` and
+`make secrets`: all exit 0. `r14-coverage.json` unchanged (CP-1 stays `partial`). Not
+verified: rendering of the new rows in Direction C fields (M3/M6), live or native
+qualification, `make audit`. OpenRouter spend: $0/$50. Publication waits for the PR session.
