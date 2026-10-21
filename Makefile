@@ -1,4 +1,4 @@
-.PHONY: setup check format types test coverage audit secrets diff dev-check dev-test
+.PHONY: setup check format types test coverage audit secrets diff dev-check dev-test product-check
 .PHONY: codex-scaffold codex-feature codex-sensitive codex-research codex-architect
 
 setup:
@@ -23,7 +23,13 @@ dev-check:
 dev-test:
 	uv run --locked pytest tests/devtools
 
-# Product targets intentionally fail until actual source/tests exist.
+product-check:
+	uv run --locked ruff check src tests/product
+	uv run --locked ruff format --check src tests/product
+	$(MAKE) types
+	node --check src/deploy_vii/assets/app.js
+	$(MAKE) coverage
+
 types:
 	uv run --locked mypy src
 
@@ -31,10 +37,12 @@ test:
 	uv run --locked pytest tests/product -m 'not live and not private'
 
 coverage:
-	uv run --locked pytest tests/product -m 'not live and not private' --cov --cov-branch --cov-report=term-missing
+	uv run --locked pytest tests/product -m 'not live and not private' --cov=deploy_vii --cov-branch --cov-report=term-missing
 
 audit:
-	uv run --locked pip-audit --strict --progress-spinner off
+	mkdir -p artifacts/dependency-audit
+	uv export --locked --all-groups --no-emit-project --format requirements-txt --output-file artifacts/dependency-audit/requirements.txt --quiet
+	uv run --locked pip-audit --strict --progress-spinner off -r artifacts/dependency-audit/requirements.txt
 
 # Requires Gitleaks 8.30.1 on PATH. Scan files, staged changes AND reachable history.
 secrets:

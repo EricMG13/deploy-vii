@@ -39,6 +39,8 @@ User requirements for product increments:
   arithmetic; models supply evidence-grounded analysis. Follow the reuse review
   before selecting any Deploy VI code.
 
-After code changes run confidence-review. After non-trivial code changes also
-run rewrite-tournament in no-argument post-edit mode on changed functions.
-Skip the latter for trivial edits, docs/config, test-only and generated files.
+After code changes run confidence-review. Per the user's latest correction,
+limit rewrite-tournament to key areas: artifact state, provenance, financial
+calculations and execution ordering. Use no-argument post-edit mode there.
+Routine UI, CLI and adapter changes receive focused tests and confidence review.
+Skip tournaments for trivial edits, docs/config, test-only and generated files.

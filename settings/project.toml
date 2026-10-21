@@ -1,6 +1,7 @@
 schema_version = 1
 phase = "development-tooling-and-product-implementation"
 product_runtime_implemented = false
+product_shell_implemented = true
 live_model_runner_implemented = false
 
 [development]
@@ -9,7 +10,7 @@ task_root = "docs/development/tasks"
 publication_owner = "coordinator"
 worker_publication = "local-commits-only"
 confidence_review = "after-code-changes"
-rewrite_tournament = "non-trivial-code-changes"
+rewrite_tournament = "key-areas-only"
 size_gate = "advisory-full-diff-no-hard-cap"
 python = "3.13.15"
 uv = "0.12.5"
@@ -76,12 +77,12 @@ candidate_preview_labelled = true
 viewports = ["1440x900", "1280x800"]
 
 [ci]
-required_contexts = ["Repository hygiene", "Secrets"]
+required_contexts = ["Repository hygiene", "Product checks", "Secrets"]
 model_calls = false
 private_packs = false
 provider_credentials = false
 dependency_audit = "separate-manual-or-weekly"
-product_gates = "activate-with-first-product-increment"
+product_gates = "lint-strict-types-unit-integration-browser-coverage"
 
 [runtime_design]
 delivery_target = "github-copilot-cli"

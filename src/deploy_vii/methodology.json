@@ -1,0 +1,703 @@
+[
+  {
+    "module_id": "CP-0",
+    "title": "Source readiness",
+    "aliases": [
+      "CP-PARSE"
+    ],
+    "required": [],
+    "optional": [],
+    "purpose": "Inventories and reads the source pack, adaptively parses what needs restructuring, freezes one effective source set, and establishes readiness plus the exact source-to-module map.",
+    "table_ids": [
+      "P3",
+      "P5",
+      "T1",
+      "T2",
+      "T3",
+      "T4",
+      "T5",
+      "T6",
+      "T7",
+      "T8"
+    ]
+  },
+  {
+    "module_id": "CP-1",
+    "title": "Canonical data foundation",
+    "aliases": [],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [],
+    "purpose": "Builds the canonical financial data and KPI foundation used by downstream analysis.",
+    "table_ids": [
+      "T4.1",
+      "T4.10",
+      "T4.11",
+      "T4.12",
+      "T4.13",
+      "T4.14",
+      "T4.15",
+      "T4.16",
+      "T4.17",
+      "T4.18",
+      "T4.19",
+      "T4.2",
+      "T4.3",
+      "T4.4",
+      "T4.5",
+      "T4.6",
+      "T4.8",
+      "T4.9"
+    ]
+  },
+  {
+    "module_id": "CP-1A",
+    "title": "Business transaction fact pack",
+    "aliases": [
+      "CP-2C"
+    ],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [],
+    "purpose": "Establishes the business and transaction fact pack: what the issuer does and what deal is in front of you.",
+    "table_ids": [
+      "T2D.1",
+      "T2D.10",
+      "T2D.11",
+      "T2D.2",
+      "T2D.3",
+      "T2D.4",
+      "T2D.5",
+      "T2D.6",
+      "T2D.7",
+      "T2D.8",
+      "T2D.9",
+      "company_description",
+      "conflict_log",
+      "credit_translation",
+      "downstream_readiness",
+      "events_timeline",
+      "gaps_ledger",
+      "operating_model",
+      "ownership_register",
+      "revenue_business_mix",
+      "source_classification",
+      "transaction_summary"
+    ]
+  },
+  {
+    "module_id": "CP-1B",
+    "title": "Earnings delta",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1"
+    ],
+    "optional": [],
+    "purpose": "Quantifies the earnings delta between reporting periods and explains what moved.",
+    "table_ids": [
+      "T4.1",
+      "T4.10",
+      "T4.11",
+      "T4.12",
+      "T4.13",
+      "T4.14",
+      "T4.15",
+      "T4.2",
+      "T4.3",
+      "T4.4",
+      "T4.5",
+      "T4.6",
+      "T4.7",
+      "T4.8",
+      "T4.9"
+    ]
+  },
+  {
+    "module_id": "CP-1C",
+    "title": "Peer benchmark",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1"
+    ],
+    "optional": [],
+    "purpose": "Benchmarks the issuer against a defined peer universe and flags outliers.",
+    "table_ids": [
+      "T4.1",
+      "T4.10",
+      "T4.11",
+      "T4.2",
+      "T4.3",
+      "T4.4",
+      "T4.5",
+      "T4.6",
+      "T4.7",
+      "T4.8",
+      "T4.9"
+    ]
+  },
+  {
+    "module_id": "CP-1D",
+    "title": "Earnings quality",
+    "aliases": [
+      "CP-1E"
+    ],
+    "required": [
+      "CP-0",
+      "CP-1"
+    ],
+    "optional": [
+      "CP-1B"
+    ],
+    "purpose": "Challenges the adjusted-EBITDA bridge: tests each add-back for achievability and recurrence against evidence, reconciles adjusted EBITDA to cash, and restates leverage on the earnings the evidence supports.",
+    "table_ids": [
+      "T1E.1",
+      "T1E.2",
+      "T1E.3",
+      "T1E.4",
+      "T1E.5",
+      "T1E.6",
+      "T1D.1",
+      "T1D.2",
+      "T1D.3",
+      "T1D.4",
+      "T1D.5",
+      "T1D.6",
+      "T1D.7"
+    ]
+  },
+  {
+    "module_id": "CP-2",
+    "title": "Fundamental credit synthesizer",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-1A"
+    ],
+    "optional": [
+      "CP-1B",
+      "CP-1C",
+      "CP-1D"
+    ],
+    "purpose": "Synthesises the fundamental credit view from the canonical data and supporting registers.",
+    "table_ids": [
+      "T2.1",
+      "T2.10",
+      "T2.11",
+      "T2.12",
+      "T2.7"
+    ]
+  },
+  {
+    "module_id": "CP-2A",
+    "title": "Downside pathway",
+    "aliases": [
+      "CP-2B"
+    ],
+    "required": [
+      "CP-0",
+      "CP-1"
+    ],
+    "optional": [],
+    "purpose": "Builds the downside and stress pathway: what breaks first and how far it falls.",
+    "table_ids": [
+      "T5.1",
+      "T5.2",
+      "T5.3",
+      "T5.4",
+      "T5.5",
+      "T5.6",
+      "T5.7",
+      "T2B.1",
+      "T2B.2",
+      "T2B.3",
+      "T2B.4",
+      "T2B.5",
+      "T2B.6",
+      "T2B.7",
+      "T2B.8",
+      "T2B.9"
+    ]
+  },
+  {
+    "module_id": "CP-2E",
+    "title": "Macro fx hedging sensitivity",
+    "aliases": [
+      "CP-2F"
+    ],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [],
+    "purpose": "Assesses macro, FX and hedging sensitivity of the credit.",
+    "table_ids": [
+      "T2G.1",
+      "T2G.2",
+      "T2G.3",
+      "T2G.4",
+      "T2G.5",
+      "T2G.6",
+      "T2G.7",
+      "T2G.8",
+      "T2F.1",
+      "T2F.2",
+      "T2F.3",
+      "T2F.4",
+      "T2F.5",
+      "T2F.6",
+      "T2F.7",
+      "T2F.8",
+      "T2F.9"
+    ]
+  },
+  {
+    "module_id": "CP-2G",
+    "title": "Forward credit model",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2A"
+    ],
+    "optional": [
+      "CP-1D",
+      "CP-2D"
+    ],
+    "purpose": "Builds the forward credit model: deleveraging path and forecast cases.",
+    "table_ids": [
+      "T2H.1",
+      "T2H.2",
+      "T2H.3",
+      "T2H.4",
+      "T2H.5",
+      "T2H.6",
+      "T2H.7",
+      "T2H.8",
+      "T2H.9"
+    ]
+  },
+  {
+    "module_id": "CP-2H",
+    "title": "Ratings migration trigger",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2G"
+    ],
+    "optional": [
+      "CP-1D"
+    ],
+    "purpose": "Maps rating migration risk, trigger headroom and agency divergence.",
+    "table_ids": [
+      "T2R.1",
+      "T2R.10",
+      "T2R.2",
+      "T2R.3",
+      "T2R.4",
+      "T2R.5",
+      "T2R.6",
+      "T2R.7",
+      "T2R.8",
+      "T2R.9"
+    ]
+  },
+  {
+    "module_id": "CP-3",
+    "title": "Relative value security selection",
+    "aliases": [
+      "CP-3A",
+      "CP-3B"
+    ],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2"
+    ],
+    "optional": [
+      "CP-1C",
+      "CP-2H",
+      "CP-2G",
+      "CP-1A",
+      "CP-1D",
+      "CP-4",
+      "CP-3D",
+      "CP-3C",
+      "CP-4C",
+      "CP-2D"
+    ],
+    "purpose": "Determines relative value and security selection across the capital structure.",
+    "table_ids": [
+      "T3C.1",
+      "T3C.2",
+      "T3C.3",
+      "T3C.4",
+      "T3C.5",
+      "T3C.6",
+      "T3C.7",
+      "T3C.8",
+      "T3C.9",
+      "T3B.1",
+      "T3B.10",
+      "T3B.11",
+      "T3B.2",
+      "T3B.3",
+      "T3B.4",
+      "T3B.5",
+      "T3B.6",
+      "T3B.7",
+      "T3B.8",
+      "T3.1",
+      "T3.10",
+      "T3.3",
+      "T3.4",
+      "T3.5",
+      "T3.6",
+      "T3.7",
+      "T3.9"
+    ]
+  },
+  {
+    "module_id": "CP-4",
+    "title": "Legal covenant interpreter",
+    "aliases": [
+      "CP-4A",
+      "CP-4B",
+      "CP-4D"
+    ],
+    "required": [
+      "CP-0",
+      "CP-1"
+    ],
+    "optional": [
+      "CP-1D"
+    ],
+    "purpose": "Interprets the legal and covenant package and what it actually permits.",
+    "table_ids": [
+      "T4C.11",
+      "T4C.12",
+      "T4C.2",
+      "T4C.3",
+      "T4C.4",
+      "T4C.5",
+      "T4C.6",
+      "T4C.7",
+      "T4C.8",
+      "T4C.9",
+      "T4F.1",
+      "T4F.2",
+      "T4F.3",
+      "T4F.4",
+      "T4F.5",
+      "T4F.6",
+      "T4D.1",
+      "T4D.2",
+      "T4D.3",
+      "T4D.4",
+      "T4D.5",
+      "T4D.6",
+      "T4D.7",
+      "T4D.8",
+      "T4.10",
+      "T4.11",
+      "T4.12",
+      "T4.13",
+      "T4.2",
+      "T4.3",
+      "T4.9"
+    ]
+  },
+  {
+    "module_id": "CP-4C",
+    "title": "Restructuring fulcrum",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2G",
+      "CP-4",
+      "CP-2A"
+    ],
+    "optional": [
+      "CP-3C"
+    ],
+    "purpose": "Models the restructuring scenario, fulcrum security and plan recovery.",
+    "table_ids": [
+      "T4E.1",
+      "T4E.10",
+      "T4E.2",
+      "T4E.3",
+      "T4E.4",
+      "T4E.5",
+      "T4E.6",
+      "T4E.7",
+      "T4E.8",
+      "T4E.9"
+    ]
+  },
+  {
+    "module_id": "CP-5",
+    "title": "Evidence trace validator",
+    "aliases": [
+      "CP-5A"
+    ],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [
+      "CP-1",
+      "CP-1A",
+      "CP-1B",
+      "CP-1C",
+      "CP-2",
+      "CP-2A",
+      "CP-2G",
+      "CP-2E",
+      "CP-2H",
+      "CP-3",
+      "CP-4C",
+      "CP-4",
+      "CP-2D",
+      "CP-3C",
+      "CP-3D"
+    ],
+    "purpose": "Validates the evidence trace behind every material claim in the run.",
+    "table_ids": [
+      "T5.1",
+      "T5.2",
+      "T5.3",
+      "T5.4",
+      "T5.5",
+      "T5.6",
+      "T5.7",
+      "T5.8",
+      "T5.9",
+      "T5B.1",
+      "T5B.2",
+      "T5B.3",
+      "T5B.4",
+      "T5B.5",
+      "T5B.6",
+      "T5B.7",
+      "T5B.8"
+    ]
+  },
+  {
+    "module_id": "CP-6",
+    "title": "Ic debate challenge",
+    "aliases": [
+      "CP-6A"
+    ],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2",
+      "CP-3",
+      "CP-5"
+    ],
+    "optional": [
+      "CP-2A",
+      "CP-1A",
+      "CP-2E",
+      "CP-2D",
+      "CP-3C",
+      "CP-3D"
+    ],
+    "purpose": "Runs the investment-committee debate and challenge, producing an action bias.",
+    "table_ids": [
+      "T6E.11",
+      "T6E.4",
+      "T6E.6",
+      "T6E.7",
+      "T6A.11",
+      "T6A.4",
+      "T6A.6",
+      "T6A.7"
+    ]
+  },
+  {
+    "module_id": "CP-8",
+    "title": "Decision ledger post mortem",
+    "aliases": [],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [
+      "CP-6"
+    ],
+    "purpose": "Records the decision ledger and post-mortem against the realised outcome.",
+    "table_ids": [
+      "T7.1",
+      "T7.2",
+      "T7.3",
+      "T7.4",
+      "T7.5",
+      "T7.6",
+      "T7.7",
+      "T7.8"
+    ]
+  },
+  {
+    "module_id": "CP-DR",
+    "title": "Deep research",
+    "aliases": [],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [],
+    "purpose": "Resolve material evidence gaps for named consumers, or answer a standalone issuer/sector research question.",
+    "table_ids": [
+      "TDR.1",
+      "TDR.2",
+      "TDR.3"
+    ]
+  },
+  {
+    "module_id": "CP-L10",
+    "title": "Financial change screen",
+    "aliases": [
+      "CP-L20",
+      "CP-L23",
+      "CP-L30",
+      "CP-L40"
+    ],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [],
+    "purpose": "Runs a bounded LITE screening synthesis for CP-1, CP-1B.",
+    "table_ids": [
+      "TL40.1",
+      "TL40.2",
+      "TL40.3",
+      "TL40.4",
+      "TL30.1",
+      "TL30.2",
+      "TL30.3",
+      "TL30.4",
+      "TL23.1",
+      "TL23.2",
+      "TL23.3",
+      "TL23.4",
+      "TL20.1",
+      "TL20.2",
+      "TL20.3",
+      "TL20.4",
+      "TL10.1",
+      "TL10.2",
+      "TL10.3",
+      "TL10.4"
+    ]
+  },
+  {
+    "module_id": "CP-MEMO",
+    "title": "Credit research report",
+    "aliases": [],
+    "required": [
+      "CP-6"
+    ],
+    "optional": [],
+    "purpose": "Editorially consolidates every eligible live issuer-run handoff into one governed Word credit research report without performing analysis.",
+    "table_ids": []
+  },
+  {
+    "module_id": "CP-MODEL",
+    "title": "Model workbook export",
+    "aliases": [],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [],
+    "purpose": "Builds the validated credit snapshot model workbook from accepted upstream handoffs.",
+    "table_ids": []
+  },
+  {
+    "module_id": "CP-OS",
+    "title": "Report navigation",
+    "aliases": [],
+    "required": [],
+    "optional": [],
+    "purpose": "Read-only navigation and routing across analytical artifacts; no new analytical handoff.",
+    "table_ids": []
+  },
+  {
+    "module_id": "CP-2D",
+    "title": "Liquidity cash flow bridge",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2"
+    ],
+    "optional": [],
+    "purpose": "Builds the near-term liquidity bridge and cash runway.",
+    "table_ids": [
+      "T2E.1",
+      "T2E.2",
+      "T2E.3",
+      "T2E.4",
+      "T2E.5",
+      "T2E.6",
+      "T2E.7",
+      "T2E.9"
+    ]
+  },
+  {
+    "module_id": "CP-3D",
+    "title": "Market implied risk",
+    "aliases": [],
+    "required": [
+      "CP-0"
+    ],
+    "optional": [
+      "CP-2H"
+    ],
+    "purpose": "Assesses market-implied credit risk and trading technicals.",
+    "table_ids": [
+      "T3E.1",
+      "T3E.10",
+      "T3E.2",
+      "T3E.3",
+      "T3E.4",
+      "T3E.5",
+      "T3E.6",
+      "T3E.7",
+      "T3E.8",
+      "T3E.9"
+    ]
+  },
+  {
+    "module_id": "CP-3C",
+    "title": "Refinancing lme risk",
+    "aliases": [],
+    "required": [
+      "CP-0",
+      "CP-1",
+      "CP-2D"
+    ],
+    "optional": [
+      "CP-1A",
+      "CP-2A",
+      "CP-4",
+      "CP-3D"
+    ],
+    "purpose": "Assesses refinancing and liability-management risk before or during distress.",
+    "table_ids": [
+      "T3D.1",
+      "T3D.10",
+      "T3D.11",
+      "T3D.2",
+      "T3D.3",
+      "T3D.4",
+      "T3D.5",
+      "T3D.6",
+      "T3D.7",
+      "T3D.8",
+      "T3D.9"
+    ]
+  }
+]

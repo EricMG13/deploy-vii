@@ -33,8 +33,10 @@ dependencies, invalidation and at most one targeted repair.
   pin batch routes, high or justified supported xhigh. No credit replenishment.
 - On exhausted OpenRouter credit, check actual native Luna availability; otherwise
   requested GLM/DeepSeek only. Preserve separate host cohorts and unknown metrics.
-- Confidence review after code; post-edit rewrite tournament after non-trivial
-  code, then affected checks. Bounded maintenance after accepted layers.
+- Confidence review after code; per the user's latest correction, limit post-edit
+  rewrite tournaments to key areas (artifact state, provenance, financial
+  calculations, execution ordering). Routine UI, CLI and adapter work uses focused
+  tests and confidence review. Bounded maintenance after accepted layers.
 - Track implementation, analytical qualification, rendering acceptance and native
   host qualification independently. No schema/browser pass implies financial fidelity.
 
@@ -54,7 +56,7 @@ No successor assigned. Current coordinator model and global host settings stay a
   `tests/devtools/`. CLI: init/checkpoint/handoff/validate/import-events/report.
   Test real scratch Git drift, pause/budget, unresolved operations, correction
   sources, review/routing preservation, unknown occupancy and replayed forks.
-- [ ] A: map pinned r14 packages/aliases and adapt reviewed Direction C shell,
+- [x] A: map pinned r14 packages/aliases and adapt reviewed Direction C shell,
   with no fixture verdicts. Establish contract and dependency tests.
 - [ ] B: PDF/text/XLSX preparation and CP-0, hash/locator/missing/unreadable tests.
 - [ ] C: canonical registers, reviewed deterministic Model, CP-1A, regressions
@@ -93,4 +95,6 @@ inputs/rubrics but retain distinct cohort identity and telemetry availability.
 Development review evidence is in `tooling-review.md`. No product/live analytical
 qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; all product modules remain unrun.
-Next: versioned product contracts and Direction C shell.
+Milestone A: see shell-review.md; 27 product tests pass. Next: source preparation,
+CP-0 and immutable validation/promotion. User narrowed tournaments to key areas;
+confidence review remains required for all code changes.

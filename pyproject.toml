@@ -1,13 +1,24 @@
 [project]
 name = "deploy-vii"
 version = "0.1.0"
-description = "Deploy VII development environment"
+description = "Evidence-grounded credit research and offline Direction C Workbench"
 requires-python = ">=3.13,<3.14"
-dependencies = []
+dependencies = [
+    "openpyxl>=3.1.5",
+    "pydantic>=2.14.1",
+    "pypdf>=6.21.1",
+]
 
 [tool.uv]
-package = false
+package = true
 required-version = "==0.12.5"
+
+[build-system]
+requires = ["uv_build==0.12.5"]
+build-backend = "uv_build"
+
+[project.scripts]
+deploy-vii = "deploy_vii.__main__:main"
 
 [tool.ruff]
 target-version = "py313"
@@ -38,7 +49,8 @@ branch = true
 source = ["src"]
 
 [tool.coverage.report]
-# Set a justified floor when the first product code and tests exist.
+# Guard the tested implementation, while allowing CLI/platform-only branches.
+fail_under = 90
 show_missing = true
 skip_covered = true
 
@@ -47,6 +59,7 @@ dev = [
     "hypothesis>=6.170.5",
     "mypy>=2.4.0",
     "pip-audit>=2.10.1",
+    "playwright>=1.64.0",
     "pre-commit-hooks>=6.0.0",
     "prek>=0.5.6",
     "pytest>=9.1.1",
