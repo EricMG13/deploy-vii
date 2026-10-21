@@ -53,8 +53,8 @@ CP-1 narrative: [prior evidence, analytical chains and story coverage](narrative
 CP-1 narrative delivery: [finding, evidence-trace and coverage projection](narrative-projection.md).
 CP-1 readiness: [consumer sufficiency and historical Model gate](downstream-readiness.md).
 CP-1 QA: [hash-bound judgments, r14 numeric confidence and pre-handoff scope](quality.md).
-Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Next product
-work follows the plan's order: M1 FFO coverage and DCF; then, in parallel, M2 runner and probe,
-M3 design re-baseline and M4 degradation semantics.
+Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). M1 (FFO
+interest coverage, DCF and DCF/debt) is implemented; next, in parallel, M2 runner and probe,
+M3 design re-baseline and M4 degradation semantics, then M5–M11 in the plan's order.
 Reuse selected Deploy VI behavior only after validating dependencies and regression
 cases. Implementation and live qualification are tracked separately in the brief.

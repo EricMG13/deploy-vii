@@ -95,7 +95,8 @@ The separate [canonical KPI register](canonical-kpis.md) now preserves CP-1
 carrying debt excluding both lease types and source-first reported/adjusted
 earnings. Its rolling totals sum the selected canonical quarters; they never
 replace a reported quarter with an aggregate recalculation. Source evidence and
-the unresolved DCF/FFO coverage definitions are recorded in that increment's review.
+the then-unresolved DCF/FFO coverage definitions are recorded in that increment's review
+(closed by M1 on 21 October 2026: [canonical KPI register](canonical-kpis.md)).
 
 Full statement-line construction now reuses the selected period plan and
 arithmetic graph without applying the complete-addback Model gate to unrelated
