@@ -56,8 +56,9 @@ are not a safe model-response input contract.
 The integration must also retain issuer/perimeter, as-of date, currency/scale,
 source/normalized/calculated/judgment categories, all required CP-1 tables and
 reconciliations, downstream readiness, and the four-complete-quarter Model
-readiness condition. These responsibilities remain open; this port does not
-claim that they are implemented.
+readiness condition. The subsequent source, period, statement and
+[historical readiness](model-readiness.md) layers implement those named
+boundaries; complete registers, other consumer readiness and delivery remain open.
 
 ## Evidence scope
 
@@ -88,3 +89,9 @@ EBITDA growth added from the r14 canonical list. See
 [arithmetic trace review](tasks/implementation/computation-review.md). The original
 source manifest remains a record of the imported base, not a claim that current
 files match their original hashes.
+
+The separate [canonical KPI register](canonical-kpis.md) now preserves CP-1
+carrying debt excluding both lease types and source-first reported/adjusted
+earnings. Its rolling totals sum the selected canonical quarters; they never
+replace a reported quarter with an aggregate recalculation. Source evidence and
+the unresolved DCF/FFO coverage definitions are recorded in that increment's review.

@@ -52,8 +52,10 @@ through signed cancellation.
 
 These checks compare supplied canonical periods and observations.
 [Constructed-period comparisons](period-reconciliation.md) now cover historical
-quarters and LTM separately. Complete normalization registers and the final
-four-quarter readiness decision remain separate work. Statement coverage now has its own
+quarters and LTM separately. [Selected historical Model readiness](model-readiness.md)
+now binds four-quarter coverage and mandatory reconciliations. Complete
+normalization registers and other consumer readiness remain separate work.
+Statement coverage now has its own
 hash-bound projection; it does not establish analytical or Module acceptance.
 Missing direct schedule rows remain blocked even where the kernel might derive
 a value. The output does not yet grant an audited/unaudited FY exception, infer
