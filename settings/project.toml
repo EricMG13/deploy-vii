@@ -6,6 +6,8 @@ product_shell_implemented = true
 live_model_runner_implemented = false
 
 [development]
+instruction_file = "CLAUDE.md"
+coordinator = "claude-code"
 context_index = "docs/development/CONTEXT.md"
 task_root = "docs/development/tasks"
 publication_owner = "coordinator"
@@ -22,6 +24,8 @@ claude_workers = ".claude/agents"
 [development.context]
 scope = "coding-sessions-only"
 strategy = "native-compaction-plus-source-linked-task-state"
+compaction_window_tokens = 500000
+occupancy_display = "context-meter-mod-display-only"
 automatic_resets = false
 lifecycle_controller_implemented = false
 observational_workflow_implemented = true

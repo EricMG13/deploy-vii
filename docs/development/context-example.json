@@ -12,7 +12,7 @@
   "reviews": {"confidence-review": "pending", "rewrite-tournament": "pending"},
   "authorization": "Synthetic example only; replace with actual scope",
   "publication_owner": "coordinator",
-  "sources": ["AGENTS.md", "docs/development/CONTEXT.md"],
+  "sources": ["CLAUDE.md", "docs/development/CONTEXT.md"],
   "facts": [],
   "hypotheses": [],
   "failed_approaches": [],

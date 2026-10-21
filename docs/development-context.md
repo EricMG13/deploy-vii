@@ -32,7 +32,7 @@ The environment setup installs the index and first task brief/result below.
 Create additional task folders only when needed:
 
 ```text
-AGENTS.md                            project instructions and current scope
+CLAUDE.md                            project instructions and current scope
 docs/development/CONTEXT.md           short development index and current state
 docs/development/tasks/<task-id>/
   brief.md                           inputs, work, acceptance and ownership
@@ -62,7 +62,7 @@ tracker. Real development loops include repairs and integration. Start with one
 active brief and add structure only when a concrete coordination need appears.
 
 The user's confidence-review requirement applies after code changes, and
-rewrite-tournament applies after non-trivial code changes. ICM adds no new approval
+rewrite-tournament applies to key-area code (CLAUDE.md review regime). ICM adds no new approval
 chain and does not waive either requirement. Publication stays with the
 [coordinator](pr-worktree-workflow.md).
 

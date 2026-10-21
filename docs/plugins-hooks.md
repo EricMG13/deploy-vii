@@ -9,9 +9,9 @@ This assessment recommends a project profile; it does not uninstall anything.
 
 1. **Historical workflow policy conflicts with current instructions.** Claude
    SessionStart injects `REWRITE-TOURNAMENT ACTIVE`. Earlier notes retired it;
-   the current user explicitly requires rewrite-tournament after non-trivial
-   code and confidence-review after code changes. Current instructions govern.
-   No global hook was changed or assumed to have run.
+   the current user requires confidence-review after code changes and, per a
+   later correction, rewrite-tournament for key-area code only. Current
+   instructions govern. (Resolved 2026-10-21: see Applied state below.)
 2. **Duplicate initialization paths.** Headroom is enabled as a plugin and also
    explicitly called in SessionStart/PreToolUse. Its README says the hook ensures
    a durable deployment. Duplicate checks exist; duplicate process creation or
@@ -65,8 +65,37 @@ Do not use remembered notes as analytical evidence or policy authority.
 Project settings do not automatically subtract inherited hook lists. Claude's
 [settings precedence](https://code.claude.com/docs/en/settings) explains merging;
 verify effective settings before any later change. Do not solve duplication by
-blanket-disabling security hooks. No plugin toggles, broad permission grants or
-global hook changes are part of this setup.
+blanket-disabling security hooks. No broad permission grants.
+
+## Applied state (2026-10-21, decision 0003)
+
+User settings (`~/.claude`, backed up under `backups/2026-10-21-consolidation/`):
+
+- **Removed or disabled:**
+  - claude-mem: disabled. It captured prompts and tool use and had failed continuously.
+  - headroom: plugin, hooks and `ANTHROPIC_BASE_URL` proxy route removed.
+  - presence: disabled.
+- **rtk:** runs through `hooks/rtk-scoped.sh`. Only read-only grep/rg/cat/ls/find/head/tail
+  commands without pipes or counts reach it; git, test, gate and process commands
+  run unmodified.
+- **Review reminders:** the two fixed reminder hooks became `hooks/review-reminder.sh`,
+  which is silent where the project's instruction file names its review regime
+  (this repository's CLAUDE.md does). It also re-fires after compaction elsewhere.
+- **Defaults:**
+  - `autoCompactWindow` 500000 and `effortLevel` high;
+  - at most 6 concurrent subagents;
+  - unnamed subagents default to Sonnet (frontmatter models still win).
+- **Mod:** the context-meter mod shows context occupancy.
+- **Agents:**
+  - Opus `mx-*` reviewers are read-only.
+  - Every `mx-*` agent carries the standing no-stub, no-hidden-failure and `Not verified:` rules.
+- **Skills:** 20 never-used global skills unrelated to any active stack were moved to `skills.disabled/`.
+
+Project settings (`.claude/settings.json`):
+
+- the firebase and fallow plugins are disabled here;
+- ponytail runs at `lite`;
+- reading `.env` is denied.
 
 Not verified: hook invocation counts/latency, duplicate capture, private-data
 retention behavior, effective host settings or a plugin-enabled performance A/B.

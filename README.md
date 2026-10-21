@@ -2,8 +2,9 @@
 
 Development environment configured from the reviewed research, 20 October 2026.
 Start at the [development context](docs/development/CONTEXT.md) and
-[environment guide](docs/development/environment.md). [Decision 0002](docs/decisions/0002-development-environment.md)
-records active choices; [AGENTS.md](AGENTS.md) scopes the work.
+[environment guide](docs/development/environment.md). Decisions [0002](docs/decisions/0002-development-environment.md)
+and [0003](docs/decisions/0003-claude-coordinated-environment.md) record active choices;
+[CLAUDE.md](CLAUDE.md), the only instruction file, scopes the work.
 
 ```sh
 make setup   # locked tools and local Git hook

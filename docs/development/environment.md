@@ -52,8 +52,9 @@ Do not turn an empty test run into a green product gate.
 
 ## Explicit worker routes
 
-The current coordinator retains its selected model. Codex workers use explicit
-Make targets, for example `make codex-feature`. These launch interactive sessions
+Claude Code coordinates and retains its selected model. Codex workers use explicit
+Make targets, for example `make codex-feature`, which pass CLAUDE.md as their
+instruction file (`project_doc_fallback_filenames`). These launch interactive sessions
 with native model/effort flags. They are not custom subagent registrations or
 desktop model selectors. The installed CLI's `--profile` selects global profile
 files, so this setup avoids the obsolete project profile-table assumption.
@@ -69,6 +70,7 @@ worker explicitly for a scoped task; descriptions avoid automatic broad routing.
 | dv-sensitive; sensitive | GPT-6.1 Sol | Sonnet 5.5 | high |
 | dv-research; research | GPT-6.1 Sol | Sonnet 5.5 | medium |
 | dv-architect; architect | GPT-6 Astra | Fable 5.1 | high |
+| dv-escalate; none | GPT-6 Astra (no Make target) | Fable 5.1 | high |
 
 Research/architecture Codex launch targets request a read-only sandbox; Claude
 definitions omit write/shell tools. Host policy, permission settings and model
@@ -103,11 +105,14 @@ files alone do not apply them. Private ruleset access currently returns HTTP 403
 The setup result distinguishes applied settings, executed checks and unavailable
 enforcement. Do not merge on an unstarted or failed required check.
 
-Global plugins/MCP/hooks remain host state; this project does not disable them.
-See the [assessment](../plugins-hooks.md). Raw output can still be observed by
+Global plugins/MCP/hooks are host state, consolidated on 2026-10-21 (see the
+[assessment](../plugins-hooks.md), Applied state). Project `.claude/settings.json`
+disables the unrelated firebase and fallow plugins here, sets ponytail to lite
+and denies reading `.env`. Raw output can still be observed by
 enabled host tooling; sanitized ICM summaries do not change that host behavior.
 
 For coding-session continuity, use the [development context policy](context-management.md)
-and its optional handoff template. Native compaction remains in place. The 60%
+and its optional handoff template. Native compaction remains, at the global
+500K-token window. The context-meter mod only displays occupancy. The 60%
 proposal is a development experiment only; no automatic reset or lifecycle hook
 is installed. Product analysis and its model-test pool are unaffected.

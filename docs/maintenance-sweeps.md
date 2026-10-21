@@ -15,7 +15,7 @@ performance change has been executed in Deploy VII.
 One owner performs a bounded pass using the [model matrix](model-matrix.md).
 A sweep may conclude no change is justified. It adds no approval chain or repeated
 whole-repository scan after each small edit. Code edits still require the user's
-confidence-review and, when non-trivial, rewrite-tournament workflow.
+confidence-review and, for key-area code (CLAUDE.md review regime), rewrite-tournament.
 
 ## Refactoring pass
 

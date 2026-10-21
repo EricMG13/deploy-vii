@@ -49,10 +49,13 @@ confirmed gaps, proposed safeguards and remaining unknowns.
   auto-compaction limit/scope. No explicit override was found in the inspected
   user config. Null does not mean compaction is disabled; model/native defaults
   and this desktop session's live occupancy were not established.
-- Claude 2.1.296's inspected user settings have no explicit auto-compaction
-  percentage override. Headroom/claude-mem are enabled and hooks exist for tool
-  and session events. Runtime transformations, inherited policies and latency
-  remain unmeasured; project files do not disable them.
+- Claude 2.1.296's inspected user settings had no explicit auto-compaction
+  override. Update 2026-10-21 ([decision 0003](../decisions/0003-claude-coordinated-environment.md)):
+  - User settings set `autoCompactWindow` to 500K tokens, which is still native compaction.
+  - The context-meter mod shows occupancy (`$.session.usage().context.percent`, the
+    status line's `used_percentage`), the reading step 2 below asks for. Its Desktop
+    rendering is not yet verified.
+  - Headroom and claude-mem are disabled, and rtk no longer rewrites gate or git commands.
 - Codex Make flags remain the worker route. No `.codex/config.toml`, global
   profile, hook, restart automation or coordinator-model change is introduced.
 - CI remains deterministic with no model calls. Development-context comparisons

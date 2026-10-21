@@ -4,6 +4,8 @@ Date: 20 October 2026. Status: selected for implementation under the user's
 request to reconcile the research and configure the development environment.
 This supersedes research-only setup restrictions and conflicting historical
 workflow recommendations. It authorizes environment setup, not analytical product work.
+The Workers, Reviews and Plugins/hooks rows are superseded by
+[decision 0003](0003-claude-coordinated-environment.md).
 
 ## Decisions
 

@@ -58,17 +58,20 @@ diff:
 	git diff --numstat origin/main
 
 # Explicit interactive worker sessions; keep the current coordinator unchanged.
+# CLAUDE.md is the only instruction file; Codex reads it as its AGENTS.md fallback.
+CODEX = codex --config 'project_doc_fallback_filenames=["CLAUDE.md"]'
+
 codex-scaffold:
-	codex --model gpt-6.1-sol --config 'model_reasoning_effort="low"'
+	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="low"'
 
 codex-feature:
-	codex --model gpt-6.1-sol --config 'model_reasoning_effort="medium"'
+	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="medium"'
 
 codex-sensitive:
-	codex --model gpt-6.1-sol --config 'model_reasoning_effort="high"'
+	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="high"'
 
 codex-research:
-	codex --model gpt-6.1-sol --config 'model_reasoning_effort="medium"' --sandbox read-only
+	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="medium"' --sandbox read-only
 
 codex-architect:
-	codex --model gpt-6-astra --config 'model_reasoning_effort="high"' --sandbox read-only
+	$(CODEX) --model gpt-6-astra --config 'model_reasoning_effort="high"' --sandbox read-only

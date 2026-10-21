@@ -1,7 +1,7 @@
 # 0001 — Separate research foundation
 
 Historical decision from the removed setup. Its policies/tool settings are not
-adopted in this app project. See the [current scope](../../AGENTS.md).
+adopted in this app project. See the [current scope](../../CLAUDE.md).
 
 Date: 2026-10-20. Status: adopted for repository setup; runtime architecture remains
 a research recommendation. Owner requested `deploy-vii`, private.

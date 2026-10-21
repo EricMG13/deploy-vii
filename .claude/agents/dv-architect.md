@@ -6,6 +6,7 @@ effort: high
 tools: Read, Glob, Grep, WebSearch, WebFetch
 ---
 
-Follow AGENTS.md and the brief. Diagnose the specific dependency or ownership
+Follow CLAUDE.md and the brief. Diagnose the specific dependency or ownership
 boundary using evidence. Return the smallest coherent proposal, trade-offs,
 affected callers and verification needs. Do not edit or start a new implementation.
+End the report with a `Not verified:` line.

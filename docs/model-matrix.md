@@ -16,9 +16,9 @@ Select an available host family explicitly for each task.
 | Financial/provenance/parser/state boundary | Sonnet 5.5 / high | GPT-6.1 Sol / high | Interacting invariants and consequential error paths. |
 | Research and dependency tracing | Sonnet 5.5 / medium | GPT-6.1 Sol / medium | Source-grounded comparison; high for unresolved interacting constraints. |
 | Architecture diagnosis | Fable 5.1 / high | GPT-6 Astra / high | Concrete blocked boundary requiring sustained reasoning. |
-| Escalated repair | Fable 5.1 / high | GPT-6 Astra / high | Fresh diagnosis after repeated causal failures. |
+| Escalated repair (`dv-escalate`) | Fable 5.1 / high | GPT-6 Astra / high | Fresh diagnosis after two concrete failed repairs or a design blocker. |
 | Refactoring/optimisation sweep | Sonnet 5.5 / medium | GPT-6.1 Sol / medium | Bounded inspection; high for financial/state changes. Scripts measure performance. |
-| Coordinator and PR owner | Current selected host model | Current selected host model | Own scope/publication; routine Git/CLI work needs no extra agent. |
+| Coordinator and PR owner | Claude Code session's selected model | n/a (Claude coordinates since 2026-10-21) | Own scope/publication; routine Git/CLI work needs no extra agent. |
 
 Haiku 5.5 and GPT-6 Luna remain optional development-worker candidates for simple
 classification or extraction. Separately, the user's model-assisted test pool is
