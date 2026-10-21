@@ -69,7 +69,7 @@ parity is still pending with deterministic calculations.
 These commands accept supplied review files and never call a provider. Keep
 execution directories and raw responses outside Git. Commands print JSON to
 stdout, except `step-output`, which prints the retained valid stage output, and
-`statement-preview` and `interface-preview`, which print the candidate HTML path.
+`statement-preview`, `interface-preview` and `register-preview`, which print the candidate HTML path.
 All examples use a frozen prepared pack and placeholder ticket IDs.
 
 ```sh
@@ -111,3 +111,8 @@ complete CP-1 delivery remains pending.
 `interface-preview --ticket TICKET --output runs/example/interface-1` also adds
 Model source registers, contextual schedules and verified Markdown table previews.
 It preserves the journal and pending ticket. See [interface scope and receipt](model-interface.md).
+
+After all four valid CP-1 stages, `register-preview --ticket TICKET --output
+runs/example/registers-1` recomputes every retained stage and writes all 18 canonical
+register tables with snapshot-bound evidence and a hashed receipt. It leaves the
+ticket pending. See [canonical register scope and remaining delivery work](canonical-tables.md).

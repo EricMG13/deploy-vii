@@ -200,3 +200,52 @@ def cp1_statement_preview(
         destination,
         execution_binding=binding,
     )
+
+
+def cp1_register_preview(store: Execution, ticket_id: str, destination: Path) -> Path:
+    """Recompute every retained stage before projecting a complete register candidate."""
+    from deploy_vii.canonical_tables import canonical_tables
+    from deploy_vii.register_view import write_register_preview
+
+    snapshot = store.read()
+    attempt = next((a for a in snapshot.attempts if a.ticket_id == ticket_id), None)
+    if attempt is None or attempt.module_id != "CP-1":
+        raise ValueError("CP-1 attempt is not available")
+    if tuple(s.step_id for s in attempt.steps) != CP1_STEPS or any(
+        s.status != "valid" for s in attempt.steps
+    ):
+        raise ValueError("All CP-1 source, financial, narrative and readiness stages must be valid")
+    if current_inputs(snapshot, "CP-1") != attempt.inputs:
+        raise ValueError("CP-1 register preview inputs are stale")
+    for index, step in enumerate(attempt.steps, 1):
+        verified = _validate_stage(
+            snapshot.pack, attempt.model_copy(update={"steps": attempt.steps[:index]})
+        )
+        if verified.issues or verified.output != step.output:
+            raise ValueError(f"{step.step_id} stage differs from trusted recomputation")
+        del verified
+    source = SourceContextReview.model_validate_json(attempt.steps[0].payload)
+    financial = FinancialSubmission.model_validate_json(attempt.steps[1].payload)
+    narrative = NarrativeReview.model_validate_json(attempt.steps[2].payload)
+    readiness = DownstreamReview.model_validate_json(attempt.steps[3].payload)
+    report = canonical_tables(
+        snapshot.pack,
+        source,
+        financial.financial,
+        financial.definition,
+        financial.binding,
+        narrative,
+        consumer_entries(snapshot.pack),
+        readiness,
+        quarter_ids=financial.quarter_ids,
+    )
+    return write_register_preview(
+        snapshot.pack,
+        report,
+        destination,
+        execution_binding={
+            "snapshot_sha256": snapshot.content_hash(),
+            "ticket_id": ticket_id,
+            "readiness_step_sha256": attempt.steps[-1].content_hash(),
+        },
+    )

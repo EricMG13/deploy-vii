@@ -161,6 +161,7 @@ class ModelInterface(Contract):
 
 
 Scalar = str | int | Decimal | date | None
+type TableSchemas = dict[str, tuple[str, str | None, tuple[str, ...]]]
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,11 @@ class _Cell:
     value_class: Literal["source", "normalized", "calculated"] = "source"
     source_amount: Decimal | None = None
     formula: str | None = None
+    calculation_id: str | None = None
+    calculation_status: str | None = None
+    stated_amount: Decimal | None = None
+    note: str | None = None
+    period: str | None = None
 
 
 def _citations(value: Observation) -> tuple[Citation, ...]:
@@ -220,6 +226,7 @@ def _sources(citations: tuple[Citation, ...]) -> dict[str, _Cell]:
 @dataclass
 class _Tables:
     book: FinancialBook
+    schemas: TableSchemas = field(default_factory=lambda: dict(SCHEMAS))
     facts: list[Fact] = field(default_factory=list)
     rows: dict[str, list[TableRow]] = field(default_factory=dict)
     gaps: list[InterfaceGap] = field(default_factory=list)
@@ -234,7 +241,7 @@ class _Tables:
         references: frozenset[str] = frozenset(),
     ) -> None:
         """Preserve every cell's coordinates, null state, units and exact evidence."""
-        columns = SCHEMAS[table][2]
+        columns = self.schemas[table][2]
         if set(values) != set(columns):
             raise ValueError(f"Interface row fields differ from {table} schema")
         identity = _id("interface-row", table, *keys)
@@ -271,13 +278,16 @@ class _Tables:
                     scale=Decimal(
                         {"UNITS": 1, "THOUSANDS": 1000, "MILLIONS": 1000000}.get(cell.unit or "", 1)
                     ),
-                    period=period,
+                    period=cell.period or period,
                     basis=f"{self.book.accounting_basis} · {self.book.entity_perimeter}",
                     citations=cell.citations,
                     value_class=cell.value_class,
                     source_amount=cell.source_amount,
                     formula=cell.formula,
-                    limitation=reason,
+                    calculation_id=cell.calculation_id,
+                    calculation_status=cell.calculation_status,
+                    stated_amount=cell.stated_amount,
+                    limitation=reason or cell.note,
                 )
             )
             ids.append(fid)
@@ -298,7 +308,7 @@ class _Tables:
                     "source and missing reason."
                 ),
             )
-            for key, (title, interface, columns) in SCHEMAS.items()
+            for key, (title, interface, columns) in self.schemas.items()
             if key != "segment-allocation" or self.book.segments
         )
 

@@ -55,8 +55,8 @@ missing in another period has an explicit null and reason. Point-in-time-only
 books have empty flow tables, not invented flow periods.
 
 This command does not settle the ticket, accept CP-1, create an accepted report,
-or call a model. Other CP-1 registers, canonical
-Markdown envelope/QA, complete Model presentation and final module promotion
+or call a model. The separate [canonical register preview](canonical-tables.md)
+adds the other CP-1 tables. Canonical Markdown envelope/QA, complete Model presentation and final module promotion
 remain pending. Charts are not applicable to these statement matrices;
 Model chart/table parity remains a later check. Synthetic fixture rendering does
 not qualify analytical judgments or a completed Module.
@@ -75,3 +75,7 @@ Constructed statements: [review](tasks/implementation/statement-history-review.m
 The combined [Model interface preview](model-interface.md) adds T4.14–T4.19 and
 contextual schedules to these statements. Table cells have a readable minimum
 width; horizontal overflow stays inside the keyboard-accessible table region.
+
+The [canonical register preview](canonical-tables.md) combines all 18 required
+table IDs and Model schedules after all four journal stages. Its Markdown remains
+a verified table preview; full analytical export and acceptance are separate.

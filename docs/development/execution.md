@@ -98,3 +98,10 @@ and canonical table transport checks; it does not settle the ticket. See
 [interface scope](model-interface.md). The source-audit coupon-unit correction now
 requires `canonical-audit/4`; older financial stage outputs embedding `/3` must be
 regenerated in a new attempt/directory. Preserve earlier stores and spend records.
+
+`register-preview` requires all four valid CP-1 stages and recomputes each prefix
+against one snapshot before writing. Exact retained output and current upstream
+hashes must match. The candidate contains all canonical register table IDs with
+context-aware readiness, preserving the journal and its pending ticket. See
+[register projection and receipt](canonical-tables.md). Narrative/envelope, QA and
+final acceptance remain pending.

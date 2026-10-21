@@ -100,7 +100,8 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-871 product tests pass (97.44% branch-inclusive coverage); CP-0 synthetic output is
+890 product tests pass (97.45% branch-inclusive coverage), followed by focused checks
+for the final canonical register validator and labels; CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -313,3 +314,18 @@ by 72 focused checks for final UI/unit changes. Full CP-1/Model delivery, CP-1A,
 subsequent modules and live/native qualification remain pending. OpenRouter spend
 remains $0/$50. Existing Direction C navigation exception retained; table readability
 was fixed without adding an ignore.
+
+All 18 canonical register table IDs now project recomputed source/financial/context
+results, statement construction, arithmetic traces, conflicts, gaps and readiness.
+`register-preview` revalidates all four retained stages before writing a hashed,
+snapshot-bound candidate. It preserves the pending ticket. Confidence review fixed
+conflict figure/role omissions, false optional-note gaps, contradictory merged
+readiness and opaque inspector labels. Only this new journal trust boundary had a
+tournament, using the matrix's fresh Sol/high roles; the verified memory candidate
+releases each temporary stage result without changing order or comparisons.
+See canonical-tables-review.md and ../../canonical-tables.md. Synthetic browser
+evidence covers exact fields, keyboard provenance, both viewports, zoom and offline
+operation. Full narrative/envelope, numeric confidence/QA, definition/coverage
+confirmation, large-pack transport qualification, final CP-1 promotion and CP-1A
+remain pending, followed by D–H. No live calls; OpenRouter spend stays $0/$50.
+The existing Direction C navigation exception remains; no CSS change or new ignore.
