@@ -84,15 +84,7 @@ def test_missing_values_unresolved_formulas_and_evidence_tiers_are_explicit() ->
     assert {v.calculation_id for v in kpis.kpis if v.value.amount is None} <= {
         g.reference for g in report.gaps if g.origin == "kpi"
     }
-    for metric in ("dcf", "dcf_to_debt"):
-        assert any(
-            g.origin == "kpi" and g.metric == metric and "definition" in g.description
-            for g in report.gaps
-        )
-    assert not any(
-        g.origin == "kpi" and g.metric == "ffo_interest_coverage" and "definition" in g.description
-        for g in report.gaps
-    )
+    assert not any(g.origin == "kpi" and "definition" in g.description for g in report.gaps)
     assert {g.reference for g in report.gaps if g.origin == "kpi_evidence"} == {
         v.calculation_id for v in kpis.kpis
     }

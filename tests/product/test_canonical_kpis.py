@@ -197,21 +197,54 @@ def test_ffo_interest_coverage_without_interest_paid_is_not_calculable(
     assert row.value.calculation_status == "Not Calculable"
 
 
-def test_only_dcf_remains_undefined_in_limitations() -> None:
-    limitations = " ".join(run(case()).limitations)
-    assert "FFO interest coverage" not in limitations
-    assert "DCF definition remains unresolved" in limitations
+def test_dcf_deducts_dividends_paid_from_fcf() -> None:
+    report = run(case())
+    dcf, fcf = kpi(report, "dcf"), kpi(report, "fcf")
+    assert dcf.operation == "value" and dcf.unit == fcf.unit
+    assert dcf.value.amount == fcf.value.amount - 2  # ready_case: dividends_paid = -2.00
 
 
-def test_undefined_formula_rows_remain_explicit_and_tampering_is_rejected() -> None:
+def test_dcf_to_debt_uses_dcf_over_canonical_debt() -> None:
+    report = run(case())
+    ratio, fcf_debt = kpi(report, "dcf_to_debt"), kpi(report, "fcf_to_debt")
+    assert ratio.operation == "ratio" and ratio.unit == "PERCENT"
+    assert ratio.denominator.amount == fcf_debt.denominator.amount
+    assert ratio.numerator.amount < fcf_debt.numerator.amount
+    assert ratio.value.amount == ratio.numerator.amount / ratio.denominator.amount
+
+
+@pytest.mark.parametrize(("amount", "equals_fcf"), [(None, False), ("0.00", True)])
+def test_dcf_dividend_operand_missing_or_zero(amount: str | None, equals_fcf: bool) -> None:
+    value = case()
+    for p in value.periods:
+        if p.period_type != "PERIOD_END":
+            value = accounts(value, p.period_id, dividends_paid=amount)
+    report = run(value)
+    fcf = kpi(report, "fcf").value.amount
+    assert fcf is not None
+    if equals_fcf:
+        assert kpi(report, "dcf").value.amount == fcf
+        assert (
+            kpi(report, "dcf_to_debt").numerator.amount
+            == kpi(report, "fcf_to_debt").numerator.amount
+        )
+    else:
+        assert kpi(report, "dcf").value.amount is None
+        assert kpi(report, "dcf_to_debt").value.amount is None
+
+
+def test_no_kpi_definition_remains_unresolved() -> None:
+    report = run(case())
+    assert all("unresolved" not in text for text in report.limitations)
+    assert "DCF = FCF - dividends paid; share repurchases are not deducted" in report.limitations
+    assert all(k.operation != "unavailable" for k in report.kpis)
+
+
+def test_kpi_tampering_and_identity_mismatch_are_rejected() -> None:
     value = case()
     pack, review = frozen(value)
     report = canonical_kpis(pack, review, value.book_id)
     assert validate_canonical_kpis(pack, review, report) == ()
-    for key in ("dcf", "dcf_to_debt"):
-        row = kpi(report, key)
-        assert row.operation == "unavailable" and row.value.amount is None
-        assert row.value.note and not row.numerator.operands and row.denominator is None
     assert validate_canonical_kpis(
         pack, review, report.model_copy(update={"kpis": report.kpis[:-1]})
     )
@@ -278,7 +311,8 @@ def test_cash_outflow_signs_and_ambient_decimal_context_do_not_change_outputs() 
                         "value": observed(r.value.observation_id, str(r.value.amount.copy_abs()))
                     }
                 )
-                if r.metric_id in {"capex_and_intangible_investment", "cash_interest_paid"}
+                if r.metric_id
+                in {"capex_and_intangible_investment", "cash_interest_paid", "dividends_paid"}
                 else r
                 for r in value.accounts
             )
@@ -292,6 +326,8 @@ def test_cash_outflow_signs_and_ambient_decimal_context_do_not_change_outputs() 
         "interest_coverage_reported",
         "fcf_to_adjusted_ebitda",
         "ffo_interest_coverage",
+        "dcf",
+        "dcf_to_debt",
     ):
         assert kpi(signed, key).value.amount == kpi(normalized, key).value.amount
     assert kpi(normalized, "capex_adjusted_coverage").numerator.amount == 200

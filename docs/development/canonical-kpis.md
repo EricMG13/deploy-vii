@@ -41,15 +41,22 @@ negative internally. Ratios require positive denominators; percentages are decim
 fractions. Arithmetic uses Decimal precision 38, half-even, independent of ambient
 context. Every signed leg identifies its retained values and actual period basis.
 
-FFO interest coverage = (FFO + cash interest paid) / cash interest paid, per the
-user's decision of 21 October 2026. It uses the trailing-twelve-month scope and is
-Not Calculable without positive cash interest paid (cash interest is stored as a
-signed outflow, so interest paid is its negation).
+Three definitions close the formerly unavailable KPI rows; no KPI row is unavailable.
 
-DCF and DCF/debt remain explicit unavailable rows with reasons: the references name
-those metrics without defining the required formulas, and no selected option or
-elapsed time is treated as an answer. Evidence tiers and analytical trends also
-remain unassessed.
+- FFO interest coverage = (FFO + cash interest paid) / cash interest paid. Authority:
+  the user's answer of 21 October 2026. Basis: trailing twelve months. Cash interest is
+  stored as a signed outflow, so interest paid is its negation. Not Calculable without
+  positive cash interest paid in the trailing year.
+- DCF = FCF - dividends paid (`fcf + dividends`, dividends stored as a signed outflow).
+  Authority: decision 0006 DC-4. Basis: each period, and the sum of trailing quarters
+  for trailing twelve months. Share repurchases are not deducted. A missing dividends
+  value makes DCF Not Calculable and never falls back to FCF; a sourced zero makes DCF
+  equal FCF.
+- DCF/debt = DCF / canonical total debt. Authority: decision 0006 DC-4. Basis: trailing
+  twelve months, as for FCF/debt. Not Calculable without a positive canonical debt
+  denominator or a calculable DCF.
+
+Evidence tiers and analytical trends remain unassessed.
 
 ## Method review and reuse
 

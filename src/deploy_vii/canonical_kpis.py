@@ -104,6 +104,7 @@ _RECIPES.update(
         "fcf_to_reported_ebitda": metrics._Metric(
             "PERCENT", "own", (("fcf", 1),), (("ebitda", 1),)
         ),
+        "dcf_to_debt": metrics._Metric("PERCENT", "twelve", (("dcf", 1),), (("total_debt", 1),)),
         "ffo_interest_coverage": metrics._Metric(
             "MULTIPLE", "twelve", (("ffo", 1), ("cash_interest", -1)), (("cash_interest", -1),)
         ),
@@ -125,6 +126,7 @@ _SCALARS = (
     "cfo_adjusted",
     "ffo",
     "fcf",
+    "dcf",
     "cash_closing",
     "total_debt",
     "secured_debt",
@@ -132,10 +134,6 @@ _SCALARS = (
     "undrawn_rcf",
     "liquidity",
 )
-_UNDEFINED = {
-    "dcf": "DCF formula awaits an explicit definition",
-    "dcf_to_debt": "DCF formula awaits an explicit definition",
-}
 
 
 def _source_states(value: Cell, observations: dict[str, Observation]) -> frozenset[str]:
@@ -210,6 +208,7 @@ def _canonical_frame(
             )
 
             cells["ffo"] = calc(((cells["cfo_adjusted"], 1), (cells["working_capital_change"], -1)))
+            cells["dcf"] = calc(((cells["fcf"], 1), (statement.get("dividends", ABSENT), 1)))
             cells["total_debt"] = source.get("acct:total_debt", ABSENT)
             cells["secured_debt"] = source.get("acct:senior_secured_debt", ABSENT)
             cells["net_debt"] = calc(((cells["total_debt"], 1), (cells["cash_closing"], -1)))
@@ -291,7 +290,7 @@ def _kpi_rows(
     def add(
         column: Column,
         key: str,
-        operation: Literal["value", "ratio", "growth", "unavailable"],
+        operation: Literal["value", "ratio", "growth"],
         unit: str,
         formula: str,
         top: MetricLeg,
@@ -300,8 +299,6 @@ def _kpi_rows(
     ) -> None:
         basis = _basis_id(column)
         value = _value(cell, observations, evidence, normalizations)
-        if operation == "unavailable":
-            value = value.model_copy(update={"calculation_status": "Not Available"})
         if value.amount is None and any(
             "conflicting" in _source_states(operands[part.value_id], observations)
             for side in (top, bottom)
@@ -389,18 +386,6 @@ def _kpi_rows(
                     bottom,
                     growth[key],
                 )
-            for key, reason in _UNDEFINED.items():
-                unit = book.unit if key == "dcf" else "PERCENT"
-                add(
-                    column,
-                    key,
-                    "unavailable",
-                    unit,
-                    reason,
-                    MetricLeg(amount=None, operands=()),
-                    None,
-                    Cell(None, "NOT_STATED", note=reason),
-                )
     return tuple(rows)
 
 
@@ -467,7 +452,7 @@ def canonical_kpis(pack: PreparedPack, review: FinancialReview, book_id: str) ->
             "FFO = adjusted CFO - working capital change",
             "Cash conversion is FCF / adjusted EBITDA; both EBITDA variants are "
             "explicitly retained",
-            "DCF definition remains unresolved",
+            "DCF = FCF - dividends paid; share repurchases are not deducted",
             "Calculations do not establish source reconciliation, readiness, analytical "
             "trends or report acceptance",
             *book.limitations,
