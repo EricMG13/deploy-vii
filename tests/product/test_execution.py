@@ -1230,3 +1230,39 @@ def test_transition_meter_counts_new_and_changed_files_once(tmp_path: Path) -> N
     (directory / "a").write_bytes(b"1234567")
     (directory / "b").write_bytes(b"xy")
     assert meter() == 9
+
+
+def test_every_view_entry_point_applies_the_pathway_scope(tmp_path: Path) -> None:
+    from deploy_vii.contracts import PATHWAY_MODULES
+    from deploy_vii.delivery import cp0_view
+    from deploy_vii.registry import dependencies, modules
+    from deploy_vii.render import empty_view
+
+    pack, review = readiness_fixture()
+    module = build_readiness(pack, review)
+    run = pack.run.model_copy(
+        update={
+            "pathway": "earnings_update",
+            "requested_modules": PATHWAY_MODULES["earnings_update"],
+        }
+    )
+    earnings = pack.model_copy(update={"run": run})
+    views = {
+        "empty_view": empty_view(run),
+        "cp0_view": cp0_view(earnings, module, accepted=False),
+        "execution": Execution.create(tmp_path / "earnings", earnings).view(),
+    }
+    in_scope = set(dependencies(run.requested_modules))
+    assert "CP-2" not in in_scope and "CP-1B" in in_scope  # Earnings Update, not Credit Snapshot
+    for name, view in views.items():
+        statuses = {m.module_id: m.status for m in view.modules}
+        assert list(statuses) == [m.module_id for m in modules()], name
+        assert statuses["CP-2"] == "not_in_pathway", name
+        assert statuses["CP-1B"] == "unrun", name
+        for module_id, status in statuses.items():
+            if module_id == "CP-0" and name == "cp0_view":
+                continue  # the delivered module carries its own status
+            assert status == ("unrun" if module_id in in_scope else "not_in_pathway"), (
+                name,
+                module_id,
+            )

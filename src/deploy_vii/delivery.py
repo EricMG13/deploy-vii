@@ -7,12 +7,13 @@ from pathlib import Path
 from deploy_vii.contracts import Module, ModuleView, View
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness
-from deploy_vii.registry import modules
+from deploy_vii.registry import idle_statuses, modules
 from deploy_vii.render import render
 
 
 def cp0_view(pack: PreparedPack, module: Module, *, accepted: bool) -> View:
     visible = module.status not in {"blocked", "stale", "rejected"}
+    idle = idle_statuses(pack.run)
     return View(
         run=pack.run,
         mode="accepted" if accepted else "candidate",
@@ -33,6 +34,7 @@ def cp0_view(pack: PreparedPack, module: Module, *, accepted: bool) -> View:
                 module_id=item.module_id,
                 title=item.title,
                 aliases=item.aliases,
+                status=idle[item.module_id],
             )
             for item in modules()
         ),

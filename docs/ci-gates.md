@@ -43,6 +43,13 @@ The workflow defines two named jobs:
 2. **Secrets:** checksum-pinned Gitleaks scans all fetched reachable history,
    redacts output and refuses scan errors. A shallow/empty scan is not accepted.
 
+The product job runs the browser tests on ubuntu, where the Front Page pixel
+comparison skips with the stated reason "no reviewed baseline for linux": glyph
+rasterisation differs between operating systems, so baselines
+(`tests/product/baselines/<platform>/`) exist only for darwin, where they were reviewed.
+Structure, zoom, keyboard, parity and zero-network checks still run there. Generate and
+review Linux baselines before treating the pixel comparison as a CI gate.
+
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and
 provider credentials outside hosted CI. The old tool pins in decision 0001 are

@@ -10,6 +10,8 @@ from deploy_vii.contracts import View
 from deploy_vii.delivery import deliver_cp0
 from deploy_vii.preparation import PreparationRequest, SourceRequest
 from deploy_vii.readiness import ReadinessReview
+from deploy_vii.registry import dependencies
+from tests.product.oracle import front_blocks
 from tests.product.test_readiness import readiness_fixture
 
 
@@ -28,7 +30,17 @@ def test_candidate_and_accepted_delivery_are_distinct_and_hashed(tmp_path: Path)
     assert candidate.modules[0].status == "candidate"
     assert accepted.modules[0].status == "restricted"
     assert candidate.modules[0].facts == accepted.modules[0].facts
-    assert all(item.status == "unrun" for item in accepted.modules[1:])
+    in_scope = set(dependencies(accepted.run.requested_modules))
+    assert [item.status for item in accepted.modules[1:]] == [
+        "unrun" if item.module_id in in_scope else "not_in_pathway" for item in accepted.modules[1:]
+    ]
+    # The Front Page is built, not idle: CP-0 binds to rail destinations only, so every block
+    # of the Credit Snapshot shows its own honest state under its FP 01 owner.
+    for name in ("candidate.html", "accepted.html"):
+        blocks = front_blocks((target / name).read_text())
+        assert all(b["owner"] != "Unbound" for b in blocks.values())
+        assert {b["state"] for b in blocks.values()} <= {"not_run", "absent", "outside"}
+        assert blocks["key-findings"]["note"] == "Not run: CP-2 has not run."
     with pytest.raises(FileExistsError):
         deliver_cp0(pack, review, target)
 

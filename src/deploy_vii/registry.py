@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from deploy_vii.contracts import Contract, Identifier, Text
+from deploy_vii.contracts import Contract, Identifier, Run, Status, Text
 
 EdgeRule = Literal["block", "restricted"]
 
@@ -80,6 +80,19 @@ def edge_rule(consumer: str, producer: str) -> EdgeRule:
         ):
             return "restricted"
     raise ValueError(f"No dependency edge from {producer} to {consumer}")
+
+
+def idle_statuses(run: Run) -> dict[str, Status]:
+    """Status of every registry module before it runs: ``unrun`` in scope, else ``not_in_pathway``.
+
+    Scope is the run's requested modules plus their required producers (decision 0009); an
+    unknown module id raises rather than silently widening or narrowing the scope. Every view
+    builder takes its not-yet-run statuses from here.
+    """
+    in_scope = set(dependencies(run.requested_modules))
+    return {
+        m.module_id: "unrun" if m.module_id in in_scope else "not_in_pathway" for m in modules()
+    }
 
 
 def plan(requested: tuple[str, ...]) -> tuple[str, ...]:

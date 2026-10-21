@@ -24,7 +24,7 @@ from deploy_vii.narrative import (
     narrative_inputs,
 )
 from deploy_vii.narrative_projection import _fields, project_narrative
-from deploy_vii.render import table_display
+from tests.product.oracle import expected_by_fact
 from tests.product.test_canonical_gaps import case
 from tests.product.test_canonical_tables import cells
 from tests.product.test_execution import step_text
@@ -260,11 +260,12 @@ def test_narrative_preview_offline_exact_claims_and_provenance(
         block = page.locator(f'[data-claim-id="{claim.claim_id}"]')
         assert block.locator("p").text_content() == claim.text
         assert page.evaluate("window.injected === undefined")
+        oracle = expected_by_fact(view)
         assert dict(
             page.locator("[data-fact-id]").evaluate_all(
                 "nodes => nodes.map(n => [n.dataset.factId,n.textContent])"
             )
-        ) == {f.fact_id: table_display(f) for f in module.facts}
+        ) == {f.fact_id: oracle[f.fact_id] for f in module.facts}
         inspect = block.get_by_role("button", name="Inspect supporting evidence")
         inspect.focus()
         page.keyboard.press("Enter")

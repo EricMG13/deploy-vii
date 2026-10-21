@@ -13,11 +13,20 @@ from deploy_vii.contracts import Fact, Module, ReportTable, TableColumn, TableRo
 from deploy_vii.cp1_workflow import cp1_statement_preview, submit_cp1_step
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.render import display, render, table_display
+from deploy_vii.registry import dependencies, modules
+from deploy_vii.render import display, markdown_display, render
 from deploy_vii.statement_history import statement_history
 from deploy_vii.statement_output import statement_report
 from deploy_vii.statement_view import statement_view, write_statement_preview
 from deploy_vii.table_markdown import markdown_cell, table_markdown
+from tests.product.oracle import (
+    expected_by_fact,
+    expected_text,
+    front_blocks,
+    gap_id_of,
+    parity_record,
+    rendered_table_display,
+)
 from tests.product.test_financials import conflict, freeze
 from tests.product.test_statements import line, statements
 from tests.product.test_workflow import cp1_case
@@ -92,8 +101,22 @@ def test_source_statement_matrix_is_exact_and_missing_values_never_become_zero()
         assert fact.citations == source.citations and fact.scale == Decimal(1000000)
         assert fact.value_class == source.value_class and fact.currency == "USD"
         assert source.period_id in fact.period
-    assert table_display(facts["T4.6", "other:zero", "Q2"]) == "0.00"
-    assert table_display(facts["T4.6", "other:zero", "Q1"]) == "null"
+    # Cell text comes from the formatter oracle (decision 0004: 0 dp amounts, gap spelling);
+    # the HTML never spells null, while the r14 Markdown transport keeps it separately.
+    html = render(view)
+    shown = rendered_table_display(html)
+    assert shown == expected_by_fact(view)
+    financials = front_blocks(html)["financials-credit-metrics"]
+    assert financials["state"] == "populated" and financials["tab_label"] == "Income statement"
+    assert [tab["label"] for tab in financials["tabs"]][:2] == [
+        "Cash flow statement",
+        "Balance sheet",
+    ]
+    zero_q2, zero_q1 = facts["T4.6", "other:zero", "Q2"], facts["T4.6", "other:zero", "Q1"]
+    assert shown[zero_q2.fact_id] == "0" and zero_q2.amount == Decimal("0.00")
+    assert shown[zero_q1.fact_id].startswith("∅ G") and zero_q1.status != "known"
+    assert "null" not in shown.values()
+    assert markdown_display(zero_q1) == "null"
     assert facts["T4.6", "other:disputed", "Q2"].status == "conflicting"
     assert facts["T4.4", "cogs", "Q2"].amount == -30
     assert facts["T4.4", "cogs", "Q2"].source_amount == 30
@@ -102,7 +125,12 @@ def test_source_statement_matrix_is_exact_and_missing_values_never_become_zero()
         projected.facts
     )
     assert "not delivered" in projected.limitations[0]
-    assert all(m.status == "unrun" for m in view.modules if m.module_id != "CP-1")
+    in_scope = set(dependencies(view.run.requested_modules))  # independent of empty_view
+    assert {m.module_id: m.status for m in view.modules if m.module_id != "CP-1"} == {
+        m.module_id: "unrun" if m.module_id in in_scope else "not_in_pathway"
+        for m in modules()
+        if m.module_id != "CP-1"
+    }
 
 
 @pytest.mark.parametrize(
@@ -246,14 +274,16 @@ def test_statement_preview_cli_returns_file_and_preserves_journal(
     assert store.read().content_hash() == before
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
 def test_old_module_and_view_versions_are_rejected(version: int) -> None:
     value = module().model_copy(update={"schema_version": f"module/{version}"})
-    with pytest.raises(ValidationError, match="module/4"):
+    with pytest.raises(ValidationError, match="module/5"):
         Module.model_validate_json(value.model_dump_json())
+    if version == 4:
+        return  # view/4 is current: nothing to reject at this version
     pack, financial = data()
     view = statement_view(pack, financial, financial.books[0].book_id)
-    with pytest.raises(ValidationError, match="view/3"):
+    with pytest.raises(ValidationError, match="view/4"):
         type(view).model_validate_json(
             view.model_copy(update={"schema_version": f"view/{version}"}).model_dump_json()
         )
@@ -281,11 +311,19 @@ def test_statement_panels_offline_exact_fields_keyboard_and_provenance(
         page.on("request", lambda req: network.append(req.url))
         page.goto(path.as_uri() + "#CP-1")
         expect(page.get_by_text("CANDIDATE PREVIEW · NOT ACCEPTED")).to_be_visible()
+        oracle = expected_by_fact(view)
+        shown = dict(
+            page.locator("[data-fact-id]").evaluate_all(
+                "nodes => nodes.map(n => [n.dataset.factId, n.textContent])"
+            )
+        )
+        parity = parity_record(oracle, shown)
+        assert parity["compared"] and not parity["mismatches"]
         for fact in next(m for m in view.modules if m.module_id == "CP-1").facts:
             target = page.locator(
                 f'[data-table-id="{fact.table_id}"] [data-fact-id="{fact.fact_id}"]'
             )
-            expect(target).to_have_text(table_display(fact))
+            expect(target).to_have_text(oracle[fact.fact_id])
             assert target.count() == 1
         amount = page.locator(
             '[data-table-id="T4.4"] tr[data-row-id="cogs"] [data-field="Q2"] button'
@@ -323,7 +361,7 @@ def test_statement_panels_offline_exact_fields_keyboard_and_provenance(
             json.dumps(
                 {
                     "viewport": [width, height],
-                    "field_parity": "passed",
+                    "field_parity": parity,
                     "errors": errors,
                     "requests": network,
                     "css_zoom": 1.25,
@@ -485,7 +523,7 @@ def test_hostile_long_table_labels_and_empty_register_are_safe(tmp_path: Path) -
         page.goto(path.as_uri() + "#CP-1")
         expect(page.get_by_role("rowheader", name=hostile, exact=True)).to_have_text(hostile)
         assert not page.evaluate("Boolean(window.injected)")
-        assert not page.locator("img").count()
+        assert not page.locator("img:not(.logo-img)").count()  # only the brand logo is an image
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         expect(page.locator('[data-table-id="empty"]')).to_contain_text("No rows supplied")
         browser.close()
@@ -501,7 +539,9 @@ def test_not_applicable_statement_cell_retains_its_source_status() -> None:
         if (f.table_id, f.row_id, f.field) == ("T4.6", "other:not-applicable", "Q2")
     )
     assert fact.status == "not_applicable"
-    assert table_display(fact) == "null"
+    gap = gap_id_of(view, fact)
+    assert expected_text(fact, gap) == f"∅ {gap} n.m."
+    assert markdown_display(fact) == "null"
     assert display(fact) == "Not applicable — This item does not apply"
     for update in ({"amount": Decimal(0)}, {"limitation": None}):
         with pytest.raises(ValidationError, match="unsettled fact"):
@@ -551,9 +591,17 @@ def test_derived_statement_cells_show_comparison_and_actual_formula_offline(
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on("request", lambda request: network.append(request.url))
         page.goto(path.as_uri() + "#CP-1")
+        oracle = expected_by_fact(view)
+        shown = dict(
+            page.locator("[data-fact-id]").evaluate_all(
+                "nodes => nodes.map(n => [n.dataset.factId, n.textContent])"
+            )
+        )
+        parity = parity_record(oracle, shown)
+        assert parity["compared"] and not parity["mismatches"]
         for value in module_view.facts:
             button = page.locator(f'[data-fact-id="{value.fact_id}"]')
-            expect(button).to_have_text(table_display(value))
+            expect(button).to_have_text(oracle[value.fact_id])
             assert button.count() == 1
         button = page.locator(f'[data-fact-id="{fact.fact_id}"]')
         button.focus()
@@ -594,7 +642,7 @@ def test_derived_statement_cells_show_comparison_and_actual_formula_offline(
             json.dumps(
                 {
                     "viewport": [width, height],
-                    "field_parity": "passed",
+                    "field_parity": parity,
                     "css_zoom": 1.25,
                     "errors": errors,
                     "requests": network,

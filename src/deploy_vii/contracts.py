@@ -1,8 +1,10 @@
 """Versioned immutable evidence and report contracts. Decimal values serialize as strings."""
 
 import hashlib
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -10,8 +12,38 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=160)]
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Text = Annotated[str, Field(min_length=1)]
-Status = Literal["unrun", "candidate", "accepted", "restricted", "blocked", "stale", "rejected"]
+Status = Literal[
+    "unrun",
+    "candidate",
+    "accepted",
+    "restricted",
+    "blocked",
+    "stale",
+    "rejected",
+    "not_in_pathway",
+]
 InputStatus = Literal["accepted", "restricted", "blocked"]
+PathwayId = Literal[
+    "credit_snapshot",
+    "earnings_update",
+    "relative_value",
+    "covenant_refinancing",
+    "distressed_restructuring",
+    "portfolio_decision",
+]
+# Requested module set per Pathway (decision 0009). Required producers are added when a view
+# or plan is built (registry.dependencies), so these list the modules the Front Page asks for.
+_PRESETS: dict[PathwayId, tuple[str, ...]] = {
+    "credit_snapshot": ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
+    "earnings_update": ("CP-0", "CP-1", "CP-1B", "CP-1D", "CP-5"),
+    "relative_value": ("CP-0", "CP-1", "CP-1C", "CP-2", "CP-2D", "CP-3", "CP-3C", "CP-3D", "CP-5"),
+    "covenant_refinancing": ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-2D", "CP-4", "CP-3C", "CP-5"),
+    "distressed_restructuring": (
+        *("CP-0", "CP-1", "CP-1A", "CP-2", "CP-2A", "CP-2G", "CP-2H", "CP-4", "CP-4C", "CP-5"),
+    ),
+    "portfolio_decision": ("CP-0", "CP-1", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
+}
+PATHWAY_MODULES: Mapping[PathwayId, tuple[str, ...]] = MappingProxyType(_PRESETS)
 
 
 class Contract(BaseModel):
@@ -22,22 +54,18 @@ class Contract(BaseModel):
 
 
 class Run(Contract):
-    schema_version: Literal["run/1"] = "run/1"
+    schema_version: Literal["run/2"] = "run/2"
     run_id: Identifier
     issuer_id: Identifier
     issuer_name: Text
     as_of: date
     method_version: Literal["deploy-v-r14"] = "deploy-v-r14"
     case_kind: Literal["public", "private", "synthetic"]
-    requested_modules: tuple[str, ...] = (
-        "CP-0",
-        "CP-1",
-        "CP-1A",
-        "CP-2",
-        "CP-4",
-        "CP-3",
-        "CP-5",
-        "CP-6",
+    pathway: PathwayId = "credit_snapshot"
+    # Defaults to the Pathway's preset; an explicit value overrides it and is what executes.
+    requested_modules: tuple[str, ...] = Field(
+        min_length=1,
+        default_factory=lambda data: PATHWAY_MODULES[data.get("pathway", "credit_snapshot")],
     )
 
 
@@ -119,6 +147,10 @@ class Fact(Contract):
     unit: str | None = None
     currency: str | None = None
     scale: Decimal = Decimal(1)
+    # Displayed decimal places of a per-unit amount (a share price keeps its cents); None means
+    # the unit class's own precision, so statement lines stay at 0 dp. Ignored on the exact-text
+    # path (no unit class, or an exponent beyond 100), where the exact decimal is shown.
+    decimals: int | None = None
     period: str | None = None
     basis: str | None = None
     denominator: str | None = None
@@ -135,6 +167,8 @@ class Fact(Contract):
     def value_semantics(self) -> Self:
         if self.scale <= 0:
             raise ValueError("scale must be positive")
+        if self.decimals is not None and not 0 <= self.decimals <= 6:
+            raise ValueError("decimals must be between 0 and 6")
         if self.amount is not None and self.text is not None:
             raise ValueError("fact cannot contain both amount and text")
         if self.status == "known" and self.amount is None and self.text is None:
@@ -175,6 +209,8 @@ class TableRow(Contract):
     row_id: Identifier
     label: Text
     fact_ids: tuple[Identifier, ...]
+    # How the row is drawn; the layout declares it, the page never infers it from the label.
+    row_kind: Literal["row", "subtotal", "total", "memo"] = "row"
 
 
 class ReportTable(Contract):
@@ -231,7 +267,7 @@ def validate_tables(tables: tuple[ReportTable, ...], facts: tuple[Fact, ...]) ->
 
 
 class Module(Contract):
-    schema_version: Literal["module/4"] = "module/4"
+    schema_version: Literal["module/5"] = "module/5"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -260,8 +296,10 @@ class Module(Contract):
             self.limitations or self.inherited_limitations
         ):
             raise ValueError("limited artifact requires explicit limitations")
-        if self.status == "unrun" and (self.facts or self.claims or self.tables):
-            raise ValueError("unrun module cannot carry outputs")
+        if self.status in {"unrun", "not_in_pathway"} and (
+            self.facts or self.claims or self.tables
+        ):
+            raise ValueError(f"{self.status} module cannot carry outputs")
         return self
 
 
@@ -281,15 +319,15 @@ class ModuleView(Contract):
         validate_tables(self.tables, self.facts)
         if (self.facts or self.claims or self.tables) and not self.artifact_sha256:
             raise ValueError("view outputs require an artifact hash")
-        if self.status == "unrun" and (
+        if self.status in {"unrun", "not_in_pathway"} and (
             self.facts or self.claims or self.tables or self.artifact_sha256
         ):
-            raise ValueError("unrun view cannot contain outputs")
+            raise ValueError(f"{self.status} view cannot contain outputs")
         return self
 
 
 class View(Contract):
-    schema_version: Literal["view/3"] = "view/3"
+    schema_version: Literal["view/4"] = "view/4"
     run: Run
     mode: Literal["candidate", "accepted"]
     modules: tuple[ModuleView, ...]
@@ -302,7 +340,8 @@ class View(Contract):
         if len({module.module_id for module in self.modules}) != len(self.modules):
             raise ValueError("duplicate view module")
         if self.mode == "accepted" and any(
-            module.status not in {"accepted", "restricted", "unrun", "blocked", "stale"}
+            module.status
+            not in {"accepted", "restricted", "unrun", "not_in_pathway", "blocked", "stale"}
             for module in self.modules
         ):
             raise ValueError("accepted view cannot contain candidate or rejected outputs")

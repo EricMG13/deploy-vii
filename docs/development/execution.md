@@ -177,10 +177,11 @@ see [table projection](report-tables.md). Canonical Markdown, complete Workbench
 projection, final module validation and promotion remain pending. Historical Model
 calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
 
-New stores use `execution/5` (blob storage above), embedding `module/4` table layouts,
+New stores use `execution/5` (blob storage above), embedding `module/5` table layouts,
 status-carrying inputs, stated comparisons and calculation status. Existing
 `execution/1` to `execution/4` snapshots are rejected with an explicit message
-rather than being silently rewritten. Migration is not implemented;
+rather than being silently rewritten. An `execution/5` store embedding `module/4` or
+older is rejected inside Module validation. Migration is not implemented;
 retain old stores and use a new execution directory for this version. This is an
 artifact format boundary, not permission to reset a live provider budget.
 

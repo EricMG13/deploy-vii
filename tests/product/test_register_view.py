@@ -11,7 +11,7 @@ from deploy_vii.contracts import View
 from deploy_vii.cp1_workflow import FinancialStage, cp1_register_preview, submit_cp1_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
-from deploy_vii.render import table_display
+from tests.product.oracle import expected_by_fact, front_blocks, parity_record
 from tests.product.test_execution import step_text
 from tests.product.test_narrative import draft
 from tests.product.test_workflow import cp1_case
@@ -77,6 +77,23 @@ def test_preview_requires_every_valid_stage_and_preserves_journal(
         cp1_register_preview(store, done.ticket_id, output)
 
 
+def test_register_preview_front_page_is_built_from_the_bound_registers(tmp_path: Path) -> None:
+    store, done = completed(tmp_path, partial=False)
+    path = cp1_register_preview(store, done.ticket_id, tmp_path / "report")
+    blocks = front_blocks(path.read_text())
+    assert all(b["owner"] != "Unbound" for b in blocks.values())
+    capital = blocks["capital-structure"]
+    assert capital["state"] == "populated" and capital["tab_label"] == "Capital structure"
+    assert [tab["label"] for tab in capital["tabs"]] == [
+        "EBITDA adjustments",
+        "Transaction and new debt",
+    ]
+    assert all(tab["note"] and not tab["rows"] for tab in capital["tabs"])  # registers hold no rows
+    strip = blocks["model-chart-strip"]  # the KPI dashboard (T4.10) feeds the strip
+    assert strip["state"] == "populated" and len(strip["rows"]) > 1
+    assert blocks["key-findings"]["state"] == "not_run"
+
+
 @pytest.mark.parametrize("stage", [0, 1, 2, 3])
 def test_each_retained_stage_is_recomputed_before_any_files_are_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: int
@@ -125,7 +142,10 @@ def test_register_fields_and_provenance_offline(tmp_path: Path, width: int, heig
             "nodes => nodes.map(n => [n.dataset.factId,n.textContent])"
         )
         assert len(actual) == len(module.facts)
-        assert dict(actual) == {f.fact_id: table_display(f) for f in module.facts}
+        oracle = expected_by_fact(view)
+        parity = parity_record({f.fact_id: oracle[f.fact_id] for f in module.facts}, dict(actual))
+        assert parity["compared"] == len(module.facts) and not parity["mismatches"]
+        assert all(text and text != "null" for _, text in actual)
         fact = next(
             f
             for f in module.facts
@@ -148,7 +168,7 @@ def test_register_fields_and_provenance_offline(tmp_path: Path, width: int, heig
             json.dumps(
                 {
                     "viewport": [width, height],
-                    "field_parity": "passed",
+                    "field_parity": parity,
                     "errors": errors,
                     "requests": requests,
                     "analytical_qualification": "unrun",

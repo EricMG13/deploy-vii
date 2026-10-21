@@ -47,7 +47,7 @@ supplied. There are no charts in this projection.
 
 The report uses `canonical-tables/2` and the last-written receipt uses
 `register-preview/2`. Explicit older report versions are rejected. The journal
-format remains `execution/4`: no stage output schema or validation order changed.
+format remains `execution/5`: no stage output schema or validation order changed.
 Create a new preview directory, retain earlier evidence, and do not reset spend.
 The internal `project_narrative` helper expects a caller-recomputed report; it is
 not an authentication API. `validate_canonical_tables` recomputes against external

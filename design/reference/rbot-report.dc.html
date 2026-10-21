@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@600;700&family=Red+Hat+Text:wght@400;500;600&family=Red+Hat+Mono:wght@500&display=swap" rel="stylesheet"><style>body{margin:0;background:#EEF0F5;font-family:'Red Hat Text',system-ui,sans-serif;color:#000533}a{color:#0017E5}a:hover{color:#0012B8}</style></helmet>
+<div style="max-width:1100px;margin:0 auto;padding:40px 32px 64px;display:flex;flex-direction:column;gap:22px">
+  <div style="display:flex;align-items:center;gap:14px"><img src="uploads/rbot-claude-design-pack/brand/ssim-logo-stacked-black-trim.png" alt="State Street Investment Management" style="height:40px;width:auto"><span style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#000533;color:#fff;border-radius:4px">RBOT · DIRECTION C · WORKBENCH</span></div>
+  <div><h1 style="margin:0 0 6px;font-family:'Red Hat Display',sans-serif;font-size:30px;font-weight:700;line-height:1.1">RBOT Report · design system and the six Front Pages</h1><p style="margin:0;max-width:78ch;color:#4A5068;line-height:1.5;text-wrap:pretty">Phase 2 of the Workbench direction: tokens and components specified for variable data, then each Pathway's Front Page composed only from them, with real Caesars Q2 2026 figures, illustrative judgements marked, and the Test CLO I portfolio marked synthetic. Every chart kind a module needs is drawn by the SVG kit with a table twin, summary and source line.</p></div>
+  <a href="RBOT Design System.dc.html" style="display:grid;grid-template-columns:120px 1fr;gap:18px;background:#000533;color:#fff;padding:18px 20px;text-decoration:none;align-items:center"><span style="font:600 11px 'Red Hat Mono',monospace;color:#C7CBE0;letter-spacing:.06em">DESIGN SYSTEM</span><span><span style="display:block;font-family:'Red Hat Display',sans-serif;font-size:18px;font-weight:600">Tokens, marks, call band, blocks, tables, every chart kind, icons, navigation, inspector, states</span><span style="display:block;font-size:12.5px;color:#C7CBE0;margin-top:3px">CSS custom properties with contrast values · provenance marks · status and verdict marks · scale badges · 12 chart kinds including n/a frame · dense, key/value and period-grid tables · empty, gap, Blocked and not-run states</span></span></a>
+  <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
+    <sc-for list="{{ pages }}" as="p" hint-placeholder-count="6"><a href="{{ p.href }}" style="display:flex;flex-direction:column;gap:6px;background:#fff;border:1px solid #DDE1EA;padding:14px 16px;text-decoration:none;color:#000533" style-hover="border-color:#0017E5"><span style="display:flex;align-items:center;gap:8px"><span style="font:600 10px ui-monospace,Menlo,monospace;padding:2px 6px;background:#EEF0F5;border-radius:3px">{{ p.n }}</span><span style="font-family:'Red Hat Display',sans-serif;font-size:16px;font-weight:600">{{ p.title }}</span></span><span style="font-size:13px;color:#4A5068;line-height:1.45;font-style:italic">{{ p.q }}</span><span style="font-size:12px;color:#4A5068;line-height:1.45"><b style="color:#000533">Charts and visuals:</b> {{ p.charts }}</span><span style="font-size:11.5px;color:#4A5068"><b style="color:#000533">States:</b> {{ p.states }}</span></a></sc-for>
+  </div>
+  <p style="margin:0;font-size:12px;color:#4A5068;line-height:1.5;max-width:78ch">Earlier phase: <a href="Direction C - Workbench.dc.html">Direction C exploration</a> (snapshot, covenant page, module view CP-1B, Model view, 17-module navigation). Figures from public filings, TRACE and the credit documents; no RBOT run has judged Caesars, so every score, recommendation, valuation, gate status and severity is illustrative and labelled.</p>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    return { pages: [
+      { n: 'FP 01', href: 'RBOT FP 01 Credit Snapshot.dc.html', title: 'Credit Snapshot', q: 'Should we own this issuer, in which instrument, and why?', charts: 'leverage, interest cover and liquidity line strips · maturity wall · revenue and EBITDA columns · debt stack by rank · capital structure and financials tables', states: 'illustrative call · honest CAOS state (tweak) · Primary chip · condition line for What changed' },
+      { n: 'FP 02', href: 'RBOT FP 02 Earnings Update.dc.html', title: 'Earnings Update', q: 'What did the period change, and does the credit view move?', charts: 'headline results grouped columns · segment margin dumbbell · EBITDA bridge waterfall · metric strip · period comparison with n.m. cells', states: 'No Prior Case as n/a · Recommendation and Fit absent, not hidden · guidance all n/a (G13) · severity bars' },
+      { n: 'FP 03', href: 'RBOT FP 03 Relative Value.dc.html', title: 'Relative Value', q: 'Which instrument is best compensated for its risk, and at what level?', charts: 'yield against maturity scatter · peer range strip · instrument levels (11 rows, 9 without a level) · compensation and preference · market-implied default n/a frame', states: 'illustrative Preferred/Avoid · honest Requires More Work (tweak) · stale-level clock · N/A recommendations' },
+      { n: 'FP 04', href: 'RBOT FP 04 Covenant Refinancing.dc.html', title: 'Covenant & Refinancing', q: 'Which provisions protect creditors, and can the issuer refinance?', charts: 'covenant bullets · liquidity bridge waterfall (synthetic step hatched) · maturity wall · funding gap with negatives · protection meters · red-flag severity bars', states: 'Headroom status · pressure Low/Medium/High · gaps G29–G34 in the inspector · Fit not in this Pathway' },
+      { n: 'FP 05', href: 'RBOT FP 05 Distressed Restructuring.dc.html', title: 'Distressed & Restructuring', q: 'Is the distress gate met; which path and fulcrum; what recoveries?', charts: 'gate table · recovery by class (illustrative hatched) · value allocation waterfall · claims · runway bridge · funding gap · covenant levers · rating triggers n/a frame', states: 'gate Unclear with recoveries · gate Not met with the condition line (tweak) · fulcrum marks · Not computable' },
+      { n: 'FP 06', href: 'RBOT FP 06 Portfolio Decision.dc.html', title: 'Portfolio Decision', q: 'Should each portfolio own it, how much, and which instrument?', charts: 'Fit limit bullets (% NAV) · per-portfolio recommendation with cap and final · limits table · instrument decision · challenge table', states: 'synthetic portfolio marks · Fits/Watch verdicts · Fit not run for unattached Strategies · binding limitations' }
+    ] };
+  }
+}
+</script>
+</body>
+</html>
