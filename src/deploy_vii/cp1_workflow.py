@@ -69,8 +69,13 @@ def consumer_entries(pack: PreparedPack) -> tuple[str, ...]:
 def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> StepValidation:
     step = attempt.steps[-1]
 
-    def text(index: int) -> str:
-        return store.payload(attempt.steps[index].payload_sha256)
+    def text(index: int, *, output: bool = False) -> str:
+        retained = attempt.steps[index]
+        if output:
+            if retained.output_sha256 is None:
+                raise ValueError(f"Step {retained.step_id} retains no output")
+            return store.step_output(retained.output_sha256)
+        return store.payload(retained.payload_sha256)
 
     try:
         if step.step_id == "source_context":
@@ -113,9 +118,7 @@ def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> S
         return StepValidation(output=output.model_dump_json())
     # These outputs came from trusted Python validation of the already retained
     # responses. Recompute the final artifacts from original contracts below.
-    stage_inputs = FinancialStage.model_validate_json(
-        attempt.steps[1].output or ""
-    ).narrative_inputs
+    stage_inputs = FinancialStage.model_validate_json(text(1, output=True)).narrative_inputs
     try:
         narrative = NarrativeReview.model_validate_json(text(2))
         readiness = (
@@ -139,7 +142,7 @@ def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> S
         )
         return StepValidation(output=downstream.model_dump_json())
     assert step.step_id == "readiness" and readiness is not None
-    prior = DownstreamInputs.model_validate_json(attempt.steps[2].output or "")
+    prior = DownstreamInputs.model_validate_json(text(2, output=True))
     issues = validate_downstream_review(prior, readiness)
     if issues:
         return StepValidation(issues=issues)
@@ -186,7 +189,7 @@ def cp1_statement_preview(
         raise ValueError("CP-1 statement preview inputs are stale")
     pack = store.pack(snapshot)
     verified = _validate_stage(store, pack, attempt.model_copy(update={"steps": prefix}))
-    if verified.issues or verified.output != prefix[-1].output:
+    if verified.issues or not verified.retained_as(prefix[-1]):
         raise ValueError("Financial stage differs from trusted recomputation")
     submission = FinancialSubmission.model_validate_json(store.payload(prefix[-1].payload_sha256))
     binding = {
@@ -232,7 +235,7 @@ def cp1_register_preview(store: Execution, ticket_id: str, destination: Path) ->
         verified = _validate_stage(
             store, pack, attempt.model_copy(update={"steps": attempt.steps[:index]})
         )
-        if verified.issues or verified.output != step.output:
+        if verified.issues or not verified.retained_as(step):
             raise ValueError(f"{step.step_id} stage differs from trusted recomputation")
         del verified
     payloads = [store.payload(step.payload_sha256) for step in attempt.steps]

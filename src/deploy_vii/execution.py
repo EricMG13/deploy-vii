@@ -46,14 +46,14 @@ class StepSubmission(Contract):
     inputs: tuple[Input, ...]
     payload_sha256: Hash
     status: Literal["pending", "valid", "invalid"] = "pending"
-    output: str | None = None
+    output_sha256: Hash | None = None
     issues: tuple[Text, ...] = ()
 
     @model_validator(mode="after")
     def coherent_state(self) -> Self:
-        if self.status == "pending" and (self.output is not None or self.issues):
+        if self.status == "pending" and (self.output_sha256 is not None or self.issues):
             raise ValueError("Pending step cannot have a validation result")
-        if self.status == "valid" and (self.output is None or self.issues):
+        if self.status == "valid" and (self.output_sha256 is None or self.issues):
             raise ValueError("Valid step requires output and no issues")
         if self.status == "invalid" and not self.issues:
             raise ValueError("Invalid step requires issues")
@@ -63,6 +63,10 @@ class StepSubmission(Contract):
 class StepValidation(Contract):
     output: str | None = None
     issues: tuple[Text, ...] = ()
+
+    def retained_as(self, step: "StepSubmission") -> bool:
+        """Whether this recomputed output is exactly the output the step retains."""
+        return (None if self.output is None else text_sha256(self.output)) == step.output_sha256
 
 
 class Attempt(Contract):
@@ -75,9 +79,52 @@ class Attempt(Contract):
     repair_issues: tuple[str, ...] = ()
     payload_sha256: Hash | None = None
     issues: tuple[str, ...] = ()
-    result: Module | None = None
+    result_sha256: Hash | None = None
     interruption: Text | None = None
     steps: tuple[StepSubmission, ...] = ()
+
+
+class Command(Contract):
+    """One CP-0 source-readiness command (a T8 `exact_command` fact), kept on the head."""
+
+    row_id: Identifier
+    text: str | None
+
+
+class Head(Contract):
+    """The current record of one module: a hash of its settled `Module` blob plus the few
+    fields the journal reads on every transition, so no blob is loaded to resolve inputs.
+
+    `status` and `notes` are the live state: staling changes them, never the blob.
+    """
+
+    module_id: Identifier
+    status: Literal["accepted", "restricted", "blocked", "stale"]
+    result_sha256: Hash
+    inputs: tuple[Input, ...]
+    commands: tuple[Command, ...] = ()
+    notes: tuple[Text, ...] = ()
+
+
+def commands_of(module: Module) -> tuple[Command, ...]:
+    return tuple(
+        Command(row_id=fact.row_id, text=fact.text)
+        for fact in module.facts
+        if fact.table_id == "T8" and fact.field == "exact_command"
+    )
+
+
+def head_of(result: Module) -> Head:
+    status = result.status
+    if status not in ("accepted", "restricted", "blocked"):
+        raise ValueError("Only an accepted, restricted or blocked module can be a head")
+    return Head(
+        module_id=result.module_id,
+        status=status,
+        result_sha256=result.content_hash(),
+        inputs=result.inputs,
+        commands=commands_of(result),
+    )
 
 
 class ExecutionSnapshot(Contract):
@@ -86,7 +133,7 @@ class ExecutionSnapshot(Contract):
     run: Run  # identity and scope are immutable; the pack blob must carry the same run
     pack_sha256: Hash  # SHA-256 of the canonical-JSON pack blob
     attempts: tuple[Attempt, ...] = ()
-    heads: tuple[Module, ...] = ()
+    heads: tuple[Head, ...] = ()
 
 
 def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, ...]:
@@ -102,9 +149,9 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
             raise ValueError("Required upstream is unrun, stale or blocked")
         # Only a settled blocked head degrades, and only under a restricted edge (decision 0007).
         if head.status == "accepted" or head.status == "restricted":
-            return Input(input_id=item, sha256=head.content_hash(), status=head.status)
+            return Input(input_id=item, sha256=head.result_sha256, status=head.status)
         if head.status == "blocked" and edge_rule(module_id, item) == "restricted":
-            return Input(input_id=item, sha256=head.content_hash(), status="blocked")
+            return Input(input_id=item, sha256=head.result_sha256, status="blocked")
         raise ValueError("Required upstream is unrun, stale or blocked")
 
     upstream = tuple(
@@ -115,13 +162,7 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         commands = (
             ()
             if readiness is None
-            else tuple(
-                fact.text
-                for fact in readiness.facts
-                if fact.table_id == "T8"
-                and fact.row_id == module_id
-                and fact.field == "exact_command"
-            )
+            else tuple(item.text for item in readiness.commands if item.row_id == module_id)
         )
         if commands != (f"Run {module_id}",):
             raise ValueError("CP-0 has not authorized this consumer's source readiness")
@@ -155,27 +196,26 @@ def candidate_issues(
     return tuple(dict.fromkeys(issues))
 
 
-def invalidate(heads: tuple[Module, ...], changed: str) -> tuple[Module, ...]:
+def staled(head: Head, note: str) -> Head:
+    return head.model_copy(update={"status": "stale", "notes": (*head.notes, note)})
+
+
+def invalidate(heads: tuple[Head, ...], changed: str) -> tuple[Head, ...]:
     affected = {changed}
     while True:
         expanded = affected | {
-            module.module_id
-            for module in heads
-            if any(item.input_id in affected for item in module.inputs)
+            head.module_id
+            for head in heads
+            if any(item.input_id in affected for item in head.inputs)
         }
         if expanded == affected:
             break
         affected = expanded
     return tuple(
-        module.model_copy(
-            update={
-                "status": "stale",
-                "limitations": (*module.limitations, f"Input changed: {changed}; rerun required"),
-            }
-        )
-        if module.module_id in affected and module.module_id != changed and module.status != "stale"
-        else module
-        for module in heads
+        staled(head, f"Input changed: {changed}; rerun required")
+        if head.module_id in affected and head.module_id != changed and head.status != "stale"
+        else head
+        for head in heads
     )
 
 
@@ -199,19 +239,26 @@ def blocked_ancestors(snapshot: ExecutionSnapshot, inputs: tuple[Input, ...]) ->
 
 
 def inherited_limitations(
-    snapshot: ExecutionSnapshot, attempt: Attempt, own: tuple[str, ...]
+    snapshot: ExecutionSnapshot,
+    attempt: Attempt,
+    own: tuple[str, ...],
+    load: Callable[[Head], Module],
 ) -> tuple[str, ...]:
-    """Limitations carried by the bound inputs, de-duplicated and never repeating own findings."""
+    """Limitations carried by the bound inputs, de-duplicated and never repeating own findings.
+
+    Loads the settled module of each directly bound head, and only here.
+    """
     heads = {item.module_id: item for item in snapshot.heads}
     texts: list[str] = []
     for item in attempt.inputs:
         head = heads.get(item.input_id)
         if head is None:
             continue
+        module = load(head)
         if item.status == "blocked":
-            texts.extend(f"Upstream {item.input_id} blocked: {text}" for text in head.limitations)
+            texts.extend(f"Upstream {item.input_id} blocked: {text}" for text in module.limitations)
         else:
-            texts.extend((*head.limitations, *head.inherited_limitations))
+            texts.extend((*module.limitations, *module.inherited_limitations))
     return tuple(text for text in dict.fromkeys(texts) if text not in own)
 
 
@@ -223,10 +270,12 @@ def settle(
     interruption: str | None = None,
     *,
     pack: PreparedPack,
-) -> Attempt:
+    load: Callable[[Head], Module],
+) -> tuple[Attempt, Module]:
     """Retain every response; only valid current candidates can supply accepted facts.
 
-    The attempt must already reference the stored blob of `payload`.
+    The attempt must already reference the stored blob of `payload`. Returns the finished
+    attempt (carrying the result's hash) and the result, which the caller stores as a blob.
     """
     if attempt.payload_sha256 != text_sha256(payload):
         raise ValueError("Settled payload is not the retained response")
@@ -260,7 +309,7 @@ def settle(
             else ()
         )
         own = tuple(dict.fromkeys((*candidate.limitations, *synthetic)))
-        inherited = inherited_limitations(snapshot, attempt, own)
+        inherited = inherited_limitations(snapshot, attempt, own, load)
         # Own findings or a blocked module anywhere up the input chain (a material inherited
         # gap) restrict the module; other inherited limitations are shown, not penalised.
         material = bool(blocked_ancestors(snapshot, attempt.inputs))
@@ -271,14 +320,15 @@ def settle(
                 "inherited_limitations": inherited,
             }
         )
-    return attempt.model_copy(
+    finished = attempt.model_copy(
         update={
             "status": "finished",
             "issues": issues,
-            "result": result,
+            "result_sha256": result.content_hash(),
             "interruption": interruption,
         }
     )
+    return finished, result
 
 
 def text_sha256(text: str) -> str:
@@ -380,6 +430,33 @@ class Execution:
         """Return the retained response text for a payload hash, verified against its bytes."""
         return self._load(sha256).decode()
 
+    def step_output(self, sha256: str) -> str:
+        """Return a step's validated output text, verified against its bytes."""
+        return self._load(sha256).decode()
+
+    def result(self, sha256: str) -> Module:
+        """Return a settled module from its blob; the bytes must be its canonical JSON."""
+        module = Module.model_validate_json(self._load(sha256))
+        if module.content_hash() != sha256:
+            raise ValueError("Execution result blob is not the canonical module")
+        return module
+
+    def head_module(self, head: Head) -> Module:
+        """The head's module as currently known: its blob, checked against the head record,
+        with the head's live status and staleness notes applied."""
+        module = self.result(head.result_sha256)
+        if module.module_id != head.module_id or module.inputs != head.inputs:
+            raise ValueError("Execution head does not match its result blob")
+        if commands_of(module) != head.commands:
+            raise ValueError("Execution head commands do not match its result blob")
+        if head.status == "stale":
+            return module.model_copy(
+                update={"status": "stale", "limitations": (*module.limitations, *head.notes)}
+            )
+        if module.status != head.status:
+            raise ValueError("Execution head status does not match its result blob")
+        return module
+
     def pack(self, snapshot: ExecutionSnapshot | None = None) -> PreparedPack:
         """Return the prepared pack of `snapshot` (default: the current one), verified."""
         snapshot = self.read() if snapshot is None else snapshot
@@ -467,19 +544,27 @@ class Execution:
                 )
                 self._write(snapshot)  # Retain response before a validator can fail or crash.
 
-            finished = settle(
-                snapshot, attempt, payload, validator, interruption, pack=self.pack(snapshot)
+            finished, result = settle(
+                snapshot,
+                attempt,
+                payload,
+                validator,
+                interruption,
+                pack=self.pack(snapshot),
+                load=self.head_module,
             )
-            self._save_finished(snapshot, finished)
+            self._save_finished(snapshot, finished, result)
             return finished
 
-    def _save_finished(self, snapshot: ExecutionSnapshot, finished: Attempt) -> None:
+    def _save_finished(
+        self, snapshot: ExecutionSnapshot, finished: Attempt, result: Module
+    ) -> None:
         """Caller holds the execution lock; preserve the existing invalidation policy."""
-        result = finished.result
-        assert result is not None
+        if self._store(result.model_dump_json()) != finished.result_sha256:
+            raise ValueError("Settled result is not the attempt's result")
         heads = invalidate(snapshot.heads, finished.module_id)
         if result.status != "rejected":
-            heads = (*tuple(h for h in heads if h.module_id != finished.module_id), result)
+            heads = (*tuple(h for h in heads if h.module_id != finished.module_id), head_of(result))
         self._write(
             snapshot.model_copy(
                 update={
@@ -570,7 +655,9 @@ class Execution:
             submitted = submission.model_copy(
                 update={
                     "status": "invalid" if outcome.issues else "valid",
-                    "output": outcome.output,
+                    "output_sha256": None
+                    if outcome.output is None
+                    else self._store(outcome.output),
                     "issues": outcome.issues,
                 }
             )
@@ -585,8 +672,15 @@ class Execution:
                     attempt=attempt.number,
                 ).model_dump_json()
                 attempt = attempt.model_copy(update={"payload_sha256": self._store(empty)})
-                finished = settle(snapshot, attempt, empty, lambda _: outcome.issues, pack=pack)
-                self._save_finished(snapshot, finished)
+                finished, result = settle(
+                    snapshot,
+                    attempt,
+                    empty,
+                    lambda _: outcome.issues,
+                    pack=pack,
+                    load=self.head_module,
+                )
+                self._save_finished(snapshot, finished, result)
                 return finished
             self._write(with_attempt(snapshot, attempt))
             return attempt
@@ -609,13 +703,7 @@ class Execution:
             if text_sha256(pack_json) == snapshot.pack_sha256:
                 return
             heads = tuple(
-                item.model_copy(
-                    update={
-                        "status": "stale",
-                        "limitations": (*item.limitations, "Prepared pack changed; rerun required"),
-                    }
-                )
-                for item in snapshot.heads
+                staled(item, "Prepared pack changed; rerun required") for item in snapshot.heads
             )
             self._write(
                 snapshot.model_copy(
@@ -630,7 +718,7 @@ class Execution:
     def view(self, ticket_id: str | None = None) -> View:
         snapshot = self.read()
         pack = self.pack(snapshot)
-        heads = {item.module_id: item for item in snapshot.heads}
+        heads = {item.module_id: self.head_module(item) for item in snapshot.heads}
         if ticket_id is not None:
             attempt = next(
                 (item for item in snapshot.attempts if item.ticket_id == ticket_id), None

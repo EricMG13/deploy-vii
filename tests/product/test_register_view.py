@@ -12,6 +12,7 @@ from deploy_vii.cp1_workflow import FinancialStage, cp1_register_preview, submit
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.render import table_display
+from tests.product.test_execution import step_text
 from tests.product.test_narrative import draft
 from tests.product.test_workflow import cp1_case
 
@@ -19,11 +20,11 @@ from tests.product.test_workflow import cp1_case
 def completed(tmp_path: Path, *, partial: bool = True) -> tuple[Execution, Attempt]:
     store, ticket, extraction = cp1_case(tmp_path, partial=partial)
     financial = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
-    output = FinancialStage.model_validate_json(financial.steps[-1].output or "")
+    output = FinancialStage.model_validate_json(step_text(store, financial.steps[-1]))
     narrative = submit_cp1_step(
         store, ticket.ticket_id, "narrative", draft(output.narrative_inputs).model_dump_json()
     )
-    inputs = DownstreamInputs.model_validate_json(narrative.steps[-1].output or "")
+    inputs = DownstreamInputs.model_validate_json(step_text(store, narrative.steps[-1]))
     done = submit_cp1_step(
         store,
         ticket.ticket_id,
@@ -83,7 +84,8 @@ def test_each_retained_stage_is_recomputed_before_any_files_are_written(
     store, done = completed(tmp_path)
     snapshot = store.read()
     steps = list(done.steps)
-    steps[stage] = steps[stage].model_copy(update={"output": (steps[stage].output or "") + " "})
+    tampered = step_text(store, steps[stage]) + " "
+    steps[stage] = steps[stage].model_copy(update={"output_sha256": store._store(tampered)})
     changed = done.model_copy(update={"steps": tuple(steps)})
     snapshot = snapshot.model_copy(
         update={

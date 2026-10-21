@@ -16,7 +16,7 @@ from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ConsumerReadiness, ReadinessReview, SourceAssessment
 from deploy_vii.registry import plan
 from tests.product.test_canonical_gaps import case
-from tests.product.test_execution import candidate_for, fixture_store
+from tests.product.test_execution import candidate_for, fixture_store, settled, step_text
 from tests.product.test_model_readiness import ready_case
 from tests.product.test_narrative import draft
 from tests.product.test_readiness import readiness_fixture
@@ -43,7 +43,7 @@ def test_cp0_trusted_submission_and_crash_between_promotion_writes(
         submit_cp0_review(store, ticket.ticket_id, "{}")
     monkeypatch.setattr(store, "finish", original)
     result = submit_cp0_review(store, ticket.ticket_id, review.model_dump_json())
-    assert result.result and result.result.status == "restricted"
+    assert settled(store, result).status == "restricted"
     assert store.payload(result.steps[0].payload_sha256) == review.model_dump_json()
     assert len(store.read().attempts) == 1
     assert store.begin("CP-1").number == 0
@@ -74,7 +74,7 @@ def test_cp0_invalid_review_consumes_shared_repair(tmp_path: Path, payload: str)
     for expected in ("rejected", "blocked"):
         ticket = store.begin("CP-0")
         result = submit_cp0_review(store, ticket.ticket_id, payload)
-        assert result.result and result.result.status == expected
+        assert settled(store, result).status == expected
         assert (
             result.steps[0].status == "invalid"
             and store.payload(result.steps[0].payload_sha256) == payload
@@ -137,10 +137,10 @@ def test_stage_failure_budget_is_per_module_not_per_step(tmp_path: Path) -> None
     first = store.begin("CP-0")
     store.submit_step(first.ticket_id, "CP-0", ("a", "b"), "a", "valid", valid)
     failed = store.submit_step(first.ticket_id, "CP-0", ("a", "b"), "b", "bad b", invalid)
-    assert failed.result and failed.result.status == "rejected"
+    assert settled(store, failed).status == "rejected"
     second = store.begin("CP-0")
     blocked = store.submit_step(second.ticket_id, "CP-0", ("a", "b"), "a", "bad a", invalid)
-    assert blocked.result and blocked.result.status == "blocked"
+    assert settled(store, blocked).status == "blocked"
     assert second.repair_issues == failed.issues
     with pytest.raises(ValueError, match="repair"):
         store.begin("CP-0")
@@ -254,17 +254,17 @@ def test_source_first_cp1_full_stages_remain_unaccepted(tmp_path: Path, partial:
         submit_cp1_step(store, ticket.ticket_id, "readiness", "{}")
     finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
     assert not finances.issues
-    output = FinancialStage.model_validate_json(finances.steps[-1].output or "")
+    output = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
     assert (output.model is None) is partial
     assert bool(output.model_issues) is partial
     narrative = draft(output.narrative_inputs)
     synthesis = submit_cp1_step(store, ticket.ticket_id, "narrative", narrative.model_dump_json())
     assert not synthesis.issues
-    downstream = DownstreamInputs.model_validate_json(synthesis.steps[-1].output or "")
+    downstream = DownstreamInputs.model_validate_json(step_text(store, synthesis.steps[-1]))
     review = DownstreamReview(inputs_sha256=downstream.content_hash())
     ready = submit_cp1_step(store, ticket.ticket_id, "readiness", review.model_dump_json())
     assert not ready.issues and ready.status == "pending"
-    report = DownstreamReport.model_validate_json(ready.steps[-1].output or "")
+    report = DownstreamReport.model_validate_json(step_text(store, ready.steps[-1]))
     assert report.analytical_qualification == "unrun"
     assert [s.step_id for s in ready.steps] == [
         "source_context",
@@ -292,14 +292,14 @@ def test_stale_stage_bindings_reject_and_retain_response(tmp_path: Path, stage: 
         finances = submit_cp1_step(
             store, ticket.ticket_id, "financials", extraction.model_dump_json()
         )
-        output = FinancialStage.model_validate_json(finances.steps[-1].output or "")
+        output = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
         review = draft(output.narrative_inputs)
         payload = review.model_copy(update={"inputs_sha256": "0" * 64}).model_dump_json()
         if stage == "readiness":
             submit_cp1_step(store, ticket.ticket_id, "narrative", review.model_dump_json())
             payload = DownstreamReview(inputs_sha256="0" * 64).model_dump_json()
     result = submit_cp1_step(store, ticket.ticket_id, stage, payload)
-    assert result.result and result.result.status == "rejected"
+    assert settled(store, result).status == "rejected"
     assert (
         store.payload(result.steps[-1].payload_sha256) == payload
         and result.steps[-1].status == "invalid"
@@ -340,7 +340,7 @@ def test_malformed_response_at_every_cp1_stage_consumes_attempt(tmp_path: Path, 
         finances = submit_cp1_step(
             store, ticket.ticket_id, "financials", extraction.model_dump_json()
         )
-        output = FinancialStage.model_validate_json(finances.steps[-1].output or "")
+        output = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
         if stage == "readiness":
             submit_cp1_step(
                 store,
@@ -381,7 +381,7 @@ def test_unassessed_source_gate_blocks_extraction(tmp_path: Path) -> None:
         }
     )
     result = submit_cp1_step(store, repair.ticket_id, "source_context", empty.model_dump_json())
-    assert result.issues and result.result and result.result.status == "blocked"
+    assert result.issues and settled(store, result).status == "blocked"
     assert "source gate" in result.issues[0]
 
 
@@ -463,12 +463,12 @@ def test_invalid_quarter_selection_is_retained_readiness_gap(tmp_path: Path) -> 
     store, ticket, extraction = cp1_case(tmp_path)
     extraction = extraction.model_copy(update={"quarter_ids": ("unknown", "unknown")})
     finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
-    output = FinancialStage.model_validate_json(finances.steps[-1].output or "")
+    output = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
     narrative = submit_cp1_step(
         store, ticket.ticket_id, "narrative", draft(output.narrative_inputs).model_dump_json()
     )
     assert not narrative.issues
-    downstream = DownstreamInputs.model_validate_json(narrative.steps[-1].output or "")
+    downstream = DownstreamInputs.model_validate_json(step_text(store, narrative.steps[-1]))
     assert downstream.model.requested_quarters == ("unknown", "unknown")
     assert '"quarter_selection"' in downstream.model.model_dump_json()
     assert '"BLOCK"' in downstream.model.model_dump_json()
@@ -492,7 +492,7 @@ def test_source_stage_requires_exact_current_pack_and_consumer_aliases_are_retai
         "source_context",
         prior.model_copy(update={"pack_sha256": "0" * 64}).model_dump_json(),
     )
-    assert failed.issues and failed.result and failed.result.status == "blocked"
+    assert failed.issues and settled(store, failed).status == "blocked"
     pack = store.pack()
     selected = pack.model_copy(
         update={

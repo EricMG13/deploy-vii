@@ -1,6 +1,7 @@
 """Local execution commands; supplied reviews only, no provider invocation."""
 
 import argparse
+import json
 from pathlib import Path
 
 from deploy_vii.cp0_workflow import submit_cp0_review
@@ -10,7 +11,7 @@ from deploy_vii.cp1_workflow import (
     cp1_statement_preview,
     submit_cp1_step,
 )
-from deploy_vii.execution import Execution
+from deploy_vii.execution import Attempt, Execution
 from deploy_vii.preparation import load_pack
 
 
@@ -38,6 +39,14 @@ def configure(parser: argparse.ArgumentParser) -> None:
             )
 
 
+def attempt_json(store: Execution, attempt: Attempt) -> str:
+    """The attempt record, with its settled module read from its blob for display."""
+    shown = attempt.model_dump(mode="json")
+    if attempt.result_sha256 is not None:
+        shown["result"] = store.result(attempt.result_sha256).model_dump(mode="json")
+    return json.dumps(shown)
+
+
 def execute(args: argparse.Namespace) -> str:
     if args.action == "create":
         return Execution.create(args.directory, load_pack(args.pack)).read().model_dump_json()
@@ -56,17 +65,19 @@ def execute(args: argparse.Namespace) -> str:
             )
         )
     elif args.action == "begin":
-        return store.begin(args.module).model_dump_json()
+        return attempt_json(store, store.begin(args.module))
     elif args.action == "interrupt":
-        return store.interrupt(args.ticket, args.reason).model_dump_json()
+        return attempt_json(store, store.interrupt(args.ticket, args.reason))
     elif args.action == "cp0-submit":
-        return submit_cp0_review(
-            store, args.ticket, args.review.read_text(encoding="utf-8")
-        ).model_dump_json()
+        return attempt_json(
+            store,
+            submit_cp0_review(store, args.ticket, args.review.read_text(encoding="utf-8")),
+        )
     elif args.action == "cp1-submit":
-        return submit_cp1_step(
-            store, args.ticket, args.step, args.review.read_text(encoding="utf-8")
-        ).model_dump_json()
+        return attempt_json(
+            store,
+            submit_cp1_step(store, args.ticket, args.step, args.review.read_text(encoding="utf-8")),
+        )
     elif args.action == "step-output":
         step = next(
             (
@@ -78,7 +89,7 @@ def execute(args: argparse.Namespace) -> str:
             ),
             None,
         )
-        if step is None or step.status != "valid" or step.output is None:
+        if step is None or step.status != "valid" or step.output_sha256 is None:
             raise ValueError("No valid retained output for this ticket and step")
-        return step.output
+        return store.step_output(step.output_sha256)
     return store.read().model_dump_json()

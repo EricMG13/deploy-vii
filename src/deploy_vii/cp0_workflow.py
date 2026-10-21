@@ -57,7 +57,7 @@ def submit_cp0_review(store: Execution, ticket_id: str, payload: str) -> Attempt
         raise ValueError("Retained steps do not match CP-0")
     # Recompute rather than treating stored or caller-supplied output as authority.
     outcome = _validate_review(store, store.pack(), attempt)
-    if outcome.issues or outcome.output != attempt.steps[0].output:
+    if outcome.issues or not outcome.retained_as(attempt.steps[0]):
         raise ValueError("Retained CP-0 output differs from trusted validation")
     candidate = Module.model_validate_json(outcome.output or "")
     return store.finish(

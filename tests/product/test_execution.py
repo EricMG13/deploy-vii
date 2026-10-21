@@ -7,8 +7,17 @@ from typing import Literal
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from deploy_vii.contracts import Claim, Input, Module
-from deploy_vii.execution import Execution, candidate_issues, current_inputs
+from deploy_vii.contracts import Claim, Fact, Input, Module
+from deploy_vii.execution import (
+    Attempt,
+    Command,
+    Execution,
+    Head,
+    StepSubmission,
+    StepValidation,
+    candidate_issues,
+    current_inputs,
+)
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
 from deploy_vii.render import render
@@ -42,12 +51,24 @@ def candidate_for(store: Execution, module_id: str, attempt: int = 0) -> Module:
     )
 
 
+def settled(store: Execution, attempt: Attempt) -> Module:
+    """The settled module of a finished attempt, read from its result blob."""
+    assert attempt.result_sha256 is not None
+    return store.result(attempt.result_sha256)
+
+
+def step_text(store: Execution, step: StepSubmission) -> str:
+    """A step's validated output, read from its blob."""
+    assert step.output_sha256 is not None
+    return store.step_output(step.output_sha256)
+
+
 def accept_cp0(store: Execution) -> str:
     _, review = readiness_fixture()
     ticket = store.begin("CP-PARSE")
     candidate = build_readiness(store.pack(), review)
     result = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
-    assert result.result is not None and result.result.status == "restricted"
+    assert settled(store, result).status == "restricted"
     return ticket.ticket_id
 
 
@@ -69,9 +90,8 @@ def test_initial_gates_and_current_lineage(tmp_path: Path) -> None:
         store.begin("CP-1A")
     candidate = candidate_for(store, "CP-1")
     result = store.finish(first.ticket_id, candidate.model_dump_json(), lambda _: ())
-    assert result.result is not None
-    carried = {*result.result.limitations, *result.result.inherited_limitations}
-    assert set(store.read().heads[0].limitations) <= carried
+    carried = {*settled(store, result).limitations, *settled(store, result).inherited_limitations}
+    assert set(store.head_module(store.read().heads[0]).limitations) <= carried
     assert store.view().mode == "accepted"
 
 
@@ -79,14 +99,14 @@ def test_one_targeted_repair_then_block_and_retain_payloads(tmp_path: Path) -> N
     store = fixture_store(tmp_path)
     first = store.begin("CP-0")
     rejected = store.finish(first.ticket_id, '{"bad":true}', lambda _: ())
-    assert rejected.result is not None and rejected.result.status == "rejected"
+    assert settled(store, rejected).status == "rejected"
     assert store.view().modules[0].status == "unrun"
     repair = store.begin("CP-0")
     assert repair.number == 1
     assert repair.repair_of == first.ticket_id
     assert repair.repair_issues == rejected.issues
     blocked = store.finish(repair.ticket_id, "not json", lambda _: ())
-    assert blocked.result is not None and blocked.result.status == "blocked"
+    assert settled(store, blocked).status == "blocked"
     assert [store.payload(item.payload_sha256) for item in store.read().attempts] == [
         '{"bad":true}',
         "not json",
@@ -116,7 +136,7 @@ def test_interruption_and_process_resume_keep_same_budget(tmp_path: Path) -> Non
     _, review = readiness_fixture()
     candidate = build_readiness(resumed.pack(), review, attempt=1)
     accepted = resumed.finish(repair.ticket_id, candidate.model_dump_json(), lambda _: ())
-    assert accepted.result is not None and accepted.result.status == "restricted"
+    assert settled(store, accepted).status == "restricted"
     with pytest.raises(ValueError, match="settled"):
         Execution(store.directory).begin("CP-0")
 
@@ -282,16 +302,11 @@ def test_snapshot_tampering_incomplete_pointer_and_existing_store(tmp_path: Path
 def test_transitive_invalidation_is_local_to_consumers() -> None:
     from deploy_vii.execution import invalidate
 
-    pack, _ = readiness_fixture()
-    run = pack.run
-
-    def artifact(module_id: str, upstream: tuple[str, ...]) -> Module:
-        return Module(
-            run_id=run.run_id,
-            issuer_id=run.issuer_id,
-            as_of=run.as_of,
+    def artifact(module_id: str, upstream: tuple[str, ...]) -> Head:
+        return Head(
             module_id=module_id,
             status="accepted",
+            result_sha256="0" * 64,
             inputs=tuple(Input(input_id=item, sha256="0" * 64) for item in upstream),
         )
 
@@ -401,9 +416,7 @@ def test_concurrent_finish_publishes_exactly_one_result(tmp_path: Path) -> None:
 def settle_module(store: Execution, module_id: str, candidate: Module | None = None) -> Module:
     ticket = store.begin(module_id)
     payload = candidate if candidate is not None else candidate_for(store, module_id)
-    result = store.finish(ticket.ticket_id, payload.model_dump_json(), lambda _: ())
-    assert result.result is not None
-    return result.result
+    return settled(store, store.finish(ticket.ticket_id, payload.model_dump_json(), lambda _: ()))
 
 
 def block_module(store: Execution, module_id: str) -> Module:
@@ -411,8 +424,9 @@ def block_module(store: Execution, module_id: str) -> Module:
     for _ in range(2):
         ticket = store.begin(module_id)
         result = store.finish(ticket.ticket_id, "not json", lambda _: ())
-    assert result.result is not None and result.result.status == "blocked"
-    return result.result
+    blocked = settled(store, result)
+    assert blocked.status == "blocked"
+    return blocked
 
 
 def settle_through(store: Execution, *module_ids: str) -> None:
@@ -474,18 +488,20 @@ def test_unrun_stale_or_rejected_producer_never_degrades(tmp_path: Path) -> None
     settle_through(store, "CP-1", "CP-1A", "CP-2")
     first = store.begin("CP-4")
     rejected = store.finish(first.ticket_id, "not json", lambda _: ())
-    assert rejected.result is not None and rejected.result.status == "rejected"
+    assert settled(store, rejected).status == "rejected"
     # CP-4 is selected and its edge to CP-3 is restricted, yet a rejected attempt has no head.
     with pytest.raises(ValueError, match="upstream"):
         store.begin("CP-3")
 
     repair = store.begin("CP-4")
-    blocked = store.finish(repair.ticket_id, "not json", lambda _: ()).result
-    assert blocked is not None and blocked.status == "blocked"
+    blocked = settled(store, store.finish(repair.ticket_id, "not json", lambda _: ()))
+    assert blocked.status == "blocked"
     snapshot = store.read()
     for status in ("stale", "rejected", "unrun"):
-        changed = blocked.model_copy(update={"status": status})
-        heads = tuple(changed if item.module_id == "CP-4" else item for item in snapshot.heads)
+        heads = tuple(
+            item.model_copy(update={"status": status}) if item.module_id == "CP-4" else item
+            for item in snapshot.heads
+        )
         with pytest.raises(ValueError, match="upstream"):
             current_inputs(snapshot.model_copy(update={"heads": heads}), "CP-3")
     assert store.begin("CP-3").number == 0  # only a settled blocked head degrades
@@ -544,8 +560,8 @@ def test_pass_reachable_with_immaterial_inherited_gap(tmp_path: Path) -> None:
     store = Execution.create(tmp_path / "execution", pack)
     ticket = store.begin("CP-0")
     candidate = build_readiness(store.pack(), review)
-    cp0 = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ()).result
-    assert cp0 is not None and cp0.status == "restricted"
+    cp0 = settled(store, store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ()))
+    assert cp0.status == "restricted"
     assert len(cp0.limitations) == 1 and not cp0.inherited_limitations
 
     clean = Module(
@@ -645,17 +661,9 @@ def test_blocked_ancestors_terminates_on_diamond_and_cycle(tmp_path: Path) -> No
     from deploy_vii.execution import blocked_ancestors
 
     store = public_store_after_cp0(tmp_path)
-    run = store.read().run
 
-    def head(module_id: str, *upstream: Input) -> Module:
-        return Module(
-            run_id=run.run_id,
-            issuer_id=run.issuer_id,
-            as_of=run.as_of,
-            module_id=module_id,
-            status="accepted",
-            inputs=upstream,
-        )
+    def head(module_id: str, *upstream: Input) -> Head:
+        return Head(module_id=module_id, status="accepted", result_sha256="0" * 64, inputs=upstream)
 
     def link(module_id: str, status: Literal["accepted", "blocked"] = "accepted") -> Input:
         return Input(input_id=module_id, sha256="0" * 64, status=status)
@@ -690,14 +698,15 @@ def test_consumer_over_blocked_producer_is_staled_when_producer_changes(tmp_path
 
     store = fixture_store(tmp_path)
     settle_through(store, "CP-1", "CP-1A", "CP-2")
-    blocked = block_module(store, "CP-4")
+    block_module(store, "CP-4")
     assert settle_module(store, "CP-3").status == "restricted"
 
     # A change to the blocked producer stales its restricted consumer, not the producer itself.
+    before = {item.module_id: item for item in store.read().heads}
     changed = {item.module_id: item for item in invalidate(store.read().heads, "CP-4")}
     assert changed["CP-3"].status == "stale"
-    assert "Input changed: CP-4; rerun required" in changed["CP-3"].limitations
-    assert changed["CP-4"] == blocked
+    assert "Input changed: CP-4; rerun required" in changed["CP-3"].notes
+    assert changed["CP-4"] == before["CP-4"]
     assert changed["CP-2"].status == "restricted"  # not downstream of CP-4
 
     # Through the journal: replacing the pack stales the blocked producer and its consumer.
@@ -783,7 +792,9 @@ def test_blob_store_writes_pack_and_payload_once(tmp_path: Path) -> None:
     store.finish(repair.ticket_id, payload, lambda _: ())  # the same bytes in a second attempt
     attempts = store.read().attempts
     assert [item.payload_sha256 for item in attempts] == [digest(payload)] * 2
-    assert blob_names(store) == {digest(pack_json), digest(payload)}
+    results = {item.result_sha256 for item in attempts}
+    assert len(results) == 2 and None not in results  # two different settled modules
+    assert blob_names(store) == {digest(pack_json), digest(payload), *results}
     assert store.payload(digest(payload)) == payload
 
     snapshots = list((store.directory / "snapshots").iterdir())
@@ -795,27 +806,151 @@ def test_blob_store_writes_pack_and_payload_once(tmp_path: Path) -> None:
         assert pack.sources[0].spans[0].text.encode() not in raw
 
 
-def test_snapshot_bytes_do_not_grow_with_attempts(tmp_path: Path) -> None:
-    payload_size = 20_000
+def accepting(_pack: PreparedPack, _attempt: Attempt) -> StepValidation:
+    return StepValidation(output="STEP-OUTPUT-MARKER-3")
+
+
+def test_result_and_step_output_are_blobs(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
-    meter = TransitionMeter(store.directory)
-    written: list[int] = []
-    for number in range(5):
-        if number and number % 2 == 0:  # a new pack gives CP-0 a fresh input set and budget
+    ticket = store.begin("CP-0")
+    step = store.submit_step(ticket.ticket_id, "CP-0", ("a",), "a", "raw", accepting)
+    marker = Fact(fact_id="marker", label="Marker", text="FACT-TEXT-MARKER-5", status="known")
+    candidate = candidate_for(store, "CP-0").model_copy(update={"facts": (marker,)})
+    finished = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+
+    result = settled(store, finished)
+    assert result.facts == (marker,)
+    assert finished.result_sha256 == result.content_hash()
+    (head,) = store.read().heads
+    assert head.result_sha256 == finished.result_sha256  # the head shares the attempt's blob
+    output_sha = step.steps[0].output_sha256
+    assert output_sha == digest("STEP-OUTPUT-MARKER-3")
+    assert output_sha is not None
+    assert store.step_output(output_sha) == "STEP-OUTPUT-MARKER-3"
+    assert (store.directory / "blobs" / head.result_sha256).read_bytes() == (
+        result.model_dump_json().encode()
+    )
+    for path in (store.directory / "snapshots").iterdir():
+        raw = path.read_bytes()
+        assert b"FACT-TEXT-MARKER-5" not in raw and b"STEP-OUTPUT-MARKER-3" not in raw
+
+    # An identical step output in another attempt is the same blob.
+    pack = store.pack()
+    source = pack.sources[0].model_copy(update={"limitation": "Another revision"})
+    store.replace_pack(pack.model_copy(update={"sources": (source,)}))
+    again = store.begin("CP-0")
+    store.submit_step(again.ticket_id, "CP-0", ("a",), "a", "raw", accepting)
+    assert sum(1 for name in blob_names(store) if name == output_sha) == 1
+    assert store.read().attempts[1].steps[0].output_sha256 == output_sha
+
+    # A stale head keeps its blob and shows its staleness notes.
+    stale = store.read().heads[0]
+    assert stale.status == "stale" and stale.result_sha256 == head.result_sha256
+    shown = store.head_module(stale)
+    assert shown.status == "stale" and shown.limitations[-1] == stale.notes[-1]
+    assert shown.facts == (marker,)
+
+
+def test_result_and_step_output_blobs_are_verified(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    ticket = store.begin("CP-0")
+    step = store.submit_step(ticket.ticket_id, "CP-0", ("a",), "a", "raw", accepting)
+    candidate = candidate_for(store, "CP-0").model_dump_json()
+    finished = store.finish(ticket.ticket_id, candidate, lambda _: ())
+    result_sha, output_sha = finished.result_sha256, step.steps[0].output_sha256
+    assert result_sha is not None and output_sha is not None
+    result_blob = store.directory / "blobs" / result_sha
+    output_blob = store.directory / "blobs" / output_sha
+    original = result_blob.read_bytes()
+
+    result_blob.write_text("tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.result(result_sha)
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.view()
+    result_blob.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        store.result(result_sha)
+    with pytest.raises(ValueError, match="missing"):
+        store.view()
+    # Bytes that match their own name but are not the canonical module are refused too.
+    spaced = json.dumps(json.loads(original), indent=1).encode()
+    other = store.directory / "blobs" / hashlib.sha256(spaced).hexdigest()
+    other.write_bytes(spaced)
+    with pytest.raises(ValueError, match="canonical module"):
+        store.result(other.name)
+    result_blob.write_bytes(original)
+    assert store.result(result_sha) == settled(store, finished)
+
+    output_blob.write_text("tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.step_output(output_sha)
+    output_blob.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        store.step_output(output_sha)
+    with pytest.raises(ValueError, match="blob hash"):
+        store.step_output("../current")
+
+    # A head must describe its result blob.
+    head = store.read().heads[0]
+    for wrong in (
+        head.model_copy(update={"inputs": ()}),
+        head.model_copy(update={"module_id": "CP-1"}),
+        head.model_copy(update={"status": "blocked"}),
+        head.model_copy(update={"commands": (Command(row_id="CP-1", text="Run CP-1"),)}),
+    ):
+        with pytest.raises(ValueError, match="head"):
+            store.head_module(wrong)
+
+
+def grow(store: Execution, payload_size: int, rounds: int) -> tuple[dict[str, list[int]], int]:
+    """Run begin, step and finish transitions; return snapshot bytes per kind and attempts."""
+    sizes: dict[str, list[int]] = {"begin": [], "step": [], "finish": []}
+
+    def measure(kind: str) -> None:
+        sizes[kind].append(len(snapshot_bytes(store)))
+
+    for number in range(rounds):
+        if number:  # a new pack gives CP-0 a fresh input set and budget
             pack = store.pack()
             source = pack.sources[0].model_copy(update={"limitation": f"Pack revision {number}"})
             store.replace_pack(pack.model_copy(update={"sources": (source,)}))
-        meter()  # discard bytes written by earlier transitions
-        ticket = store.begin("CP-0")
-        written.append(meter())
-        store.finish(ticket.ticket_id, f"{number}" + "x" * payload_size, lambda _: ())
+        for attempt in range(2):
+            ticket = store.begin("CP-0")
+            measure("begin")
+            if attempt == 0:
+                store.submit_step(
+                    ticket.ticket_id, "CP-0", ("a",), "a", "s" * payload_size, accepting
+                )
+                measure("step")
+            store.finish(ticket.ticket_id, f"{number}{attempt}" + "x" * payload_size, no_issues)
+            measure("finish")
+    return sizes, len(store.read().attempts)
 
-    attempts = store.read().attempts
-    assert len(attempts) == 5
-    record = max(len(item.model_dump_json()) for item in attempts)
-    assert record < payload_size  # a record carries a payload hash, not the payload
-    assert written[4] - written[0] <= 5 * record
-    assert written[4] - written[0] < 4 * payload_size  # payloads are not rewritten
+
+def no_issues(_: Module) -> tuple[str, ...]:
+    return ()
+
+
+def test_snapshot_bytes_do_not_grow_with_attempts(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path / "large")
+    sizes, count = grow(store, 20_000, rounds=3)
+    assert count == 6
+
+    # The allowance is one attempt record (it holds hashes, a step record and issue text, but
+    # no payload, result or output content), plus the head record that appears with the first
+    # settled module. Derived from the store, not a magic number.
+    snapshot = store.read()
+    record = max(len(item.model_dump_json()) for item in snapshot.attempts)
+    heads = sum(len(item.model_dump_json()) for item in snapshot.heads)
+    assert record < 3_000  # a few hundred bytes of hashes; never the 20,000-byte payloads
+    for kind, written in sizes.items():
+        assert written[-1] - written[0] <= count * record + heads, kind
+
+    # Independent of content: the same transitions with payloads 100 times smaller write
+    # snapshots of identical size.
+    small, _ = grow(fixture_store(tmp_path / "small"), 200, rounds=3)
+    assert small == sizes
 
 
 def test_missing_or_tampered_blob_is_rejected(tmp_path: Path) -> None:
@@ -940,7 +1075,14 @@ def test_settle_refuses_a_payload_the_attempt_does_not_reference(tmp_path: Path)
     store = fixture_store(tmp_path)
     ticket = store.begin("CP-0")
     with pytest.raises(ValueError, match="retained response"):
-        settle(store.read(), ticket, "unretained", lambda _: (), pack=store.pack())
+        settle(
+            store.read(),
+            ticket,
+            "unretained",
+            lambda _: (),
+            pack=store.pack(),
+            load=store.head_module,
+        )
 
 
 def test_transition_meter_counts_new_and_changed_files_once(tmp_path: Path) -> None:

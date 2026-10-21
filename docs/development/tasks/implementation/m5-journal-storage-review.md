@@ -31,8 +31,14 @@ Brief: [m5-journal-storage-brief.md](m5-journal-storage-brief.md).
 - `run: Run` is stored inline in the snapshot in addition to `pack_sha256`, because
   `current_inputs(snapshot, module_id)` must keep its signature and needs the selected
   modules without reading the pack. `pack()` rejects a blob whose run differs.
-- Attempt `result` modules and step `output` text stay inline (not in the brief).
-  They still grow the snapshot with attempts; only pack and payloads are deduplicated.
+- Fix round 1 (coordinator ruling): the attempt `result` and the step `output` are blobs
+  too (`result_sha256`, `output_sha256`), and `heads` became `Head` records (hash of the
+  settled module blob, `inputs`, CP-0 `commands`, live `status`, staleness `notes`) so
+  that no snapshot field holds module content. `current_inputs` keeps its signature by
+  reading `commands` from the head. `invalidate` now works on heads, `settle` returns
+  `(attempt, result)` and takes a `load` callable for upstream modules, and the CLI adds
+  the settled module to the attempt JSON it prints. Details of what is loaded when are in
+  docs/development/execution.md.
 
 ## Reviews
 

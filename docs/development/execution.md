@@ -57,25 +57,46 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
 <directory>/
   current                  pointer: hex SHA-256 of the current snapshot
   snapshots/<sha256>.json  small immutable snapshots, each naming its parent
-  blobs/<sha256>           the prepared pack and every response payload, stored once
+  blobs/<sha256>           pack, payload, result and step-output blobs, each stored once
   .lock                    POSIX flock serialising transitions
 ```
 
-- A snapshot holds the run identity (`run`), `pack_sha256`, the attempts and the heads.
-  An attempt or step carries `payload_sha256`, not the response text. `parent` and
-  `snapshot.content_hash()` cover only this small snapshot, so a transition writes a
-  snapshot whose size does not include the pack or any payload.
-- The pack blob is the canonical `PreparedPack.model_dump_json()` UTF-8 bytes; its
-  SHA-256 is `pack_sha256` and is the hash bound as `Input("prepared-pack", ...)`.
-  The canonical form is deterministic (field order of the contract, Decimal strings),
-  so the pack hash is the same across runs. A payload blob is the response text as
-  UTF-8; identical responses in different attempts share one blob.
-- `Execution.pack(snapshot=None)` and `Execution.payload(sha256)` are the only readers.
-  Each reads the blob, checks its SHA-256 against the name it was asked for, and
-  rejects a missing or mismatching blob with `ValueError`; `pack()` also requires the
-  pack's run to equal the snapshot's `run` and the bytes to be the canonical form.
+- A snapshot holds the run identity (`run`), `pack_sha256`, the attempts and the heads,
+  and nothing else of substance. An attempt carries `payload_sha256` and `result_sha256`;
+  a step carries `payload_sha256` and `output_sha256`; a head is a small record (below).
+  `parent` and `snapshot.content_hash()` cover only this snapshot, so the bytes written
+  by a transition depend on the number of records, not on any pack, payload, result or
+  output content.
+- Four blob kinds, each named by the SHA-256 of its bytes (identical content is one blob):
+
+  | Blob | Bytes (canonical form) | Read with | Checked |
+  | --- | --- | --- | --- |
+  | pack | `PreparedPack.model_dump_json()` UTF-8; its SHA-256 is `pack_sha256`, the hash bound as `Input("prepared-pack", ...)` | `pack(snapshot=None)` | hash; same `run` as the snapshot; bytes are exactly the canonical JSON |
+  | payload | the response text, UTF-8 (module response or step response) | `payload(sha256)` | hash |
+  | result | the settled `Module.model_dump_json()`, so `result_sha256 == module.content_hash()` (this is also the hash a consumer binds as an `Input`) | `result(sha256)` | hash; bytes are exactly the canonical module |
+  | step output | the validator's output text, UTF-8 | `step_output(sha256)` | hash |
+
+  The pack and module forms are deterministic (contract field order, Decimal strings),
+  so hashes are stable across runs.
+- A head is `Head(module_id, status, result_sha256, inputs, commands, notes)`. `status`
+  and `notes` are the live state: staling sets `status: "stale"` and appends a note
+  (`Input changed: ...` or `Prepared pack changed; ...`) and never rewrites the result
+  blob. `inputs` and `commands` (the CP-0 T8 `exact_command` facts) duplicate fields of
+  the blob so that no blob is loaded to resolve them. `Execution.head_module(head)`
+  loads the blob, rejects it if its module id, inputs, commands or (for a live head)
+  status differ from the head, and applies the status and notes, which reproduces the
+  module the journal formerly kept inline (stale limitations included).
+- What is loaded, and when. `current_inputs`, `invalidate`, `blocked_ancestors` and
+  `begin` read only snapshot fields (no blob). `settle` loads the result blob of each
+  directly bound upstream head, only when a candidate validates, to carry its
+  limitations. `finish` and `submit_step` load the pack (after retaining the response)
+  and, on resume, the retained payload. `view()` loads the pack and every head's
+  result blob. `cp1_workflow` previews load the pack and the retained step payloads;
+  recomputed step outputs are compared by hash, not loaded.
+- Every reader reads the blob, checks its SHA-256 against the name it was asked for, and
+  rejects a missing or mismatching blob with `ValueError`, never an empty value.
   `read()` verifies the snapshot against the pointer and its schema but does not read
-  blobs, so a bad blob is reported when it is used, never as an empty value.
+  blobs, so a bad blob is reported when it is used.
 - Writes are temp file, fsync, rename. Writing bytes whose hash already exists is a
   no-op; a different file at an existing hash path is corruption and is refused, never
   overwritten. A blob is written before the snapshot that references it, so a crash
@@ -85,8 +106,9 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   and the configured POSIX workflow, not Windows. Directory fsync and power-loss
   durability are not claimed. No compaction or garbage collection is enabled.
   Local hashes detect changed bytes, not an adversary rewriting every hash and pointer.
-- Attempt results (`Module`) and step outputs are still stored inline in the snapshot
-  and in `heads`; only the pack and the response payloads are blobs.
+- CLI: commands that print an attempt (`begin`, `interrupt`, `cp0-submit`, `cp1-submit`)
+  add a `result` key read from the result blob for display; `create` and `status` print
+  the snapshot itself, which holds hashes. `step-output` prints the output blob.
 - `tests/product/test_execution.py::TransitionMeter` reports the bytes written per
   transition from a directory listing (new or changed files since its previous call).
 

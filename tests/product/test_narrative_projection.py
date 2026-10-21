@@ -27,6 +27,7 @@ from deploy_vii.narrative_projection import _fields, project_narrative
 from deploy_vii.render import table_display
 from tests.product.test_canonical_gaps import case
 from tests.product.test_canonical_tables import cells
+from tests.product.test_execution import step_text
 from tests.product.test_financials import book
 from tests.product.test_model_readiness import ready_case
 from tests.product.test_narrative import finding, populated
@@ -223,11 +224,11 @@ def test_narrative_preview_offline_exact_claims_and_provenance(
 ) -> None:
     store, ticket, extraction = cp1_case(tmp_path, partial=True)
     financial = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
-    output = FinancialStage.model_validate_json(financial.steps[-1].output)
+    output = FinancialStage.model_validate_json(step_text(store, financial.steps[-1]))
     narrative = submit_cp1_step(
         store, ticket.ticket_id, "narrative", supplied(output.narrative_inputs).model_dump_json()
     )
-    inputs = DownstreamInputs.model_validate_json(narrative.steps[-1].output)
+    inputs = DownstreamInputs.model_validate_json(step_text(store, narrative.steps[-1]))
     submit_cp1_step(
         store,
         ticket.ticket_id,
