@@ -24,7 +24,8 @@ are distinct. Kernel FX conversions do not overwrite source amounts here.
 Each field retains its citations; the row's primary source locator is only the
 first applicable locator and does not represent every field's evidence.
 
-Unknown values display `null` with reasons and gap entries. Empty reference lists,
+In the r14 Markdown transport, unknown values display `null` with reasons and gap
+entries. HTML uses decision 0004's gap states (`∅ G#`) instead. Empty reference lists,
 non-quarter fiscal-quarter metadata and absent component references are explicit
 not-applicable fields. The pinned exceptions for unstated floors and inapplicable
 fixed/floating terms do not create value gaps; conflicts and unknown amortisation

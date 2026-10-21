@@ -5,7 +5,9 @@ request to reconcile the research and configure the development environment.
 This supersedes research-only setup restrictions and conflicting historical
 workflow recommendations. It authorizes environment setup, not analytical product work.
 The Workers, Reviews and Plugins/hooks rows are superseded by
-[decision 0003](0003-claude-coordinated-environment.md).
+[decision 0003](0003-claude-coordinated-environment.md); the Frontend row by
+[decision 0004](0004-design-system-frontend.md); the Publication row's "No automatic
+merge" by [decision 0006](0006-delegated-choices-and-orchestration.md).
 
 ## Decisions
 

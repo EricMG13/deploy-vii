@@ -10,7 +10,9 @@ instruction_file = "CLAUDE.md"
 coordinator = "claude-code"
 context_index = "docs/development/CONTEXT.md"
 task_root = "docs/development/tasks"
-publication_owner = "coordinator"
+publication_owner = "pr-session"
+publication_decision = "docs/decisions/0006-delegated-choices-and-orchestration.md"
+merge_policy = "squash-after-local-gates-and-recorded-reviews"
 worker_publication = "local-commits-only"
 confidence_review = "after-code-changes"
 rewrite_tournament = "key-areas-only"
@@ -40,7 +42,8 @@ evidence_root = "artifacts/context-policy"
 
 [model_tests]
 provider = "openrouter"
-credential_env = "OPENROUTER_API_KEY"
+credential_file = "~/Documents/op router.rtf"
+credential_handling = "read-at-dispatch-in-memory-never-logged"
 selection = "uniform-random-among-eligible"
 record_selection_seed = true
 default_effort = "high"
@@ -55,6 +58,12 @@ retain_requests_outputs_metrics_events = true
 missing_metrics = "null-with-reason"
 provider_fallback = "observable-and-separately-classified"
 version_policy = "resolve-and-pin-per-comparison-batch"
+regime = "docs/decisions/0005-methodology-changes-and-regular-testing.md"
+internal_tiers = ["I1-every-change", "I2-replay-on-contract-change", "I3-each-milestone"]
+external_tiers = ["E1-module-completion", "E2-milestone-matched-comparison", "E3-weekly-canary"]
+recurring_caps_usd = { e1_per_case = 3, e2_per_milestone = 15, e3_per_week = 3 }
+cumulative_ceiling_usd = 200
+no_credit_fallback = "native-luna-else-labelled-claude-agent-proxy-cohort"
 
 [[model_tests.candidates]]
 key = "luna"
@@ -74,7 +83,10 @@ catalog_checked = "2026-10-20"
 
 [frontend]
 direction = "C-Workbench"
-reference = "design/reference/direction-c-workbench.dc.html"
+reference = "design/reference/rbot-design-system.dc.html"
+reference_decision = "docs/decisions/0004-design-system-frontend.md"
+design_project = "claude-design:1611c8f7-873d-4ee5-82f3-013d0a4d3041"
+superseded_reference = "design/reference/direction-c-workbench.dc.html"
 incremental_module_rendering = true
 accepted_artifacts_only = true
 candidate_preview_labelled = true

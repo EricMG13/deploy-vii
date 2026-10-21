@@ -7,6 +7,6 @@
     "PONYTAIL_DEFAULT_MODE": "lite"
   },
   "permissions": {
-    "deny": ["Read(./.env)"]
+    "deny": ["Read(./.env)", "Read(~/Documents/op router.rtf)"]
   }
 }
