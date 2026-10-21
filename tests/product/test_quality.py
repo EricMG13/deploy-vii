@@ -10,11 +10,14 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.quality import (
+    WEIGHTS,
     ClaimAssessment,
     ClaimCandidate,
     CoverageField,
+    EvidenceCeiling,
     EvidenceLineage,
     Lineage,
+    LineageBasis,
     QaFinding,
     QualityInputs,
     QualityReport,
@@ -24,6 +27,11 @@ from deploy_vii.quality import (
     validate_quality_report,
     validate_quality_review,
 )
+
+
+def cited(*ids: str) -> tuple[EvidenceCeiling, ...]:
+    """Directly Sourced ceilings, so a fixture's supplied classes are never upgrades."""
+    return tuple(EvidenceCeiling.of(i, "citation") for i in ids)
 
 
 def fixture(*, present: int = 19, total: int = 20) -> tuple[QualityInputs, QualityReview]:
@@ -41,6 +49,7 @@ def fixture(*, present: int = 19, total: int = 20) -> tuple[QualityInputs, Quali
         source_gate="pass",
         module_status="complete",
         references=tuple(f"e{i}" for i in range(12)),
+        ceilings=cited(*(f"e{i}" for i in range(12))),
     )
     review = QualityReview(
         inputs_sha256=inputs.content_hash(),
@@ -304,6 +313,7 @@ def build(**changes: object) -> dict[str, Any]:
         "source_gate": "pass",
         "module_status": "complete",
         "references": ("e", "f"),
+        "ceilings": cited("e", "f"),
     }
     return base | changes
 
@@ -530,8 +540,16 @@ def near_tie_scenarios(draw: st.DrawFn) -> tuple[Claims, int, int, str, str, Fin
 
 
 def _realize(
-    claims: Claims, present: int, total: int, gate: str, module: str, findings: Findings
+    claims: Claims,
+    present: int,
+    total: int,
+    gate: str,
+    module: str,
+    findings: Findings,
+    bases: Sequence[LineageBasis] = (),
 ) -> tuple[QualityInputs, QualityReview]:
+    """Evidence ``e{i}_{j}`` takes ``bases`` in order; unlisted evidence is cited."""
+
     def finding(i: int, severity: str, status: str) -> QaFinding:
         return QaFinding.model_validate(
             {
@@ -544,6 +562,8 @@ def _realize(
         )
 
     items = [(i, *f) for i, f in enumerate(findings)]
+    references = tuple(f"e{i}_{j}" for i, (_, ls) in enumerate(claims) for j in range(len(ls)))
+    kinds = (*bases, *("citation",) * (len(references) - len(bases)))
     inputs = QualityInputs.model_validate(
         build(
             artifact_sha256="b" * 64,
@@ -560,8 +580,9 @@ def _realize(
             ),
             source_gate=gate,
             module_status=module,
-            references=tuple(
-                f"e{i}_{j}" for i, (_, ls) in enumerate(claims) for j in range(len(ls))
+            references=references,
+            ceilings=tuple(
+                EvidenceCeiling.of(r, b) for r, b in zip(references, kinds, strict=True)
             ),
             inherited_findings=tuple(finding(i, sev, st_) for i, sev, st_, own in items if own),
         )
@@ -663,3 +684,143 @@ def test_adaptation_source_gate_and_module_status_map_to_d1_without_any_finding(
     assert (state, score) == (status, result.confidence_score)
     assert result.qa_status == status != "Passed"
     assert result.confidence_score == cap  # fully covered and sourced, so the cap binds
+
+
+# --- MC-5: the producer owns each evidence ID's lineage ceiling --------------------------------
+
+
+def ceilinged(
+    inputs: QualityInputs, review: QualityReview, **bases: LineageBasis
+) -> tuple[QualityInputs, QualityReview]:
+    """Re-validated inputs with the named evidence re-based, and the review re-bound."""
+    ceilings = tuple(
+        EvidenceCeiling.of(c.evidence_id, bases[c.evidence_id]) if c.evidence_id in bases else c
+        for c in inputs.ceilings
+    )
+    changed = QualityInputs.model_validate_json(
+        inputs.model_copy(update={"ceilings": ceilings}).model_dump_json()
+    )
+    return changed, bind(changed, review)
+
+
+def supplied(review: QualityReview, evidence_id: str, cls: Lineage) -> QualityReview:
+    claims = tuple(
+        c.model_copy(
+            update={
+                "evidence": tuple(
+                    e.model_copy(update={"lineage_class": cls})
+                    if e.evidence_id == evidence_id
+                    else e
+                    for e in c.evidence
+                )
+            }
+        )
+        for c in review.claims
+    )
+    return review.model_copy(update={"claims": claims})
+
+
+def test_ceilings_follow_the_producer_basis_table() -> None:
+    assert {b: EvidenceCeiling.of("e", b).ceiling for b in get_args(LineageBasis)} == {
+        "citation": "Directly Sourced",
+        "calculation": "Calculated",
+        "gap": "Insufficient Information",
+        "missing": "Insufficient Information",
+        "coverage": "Insufficient Information",
+    }
+    with pytest.raises(ValueError, match="does not follow its basis: e"):
+        EvidenceCeiling(evidence_id="e", ceiling="Directly Sourced", basis="calculation")
+    assert QualityInputs.model_validate(build()).schema_version == "quality-inputs/2"
+
+
+def test_model_cannot_upgrade_lineage() -> None:
+    inputs, review = fixture()
+    assert review.claims[0].evidence[0].lineage_class == "Directly Sourced"
+    inputs, review = ceilinged(inputs, review, e0="calculation")
+    issue = "QA lineage upgrade rejected: e0 Directly Sourced above ceiling Calculated"
+    assert validate_quality_review(inputs, review) == (issue,)
+    with pytest.raises(ValueError, match=f"^{issue}$"):
+        assess_quality(inputs, review)
+    kept = supplied(review, "e0", "Calculated")
+    assert validate_quality_review(inputs, kept) == ()
+
+
+@pytest.mark.parametrize("basis", ["gap", "missing", "coverage"])
+def test_bottom_ceilings_admit_only_zero_weight_classes(basis: LineageBasis) -> None:
+    inputs, review = fixture()
+    inputs, review = ceilinged(inputs, review, e0=basis)
+    for cls in LINEAGES:
+        issues = validate_quality_review(inputs, supplied(review, "e0", cls))
+        assert (issues == ()) is (WEIGHTS[cls] == 0)
+
+
+def test_downgrade_is_accepted() -> None:
+    inputs, review = fixture()
+    weak = supplied(review, "e0", "Weak Lineage")
+    assert validate_quality_review(inputs, weak) == ()
+    score = assess_quality(inputs, weak).confidence
+    # 7 Directly Sourced (10), 1 Weak Lineage (3), 2 Calculated (9), 2 Assumption-Based (5).
+    assert fraction(score.evidence_quality) == Fraction((70 + 3 + 18 + 10) * 10, 12)
+    before = assess_quality(inputs, review).confidence
+    assert fraction(score.evidence_quality) < fraction(before.evidence_quality)
+    first = weak.claims[0]
+    blank_evidence = first.evidence[0].model_copy(update={"rationale": " "})
+    blank = weak.model_copy(
+        update={
+            "claims": (first.model_copy(update={"evidence": (blank_evidence,)}), *weak.claims[1:])
+        }
+    )
+    issues = validate_quality_review(inputs, blank)
+    assert len(issues) == 1 and "QA explanations must be nonblank" in issues[0]
+
+
+@pytest.mark.parametrize(
+    "ceilings",
+    [cited("e"), cited("e", "f", "g"), cited("e", "e", "f"), cited("e", "g")],
+    ids=["missing", "extra", "duplicate", "substituted"],
+)
+def test_ceilings_must_cover_every_reference_exactly_once(
+    ceilings: tuple[EvidenceCeiling, ...],
+) -> None:
+    with pytest.raises(ValueError, match="ceilings must cover every reference exactly once"):
+        QualityInputs.model_validate(build(ceilings=ceilings))
+
+
+def test_ceilings_are_required_not_defaulted() -> None:
+    with pytest.raises(ValueError, match="ceilings"):
+        QualityInputs.model_validate({k: v for k, v in build().items() if k != "ceilings"})
+
+
+@st.composite
+def ceiling_scenarios(
+    draw: st.DrawFn,
+) -> tuple[tuple[Claims, int, int, str, str, Findings], list[LineageBasis]]:
+    scenario = draw(scenarios())
+    count = sum(len(ls) for _, ls in scenario[0])
+    bases = draw(st.lists(st.sampled_from(get_args(LineageBasis)), min_size=count, max_size=count))
+    return scenario, bases
+
+
+@settings(max_examples=300, deadline=None)
+@given(ceiling_scenarios())
+def test_review_is_accepted_iff_no_supplied_weight_exceeds_its_ceiling(
+    drawn: tuple[tuple[Claims, int, int, str, str, Findings], list[LineageBasis]],
+) -> None:
+    scenario, bases = drawn
+    inputs, review = _realize(*scenario, bases=bases)
+    ceiling = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+    upgrades = [
+        f"QA lineage upgrade rejected: {e.evidence_id} {e.lineage_class} "
+        f"above ceiling {ceiling[e.evidence_id]}"
+        for c in review.claims
+        for e in c.evidence
+        if WEIGHTS[e.lineage_class] > WEIGHTS[ceiling[e.evidence_id]]
+    ]
+    assert list(validate_quality_review(inputs, review)) == upgrades
+    if upgrades:
+        with pytest.raises(ValueError, match="QA lineage upgrade rejected"):
+            assess_quality(inputs, review)
+    else:
+        raw, score, _, _ = restate_r14(*scenario)
+        result = assess_quality(inputs, review).confidence
+        assert (fraction(result.raw_score), result.confidence_score) == (raw, score)

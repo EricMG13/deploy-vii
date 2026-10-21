@@ -1,5 +1,6 @@
 """CP-1 QA scope projection; synthetic registers do not qualify analytical judgments."""
 
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -20,6 +21,7 @@ from deploy_vii.narrative import (
     Finding,
     FundingAssessment,
     IssuerPart,
+    NarrativeReport,
     NarrativeReview,
     ProsePart,
     StatementCell,
@@ -27,9 +29,12 @@ from deploy_vii.narrative import (
     narrative_inputs,
 )
 from deploy_vii.quality import (
+    CEILINGS,
+    WEIGHTS,
     ClaimAssessment,
     EvidenceLineage,
     Lineage,
+    LineageBasis,
     QualityInputs,
     QualityReview,
     assess_quality,
@@ -133,8 +138,15 @@ def analysed(base: Args) -> NarrativeReview:
 
 
 def lineage_review(inputs: QualityInputs) -> QualityReview:
-    """Every candidate claim is material; evidence lineage alternates deterministically."""
+    """Every candidate claim is material; lineage alternates deterministically, never above
+    the producer ceiling (MC-5), so a weaker class keeps the ceiling."""
     classes: tuple[Lineage, ...] = ("Calculated", "Directly Sourced", "Assumption-Based")
+    ceiling = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+
+    def bounded(cls: Lineage, evidence_id: str) -> Lineage:
+        top = ceiling[evidence_id]
+        return cls if WEIGHTS[cls] <= WEIGHTS[top] else top
+
     return QualityReview(
         inputs_sha256=inputs.content_hash(),
         claims=tuple(
@@ -145,7 +157,7 @@ def lineage_review(inputs: QualityInputs) -> QualityReview:
                 evidence=tuple(
                     EvidenceLineage(
                         evidence_id=evidence_id,
-                        lineage_class=classes[i % 3],
+                        lineage_class=bounded(classes[i % 3], evidence_id),
                         rationale="Synthetic lineage judgment",
                     )
                     for i, evidence_id in enumerate(claim.evidence_ids)
@@ -174,6 +186,17 @@ def altered(
     )
     if narrative_status:
         narrative = narrative.model_copy(update={"status": narrative_status})
+    inputs = downstream.inputs.model_copy(update={"narrative": narrative})
+    return registers.model_copy(
+        update={"downstream": downstream.model_copy(update={"inputs": inputs})}
+    )
+
+
+def with_narrative_report(
+    registers: CanonicalTables, narrative: NarrativeReport
+) -> CanonicalTables:
+    """Shape-valid copy with the nested narrative replaced (not authenticated)."""
+    downstream = registers.downstream
     inputs = downstream.inputs.model_copy(update={"narrative": narrative})
     return registers.model_copy(
         update={"downstream": downstream.model_copy(update={"inputs": inputs})}
@@ -593,3 +616,125 @@ def test_module_status_derives_from_own_findings_only(
         update={"downstream": downstream.model_copy(update={"inputs": inputs})}
     )
     assert cp1_quality_inputs(changed).module_status == module
+
+
+# --- MC-5: Python derives each evidence ID's lineage ceiling from its register ----------------
+
+CITED_KINDS = {"source", "entity", "subsequent_event", "source_period", "definition"}
+CITED_KINDS |= {"multi_figure_event"}
+SETTLED = {"known", "not_applicable"}
+
+
+def expected_basis(kind: str, row: dict[str, Any], cited: bool) -> LineageBasis:
+    """Independent restatement over the raw serialized rows, not the producer's typed parse."""
+    if kind == "gap":
+        return "gap"
+    if kind == "observation":
+        return "citation" if cited and row["observation"]["status"] in SETTLED else "missing"
+    if kind.startswith("statement_"):
+        return "citation" if cited and row["status"] in SETTLED else "missing"
+    if kind == "source" and row["availability"] != "ready":
+        return "missing"
+    if kind in CITED_KINDS:
+        return "citation" if cited else "missing"
+    if kind in {"historical_value", "canonical_value", "kpi", "computation"}:
+        return "missing" if row["value"]["amount"] is None else "calculation"
+    assert kind in {"normalization", "source_check", "period_check", "construction", "basis"}
+    return "calculation"
+
+
+def test_producer_derives_every_ceiling_from_its_register(
+    registers: CanonicalTables, inputs: QualityInputs
+) -> None:
+    narrative = registers.downstream.inputs.narrative
+    assert [c.evidence_id for c in inputs.ceilings] == list(inputs.references)
+    basis = {c.evidence_id: c.basis for c in inputs.ceilings}
+    assert all(c.ceiling == CEILINGS[c.basis] for c in inputs.ceilings)
+    seen: set[tuple[str, LineageBasis]] = set()
+    for record in narrative.inputs.catalogue:
+        row = json.loads(record.record_json)
+        expected = expected_basis(record.kind, row, bool(record.citations))
+        assert basis[record.evidence_id] == expected, record.kind
+        seen.add((record.kind, expected))
+    assert all(basis[c.field_id] == "coverage" for c in inputs.coverage)
+    assert all(basis[g.gap_id] == "gap" for g in narrative.gaps)
+    # The fixture reaches each branch: cited and missing source values (a missing observation
+    # keeps its search citations yet is capped), and calculated and not-calculable KPIs.
+    assert {("observation", "citation"), ("observation", "missing")} <= seen
+    assert {("statement_BS", "citation"), ("statement_BS", "missing")} <= seen
+    assert {("kpi", "calculation"), ("kpi", "missing"), ("basis", "calculation")} <= seen
+    assert {("source", "citation"), ("gap", "gap")} <= seen
+    missing_cited = [
+        r
+        for r in narrative.inputs.catalogue
+        if r.kind == "observation" and r.citations and basis[r.evidence_id] == "missing"
+    ]
+    assert missing_cited
+
+
+@pytest.mark.parametrize("availability", ["missing", "unreadable"])
+def test_a_cited_record_of_an_unavailable_source_is_missing_evidence(
+    registers: CanonicalTables, availability: str
+) -> None:
+    narrative = registers.downstream.inputs.narrative
+    catalogue = narrative.inputs.catalogue
+    index, source = next((i, r) for i, r in enumerate(catalogue) if r.kind == "source")
+    assert source.citations and json.loads(source.record_json)["availability"] == "ready"
+    row = json.loads(source.record_json) | {"availability": availability}
+    unavailable = source.model_copy(update={"record_json": json.dumps(row)})
+    changed = narrative.model_copy(
+        update={
+            "inputs": narrative.inputs.model_copy(
+                update={"catalogue": (*catalogue[:index], unavailable, *catalogue[index + 1 :])}
+            )
+        }
+    )
+    scope = cp1_quality_inputs(with_narrative_report(registers, changed))
+    ceiling = next(c for c in scope.ceilings if c.evidence_id == source.evidence_id)
+    assert (ceiling.basis, ceiling.ceiling) == ("missing", "Insufficient Information")
+
+
+def test_unknown_register_kind_fails_closed(registers: CanonicalTables) -> None:
+    narrative = registers.downstream.inputs.narrative
+    first, *rest = narrative.inputs.catalogue
+    novel = first.model_copy(update={"kind": "novel_register"})
+    changed = narrative.model_copy(
+        update={"inputs": narrative.inputs.model_copy(update={"catalogue": (novel, *rest)})}
+    )
+    with pytest.raises(ValueError, match="No QA lineage ceiling for register kind: novel_register"):
+        cp1_quality_inputs(with_narrative_report(registers, changed))
+
+
+def test_an_identity_shared_by_registers_with_different_ceilings_fails_closed(
+    registers: CanonicalTables,
+) -> None:
+    narrative = registers.downstream.inputs.narrative
+    kpi = next(r for r in narrative.inputs.catalogue if r.kind == "kpi" and r.citations)
+    first, *rest = narrative.gaps
+    clash = narrative.model_copy(
+        update={"gaps": (first.model_copy(update={"gap_id": kpi.evidence_id}), *rest)}
+    )
+    with pytest.raises(ValueError, match=f"conflicting lineage registers: {kpi.evidence_id}"):
+        cp1_quality_inputs(with_narrative_report(registers, clash))
+
+
+def test_cp1_review_cannot_upgrade_a_calculated_kpi(
+    genuine: tuple[Args, QualityReview, CP1QualityReport],
+) -> None:
+    args, review, report = genuine
+    ceiling = {c.evidence_id: c.ceiling for c in report.inputs.ceilings}
+    first = review.claims[0]
+    target = next(e for e in first.evidence if ceiling[e.evidence_id] == "Calculated")
+    upgraded = target.model_copy(update={"lineage_class": "Directly Sourced"})
+    evidence = tuple(upgraded if e is target else e for e in first.evidence)
+    forged = review.model_copy(
+        update={"claims": (first.model_copy(update={"evidence": evidence}), *review.claims[1:])}
+    )
+    issue = (
+        f"QA lineage upgrade rejected: {target.evidence_id} Directly Sourced above ceiling "
+        "Calculated"
+    )
+    with pytest.raises(ValueError, match=issue):
+        canonical_quality(*args, forged)
+    issues = validate_canonical_quality(*args, forged, report)
+    assert len(issues) == 1 and issue in issues[0]

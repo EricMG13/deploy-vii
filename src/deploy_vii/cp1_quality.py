@@ -2,18 +2,29 @@
 
 from typing import Literal
 
-from deploy_vii.canonical_audit import DefinitionReview
+from deploy_vii.calculation_trace import Computation
+from deploy_vii.canonical_audit import DefinitionReview, SourcePosition
+from deploy_vii.canonical_kpis import CanonicalKpi
 from deploy_vii.canonical_tables import CanonicalTables, canonical_tables
 from deploy_vii.context_binding import FinancialContextBinding
 from deploy_vii.contracts import Contract
 from deploy_vii.downstream_readiness import DownstreamReview
 from deploy_vii.financial_contracts import FinancialReview
-from deploy_vii.financial_periods import _id
-from deploy_vii.narrative import _DIMENSIONS, EvidencePart, NarrativeReport, NarrativeReview
+from deploy_vii.financial_model import ModelValue
+from deploy_vii.financial_periods import HistoricalValue, _id
+from deploy_vii.narrative import (
+    _DIMENSIONS,
+    EvidencePart,
+    EvidenceRecord,
+    NarrativeReport,
+    NarrativeReview,
+)
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.quality import (
     ClaimCandidate,
     CoverageField,
+    EvidenceCeiling,
+    LineageBasis,
     ModuleStatus,
     QualityInputs,
     QualityReport,
@@ -21,9 +32,23 @@ from deploy_vii.quality import (
     SourceGate,
     assess_quality,
 )
-from deploy_vii.source_context import SourceContextReview
+from deploy_vii.source_context import SourceContextReview, SourceRegisterRow
+from deploy_vii.statement_output import StatementCell
 
 REQUIRED_TABLES = tuple(f"T4.{i}" for i in range(1, 20) if i != 7)
+# MC-5 register table over the narrative catalogue kinds (narrative._catalogue).
+_CITED = frozenset(
+    {"source", "entity", "subsequent_event", "source_period", "definition", "multi_figure_event"}
+)
+_LOCATED = frozenset({"observation", "statement_IS", "statement_CFS", "statement_BS"})
+_CALCULATED = frozenset({"normalization", "source_check", "period_check", "construction", "basis"})
+_VALUED: dict[str, type[HistoricalValue | ModelValue | CanonicalKpi | Computation]] = {
+    "historical_value": HistoricalValue,
+    "canonical_value": ModelValue,
+    "kpi": CanonicalKpi,
+    "computation": Computation,
+}
+_SETTLED = frozenset({"known", "not_applicable"})
 
 
 class CP1QualityReport(Contract):
@@ -39,6 +64,54 @@ def _module_status(narrative: NarrativeReport) -> ModuleStatus:
     if narrative.status == "blocked":
         return "blocked"
     return "restricted" if narrative.limitations or narrative.status != "candidate" else "complete"
+
+
+def _lineage_basis(record: EvidenceRecord) -> LineageBasis:
+    """The producing register's ceiling basis; an unlisted kind fails closed.
+
+    Citation registers cap at Directly Sourced only while they carry a citation and, for
+    located values, a settled status; an unavailable source, a missing or conflicting value
+    (even one citing where it was sought) or an absent calculated amount is missing evidence.
+    """
+    kind, row = record.kind, record.record_json
+    if kind == "gap":
+        return "gap"
+    if kind == "source" and SourceRegisterRow.model_validate_json(row).availability != "ready":
+        return "missing"
+    if kind in _CITED:
+        return "citation" if record.citations else "missing"
+    if kind in _LOCATED:
+        status = (
+            SourcePosition.model_validate_json(row).observation.status
+            if kind == "observation"
+            else StatementCell.model_validate_json(row).status
+        )
+        return "citation" if record.citations and status in _SETTLED else "missing"
+    if kind in _CALCULATED:
+        return "calculation"
+    if kind in _VALUED:
+        value = _VALUED[kind].model_validate_json(row).value
+        return "missing" if value.amount is None else "calculation"
+    raise ValueError(f"No QA lineage ceiling for register kind: {kind}")
+
+
+def _ceilings(
+    narrative: NarrativeReport, coverage: list[CoverageField]
+) -> tuple[EvidenceCeiling, ...]:
+    """One ceiling per distinct reference, in first-appearance order."""
+    bases: dict[str, LineageBasis] = {}
+
+    def add(evidence_id: str, basis: LineageBasis) -> None:
+        if bases.setdefault(evidence_id, basis) != basis:
+            raise ValueError(f"QA reference has conflicting lineage registers: {evidence_id}")
+
+    for record in narrative.inputs.catalogue:
+        add(record.evidence_id, _lineage_basis(record))
+    for field in coverage:
+        add(field.field_id, "coverage")
+    for gap in narrative.gaps:
+        add(gap.gap_id, "gap")
+    return tuple(EvidenceCeiling.of(i, b) for i, b in bases.items())
 
 
 def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
@@ -141,6 +214,7 @@ def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
         if context.status == "restricted"
         else "fail"
     )
+    ceilings = _ceilings(narrative, coverage)
     return QualityInputs(
         artifact_sha256=registers.content_hash(),
         coverage_policy="cp1-registers-pre-handoff/1",
@@ -148,15 +222,8 @@ def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
         coverage=tuple(coverage),
         source_gate=gate,
         module_status=_module_status(narrative),
-        references=tuple(
-            dict.fromkeys(
-                (
-                    *(r.evidence_id for r in narrative.inputs.catalogue),
-                    *(f.field_id for f in coverage),
-                    *(g.gap_id for g in narrative.gaps),
-                )
-            )
-        ),
+        references=tuple(c.evidence_id for c in ceilings),
+        ceilings=ceilings,
     )
 
 
