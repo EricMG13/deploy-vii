@@ -99,10 +99,12 @@ Development review evidence is in `tooling-review.md`. No product/live analytica
 qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; all product modules remain unrun.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-301 product tests pass (97.13% combined coverage); CP-0 synthetic output is
+356 product tests pass (96.74% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
-../../model-reuse.md. Its validated CP-1 input adapter remains pending.
+../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
+financial-input-review.md and ../../financial-inputs.md. Output reconciliation,
+Model readiness, artifact binding and CP-1A remain pending.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
 live qualification remain pending. Next: canonical registers, deterministic
 calculations, CP-1A and module-adapter integration with the tested execution journal. Tournaments remain key-area

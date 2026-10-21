@@ -32,8 +32,10 @@ is missing with a reason, never infinity. Expense sign normalization is explicit
 
 ## Required integration boundaries
 
-These are release conditions for the next CP-1 adapter, not assumptions that a
-passing legacy regression suite proves. The raw dataclasses are internal and
+The [validated financial input boundary](financial-inputs.md) now implements the
+source-contract, sparse-row, presentation, issuance and same-date checks below.
+Output reconciliation, readiness and report binding remain release conditions; a
+passing legacy regression suite does not prove those conditions. The raw dataclasses are internal and
 are not a safe model-response input contract.
 
 | Boundary | Observed behavior | Required Deploy VII treatment |
