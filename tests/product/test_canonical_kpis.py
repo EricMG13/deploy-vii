@@ -173,12 +173,42 @@ def test_missing_or_nonpositive_denominators_never_produce_infinite_ratios(
     assert row.value.calculation_status == "Not Calculable"
 
 
+def test_ffo_interest_coverage_adds_back_cash_interest_paid() -> None:
+    report = run(case())
+    row = kpi(report, "ffo_interest_coverage")
+    coverage = kpi(report, "interest_coverage_reported")
+    ffo = kpi(report, "ffo_to_debt")
+    assert row.operation == "ratio" and row.unit == "MULTIPLE"
+    assert row.denominator.amount == coverage.denominator.amount == 20
+    assert row.numerator.amount == ffo.numerator.amount + coverage.denominator.amount
+    assert row.value.amount == row.numerator.amount / row.denominator.amount
+
+
+@pytest.mark.parametrize("amount", [None, "0"])
+def test_ffo_interest_coverage_without_interest_paid_is_not_calculable(
+    amount: str | None,
+) -> None:
+    value = case()
+    for p in value.periods:
+        if p.period_type != "PERIOD_END":
+            value = accounts(value, p.period_id, cash_interest_paid=amount)
+    row = kpi(run(value), "ffo_interest_coverage")
+    assert row.value.amount is None
+    assert row.value.calculation_status == "Not Calculable"
+
+
+def test_only_dcf_remains_undefined_in_limitations() -> None:
+    limitations = " ".join(run(case()).limitations)
+    assert "FFO interest coverage" not in limitations
+    assert "DCF definition remains unresolved" in limitations
+
+
 def test_undefined_formula_rows_remain_explicit_and_tampering_is_rejected() -> None:
     value = case()
     pack, review = frozen(value)
     report = canonical_kpis(pack, review, value.book_id)
     assert validate_canonical_kpis(pack, review, report) == ()
-    for key in ("dcf", "dcf_to_debt", "ffo_interest_coverage"):
+    for key in ("dcf", "dcf_to_debt"):
         row = kpi(report, key)
         assert row.operation == "unavailable" and row.value.amount is None
         assert row.value.note and not row.numerator.operands and row.denominator is None
@@ -257,7 +287,12 @@ def test_cash_outflow_signs_and_ambient_decimal_context_do_not_change_outputs() 
     with localcontext() as context:
         context.prec = 3
         normalized = run(flipped)
-    for key in ("capex_adjusted_coverage", "interest_coverage_reported", "fcf_to_adjusted_ebitda"):
+    for key in (
+        "capex_adjusted_coverage",
+        "interest_coverage_reported",
+        "fcf_to_adjusted_ebitda",
+        "ffo_interest_coverage",
+    ):
         assert kpi(signed, key).value.amount == kpi(normalized, key).value.amount
     assert kpi(normalized, "capex_adjusted_coverage").numerator.amount == 200
     assert kpi(normalized, "capex_adjusted_coverage").denominator.amount == 20

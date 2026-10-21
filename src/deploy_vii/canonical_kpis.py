@@ -104,6 +104,9 @@ _RECIPES.update(
         "fcf_to_reported_ebitda": metrics._Metric(
             "PERCENT", "own", (("fcf", 1),), (("ebitda", 1),)
         ),
+        "ffo_interest_coverage": metrics._Metric(
+            "MULTIPLE", "twelve", (("ffo", 1), ("cash_interest", -1)), (("cash_interest", -1),)
+        ),
     }
 )
 _SCALARS = (
@@ -132,7 +135,6 @@ _SCALARS = (
 _UNDEFINED = {
     "dcf": "DCF formula awaits an explicit definition",
     "dcf_to_debt": "DCF formula awaits an explicit definition",
-    "ffo_interest_coverage": "FFO interest coverage formula awaits an explicit definition",
 }
 
 
@@ -388,13 +390,7 @@ def _kpi_rows(
                     growth[key],
                 )
             for key, reason in _UNDEFINED.items():
-                unit = (
-                    book.unit
-                    if key == "dcf"
-                    else "MULTIPLE"
-                    if key == "ffo_interest_coverage"
-                    else "PERCENT"
-                )
+                unit = book.unit if key == "dcf" else "PERCENT"
                 add(
                     column,
                     key,
@@ -471,7 +467,7 @@ def canonical_kpis(pack: PreparedPack, review: FinancialReview, book_id: str) ->
             "FFO = adjusted CFO - working capital change",
             "Cash conversion is FCF / adjusted EBITDA; both EBITDA variants are "
             "explicitly retained",
-            "DCF and FFO interest coverage definitions remain unresolved",
+            "DCF definition remains unresolved",
             "Calculations do not establish source reconciliation, readiness, analytical "
             "trends or report acceptance",
             *book.limitations,

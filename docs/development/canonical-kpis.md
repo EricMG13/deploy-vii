@@ -41,10 +41,15 @@ negative internally. Ratios require positive denominators; percentages are decim
 fractions. Arithmetic uses Decimal precision 38, half-even, independent of ambient
 context. Every signed leg identifies its retained values and actual period basis.
 
-DCF, DCF/debt and FFO interest coverage are explicit unavailable rows with reasons.
-The references name those metrics without defining the required formulas. User
-clarifications remain pending; no selected option or elapsed time is treated as
-an answer. Evidence tiers and analytical trends also remain unassessed.
+FFO interest coverage = (FFO + cash interest paid) / cash interest paid, per the
+user's decision of 21 October 2026. It uses the trailing-twelve-month scope and is
+Not Calculable without positive cash interest paid (cash interest is stored as a
+signed outflow, so interest paid is its negation).
+
+DCF and DCF/debt remain explicit unavailable rows with reasons: the references name
+those metrics without defining the required formulas, and no selected option or
+elapsed time is treated as an answer. Evidence tiers and analytical trends also
+remain unassessed.
 
 ## Method review and reuse
 
