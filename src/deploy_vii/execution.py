@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, Self
@@ -265,28 +265,31 @@ def inherited_limitations(
     return tuple(text for text in dict.fromkeys(texts) if text not in own)
 
 
-MAX_SCHEMA_ERRORS = 20
-MAX_ERROR_CHARS = 300
+MAX_ISSUES = 20
+MAX_ISSUE_CHARS = 300
+
+
+def shortened(text: str) -> str:
+    return text if len(text) <= MAX_ISSUE_CHARS else text[: MAX_ISSUE_CHARS - 1] + "…"
+
+
+def bounded_issues(issues: Sequence[str]) -> tuple[str, ...]:
+    """At most 20 lines of at most 300 characters, then a count of the lines left out.
+
+    Issue text can quote caller content (a citation locator, a field name), so no issue
+    list reaches a snapshot unbounded.
+    """
+    shown = tuple(shortened(line) for line in issues[:MAX_ISSUES])
+    rest = len(issues) - MAX_ISSUES
+    return (*shown, f"{rest} further issues not listed") if rest > 0 else shown
 
 
 def malformed_issues(error: ValidationError) -> tuple[str, ...]:
-    """Schema errors as `loc: message` lines, without the input value or documentation URL.
-
-    A payload excerpt is never stored inline: the count is capped and each line shortened
-    (field names in a payload are caller-controlled text too).
-    """
-    errors = error.errors(include_input=False, include_url=False, include_context=False)
-    lines = [
+    """Schema errors as `loc: message` lines, without the input value or documentation URL."""
+    return tuple(
         f"Malformed candidate: {'.'.join(map(str, item['loc'])) or '(root)'}: {item['msg']}"
-        for item in errors[:MAX_SCHEMA_ERRORS]
-    ]
-    lines = [
-        line if len(line) <= MAX_ERROR_CHARS else line[: MAX_ERROR_CHARS - 1] + "…"
-        for line in lines
-    ]
-    if len(errors) > MAX_SCHEMA_ERRORS:
-        lines.append(f"Malformed candidate: {len(errors) - MAX_SCHEMA_ERRORS} further errors")
-    return tuple(lines)
+        for item in error.errors(include_input=False, include_url=False, include_context=False)
+    )
 
 
 def settle(
@@ -312,11 +315,12 @@ def settle(
         issues = candidate_issues(snapshot, attempt, candidate, pack=pack)
     except ValidationError as error:
         issues = malformed_issues(error)
-    if interruption is not None:
-        issues = (f"Interrupted: {interruption}",)
+    reason = None if interruption is None else shortened(interruption)
+    if reason is not None:
+        issues = (f"Interrupted: {reason}",)
     if candidate is not None and not issues:
         issues = validator(candidate)
-    issues = tuple(dict.fromkeys(issues))
+    issues = bounded_issues(tuple(dict.fromkeys(issues)))
     if issues:
         result = Module(
             run_id=snapshot.run.run_id,
@@ -352,7 +356,7 @@ def settle(
             "status": "finished",
             "issues": issues,
             "result_sha256": result.content_hash(),
-            "interruption": interruption,
+            "interruption": reason,
         }
     )
     return finished, result
@@ -687,7 +691,7 @@ class Execution:
                     "output_sha256": None
                     if outcome.output is None
                     else self._store(outcome.output),
-                    "issues": outcome.issues,
+                    "issues": bounded_issues(outcome.issues),
                 }
             )
             attempt = attempt.model_copy(update={"steps": (*completed, submitted)})

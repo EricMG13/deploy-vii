@@ -7,7 +7,7 @@ from typing import Literal
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from deploy_vii.contracts import Claim, Fact, Input, Module
+from deploy_vii.contracts import Citation, Claim, Fact, Input, Module
 from deploy_vii.execution import (
     Attempt,
     Command,
@@ -983,16 +983,82 @@ def test_malformed_candidate_issues_never_quote_the_payload(tmp_path: Path) -> N
             attempt = store.finish(ticket.ticket_id, payload, no_issues)
             assert attempt.issues and all(len(issue) <= 330 for issue in attempt.issues)
             assert len(attempt.issues) <= 21  # a capped list, with a count of the rest
-            assert all(issue.startswith("Malformed candidate: ") for issue in attempt.issues)
+            assert all(issue.startswith("Malformed candidate: ") for issue in attempt.issues[:20])
             raw = snapshot_bytes(store)
             # Field names are payload text too: at most one capped line of them is kept.
-            assert all(b"K" * 300 not in raw for _ in "x") and b"zzzzzzzz" not in raw
+            assert b"K" * 300 not in raw and b"zzzzzzzz" not in raw
             assert b"L" * 300 not in raw and b"M" * 300 not in raw
             sizes.setdefault(kind, []).append(len(raw))
     # The snapshot after each payload kind has the same size at both payload sizes, except for
     # the digits of the count of omitted errors (125 times more elements, a few more digits).
     for kind, (small, large) in sizes.items():
         assert 0 <= large - small <= 6, kind
+
+
+def snapshot_after_rejected_citations(
+    tmp_path: Path, locators: list[str], interruption: str | None = None
+) -> tuple[Attempt, int]:
+    """Settle one candidate that cites the real source at invalid locators."""
+    store = fixture_store(tmp_path)
+    source = store.pack().sources[0]
+    assert source.sha256 is not None
+    citations = tuple(
+        Citation(source_id=source.source_id, source_sha256=source.sha256, locator=item, quote="q")
+        for item in locators
+    )
+    fact = Fact(fact_id="cited", label="Cited", text="t", status="known", citations=citations)
+    ticket = store.begin("CP-0")
+    candidate = candidate_for(store, "CP-0").model_copy(update={"facts": (fact,)})
+    if interruption is None:
+        finished = store.finish(ticket.ticket_id, candidate.model_dump_json(), no_issues)
+    else:
+        finished = store.interrupt(ticket.ticket_id, interruption)
+    return finished, len(snapshot_bytes(store))
+
+
+def test_every_inline_issue_list_is_capped(tmp_path: Path) -> None:
+    # citation_issues quotes the locator, which is caller text of any length.
+    short, short_size = snapshot_after_rejected_citations(tmp_path / "a", ["L" * 400])
+    long, long_size = snapshot_after_rejected_citations(tmp_path / "b", ["L" * 50_000])
+    assert short.issues and all(len(issue) <= 300 for issue in short.issues + long.issues)
+    assert long_size == short_size
+    assert b"L" * 300 not in snapshot_bytes(Execution(tmp_path / "b" / "execution"))
+
+    # Thousands of distinct invalid citations: 20 lines and a count of the rest.
+    few, few_size = snapshot_after_rejected_citations(
+        tmp_path / "c", [f"loc{n}" for n in range(100)]
+    )
+    many, many_size = snapshot_after_rejected_citations(
+        tmp_path / "d", [f"loc{n}" for n in range(5_000)]
+    )
+    assert len(few.issues) == len(many.issues) == 21
+    assert many.issues[-1] == "4980 further issues not listed"
+    assert 0 <= many_size - few_size <= 8  # the digits of the count only
+
+
+def test_step_issues_are_capped_like_attempt_issues(tmp_path: Path) -> None:
+    def complaining(_pack: PreparedPack, _attempt: Attempt) -> StepValidation:
+        return StepValidation(issues=tuple(f"{n} " + "w" * 50_000 for n in range(30)))
+
+    store = fixture_store(tmp_path)
+    ticket = store.begin("CP-0")
+    finished = store.submit_step(ticket.ticket_id, "CP-0", ("a",), "a", "raw", complaining)
+    (step,) = finished.steps
+    assert len(step.issues) == 21 and all(len(issue) <= 300 for issue in step.issues)
+    assert finished.issues == step.issues
+    assert b"w" * 300 not in snapshot_bytes(store)
+
+
+def test_interruption_text_is_capped(tmp_path: Path) -> None:
+    short, short_size = snapshot_after_rejected_citations(tmp_path / "a", [], "r" * 400)
+    long, long_size = snapshot_after_rejected_citations(tmp_path / "b", [], "r" * 50_000)
+    assert long.interruption == short.interruption
+    assert long.interruption is not None
+    assert len(long.interruption) == 300 and long.interruption.endswith("…")
+    assert long.issues == short.issues and len(long.issues[0]) <= 300
+    assert long_size == short_size
+    quick, _ = snapshot_after_rejected_citations(tmp_path / "c", [], "stopped")
+    assert quick.interruption == "stopped" and quick.issues == ("Interrupted: stopped",)
 
 
 def test_two_pack_replacements_add_one_staleness_note(tmp_path: Path) -> None:
