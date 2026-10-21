@@ -903,28 +903,38 @@ def test_result_and_step_output_blobs_are_verified(tmp_path: Path) -> None:
             store.head_module(wrong)
 
 
-def grow(store: Execution, payload_size: int, rounds: int) -> tuple[dict[str, list[int]], int]:
-    """Run begin, step and finish transitions; return snapshot bytes per kind and attempts."""
+def grow(store: Execution, content_size: int, rounds: int) -> tuple[dict[str, list[int]], int]:
+    """Run begin, step and finish transitions; return snapshot bytes per kind and attempts.
+
+    Every round has a rejected attempt (a malformed response and a step with a large output)
+    and a repair that settles a valid candidate carrying a large fact text.
+    """
     sizes: dict[str, list[int]] = {"begin": [], "step": [], "finish": []}
 
     def measure(kind: str) -> None:
         sizes[kind].append(len(snapshot_bytes(store)))
+
+    def large_output(_pack: PreparedPack, _attempt: Attempt) -> StepValidation:
+        return StepValidation(output="o" * content_size)
 
     for number in range(rounds):
         if number:  # a new pack gives CP-0 a fresh input set and budget
             pack = store.pack()
             source = pack.sources[0].model_copy(update={"limitation": f"Pack revision {number}"})
             store.replace_pack(pack.model_copy(update={"sources": (source,)}))
-        for attempt in range(2):
-            ticket = store.begin("CP-0")
-            measure("begin")
-            if attempt == 0:
-                store.submit_step(
-                    ticket.ticket_id, "CP-0", ("a",), "a", "s" * payload_size, accepting
-                )
-                measure("step")
-            store.finish(ticket.ticket_id, f"{number}{attempt}" + "x" * payload_size, no_issues)
-            measure("finish")
+        ticket = store.begin("CP-0")
+        measure("begin")
+        store.submit_step(ticket.ticket_id, "CP-0", ("a",), "a", "s" * content_size, large_output)
+        measure("step")
+        store.finish(ticket.ticket_id, "x" * content_size, no_issues)
+        measure("finish")
+        repair = store.begin("CP-0")
+        measure("begin")
+        fact = Fact(fact_id="large", label="Large", text="t" * content_size, status="known")
+        valid = candidate_for(store, "CP-0", attempt=1).model_copy(update={"facts": (fact,)})
+        finished = store.finish(repair.ticket_id, valid.model_dump_json(), no_issues)
+        assert settled(store, finished).facts == (fact,)
+        measure("finish")
     return sizes, len(store.read().attempts)
 
 
@@ -934,23 +944,82 @@ def no_issues(_: Module) -> tuple[str, ...]:
 
 def test_snapshot_bytes_do_not_grow_with_attempts(tmp_path: Path) -> None:
     store = fixture_store(tmp_path / "large")
-    sizes, count = grow(store, 20_000, rounds=3)
+    sizes, count = grow(store, 25_000, rounds=3)
     assert count == 6
 
-    # The allowance is one attempt record (it holds hashes, a step record and issue text, but
-    # no payload, result or output content), plus the head record that appears with the first
-    # settled module. Derived from the store, not a magic number.
+    # The allowance is one attempt record (hashes, a step record and short issue text, but no
+    # payload, result or output content), plus the head records. Derived from the store.
     snapshot = store.read()
     record = max(len(item.model_dump_json()) for item in snapshot.attempts)
     heads = sum(len(item.model_dump_json()) for item in snapshot.heads)
-    assert record < 3_000  # a few hundred bytes of hashes; never the 20,000-byte payloads
+    assert record < 3_000  # never the 25,000-byte contents
     for kind, written in sizes.items():
         assert written[-1] - written[0] <= count * record + heads, kind
 
-    # Independent of content: the same transitions with payloads 100 times smaller write
-    # snapshots of identical size.
+    # Independent of content: the same transitions with 125 times less payload, fact text and
+    # step output write snapshots of identical size at every transition.
     small, _ = grow(fixture_store(tmp_path / "small"), 200, rounds=3)
     assert small == sizes
+
+
+def test_malformed_candidate_issues_never_quote_the_payload(tmp_path: Path) -> None:
+    def payloads(size: int) -> dict[str, str]:
+        key = "K" * size
+        return {
+            "text": "z" * size,
+            "object": json.dumps({key: 1, "module_id": "M" * size}),
+            "list": json.dumps({"facts": [{"label": "L" * size}] * (size // 10)}),
+        }
+
+    sizes: dict[str, list[int]] = {}
+    for size in (400, 50_000):
+        store = fixture_store(tmp_path / f"s{size}")
+        for number, (kind, payload) in enumerate(payloads(size).items()):
+            if number:  # a fresh input set, so this payload is attempt 0 again
+                pack = store.pack()
+                source = pack.sources[0].model_copy(update={"limitation": f"Revision {kind}"})
+                store.replace_pack(pack.model_copy(update={"sources": (source,)}))
+            ticket = store.begin("CP-0")
+            attempt = store.finish(ticket.ticket_id, payload, no_issues)
+            assert attempt.issues and all(len(issue) <= 330 for issue in attempt.issues)
+            assert len(attempt.issues) <= 21  # a capped list, with a count of the rest
+            assert all(issue.startswith("Malformed candidate: ") for issue in attempt.issues)
+            raw = snapshot_bytes(store)
+            # Field names are payload text too: at most one capped line of them is kept.
+            assert all(b"K" * 300 not in raw for _ in "x") and b"zzzzzzzz" not in raw
+            assert b"L" * 300 not in raw and b"M" * 300 not in raw
+            sizes.setdefault(kind, []).append(len(raw))
+    # The snapshot after each payload kind has the same size at both payload sizes, except for
+    # the digits of the count of omitted errors (125 times more elements, a few more digits).
+    for kind, (small, large) in sizes.items():
+        assert 0 <= large - small <= 6, kind
+
+
+def test_two_pack_replacements_add_one_staleness_note(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    pack = store.pack()
+    for number in (1, 2):
+        source = pack.sources[0].model_copy(update={"limitation": f"Revision {number}"})
+        store.replace_pack(pack.model_copy(update={"sources": (source,)}))
+    (head,) = store.read().heads
+    assert head.status == "stale"
+    assert head.notes == ("Prepared pack changed; rerun required",)
+
+
+def test_stale_head_still_requires_a_settled_result_blob(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    rejected = store.finish(store.begin("CP-0").ticket_id, "not json", no_issues)
+    store.finish(store.begin("CP-0").ticket_id, "not json", no_issues)  # the repair: blocked
+    (head,) = store.read().heads
+    assert head.status == "blocked"
+    assert rejected.result_sha256 != head.result_sha256
+    assert settled(store, rejected).status == "rejected"
+    assert settled(store, rejected).inputs == head.inputs  # only its status gives it away
+    swapped = head.model_copy(update={"status": "stale", "result_sha256": rejected.result_sha256})
+    with pytest.raises(ValueError, match="head"):
+        store.head_module(swapped)
+    assert store.head_module(head.model_copy(update={"status": "stale"})).status == "stale"
 
 
 def test_missing_or_tampered_blob_is_rejected(tmp_path: Path) -> None:

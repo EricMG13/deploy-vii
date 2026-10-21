@@ -80,8 +80,8 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   so hashes are stable across runs.
 - A head is `Head(module_id, status, result_sha256, inputs, commands, notes)`. `status`
   and `notes` are the live state: staling sets `status: "stale"` and appends a note
-  (`Input changed: ...` or `Prepared pack changed; ...`) and never rewrites the result
-  blob. `inputs` and `commands` (the CP-0 T8 `exact_command` facts) duplicate fields of
+  (`Input changed: ...` or `Prepared pack changed; ...`; an already-stale head keeps
+  its first note) and never rewrites the result blob. `inputs` and `commands` (the CP-0 T8 `exact_command` facts) duplicate fields of
   the blob so that no blob is loaded to resolve them. `Execution.head_module(head)`
   loads the blob, rejects it if its module id, inputs, commands or (for a live head)
   status differ from the head, and applies the status and notes, which reproduces the
@@ -93,6 +93,25 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   and, on resume, the retained payload. `view()` loads the pack and every head's
   result blob. `cp1_workflow` previews load the pack and the retained step payloads;
   recomputed step outputs are compared by hash, not loaded.
+- Trust. Heads are trusted from the snapshot by `current_inputs`, `invalidate` and
+  `blocked_ancestors`; only `head_module` (used by `view()` and `settle`) cross-checks a
+  head against its blob, and a head blob must always be an `accepted`, `restricted` or
+  `blocked` module, stale or not. The trust boundary is the snapshot and pointer pair,
+  as before: a local hash chain detects changed bytes, not a rewritten snapshot.
+- Inline text that remains in a snapshot, and why it is bounded. Schema errors of a
+  malformed response are stored as at most 20 `loc: message` lines of at most 300
+  characters plus a count of the rest, with no input value or URL, so a payload is never
+  excerpted. `Attempt.issues` and `repair_issues` (a copy of the previous attempt's
+  issues for the one repair) hold validator and citation findings: their size follows the
+  number of rules a trusted validator reports and the number of invalid citations in a
+  candidate, not the size of any payload. `interruption` is the caller's reason text.
+  Each attempt record also repeats its bound `inputs` (a few hundred bytes of hashes).
+  So bytes per transition still grow with the number of attempts, by one such record
+  each, and with nothing else.
+- Compatibility. A store written by the first `execution/5` commit (9a3f0c7: inline
+  results, step outputs and head modules) is not supported and the schema string was
+  not bumped, because `execution/5` is unreleased and no such store exists outside test
+  fixtures. `execution/1` to `execution/4` stores are rejected with an explicit message.
 - Every reader reads the blob, checks its SHA-256 against the name it was asked for, and
   rejects a missing or mismatching blob with `ValueError`, never an empty value.
   `read()` verifies the snapshot against the pointer and its schema but does not read

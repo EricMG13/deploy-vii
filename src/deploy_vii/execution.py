@@ -197,6 +197,9 @@ def candidate_issues(
 
 
 def staled(head: Head, note: str) -> Head:
+    """Mark a head stale with the first reason; a head that is already stale keeps its note."""
+    if head.status == "stale":
+        return head
     return head.model_copy(update={"status": "stale", "notes": (*head.notes, note)})
 
 
@@ -213,7 +216,7 @@ def invalidate(heads: tuple[Head, ...], changed: str) -> tuple[Head, ...]:
         affected = expanded
     return tuple(
         staled(head, f"Input changed: {changed}; rerun required")
-        if head.module_id in affected and head.module_id != changed and head.status != "stale"
+        if head.module_id in affected and head.module_id != changed
         else head
         for head in heads
     )
@@ -262,6 +265,30 @@ def inherited_limitations(
     return tuple(text for text in dict.fromkeys(texts) if text not in own)
 
 
+MAX_SCHEMA_ERRORS = 20
+MAX_ERROR_CHARS = 300
+
+
+def malformed_issues(error: ValidationError) -> tuple[str, ...]:
+    """Schema errors as `loc: message` lines, without the input value or documentation URL.
+
+    A payload excerpt is never stored inline: the count is capped and each line shortened
+    (field names in a payload are caller-controlled text too).
+    """
+    errors = error.errors(include_input=False, include_url=False, include_context=False)
+    lines = [
+        f"Malformed candidate: {'.'.join(map(str, item['loc'])) or '(root)'}: {item['msg']}"
+        for item in errors[:MAX_SCHEMA_ERRORS]
+    ]
+    lines = [
+        line if len(line) <= MAX_ERROR_CHARS else line[: MAX_ERROR_CHARS - 1] + "…"
+        for line in lines
+    ]
+    if len(errors) > MAX_SCHEMA_ERRORS:
+        lines.append(f"Malformed candidate: {len(errors) - MAX_SCHEMA_ERRORS} further errors")
+    return tuple(lines)
+
+
 def settle(
     snapshot: ExecutionSnapshot,
     attempt: Attempt,
@@ -284,7 +311,7 @@ def settle(
         candidate = Module.model_validate_json(payload)
         issues = candidate_issues(snapshot, attempt, candidate, pack=pack)
     except ValidationError as error:
-        issues = (f"Malformed candidate: {error}",)
+        issues = malformed_issues(error)
     if interruption is not None:
         issues = (f"Interrupted: {interruption}",)
     if candidate is not None and not issues:
@@ -449,12 +476,14 @@ class Execution:
             raise ValueError("Execution head does not match its result blob")
         if commands_of(module) != head.commands:
             raise ValueError("Execution head commands do not match its result blob")
+        # A head only ever holds a settled module; staleness is the head's, not the blob's.
+        is_settled = module.status in ("accepted", "restricted", "blocked")
+        if not is_settled or head.status not in ("stale", module.status):
+            raise ValueError("Execution head status does not match its result blob")
         if head.status == "stale":
             return module.model_copy(
                 update={"status": "stale", "limitations": (*module.limitations, *head.notes)}
             )
-        if module.status != head.status:
-            raise ValueError("Execution head status does not match its result blob")
         return module
 
     def pack(self, snapshot: ExecutionSnapshot | None = None) -> PreparedPack:

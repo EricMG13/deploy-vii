@@ -40,6 +40,12 @@ Brief: [m5-journal-storage-brief.md](m5-journal-storage-brief.md).
   the settled module to the attempt JSON it prints. Details of what is loaded when are in
   docs/development/execution.md.
 
+- Fix round 2 (re-review): schema errors of a malformed response are stored as at most 20
+  `loc: message` lines of at most 300 characters (no input value, no URL); `replace_pack`
+  no longer adds a second note to an already-stale head; `head_module` requires a settled
+  blob status for stale heads too. Residual inline text (validator issues, `repair_issues`,
+  `interruption`) is described in docs/development/execution.md.
+
 ## Reviews
 
 - confidence-review (inline): no confirmed defect. Seven mutants of the integrity paths
@@ -48,6 +54,10 @@ Brief: [m5-journal-storage-brief.md](m5-journal-storage-brief.md).
   were each killed by the focused tests. Coverage gaps found in the new guards were
   closed (`test_pack_blob_must_be_canonical_and_match_the_snapshot_run`,
   `test_settle_refuses_a_payload_the_attempt_does_not_reference`).
+- Fix round 2: rewrite-tournament (inline) on `settle`, `head_module`, `invalidate`:
+  `settle` and `invalidate` incumbents hold; the `head_module` status condition was
+  simplified (`is_settled` and `head.status not in ("stale", module.status)`), same
+  tests pass.
 - rewrite-tournament on `_write` and `read` (no sub-agents allowed here, run inline):
   `read` incumbent holds (a byte-prefix schema probe would be faster but brittle; the
   second JSON parse is small). `_write` readability rewrite adopted: the pointer write
