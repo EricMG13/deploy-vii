@@ -38,6 +38,7 @@ CP-1 KPI register: [canonical debt, income selection and ratio operands](canonic
 Annual audit differences: [sourced explanations and scope](audit-basis.md).
 Cash movement: [explicit source adjustments and period combinations](cash-movement.md).
 Net cash flow: [independent source equations and readiness](net-cash-flow.md).
+CP-1 source audit: [normalizations, definition conflicts and gap ledger](canonical-audit.md).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
 Reuse selected Deploy VI behavior only after validating dependencies and regression
