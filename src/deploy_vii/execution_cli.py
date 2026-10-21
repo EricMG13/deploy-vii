@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from deploy_vii.cp0_workflow import submit_cp0_review
-from deploy_vii.cp1_workflow import CP1_STEPS, submit_cp1_step
+from deploy_vii.cp1_workflow import CP1_STEPS, cp1_statement_preview, submit_cp1_step
 from deploy_vii.execution import Execution
 from deploy_vii.preparation import load_pack
 
@@ -16,6 +16,9 @@ def configure(parser: argparse.ArgumentParser) -> None:
         actions.add_parser(name).add_argument("--pack", type=Path, required=True)
     actions.add_parser("status")
     actions.add_parser("begin").add_argument("module")
+    preview = actions.add_parser("statement-preview")
+    preview.add_argument("--ticket", required=True)
+    preview.add_argument("--output", type=Path, required=True)
     for name in ("interrupt", "cp0-submit", "cp1-submit", "step-output"):
         action = actions.add_parser(name)
         action.add_argument("--ticket", required=True)
@@ -35,6 +38,8 @@ def execute(args: argparse.Namespace) -> str:
     store = Execution(args.directory)
     if args.action == "replace-pack":
         store.replace_pack(load_pack(args.pack))
+    elif args.action == "statement-preview":
+        return str(cp1_statement_preview(store, args.ticket, args.output))
     elif args.action == "begin":
         return store.begin(args.module).model_dump_json()
     elif args.action == "interrupt":

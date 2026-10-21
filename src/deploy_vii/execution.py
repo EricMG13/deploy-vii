@@ -75,7 +75,7 @@ class Attempt(Contract):
 
 
 class ExecutionSnapshot(Contract):
-    schema_version: Literal["execution/2"] = "execution/2"
+    schema_version: Literal["execution/3"] = "execution/3"
     parent: Hash | None = None
     pack: PreparedPack
     attempts: tuple[Attempt, ...] = ()
@@ -541,6 +541,7 @@ class Execution:
                     status=module.status if module else "unrun",
                     artifact_sha256=module.content_hash() if module else None,
                     facts=module.facts if visible and module else (),
+                    tables=module.tables if visible and module else (),
                     claims=module.claims if visible and module else (),
                     limitations=module.limitations if module else (),
                 )

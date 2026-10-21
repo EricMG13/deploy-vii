@@ -68,7 +68,8 @@ parity is still pending with deterministic calculations.
 
 These commands accept supplied review files and never call a provider. Keep
 execution directories and raw responses outside Git. Commands print JSON to
-stdout, except `step-output`, which prints the retained valid stage output.
+stdout, except `step-output`, which prints the retained valid stage output, and
+`statement-preview`, which prints the candidate HTML path.
 All examples use a frozen prepared pack and placeholder ticket IDs.
 
 ```sh
@@ -101,3 +102,8 @@ An interruption consumes the attempt. `replace-pack` requires no pending ticket
 and identical run identity/scope, stales heads, and retains old snapshots and repair
 counts. It does not reconcile provider spend. See [execution contracts](execution.md)
 for format compatibility and the still-pending CP-1 delivery/promotion boundary.
+
+After the valid financial stage, `statement-preview --ticket TICKET --output
+runs/example/statements-1` creates a source-period statement candidate without
+settling the attempt. See [table projection and limits](report-tables.md); derived
+periods and complete CP-1 delivery remain pending.

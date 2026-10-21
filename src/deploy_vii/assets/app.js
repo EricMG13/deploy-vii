@@ -35,8 +35,11 @@
       document.getElementById("inspector").scrollIntoView({block:"start"});
     }
   };
-  const table = (headings, rows, title) => {
+  const table = (headings, rows, title, rowHeaders = false) => {
     const wrapper = node("div", null, "table-scroll");
+    wrapper.tabIndex = 0;
+    wrapper.setAttribute("role", "region");
+    wrapper.setAttribute("aria-label", title);
     const result = node("table");
     result.append(node("caption", title));
     const head = node("thead"), headRow = node("tr"), body = node("tbody");
@@ -46,8 +49,9 @@
     head.append(headRow);
     rows.forEach(row => {
       const tr = node("tr");
-      row.forEach(value => {
-        const cell = node("td");
+      row.forEach((value, index) => {
+        const cell = node(rowHeaders && index === 0 ? "th" : "td");
+        if (rowHeaders && index === 0) cell.scope = "row";
         cell.append(value instanceof Node ? value : node("span", value)); tr.append(cell);
       });
       body.append(tr);
@@ -56,14 +60,16 @@
   };
   const sourceText = (citations) => citations.map(c =>
     `${c.source_id} · ${c.locator}\nSHA-256 ${c.source_sha256}\n${c.quote}`).join("\n\n");
-  const factButton = (fact, owner) => {
-    const button = node("button", fact.display, "fact-value");
+  const factButton = (fact, owner, inTable = false) => {
+    const button = node("button", inTable ? fact.table_display : fact.display, "fact-value");
     button.type = "button";
     button.dataset.factId = fact.fact_id;
     button.dataset.moduleId = owner.module_id;
     button.setAttribute("aria-label", `Inspect ${fact.label}`);
     button.addEventListener("click", () => inspect({
       "Field": `${owner.module_id} / ${fact.table_id} / ${fact.row_id} / ${fact.field}`,
+      "Label": fact.label, "Value class": fact.value_class,
+      "Source value": fact.source_amount, "Formula": fact.formula,
       "Value": fact.display, "Status": fact.status, "Period": fact.period,
       "Unit": fact.unit, "Currency": fact.currency, "Scale": fact.scale,
       "Basis": fact.basis, "Denominator": fact.denominator,
@@ -76,6 +82,7 @@
   const renderModule = (module) => {
     const content = node("div");
     content.append(status(module.status));
+    if (module.limitations.length) content.append(panel("Scope and limitations", node("p", module.limitations[0], "text-content")));
     if (module.aliases.length) content.append(node("p", "Also invoked by " + module.aliases.join(", "), "muted"));
     if (!module.facts.length && !module.claims.length) {
       content.append(panel("Analysis", node("p", "No validated output is available for this module. Its findings and figures will appear here after the module is run and checked.", "empty-state")));
@@ -90,7 +97,30 @@
       body.append(evidence); content.append(panel("Finding", body));
     });
     const groups = new Map();
+    const laidOut = new Set(module.tables.map(layout => layout.table_id));
+    const factsById = new Map(module.facts.map(fact => [fact.fact_id, fact]));
+    module.tables.forEach(layout => {
+      const headings = layout.columns.map(column => column.label);
+      if (layout.row_header) headings.unshift(layout.row_header);
+      const rows = layout.rows.map(row => {
+        const cells = row.fact_ids.map(id => factButton(factsById.get(id), module, true));
+        if (layout.row_header) cells.unshift(row.label);
+        return cells;
+      });
+      const matrix = table(headings, rows, layout.title, Boolean(layout.row_header));
+      matrix.dataset.tableId = layout.table_id;
+      matrix.querySelectorAll("tbody tr").forEach((tr, index) => {
+        tr.dataset.rowId = layout.rows[index].row_id;
+        layout.columns.forEach((column, offset) => {
+          tr.children[offset + (layout.row_header ? 1 : 0)].dataset.field = column.field;
+        });
+      });
+      if (!rows.length) matrix.append(node("p", "No rows supplied for this register.", "muted"));
+      if (layout.limitation) matrix.prepend(node("p", layout.limitation, "text-content"));
+      content.append(panel(layout.table_id + " · " + layout.title, matrix));
+    });
     module.facts.forEach(fact => {
+      if (laidOut.has(fact.table_id)) return;
       if (!groups.has(fact.table_id)) groups.set(fact.table_id, []);
       groups.get(fact.table_id).push(fact);
     });
@@ -101,7 +131,7 @@
         status(fact.status)
       ]), id + " · artifact values"
     ))));
-    module.limitations.forEach(text => content.append(panel("Limitation", node("p", text, "text-content"))));
+    module.limitations.slice(1).forEach(text => content.append(panel("Limitation", node("p", text, "text-content"))));
     return content;
   };
   const renderOverview = () => {

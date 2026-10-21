@@ -81,11 +81,13 @@ identity-confirmed source produces rejection, then blocking if repair also fails
    the canonical downstream report with historical Model readiness distinct.
 
 The final step leaves the ticket pending. It does not accept CP-1 or CP-MODEL.
-Canonical Markdown, Workbench field projection, final module validation and
-promotion remain the next increment. Historical Model calculations are not the
-CP-MODEL workbook export. Every analytical qualification remains `unrun`.
+Source-period statement previews are available through `statement-preview`;
+see [table projection](report-tables.md). Canonical Markdown, complete Workbench
+projection, final module validation and promotion remain pending. Historical Model
+calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
 
-New stores use `execution/2`. Existing explicit `execution/1` snapshots fail schema
-validation rather than being silently rewritten. Migration is not implemented;
+New stores use `execution/3`, embedding `module/2` table layouts and fact provenance.
+Existing explicit `execution/1` and `execution/2` snapshots fail schema validation
+rather than being silently rewritten. Migration is not implemented;
 retain old stores and use a new execution directory for this version. This is an
 artifact format boundary, not permission to reset a live provider budget.

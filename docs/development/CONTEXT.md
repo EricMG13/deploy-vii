@@ -28,7 +28,8 @@ raw test artifacts outside these briefs. Do not create a parallel stage hierarch
 Execution substrate: [internal API](execution.md).
 Model kernel: [selected reuse and integration requirements](model-reuse.md).
 CP-1 source boundary: [contracts, validation and remaining work](financial-inputs.md).
-CP-1 statements: [source coverage and independent equations](statements.md).
+CP-1 statements: [source coverage and independent equations](statements.md) and
+[typed tables/source-period preview](report-tables.md).
 CP-1 constructed periods: [historical series and operands](financial-periods.md).
 Model historical output: [statement computations and ratio operands](model-output.md).
 CP-1 arithmetic checks: [source-register reconciliation](financial-reconciliation.md)

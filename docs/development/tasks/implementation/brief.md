@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-774 product tests pass (97.49% combined coverage); CP-0 synthetic output is
+828 product tests pass (97.48% branch-inclusive coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -270,3 +270,16 @@ covers only journal transition and stage validation; routine adapters/CLI use
 confidence review and focused tests. Canonical Markdown/Workbench projection,
 CP-1A and live/native qualification remain pending. OpenRouter spend stays $0 of
 the authorized $50 cap; no live call or provider route changed.
+
+Typed report layouts now bind each declared HTML/Markdown cell to a canonical
+Fact and reject omissions, duplicates and coordinate substitutions. The journal
+CLI can render source-period T4.4–T4.6 as a labelled candidate, retaining original
+and normalized values, units, dates, citations and file/snapshot hashes without
+settling CP-1. Confidence review fixed machine-field escaping, placement of
+scope/units and loss of not-applicable source status. The one Sol/high tournament targets only table provenance validation;
+routine UI/CLI/adapters use focused checks. See report-tables-review.md and
+../../report-tables.md. Derived statement periods, remaining CP-1 registers,
+canonical envelope/QA and reader interoperability, Model presentation and final
+promotion remain pending. This preview does not qualify a completed Module.
+Formats advance explicitly to module/2, view/2 and execution/3; no automatic
+migration or provider-budget reset. OpenRouter spend remains $0/$50.

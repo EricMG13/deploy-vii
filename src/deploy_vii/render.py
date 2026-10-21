@@ -22,12 +22,19 @@ def empty_view(run: Run, *, candidate: bool = True) -> View:
 
 def display(fact: Fact) -> str:
     if fact.status != "known":
-        return fact.status.capitalize() + " — " + (fact.limitation or "Not supplied")
+        return (
+            fact.status.replace("_", " ").capitalize() + " — " + (fact.limitation or "Not supplied")
+        )
     if fact.amount is not None:
         if abs(fact.amount.adjusted()) > 100:
             return str(fact.amount)  # Exact scientific form avoids unbounded fixed-point expansion.
         return format(fact.amount, "f")
     return fact.text or ""
+
+
+def table_display(fact: Fact) -> str:
+    """Canonical null spelling; status and reason stay in the inspector/gap register."""
+    return "null" if fact.status != "known" else display(fact)
 
 
 def render(view: View) -> str:
@@ -53,6 +60,7 @@ def render(view: View) -> str:
     for module_payload, module in zip(payload["modules"], view.modules, strict=True):
         for fact_payload, fact in zip(module_payload["facts"], module.facts, strict=True):
             fact_payload["display"] = display(fact)
+            fact_payload["table_display"] = table_display(fact)
     data = json.dumps(payload, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
     css = (
         assets.joinpath("tokens.css").read_text()

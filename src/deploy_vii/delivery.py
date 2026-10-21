@@ -24,6 +24,7 @@ def cp0_view(pack: PreparedPack, module: Module, *, accepted: bool) -> View:
                 status=module.status,
                 artifact_sha256=module.content_hash(),
                 facts=module.facts if visible else (),
+                tables=module.tables if visible else (),
                 claims=module.claims if visible else (),
                 limitations=module.limitations,
             )

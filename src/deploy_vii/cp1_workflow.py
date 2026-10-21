@@ -4,6 +4,7 @@ Validated stage outputs are internal handoffs. Module projection and promotion
 are separate: completing these stages never accepts CP-1 or CP-MODEL implicitly.
 """
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import ValidationError
@@ -18,7 +19,7 @@ from deploy_vii.downstream_readiness import (
     downstream_inputs,
     validate_downstream_review,
 )
-from deploy_vii.execution import Attempt, Execution, StepValidation
+from deploy_vii.execution import Attempt, Execution, StepValidation, current_inputs
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_model import ModelReport, model_report
 from deploy_vii.narrative import (
@@ -30,6 +31,7 @@ from deploy_vii.narrative import (
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import plan
 from deploy_vii.source_context import SourceContextReview, source_context, validate_source_context
+from deploy_vii.statement_view import write_statement_preview
 
 CP1_STEPS = ("source_context", "financials", "narrative", "readiness")
 
@@ -155,3 +157,33 @@ def _validate_stage(pack: PreparedPack, attempt: Attempt) -> StepValidation:
 def submit_cp1_step(store: Execution, ticket_id: str, step_id: str, payload: str) -> Attempt:
     """Submit one step or resume its exact retained response after a runtime failure."""
     return store.submit_step(ticket_id, "CP-1", CP1_STEPS, step_id, payload, _validate_stage)
+
+
+def cp1_statement_preview(store: Execution, ticket_id: str, destination: Path) -> Path:
+    """Render only a current, source-gated financial stage; never settle its ticket."""
+    snapshot = store.read()
+    attempt = next((a for a in snapshot.attempts if a.ticket_id == ticket_id), None)
+    if attempt is None or attempt.module_id != "CP-1" or len(attempt.steps) < 2:
+        raise ValueError("CP-1 financial stage is not available")
+    prefix = attempt.steps[:2]
+    if tuple(s.step_id for s in prefix) != CP1_STEPS[:2] or any(
+        s.status != "valid" for s in prefix
+    ):
+        raise ValueError("CP-1 source and financial stages must be valid")
+    if current_inputs(snapshot, "CP-1") != attempt.inputs:
+        raise ValueError("CP-1 statement preview inputs are stale")
+    verified = _validate_stage(snapshot.pack, attempt.model_copy(update={"steps": prefix}))
+    if verified.issues or verified.output != prefix[-1].output:
+        raise ValueError("Financial stage differs from trusted recomputation")
+    submission = FinancialSubmission.model_validate_json(prefix[-1].payload)
+    return write_statement_preview(
+        snapshot.pack,
+        submission.financial,
+        submission.definition.book_id,
+        destination,
+        execution_binding={
+            "snapshot_sha256": snapshot.content_hash(),
+            "ticket_id": ticket_id,
+            "financial_step_sha256": prefix[-1].content_hash(),
+        },
+    )

@@ -111,7 +111,7 @@ class Fact(Contract):
     field: Identifier = "value"
     amount: Decimal | None = None
     text: str | None = None
-    status: Literal["known", "missing", "conflicting"] = "known"
+    status: Literal["known", "missing", "conflicting", "not_applicable"] = "known"
     unit: str | None = None
     currency: str | None = None
     scale: Decimal = Decimal(1)
@@ -120,6 +120,9 @@ class Fact(Contract):
     denominator: str | None = None
     citations: tuple[Citation, ...] = ()
     calculation_id: Identifier | None = None
+    value_class: Literal["source", "normalized", "calculated", "analyst_judgment"] | None = None
+    source_amount: Decimal | None = None
+    formula: Text | None = None
     limitation: str | None = None
 
     @model_validator(mode="after")
@@ -131,9 +134,9 @@ class Fact(Contract):
         if self.status == "known" and self.amount is None and self.text is None:
             raise ValueError("known fact requires a value")
         if self.status != "known" and (self.amount is not None or self.text is not None):
-            raise ValueError("missing/conflicting fact cannot carry a settled value")
+            raise ValueError("unsettled fact cannot carry a settled value")
         if self.status != "known" and not self.limitation:
-            raise ValueError("missing/conflicting fact requires a limitation")
+            raise ValueError("unsettled fact requires a limitation")
         if self.amount is not None and (not self.unit or not self.period):
             raise ValueError("numeric fact requires explicit unit and period")
         return self
@@ -157,8 +160,72 @@ class Calculation(Contract):
     limitations: tuple[str, ...] = ()
 
 
+class TableColumn(Contract):
+    field: Identifier
+    label: Text
+
+
+class TableRow(Contract):
+    row_id: Identifier
+    label: Text
+    fact_ids: tuple[Identifier, ...]
+
+
+class ReportTable(Contract):
+    """Layout references canonical facts; it never stores replacement values."""
+
+    table_id: Identifier
+    title: Text
+    columns: Annotated[tuple[TableColumn, ...], Field(min_length=1)]
+    rows: tuple[TableRow, ...]
+    row_header: Text | None = None
+    interface_id: Identifier | None = None
+    limitation: Text | None = None
+
+
+def validate_tables(tables: tuple[ReportTable, ...], facts: tuple[Fact, ...]) -> None:
+    """Validate declared layouts against canonical facts; permit undeclared tables."""
+    if len({table.table_id for table in tables}) != len(tables):
+        raise ValueError("Duplicate report table")
+    interface_ids = [table.interface_id for table in tables if table.interface_id is not None]
+    if len(interface_ids) != len(set(interface_ids)):
+        raise ValueError("Duplicate table interface identity")
+    facts_by_id = {fact.fact_id: fact for fact in facts}
+    if len(facts_by_id) != len(facts):
+        raise ValueError("Duplicate fact identity")
+
+    for table in tables:
+        if table.interface_id and (
+            table.row_header is not None
+            or any(column.label != column.field for column in table.columns)
+        ):
+            raise ValueError(
+                "Interface table requires exact field headings without an extra row header"
+            )
+        column_fields = [column.field for column in table.columns]
+        if len(column_fields) != len(set(column_fields)):
+            raise ValueError("Duplicate report column")
+        if len({row.row_id for row in table.rows}) != len(table.rows):
+            raise ValueError("Duplicate report row")
+
+        referenced_fact_ids: set[str] = set()
+        for row in table.rows:
+            if len(row.fact_ids) != len(column_fields):
+                raise ValueError("Report row does not match its columns")
+            for field, fact_id in zip(column_fields, row.fact_ids, strict=True):
+                fact = facts_by_id.get(fact_id)
+                if fact_id in referenced_fact_ids or fact is None:
+                    raise ValueError("Report cell repeats or references an unknown fact")
+                if (fact.table_id, fact.row_id, fact.field) != (table.table_id, row.row_id, field):
+                    raise ValueError("Report cell differs from its canonical fact coordinates")
+                referenced_fact_ids.add(fact_id)
+        canonical_fact_ids = {fact.fact_id for fact in facts if fact.table_id == table.table_id}
+        if referenced_fact_ids != canonical_fact_ids:
+            raise ValueError("Declared report table omits canonical facts")
+
+
 class Module(Contract):
-    schema_version: Literal["module/1"] = "module/1"
+    schema_version: Literal["module/2"] = "module/2"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -167,12 +234,14 @@ class Module(Contract):
     status: Status = "candidate"
     inputs: tuple[Input, ...] = ()
     facts: tuple[Fact, ...] = ()
+    tables: tuple[ReportTable, ...] = ()
     claims: tuple[Claim, ...] = ()
     limitations: tuple[str, ...] = ()
     attempt: int = Field(default=0, ge=0, le=1)
 
     @model_validator(mode="after")
     def distinct_records(self) -> Self:
+        validate_tables(self.tables, self.facts)
         for identities in (
             [fact.fact_id for fact in self.facts],
             [claim.claim_id for claim in self.claims],
@@ -182,7 +251,7 @@ class Module(Contract):
                 raise ValueError("duplicate artifact record identity")
         if self.status in {"restricted", "blocked", "stale", "rejected"} and not self.limitations:
             raise ValueError("limited artifact requires explicit limitations")
-        if self.status == "unrun" and (self.facts or self.claims):
+        if self.status == "unrun" and (self.facts or self.claims or self.tables):
             raise ValueError("unrun module cannot carry outputs")
         return self
 
@@ -194,20 +263,24 @@ class ModuleView(Contract):
     status: Status = "unrun"
     artifact_sha256: Hash | None = None
     facts: tuple[Fact, ...] = ()
+    tables: tuple[ReportTable, ...] = ()
     claims: tuple[Claim, ...] = ()
     limitations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def output_identity(self) -> Self:
-        if (self.facts or self.claims) and not self.artifact_sha256:
+        validate_tables(self.tables, self.facts)
+        if (self.facts or self.claims or self.tables) and not self.artifact_sha256:
             raise ValueError("view outputs require an artifact hash")
-        if self.status == "unrun" and (self.facts or self.claims or self.artifact_sha256):
+        if self.status == "unrun" and (
+            self.facts or self.claims or self.tables or self.artifact_sha256
+        ):
             raise ValueError("unrun view cannot contain outputs")
         return self
 
 
 class View(Contract):
-    schema_version: Literal["view/1"] = "view/1"
+    schema_version: Literal["view/2"] = "view/2"
     run: Run
     mode: Literal["candidate", "accepted"]
     modules: tuple[ModuleView, ...]

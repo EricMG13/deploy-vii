@@ -1,0 +1,66 @@
+# Typed tables and source-statement previews
+
+`ReportTable` declares ordered columns and rows that reference canonical `Fact`
+IDs. It stores no replacement values. Validation rejects duplicate tables,
+interfaces, columns and rows; unknown or repeated facts; nonrectangular rows;
+coordinate substitutions; and omitted facts belonging to a declared table.
+Facts in undeclared tables retain the generic record view. Empty schedules retain
+headers without manufactured rows. `Module` and `ModuleView` validate the same
+layout; stale/blocked execution output hides layouts with its facts.
+
+Python supplies identical table value strings to HTML and Markdown. Unknown and
+conflicting/not-applicable values display literal `null`; their distinct status
+and reason remain inspectable. Zero retains its source precision.
+The inspector keeps status, reason, source and normalized amounts, value class,
+normalization formula, exact units/scale, dates, entity/accounting basis, citations
+and artifact hash. Table wrappers support keyboard scrolling and row headers.
+Units and partial-output scope appear before the values.
+
+`table_markdown(module, table_id)` is a table projection primitive, not the full
+r14 canonical Markdown handoff. Interface tables require literal field headings,
+no extra row-header column, and their exact `<!-- table-id: ... -->` tag.
+Known interface text matching null markers is rejected. Source markup and pipes
+are entity-escaped; newlines become generated `<br>` (CRLF/CR normalize to LF).
+The raw JSON remains authoritative. The pinned Deploy VI parser does not decode
+these entities: a Deploy VII canonical reader/adapter and round-trip verification
+remain required before claiming downstream Markdown interoperability. No legacy
+parser was adopted.
+
+## Source-period preview
+
+After valid `source_context` and `financials` submissions:
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 statement-preview --ticket TICKET --output runs/example/statements-1
+```
+
+The command rechecks current inputs and recomputes the retained financial stage.
+It writes a new directory containing `statement-report.json`, `view.json`,
+`candidate.html` and a last-written `complete.json` with file hashes, pack/review
+hashes, and execution snapshot/ticket/financial-step bindings. Existing directories
+are rejected. A failed write can leave an incomplete directory; absence of the
+receipt means incomplete output. The receipt is not an atomic directory publish
+or power-loss guarantee. The preview is bound to the snapshot read at invocation;
+subsequent journal changes do not update an existing HTML file.
+
+T4.4 income, T4.5 cash flow and T4.6 balance-sheet matrices cover source periods
+and disclosed line items plus required gaps. Each cell retains its actual source
+label even when the row label is selected from another period. A disclosed item
+missing in another period has an explicit null and reason. Point-in-time-only
+books have empty flow tables, not invented flow periods.
+
+This command does not settle the ticket, accept CP-1, create an accepted report,
+or call a model. Derived-period statements, other CP-1 registers, canonical
+Markdown envelope/QA, complete Model presentation and final module promotion
+remain pending. Charts are not applicable to this source-statement-only preview;
+Model chart/table parity remains a later check. Synthetic fixture rendering does
+not qualify analytical judgments or a completed Module.
+
+## Format boundary
+
+Layouts and additional fact provenance fields change serialized artifact hashes.
+New artifacts use `module/2`, `view/2` and `execution/3`. Explicit previous versions
+are rejected. There is no automatic migration: retain old stores and outputs.
+This boundary does not authorize a new provider budget or discard earlier spend.
+
+Verification and the one scoped tournament: [review](tasks/implementation/report-tables-review.md).
