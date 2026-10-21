@@ -38,7 +38,7 @@ def spec(repo: Path) -> dict[str, object]:
         "owner": "session-1",
         "constraints": ["No automatic resets"],
         "corrections": ["Read counterevidence"],
-        "routing": {"host": "codex", "model": "fixed", "effort": "high"},
+        "routing": {"host": "claude", "model": "fixed", "effort": "high"},
         "budgets": [{"unit": "USD", "cap": 50, "consumed": 4, "reason": None}],
         "paused": False,
         "pending_operations": [],
@@ -121,25 +121,47 @@ def test_c07_routing_review_drift(
     assert "context_changed" in validate(repo, read_object(path), corrected)["findings"]
 
 
-def test_c08_cumulative_usage_is_not_occupancy(repo: Path) -> None:
+def test_c08_per_request_usage_is_not_occupancy(repo: Path) -> None:
     log = repo / "artifacts/events.jsonl"
     log.parent.mkdir()
     event = {
-        "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "info": {"total_token_usage": {"input_tokens": 100, "output_tokens": 20}},
-        },
+        "type": "assistant",
+        "message": {"id": "req-1", "usage": {"input_tokens": 100, "output_tokens": 20}},
     }
     log.write_text(json.dumps(event) + "\n", encoding="utf-8")
     root = repo / "artifacts/telemetry"
-    import_events(repo, root, log, "codex", "session-1")
-    import_events(repo, root, log, "codex", "session-1")
+    import_events(repo, root, log, "claude", "session-1")
+    import_events(repo, root, log, "claude", "session-1")
     result = report(root)
     assert result["event_count"] == 1
     assert result["occupancy"] == {"value": None, "reason": "no qualified occupancy signal"}
-    assert result["per_request"] == []
-    assert result["cumulative"][0]["usage"]["input_tokens"] == 100
+    assert result["per_request"][0]["usage"]["input_tokens"] == 100
+    assert "cumulative" not in result
+
+
+def test_codex_host_rejected_by_cli(repo: Path) -> None:
+    log = repo / "events.jsonl"
+    log.write_text("{}\n", encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "devtools.workflow",
+            "--repo",
+            str(repo),
+            "import-events",
+            "--source",
+            str(log),
+            "--host",
+            "codex",
+            "--session",
+            "s",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert "invalid choice: 'codex'" in completed.stderr
 
 
 def test_c09_fork_is_not_fresh_context(repo: Path, spec: dict[str, object]) -> None:
@@ -239,7 +261,7 @@ def test_tampered_telemetry_summary_rejected(repo: Path) -> None:
     root = repo / "artifacts/telemetry"
     log = repo / "input.jsonl"
     log.write_text("{}\n", encoding="utf-8")
-    import_events(repo, root, log, "codex", "session")
+    import_events(repo, root, log, "claude", "session")
     manifest = next((root / "imports").glob("*.json"))
     value = json.loads(manifest.read_text())
     value["events"] = [{"event_id": "evil", "kind": "per_request", "secret": "sensitive"}]
@@ -298,7 +320,7 @@ def test_every_cli_command_and_stale_exit(repo: Path, spec: dict[str, object]) -
     log = repo / "events.jsonl"
     log.write_text("{}\ninvalid-json\n", encoding="utf-8")
     completed = subprocess.run(
-        [*base, "import-events", "--source", str(log), "--host", "codex", "--session", "test"],
+        [*base, "import-events", "--source", str(log), "--host", "claude", "--session", "test"],
         capture_output=True,
     )
     assert completed.returncode == 1

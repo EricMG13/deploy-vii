@@ -1,5 +1,4 @@
 .PHONY: setup check format types test coverage audit secrets diff dev-check dev-test product-check
-.PHONY: codex-scaffold codex-feature codex-sensitive codex-research codex-architect
 
 setup:
 	uv sync --locked
@@ -56,22 +55,3 @@ secrets:
 diff:
 	git diff --stat origin/main
 	git diff --numstat origin/main
-
-# Explicit interactive worker sessions; keep the current coordinator unchanged.
-# CLAUDE.md is the only instruction file; Codex reads it as its AGENTS.md fallback.
-CODEX = codex --config 'project_doc_fallback_filenames=["CLAUDE.md"]'
-
-codex-scaffold:
-	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="low"'
-
-codex-feature:
-	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="medium"'
-
-codex-sensitive:
-	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="high"'
-
-codex-research:
-	$(CODEX) --model gpt-6.1-sol --config 'model_reasoning_effort="medium"' --sandbox read-only
-
-codex-architect:
-	$(CODEX) --model gpt-6-astra --config 'model_reasoning_effort="high"' --sandbox read-only

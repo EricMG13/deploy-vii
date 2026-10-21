@@ -38,7 +38,7 @@ future runner, not an implemented test or rendering engine.
 | Requested update | Current document | Result |
 | --- | --- | --- |
 | Review methodology adaptations | [Methodology adaptation](docs/methodology-adaptation.md) | Adapt execution contracts; preserve analytical meaning; reassess earlier cuts and budgets. |
-| Include GPT counterparts | [Model/reasoning matrix](docs/model-matrix.md) | Claude/GPT routes by task, effort, escalation and verification. |
+| Include GPT counterparts | [Model/reasoning matrix](docs/model-matrix.md) | Claude routes by task, effort, escalation and verification; GPT/Codex routes retired 21 October 2026. |
 | Add refactoring and optimisation sweeps | [Maintenance sweeps](docs/maintenance-sweeps.md) | Bounded layer/integration sweeps with correctness and measurement criteria. |
 | Review PR/worktree struggles | [PR and worktree workflow](docs/pr-worktree-workflow.md) | Evidence-based diagnosis and one coordinator owning publication by default. |
 

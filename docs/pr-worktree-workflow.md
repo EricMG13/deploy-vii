@@ -1,7 +1,8 @@
 # PR creation and worktree management
 
-Adopted procedure: 20 October 2026. The environment task connects this app folder
-to the existing repository history and owns `codex/development-environment`.
+Adopted procedure: 20 October 2026. The environment branch
+`codex/development-environment` was squash-merged into `main` on 21 October 2026;
+new work branches from `main`.
 See the [setup result](development/tasks/environment/result.md) for publication state.
 
 ## Evidence and diagnosis

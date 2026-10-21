@@ -52,28 +52,22 @@ Do not turn an empty test run into a green product gate.
 
 ## Explicit worker routes
 
-Claude Code coordinates and retains its selected model. Codex workers use explicit
-Make targets, for example `make codex-feature`, which pass CLAUDE.md as their
-instruction file (`project_doc_fallback_filenames`). These launch interactive sessions
-with native model/effort flags. They are not custom subagent registrations or
-desktop model selectors. The installed CLI's `--profile` selects global profile
-files, so this setup avoids the obsolete project profile-table assumption.
-See [.codex/README.md](../../.codex/README.md) for the verified host behavior.
+Claude Code coordinates and retains its selected model. Codex development ended on
+21 October 2026; its Make targets and `.codex/` notes were removed.
 
 Claude definitions in `.claude/agents/` are project subagents. Select a named
 worker explicitly for a scoped task; descriptions avoid automatic broad routing.
 
-| Role (Claude name; Codex Make suffix) | Codex | Claude | Effort |
-| --- | --- | --- | --- |
-| dv-scaffold; scaffold | GPT-6.1 Sol | Sonnet 5.5 | low |
-| dv-feature; feature | GPT-6.1 Sol | Sonnet 5.5 | medium |
-| dv-sensitive; sensitive | GPT-6.1 Sol | Sonnet 5.5 | high |
-| dv-research; research | GPT-6.1 Sol | Sonnet 5.5 | medium |
-| dv-architect; architect | GPT-6 Astra | Fable 5.1 | high |
-| dv-escalate; none | GPT-6 Astra (no Make target) | Fable 5.1 | high |
+| Agent | Model | Effort |
+| --- | --- | --- |
+| dv-scaffold | Sonnet 5.5 | low |
+| dv-feature | Sonnet 5.5 | medium |
+| dv-sensitive | Sonnet 5.5 | high |
+| dv-research | Sonnet 5.5 | medium |
+| dv-architect | Fable 5.1 | high |
+| dv-escalate | Fable 5.1 | high |
 
-Research/architecture Codex launch targets request a read-only sandbox; Claude
-definitions omit write/shell tools. Host policy, permission settings and model
+Research/architecture definitions omit write/shell tools. Host policy, permission settings and model
 entitlement still determine actual capability. Prose path scope does not isolate
 Git refs/credentials. No worker calls or live entitlement tests are part of setup.
 Use [model routing](../model-matrix.md) and [publication ownership](../pr-worktree-workflow.md).

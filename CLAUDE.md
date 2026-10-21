@@ -1,7 +1,7 @@
 # Deploy VII
 
 Standalone project and this repository's only instruction file. Claude Code is
-the coordinator; Codex workers read this file through a fallback flag.
+the coordinator; Codex development ended on 21 October 2026.
 
 Current authorization: implement development tooling and the full product under
 the adopted 21 October 2026 request, recorded in

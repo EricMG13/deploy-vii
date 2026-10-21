@@ -27,7 +27,7 @@ def main() -> int:
             command.add_argument("--record", type=Path)
     command = commands.add_parser("import-events")
     command.add_argument("--source", type=Path, required=True)
-    command.add_argument("--host", choices=("codex", "claude"), required=True)
+    command.add_argument("--host", choices=("claude",), required=True)
     command.add_argument("--session", required=True)
     commands.add_parser("report")
     args = parser.parse_args()

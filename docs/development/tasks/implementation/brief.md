@@ -3,6 +3,8 @@
 Task: `dvii-implementation-001`. Owner: `01a15bb5-b5bc-7151-94b3-4edbae9d7815`.
 Workspace: `/Users/ericguei/Documents/DEPLOY VII`.
 Starting branch: `codex/development-environment`; clean HEAD: `3715b3c`.
+Since 21 October 2026: Claude Code coordinates and work branches from `main`
+([decision 0003](../../../decisions/0003-claude-coordinated-environment.md)).
 Authorization: user's pasted request, 21 October 2026, attachment
 `c9350fcb-2166-4c25-8ef2-94a8eec4c8c8/Pasted text.txt`.
 
@@ -44,11 +46,11 @@ dependencies, invalidation and at most one targeted repair.
 
 Implementation is inline; discovery/rewrite review may delegate within skill scope.
 User correction: use the development model matrix. Initial discovery workers
-inherited the coordinator route before this correction. Subsequent state/provenance
-rewrite roles explicitly request GPT-6.1 Sol/high in fresh contexts. Research
-defaults to GPT-6.1 Sol/medium; normal implementation to medium; mechanical work
-to low; architecture escalation to GPT-6 Astra/high only on an evidenced blocker.
-No successor assigned. Current coordinator model and global host settings stay as is.
+inherited the coordinator route before this correction. Until 21 October 2026,
+state/provenance rewrite roles ran on GPT-6.1 Sol/high (Codex). Since then the routes
+are the `dv-*` agents in ../../../model-matrix.md: tournament roles on Sonnet 5.5/high,
+research on Sonnet 5.5/medium, mechanical work on low, and escalation or architecture
+on Fable 5.1/high only after two failed repairs or an evidenced blocker.
 
 - [x] Inspect clean Git, project instructions, context, settings, architecture,
   methodology, reuse, frontend, telemetry and maintenance documents; run setup.
@@ -154,8 +156,10 @@ before summing. See canonical-kpis-review.md and ../../canonical-kpis.md. The
 scoped Sol/high tournament covers only `_canonical_frame` and `_rolling_frame`.
 DCF, DCF/debt and FFO interest coverage remain explicit unavailable rows.
 The additional FFO coverage question offered (FFO + cash interest paid) / cash
-interest paid, FFO / cash interest paid, or source-defined only. No answer has
-arrived and no option is adopted. These definitions do not block independent work.
+interest paid, FFO / cash interest paid, or source-defined only. The user answered
+in the Codex chat: (FFO + cash interest paid) / cash interest paid. It is recorded
+here, not yet implemented; the row stays unavailable until a scoped change applies it
+with tests. DCF remains unanswered. These definitions do not block independent work.
 
 Sourced annual audit-basis differences now have an explicit representation bound
 to one metric, audited FY, four independent unaudited quarters and the compared
@@ -343,3 +347,22 @@ checks apply, with no new tournament. Formats are canonical-tables/2 and
 register-preview/2; journal/stage contracts remain unchanged. Full canonical
 envelope, QA/numeric confidence, complete analytical review, final promotion and
 CP-1A remain next, followed by D–H. No live calls or spend; $0/$50 remains.
+
+CP-1 QA and numeric confidence now exist as hash-bound contracts (quality-inputs/1,
+quality-review/1, confidence/1, quality-report/1, cp1-quality/1). Python computes the
+r14 CP_CONFIDENCE_SCORE with exact fractions, caps and bands; producers own coverage slots,
+source gate, module status and inherited findings, and analysts supply only materiality,
+lineage and findings. The CP-1 projection counts the 18 required registers, their cells,
+empty mandatory registers, narrative dimensions, stories, funding and findings, keeps
+canonical-handoff absent, and can never reach Passed before handoff. An independent Decimal
+restatement of the r14 text is property-tested against it; two deliberate adaptations (exact
+ties-to-even rounding; source gate and module status mapped to Blocked/Restricted per D1)
+are pinned. See quality-review.md and ../../quality.md. Confidence review applies. The
+scoped Sonnet 5.5/high tournament on `_compute_confidence` kept the incumbent. The canonical
+envelope/handoff, analytical review that supplies the judgments, final promotion and CP-1A
+remain next, followed by D-H. No live calls; OpenRouter spend remains $0/$50.
+
+Environment, 21 October 2026 (decision 0003): Claude Code coordinates from `main`,
+CLAUDE.md is the only instruction file, and Codex routes are retired. The setup branch
+was squash-merged into `main`. The next session resumes at the canonical envelope/handoff
+for CP-1.

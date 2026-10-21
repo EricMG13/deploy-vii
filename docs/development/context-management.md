@@ -56,8 +56,8 @@ confirmed gaps, proposed safeguards and remaining unknowns.
     status line's `used_percentage`), the reading step 2 below asks for. Its Desktop
     rendering is not yet verified.
   - Headroom and claude-mem are disabled, and rtk no longer rewrites gate or git commands.
-- Codex Make flags remain the worker route. No `.codex/config.toml`, global
-  profile, hook, restart automation or coordinator-model change is introduced.
+- Codex development ended on 21 October 2026; `.claude/agents/` holds the worker
+  routes. No restart automation or coordinator-model change is introduced.
 - CI remains deterministic with no model calls. Development-context comparisons
   hold model/provider/effort fixed; random product-test routing is a separate task.
 

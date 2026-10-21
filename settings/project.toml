@@ -18,7 +18,6 @@ size_gate = "advisory-full-diff-no-hard-cap"
 python = "3.13.15"
 uv = "0.12.5"
 type_checker = "mypy-strict"
-codex_workers = "explicit-make-targets"
 claude_workers = ".claude/agents"
 
 [development.context]

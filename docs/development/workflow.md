@@ -9,7 +9,7 @@ uv run python -m devtools.workflow init --context docs/development/context-examp
 uv run python -m devtools.workflow checkpoint --context docs/development/context-example.json
 uv run python -m devtools.workflow handoff --context docs/development/context-example.json
 uv run python -m devtools.workflow validate --context docs/development/context-example.json
-uv run python -m devtools.workflow import-events --host codex --session actual-session-id --source /absolute/path/to/supplied.jsonl
+uv run python -m devtools.workflow import-events --host claude --session actual-session-id --source /absolute/path/to/supplied.jsonl
 uv run python -m devtools.workflow report
 ```
 
@@ -40,17 +40,14 @@ or decrease consumed usage. Append superseding corrections. Clearing a pause
 requires explicit `resume_authorization` evidence in the submitted context;
 this is a recorded assertion, not authentication of the human instruction.
 
-Supported telemetry inputs are Codex rollout JSONL `event_msg/token_count` with
-`info.total_token_usage`, and Claude JSONL `assistant.message` with `id` and
+The supported telemetry input is Claude JSONL `assistant.message` with `id` and
 `usage`. Other formats/events are counted as unrecognized; malformed lines are
 retained and reported. Imports require an explicit host/session and file path;
 there is no log discovery, tailer or host hook.
 
-Codex cumulative counters and Claude request counters remain separate series.
-Duplicate cumulative vectors and duplicate message IDs are not counted twice;
-conflicting usage for a request ID is excluded and reported. Cached/reasoning
-subtotals are never added to token totals. No cumulative sum or token-window
-occupancy is inferred. Cost, latency and occupancy remain null with reasons for
+Duplicate message IDs are not counted twice; conflicting usage for a request ID
+is excluded and reported. Cached subtotals are never added to token totals. No
+sum or token-window occupancy is inferred. Cost, latency and occupancy remain null with reasons for
 these formats. Summary fields exclude prompts, response prose and credentials.
 Raw evidence and manifest hashes are verified when reporting; hashes establish
 integrity against accidental mutation, not authenticity against a malicious writer.

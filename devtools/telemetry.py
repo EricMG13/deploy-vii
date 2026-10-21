@@ -1,4 +1,4 @@
-"""Import supplied Codex/Claude JSONL evidence without copying prose into summaries."""
+"""Import supplied Claude JSONL evidence without copying prose into summaries."""
 
 import json
 from pathlib import Path
@@ -17,8 +17,6 @@ from devtools.storage import (
 METRICS = (
     "input_tokens",
     "output_tokens",
-    "cached_input_tokens",
-    "reasoning_output_tokens",
     "total_tokens",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
@@ -38,29 +36,14 @@ def usage_fields(usage: Object) -> Object:
 
 def normalize(event: Object, host: str, session: str) -> Object | None:
     session_hash = digest(session.encode())
-    if host == "codex":
-        payload = obj(event.get("payload"))
-        info = obj(payload.get("info"))
-        if event.get("type") != "event_msg" or payload.get("type") != "token_count":
-            return None
-        # Last usage is not a uniquely identified request; never add it to the ledger.
-        usage = obj(info.get("total_token_usage"))
-        if not usage:
-            return None
-        kind = "cumulative"
-        normalized_usage = usage_fields(usage)
-        identity: Json = normalized_usage
-    elif host == "claude":
-        message = obj(event.get("message"))
-        usage = obj(message.get("usage"))
-        request_id = message.get("id")
-        if event.get("type") != "assistant" or not usage or not isinstance(request_id, str):
-            return None
-        kind = "per_request"
-        normalized_usage = usage_fields(usage)
-        identity = request_id
-    else:
-        raise ValueError("host must be codex or claude")
+    message = obj(event.get("message"))
+    usage = obj(message.get("usage"))
+    request_id = message.get("id")
+    if event.get("type") != "assistant" or not usage or not isinstance(request_id, str):
+        return None
+    kind = "per_request"
+    normalized_usage = usage_fields(usage)
+    identity = request_id
     record: Object = {
         "host": host,
         "session": session_hash,
@@ -73,7 +56,7 @@ def normalize(event: Object, host: str, session: str) -> Object | None:
 
 
 def import_events(repo: Path, root: Path, source: Path, host: str, session: str) -> Object:
-    if host not in {"codex", "claude"} or not session:
+    if host != "claude" or not session:
         raise ValueError("explicit host and session required")
     root = local_store(repo, root)
     raw = source.read_bytes()
@@ -154,8 +137,7 @@ def report(root: Path) -> Object:
         "event_count": len(events),
         "conflicts": [item for item in sorted(conflicts)],
         "per_request": [event for event in usable if event["kind"] == "per_request"],
-        "cumulative": [event for event in usable if event["kind"] == "cumulative"],
-        "accounting": "Separate series; never add cumulative, cached or reasoning subtotals.",
+        "accounting": "Per-request series; never add cached subtotals to token totals.",
         "invalid_lines": invalid_lines,
         "unrecognized_events": ignored,
         "occupancy": {"value": None, "reason": "no qualified occupancy signal"},
