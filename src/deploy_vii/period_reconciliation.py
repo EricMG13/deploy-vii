@@ -11,7 +11,12 @@ from typing import Literal
 
 from deploy_vii.audit_basis import annual_warning
 from deploy_vii.contracts import Citation, Contract, Identifier, Text
-from deploy_vii.financial_contracts import AuditBasisExplanation, FinancialBook, FinancialReview
+from deploy_vii.financial_contracts import (
+    AuditBasisExplanation,
+    CashMovementBridge,
+    FinancialBook,
+    FinancialReview,
+)
 from deploy_vii.financial_periods import (
     HistoricalReport,
     HistoricalValue,
@@ -24,6 +29,7 @@ from deploy_vii.financial_reconciliation import (
     ReconciliationTerm,
     _account,
     _balance,
+    _cash_movement,
     _statement_check,
 )
 from deploy_vii.model._cells import CONTEXT
@@ -59,10 +65,11 @@ class PeriodCheck(Contract):
     explanation: Text
     context_citations: tuple[Citation, ...]
     audit_basis_explanation: AuditBasisExplanation | None = None
+    cash_movement_bridges: tuple[CashMovementBridge, ...] = ()
 
 
 class PeriodReconciliationReport(Contract):
-    schema_version: Literal["period-reconciliation/2"] = "period-reconciliation/2"
+    schema_version: Literal["period-reconciliation/3"] = "period-reconciliation/3"
     historical: HistoricalReport
     checks: tuple[PeriodCheck, ...]
     limitations: tuple[Text, ...]
@@ -218,6 +225,60 @@ def _cfo(
     )
 
 
+def _period_cash(
+    book: FinancialBook,
+    report: HistoricalReport,
+    node: PeriodConstruction,
+    reported: PeriodTerm,
+    closing: PeriodTerm,
+) -> PeriodCheck:
+    """Combine assessed source adjustments without canceling unresolved inputs.
+
+    Unadjusted legacy comparisons keep their own opening/closing boundary. Once
+    any contributing source uses a bridge, every contribution must be assessed
+    and its cash check must pass before the constructed check can agree.
+    """
+    opening = (
+        node.start_date - timedelta(days=1)
+        if node.start_date and node.start_date.toordinal() > 1
+        else None
+    )
+    parts = [closing, _source(_balance(book, opening, "cash_and_equivalents", sign=-1))]
+    sources = _source_periods(report, node)
+    assessments = {b.period_id for b in book.cash_movement_bridges}
+    adjusted = any(pid in assessments for pid, _ in sources)
+    bridges: list[CashMovementBridge] = []
+    contexts: list[Citation] = []
+    blockers: list[str] = []
+    if adjusted:
+        periods = {p.period_id: p for p in book.periods}
+        for pid, sign in sources:
+            if pid not in assessments:
+                parts.append(_cell(None, f"Unassessed cash bridge: {pid}", 1 if sign == 1 else -1))
+                blockers.append(f"Unassessed cash bridge: {pid}")
+                continue
+            assert pid is not None
+            source = _cash_movement(book, periods[pid])
+            parts.extend(_source(term, sign) for term in source.components[2:])
+            bridges.extend(source.cash_movement_bridges)
+            contexts.extend(source.context_citations)
+            if source.status != "PASS":
+                blockers.append(f"{pid}: {source.explanation}")
+    check = _compare(
+        node,
+        "NCF_CASH_MOVEMENT",
+        "net_cash_change",
+        reported,
+        tuple(parts),
+        "closing cash - opening cash - signed period combination of source adjustments"
+        if adjusted
+        else "closing cash - opening cash; no inferred FX plug",
+        blocker=node.limitation or "; ".join(blockers) or None,
+        context=tuple(contexts),
+    )
+    return check.model_copy(update={"cash_movement_bridges": tuple(bridges)})
+
+
 def _bridges(
     book: FinancialBook,
     report: HistoricalReport,
@@ -257,11 +318,6 @@ def _bridges(
         or row.lease_classification not in {"FINANCE_LEASE", "OPERATING_LEASE"}
     )
     foreign = any(facilities[fid].currency != book.currency for fid in debt)
-    opening = (
-        node.start_date - timedelta(days=1)
-        if node.start_date and node.start_date.toordinal() > 1
-        else None
-    )
     undisclosed = not segments and book.segment_disclosure.status in {
         "not_disclosed",
         "not_applicable",
@@ -318,17 +374,12 @@ def _bridges(
             context=tuple(c for row in book.facilities for c in row.terms_citations),
         ),
         _cfo(book, report, node, account("cfo_ncfo")),
-        _compare(
+        _period_cash(
+            book,
+            report,
             node,
-            "NCF_CASH_MOVEMENT",
-            "net_cash_change",
             account("net_cash_change"),
-            (
-                account("cash_and_equivalents"),
-                _source(_balance(book, opening, "cash_and_equivalents", sign=-1)),
-            ),
-            "closing cash - opening cash; no inferred FX plug",
-            blocker=node.limitation,
+            account("cash_and_equivalents"),
         ),
     )
 

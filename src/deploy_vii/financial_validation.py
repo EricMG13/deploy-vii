@@ -7,6 +7,7 @@ from datetime import date
 from pydantic import BaseModel, ValidationError
 
 from deploy_vii.audit_basis import audit_explanation_issues
+from deploy_vii.cash_bridge import cash_bridge_issues
 from deploy_vii.contracts import Citation
 from deploy_vii.financial_contracts import (
     AccountObservation,
@@ -131,6 +132,7 @@ def book_issues(book: FinancialBook) -> tuple[str, ...]:
         *period_issues(book.periods),
         *statement_issues(book),
         *audit_explanation_issues(book),
+        *cash_bridge_issues(book),
     ]
     periods = {period.period_id: period for period in book.periods}
     dimensions = book.currency, book.unit, book.accounting_basis, book.entity_perimeter

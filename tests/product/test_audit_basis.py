@@ -125,9 +125,9 @@ def test_explicit_explanation_warns_without_changing_values_or_readiness_require
     assert validate_reconciliation_report(pack, review, source) == ()
     assert validate_period_reconciliation(pack, review, periods) == ()
     assert validate_model_readiness(pack, review, ready) == ()
-    assert source.schema_version == "financial-reconciliation/2"
-    assert periods.schema_version == "period-reconciliation/2"
-    assert review.schema_version == "financial-review/2"
+    assert source.schema_version == "financial-reconciliation/3"
+    assert periods.schema_version == "period-reconciliation/3"
+    assert review.schema_version == "financial-review/3"
 
 
 def test_explanation_is_not_a_blanket_metric_or_cash_override() -> None:
@@ -306,5 +306,5 @@ def test_report_tampering_and_old_explicit_schema_are_rejected() -> None:
         assert validator(pack, review, altered)
     with pytest.raises(ValidationError):
         FinancialReview.model_validate_json(
-            review.model_dump_json().replace("financial-review/2", "financial-review/1")
+            review.model_dump_json().replace("financial-review/3", "financial-review/1")
         )

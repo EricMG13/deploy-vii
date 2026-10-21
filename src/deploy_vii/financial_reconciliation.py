@@ -17,6 +17,7 @@ from deploy_vii.audit_basis import annual_warning
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
 from deploy_vii.financial_contracts import (
     AuditBasisExplanation,
+    CashMovementBridge,
     FinancialBook,
     FinancialPeriod,
     FinancialReview,
@@ -77,10 +78,11 @@ class Reconciliation(Contract):
     explanation: Text
     context_citations: tuple[Citation, ...]
     audit_basis_explanation: AuditBasisExplanation | None = None
+    cash_movement_bridges: tuple[CashMovementBridge, ...] = ()
 
 
 class ReconciliationReport(Contract):
-    schema_version: Literal["financial-reconciliation/2"] = "financial-reconciliation/2"
+    schema_version: Literal["financial-reconciliation/3"] = "financial-reconciliation/3"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -404,9 +406,23 @@ def _statement_check(
     )
 
 
-def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
-    cfo = _statement_check(book, period, "CFS", "cfo_ncfo", "CFO_IDENTITY")
-    opening = period.start_date - timedelta(days=1) if period.start_date else None
+def _cash_movement(book: FinancialBook, period: FinancialPeriod) -> Reconciliation:
+    opening = (
+        period.start_date - timedelta(days=1)
+        if period.start_date and period.start_date.toordinal() > 1
+        else None
+    )
+    bridge = next((b for b in book.cash_movement_bridges if b.period_id == period.period_id), None)
+    lines = {r.line_id: r for r in book.statement_lines if r.period_id == period.period_id}
+    adjustments = tuple(
+        _term(
+            part.line_id,
+            lines[part.line_id].value,
+            coefficient=-1 if part.coefficient == 1 else 1,
+            outflow=lines[part.line_id].sign_convention == "outflow_magnitude",
+        )
+        for part in (bridge.components if bridge else ())
+    )
     ncf = _check(
         period,
         "NCF_CASH_MOVEMENT",
@@ -415,10 +431,26 @@ def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation,
         (
             _balance(book, period.end_date, "cash_and_equivalents"),
             _balance(book, opening, "cash_and_equivalents", sign=-1),
+            *adjustments,
         ),
-        "closing cash - opening cash; no inferred FX or other cash adjustment",
+        "closing cash - opening cash - signed source adjustments"
+        if bridge
+        else "closing cash - opening cash; no inferred FX or other cash adjustment",
+        context=(
+            *bridge.citations,
+            *(c for part in bridge.components for c in lines[part.line_id].sign_citations),
+        )
+        if bridge
+        else (),
     )
-    return cfo, ncf
+    return ncf.model_copy(update={"cash_movement_bridges": (bridge,) if bridge else ()})
+
+
+def _cash(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:
+    return (
+        _statement_check(book, period, "CFS", "cfo_ncfo", "CFO_IDENTITY"),
+        _cash_movement(book, period),
+    )
 
 
 def _year(book: FinancialBook, period: FinancialPeriod) -> tuple[Reconciliation, ...]:

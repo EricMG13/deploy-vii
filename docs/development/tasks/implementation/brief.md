@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-536 product tests pass (97.42% combined coverage); CP-0 synthetic output is
+563 product tests pass (97.46% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -166,9 +166,20 @@ to the two financial eligibility functions; report assembly receives confidence
 review and focused tests. Historical readiness consumes the warning without
 relaxing its other conditions. This remains deterministic synthetic evidence.
 
+Source-backed cash movement bridges now reference explicitly assessed FX/perimeter
+source detail, retain original values/signs/citations and require complete passing
+source assessments before constructed periods can combine adjustments. Missing
+assessments and equal source errors cannot cancel into a pass. Input and affected
+reconciliation schemas advance to /3. See cash-movement-review.md and
+../../cash-movement.md. The tournament covered only validation and constructed
+cash assembly (fresh Sol/high roles); 149 focused tests and 1,144 coordinator
+comparisons verify the selected rewrite. All code received confidence review.
+No new Module or live analytical/rendering/native-host qualification is claimed.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: complete source-backed cash/FX
-treatment, remaining canonical registers and full consumer readiness.
+live qualification remain pending. Next: independent operating/investing/financing
+to net-cash-change reconciliation, remaining canonical registers and full consumer
+readiness, including explicit foreign-currency debt treatment.
 Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.
 

@@ -36,10 +36,10 @@ Module, rendering or native-host acceptance.
 
 ## Versions and migration
 
-Inputs now use `financial-review/2`; source and period reconciliation artifacts
-use `financial-reconciliation/2` and `period-reconciliation/2`. Explicit version-1
-payloads are rejected, not silently reinterpreted. Rebuild source reviews under
-the new contract and regenerate dependent artifacts from the frozen pack; do not
+This feature introduced version 2 of the review and reconciliation contracts.
+The subsequent [cash-movement increment](cash-movement.md) advances all three
+to version 3. Explicit older-version payloads are rejected, not silently
+reinterpreted. Rebuild source reviews under the new contract and regenerate dependent artifacts from the frozen pack; do not
 edit saved hashes or relabel accepted outputs. With no explanation records, the
 existing numeric and severity behavior is preserved. Other output schemas retain
 their existing shape and bind the new review hash or nested versioned reports.

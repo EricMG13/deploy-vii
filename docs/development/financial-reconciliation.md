@@ -1,7 +1,7 @@
 # CP-1 source-register reconciliation
 
 `reconcile_financials(pack, review, book_id)` now produces the immutable
-`financial-reconciliation/2` internal artifact. It binds the prepared pack and
+`financial-reconciliation/3` internal artifact. It binds the prepared pack and
 financial review hashes, run, issuer, as-of date, book, currency, scale,
 accounting basis and entity perimeter. It is not a Module acceptance or Model
 readiness decision. No CLI, journal or renderer consumes it yet.
@@ -31,7 +31,8 @@ The implementation adds these source-register comparisons:
 - Independent source statement equations, recursively expanded to original leaves.
   CFO identity requires a complete source cash-flow disclosure and independent
   components; the Model residual is never used to prove its own construction.
-- Net cash change against closing less opening cash, with no invented FX plug.
+- Net cash change against closing less opening cash, including explicitly sourced
+  [cash movement adjustments](cash-movement.md); no invented FX plug.
 - Each controlled flow metric's reported FY against four directly supplied,
   contiguous quarters spanning exactly that FY. Reported FY remains independent.
 
@@ -61,9 +62,9 @@ Missing direct schedule rows remain blocked even where the kernel might derive
 a value. An explicit, sourced [annual audit explanation](audit-basis.md) can now
 make its exact audited-FY versus unaudited-quarter comparison WARN, retaining the
 actual difference. No automatic exception is inferred. Source-register comparisons
-still do not infer pre-issuance zero balances or absorb FX differences; those cases
-require explicit source-backed treatment. Unexplained differences are never forced
-to zero.
+still do not infer pre-issuance zero balances or absorb unexplained FX differences.
+Explicit cash/FX bridges now retain the sourced adjustments and their signs;
+unexplained differences are never forced to zero.
 
 There is no live model qualification or new completed-module rendering claim.
 All current evidence is explicitly synthetic. This artifact advances milestone

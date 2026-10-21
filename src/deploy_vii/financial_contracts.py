@@ -291,6 +291,20 @@ class StatementDisclosure(Contract):
     disclosure: Disclosure
 
 
+class CashMovementBridge(Contract):
+    """Cash delta = reported NCF + signed source adjustments; never a plug.
+
+    An empty component list explicitly assesses that no adjustment is needed.
+    Components reference detail lines in the same period's source CFS.
+    """
+
+    bridge_id: Identifier
+    period_id: Identifier
+    components: Annotated[tuple[StatementContribution, ...], Field(max_length=20000)]
+    explanation: Text
+    citations: Located
+
+
 class AuditBasisExplanation(Contract):
     """Located explanation for one audited FY versus four unaudited quarters."""
 
@@ -320,6 +334,7 @@ class FinancialBook(Contract):
     statement_lines: Annotated[tuple[StatementLine, ...], Field(max_length=20000)] = ()
     statement_identities: Annotated[tuple[StatementIdentity, ...], Field(max_length=20000)] = ()
     statement_disclosures: tuple[StatementDisclosure, ...] = ()
+    cash_movement_bridges: Annotated[tuple[CashMovementBridge, ...], Field(max_length=200)] = ()
     audit_basis_explanations: Annotated[
         tuple[AuditBasisExplanation, ...], Field(max_length=20000)
     ] = ()
@@ -330,7 +345,7 @@ class FinancialBook(Contract):
 
 
 class FinancialReview(Contract):
-    schema_version: Literal["financial-review/2"] = "financial-review/2"
+    schema_version: Literal["financial-review/3"] = "financial-review/3"
     pack_sha256: Hash
     run_id: Identifier
     issuer_id: Identifier

@@ -1,6 +1,6 @@
 # Reconciliation across historical constructions
 
-`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/2`.
+`reconcile_periods(pack, review, book_id)` returns `period-reconciliation/3`.
 It embeds the complete hash-bound historical report, including source and review
 identity, currency/scale, original observations, period constructions and input
 values. This adds comparisons over constructed quarters and LTM periods to the
@@ -22,6 +22,8 @@ For every exposed historical column, checks compare:
   numeric difference. Equal source errors cannot cancel into acceptance. Missing
   period references remain explicit missing terms.
 - Net cash change with closing less opening cash for the actual constructed span.
+  Explicit [source cash bridges](cash-movement.md) contribute signed adjustments;
+  every contributing source assessment must reconcile before they can be combined.
   An unexplained FX/other movement remains a difference; no Model residual proves it.
 
 Reported FY is also compared with four dated, contiguous constructed quarters.
@@ -51,10 +53,10 @@ Partial reviews remain retainable as source artifacts. Exact-scope, sourced
 [annual audit explanations](audit-basis.md) now permit eligible annual WARNs;
 the [historical readiness gate](model-readiness.md) and
 [canonical KPI register](canonical-kpis.md) are separate implemented layers.
-Remaining work includes source-backed cash/FX treatment, explicit comparability
-where presentation changes, pending KPI definitions, CP-1A and execution/Workbench
-integration. No new module
-analytical, rendering or native-host acceptance is claimed. Current evidence is
+Source-backed [cash/FX treatment](cash-movement.md) now exists. Remaining work
+includes explicit comparability where presentation changes, pending KPI
+definitions, CP-1A and execution/Workbench integration. No new module analytical,
+rendering or native-host acceptance is claimed. Current evidence is
 synthetic; live-model spend remains zero.
 
 Review: [implementation review](tasks/implementation/period-reconciliation-review.md).
