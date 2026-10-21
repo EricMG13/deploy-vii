@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-669 product tests pass (97.46% combined coverage); CP-0 synthetic output is
+696 product tests pass (97.29% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -217,9 +217,19 @@ See canonical-gaps-review.md and ../../canonical-gaps.md. The Sol/high
 tournament covers only the two aggregation/provenance functions. This register
 confers no consumer readiness or Module acceptance.
 
+The CP-1 narrative protocol now binds evidence-risk-credit chains to immutable
+prior-row catalogues, requires explicit dimensional coverage and named event,
+multi-figure and material funding stories, and retains every upstream gap.
+No available numeric KPI limits synthesis to data quality. Confidence review
+fixed empty reasoning chains and false funding designations of standard BS rows.
+See narrative-review.md and ../../narrative.md. The Sol/high tournament covers
+only catalogue construction and narrative validation. Semantic qualification,
+canonical Markdown and Workbench delivery remain pending; this is internal
+protocol implementation, not a completed Module or analytical acceptance.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: add the evidence-risk-credit narrative
-and full consumer readiness, then bind CP-1/Model
+live qualification remain pending. Next: add full consumer readiness,
+then bind CP-1/Model
 outputs to the execution journal and Workbench. Remaining cross-statement checks, foreign-currency debt treatment
 and CP-1A remain explicit
 requirements; current selected historical readiness is not full CP-1 acceptance.
