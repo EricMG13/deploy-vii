@@ -1,7 +1,7 @@
 # Historical Model calculation artifact
 
 `model_report(pack, review, book_id, exclude_unrealised=False)` produces the
-immutable `financial-model/1` internal artifact. It embeds the complete
+immutable `financial-model/2` internal artifact. It embeds the complete
 hash-bound historical input/period report, including run, issuer, as-of date,
 method, source/review hashes, perimeter, accounting basis, currency and scale.
 It does not grant Model readiness or complete CP-1 delivery.
@@ -24,6 +24,22 @@ quarterly margins use the quarter. Interim leverage is not applicable, while
 interim liquidity/debt uses its own closing balances. LTM growth's prior-quarter
 fallback points to that prior quarter's rolling year, not its own quarter.
 Corporate/elimination segment growth remains not applicable.
+
+Every statement value now references a content-addressed computation root. The
+computation register retains the actual ordered, signed operands used by sums
+and balance/flow × days calculations, including failed operations. Shared
+subexpressions are stored once; children precede parents. Input leaves retain
+observation/issuance citations and sign-normalization notes. Located null inputs
+retain their evidence separately from generic unavailable leaves. Constants are
+explicitly kernel constants, not source facts. Early refusals before arithmetic
+retain their reason; their period construction remains in the historical report.
+The graph describes calculation provenance, not an independent reconciliation.
+
+EBIT and net-income margins use their own period's revenue. Net income comes
+from a controlled account or an explicitly mapped income-statement line; it is
+never filled from pretax income less tax. Reported EBITDA growth is separate
+from adjusted EBITDA growth. Pro forma EBIT/net-income margins remain not
+applicable because no corresponding adjustment rule is defined.
 
 The kernel remains the arithmetic authority. The artifact reads the same metric
 recipes, period selection and prior-period rules, and uses the existing
@@ -65,10 +81,15 @@ including explicit missing placeholders.
 This is deterministic implementation evidence only. Evidence quality tiers
 remain null with an explicit unassessed reason; they are not inferred from a
 matched quotation. Analytical KPI trends and commentary remain separate model
-work. The complete canonical CP-1 KPI set, statement formula register,
+work. The complete canonical CP-1 KPI set,
 independent derived-period reconciliation, four-quarter readiness, pro forma,
 projection integration and CP-1A remain outstanding. No CLI, execution journal
 or Workbench consumer is connected to this API yet. No completed-Module browser,
 public-case analytical or native-host acceptance is claimed.
 
-Review and verification: [implementation review](tasks/implementation/model-output-review.md).
+DCF is named in the pinned r14 references without a formula. Its definition is
+awaiting the user's answer; neither dividend-only nor dividend-plus-buyback
+subtraction has been adopted. This does not block unrelated calculations.
+
+Review and verification: [initial implementation review](tasks/implementation/model-output-review.md)
+and [arithmetic trace review](tasks/implementation/computation-review.md).

@@ -107,6 +107,7 @@ ACCOUNT_LINKS: dict[tuple[str, str], str] = {
             "depreciation_amortization",
             "ebit",
             "pretax_income",
+            "net_income",
             "opex_including_da",
             "operating_lease_cost",
         )

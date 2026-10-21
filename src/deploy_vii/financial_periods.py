@@ -197,7 +197,7 @@ def _value(
     observations: dict[str, Observation],
     evidence: dict[tuple[str, str], tuple[Citation, ...]],
 ) -> PeriodValue:
-    sources: tuple[SourceRef, ...] = cell.sources
+    sources: tuple[SourceRef, ...] = cell.sources or cell.input_sources
     ids = tuple(
         dict.fromkeys(
             ref.source_id for ref in sources if ref.source_locator == "financial-observation"
@@ -210,7 +210,7 @@ def _value(
     )
     source = observations.get(ids[0]) if len(ids) == 1 else None
     classification: Literal["source", "normalized", "calculated"] = "calculated"
-    if cell.basis == "REPORTED":
+    if cell.basis == "REPORTED" or cell.input_sources:
         classification = (
             "source" if source is not None and cell.value == source.amount else "normalized"
         )

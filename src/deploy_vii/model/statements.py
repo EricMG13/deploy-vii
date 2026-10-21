@@ -76,7 +76,7 @@ from deploy_vii.model.debt import (
     facility_keys,
     notes_of,
 )
-from deploy_vii.model.frame import Cell, Column, Frame
+from deploy_vii.model.frame import Arithmetic, Cell, Column, Frame
 from deploy_vii.model.registers import Cp1Registers, PfAdjustmentRow
 
 _EXCLUDED = "excluded"
@@ -87,6 +87,7 @@ UNREALISED = frozenset({"UNREALIZED", "NOT_STATED"})
 # Frame keys read straight from one CP-1 account (outflows normalised).
 _LINES = {
     "revenue": "revenue",
+    "net_income": "net_income",
     "cogs": "cogs",
     "da": "depreciation_amortization",
     "opex_total": "opex_including_da",
@@ -119,6 +120,7 @@ _PF_TARGETS = {
 }
 _REVOLVER = re.compile(r"^(RCF|REVOLV)")
 _PF_BLANK = (
+    "net_income",
     "other_operating",
     "ffo",
     "working_capital_change",
@@ -308,13 +310,14 @@ def _opening_cash(regs: Cp1Registers, column: Column) -> Cell:
 def _days_ratio(balance: Cell, flow: Cell, days: Cell) -> Cell:
     """`balance / flow x days`; `ZERO_OR_NEGATIVE_DENOMINATOR` for a flow at
     or below zero."""
+    arithmetic = Arithmetic("ratio_times", ((balance, 1), (flow, 1), (days, 1)))
     if balance.value is None or flow.value is None or days.value is None:
-        return Cell(None, "COMPONENT_MISSING")
+        return Cell(None, "COMPONENT_MISSING", arithmetic=arithmetic)
     if flow.value <= 0:
-        return Cell(None, "ZERO_OR_NEGATIVE_DENOMINATOR")
+        return Cell(None, "ZERO_OR_NEGATIVE_DENOMINATOR", arithmetic=arithmetic)
     sources = refs([*balance.sources, *flow.sources])
     value = balance.value / flow.value * days.value
-    return Cell(value, basis="CALCULATED", sources=sources)
+    return Cell(value, basis="CALCULATED", sources=sources, arithmetic=arithmetic)
 
 
 def _working_capital(get: _Get, column: Column) -> dict[str, Cell]:

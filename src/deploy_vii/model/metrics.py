@@ -113,6 +113,8 @@ _METRICS: dict[str, _Metric] = {
     "capex_to_revenue": _Metric("PERCENT", "own", (("capex", -1),), _REVENUE),
     "liquidity_to_debt": _Metric("PERCENT", "rolling", (("liquidity", 1),), _DEBT),
     "gross_margin": _Metric("PERCENT", "own", (("gross_profit", 1),), _REVENUE),
+    "ebit_margin": _Metric("PERCENT", "own", (("ebit", 1),), _REVENUE),
+    "net_income_margin": _Metric("PERCENT", "own", (("net_income", 1),), _REVENUE),
     "ebitda_margin": _Metric("PERCENT", "own", _EBITDA, _REVENUE),
     "adjusted_ebitda_margin": _Metric("PERCENT", "own", _ADJUSTED, _REVENUE),
 }
@@ -124,8 +126,8 @@ _REPORTED = frozenset(
 # too (acquired EBITDA over unadjusted revenue is no margin).
 _PF_MARGINS = frozenset({"ebitda_margin", "adjusted_ebitda_margin"})
 # Deploy VI adds gross profit growth (spec §6.3) for the Credit Snapshot.
-_GROWTH = ("revenue", "gross_profit", "adjusted_ebitda")
-_GROWTH_KEYS = frozenset({"revenue_growth", "gross_profit_growth", "adjusted_ebitda_growth"})
+_GROWTH = ("revenue", "gross_profit", "adjusted_ebitda", "ebitda")
+_GROWTH_KEYS = frozenset(f"{key}_growth" for key in _GROWTH)
 _LIKE = {"QUARTER": "QUARTER", "YTD": "PYTD", "FY": "FY", "LTM": "LTM"}
 _YEAR = 365
 _WEEK = 7  # a 52- or 53-week year ends within a week of the calendar year
@@ -199,6 +201,8 @@ def _pf_blank(column: Column, own: Mapping[str, Cell], name: str) -> bool:
     VI) the gross margin where one did (gross profit has no PF target)."""
     if column.kind != "PF_LTM":
         return False
+    if name in {"ebit_margin", "net_income_margin"}:
+        return True  # No pro forma EBIT/net-income adjustment is defined.
     adjusted = _get(own, "revenue", column).basis == "PRO_FORMA"
     margin = name in _PF_MARGINS and not adjusted
     return name in _REPORTED or margin or (name == "gross_margin" and adjusted)

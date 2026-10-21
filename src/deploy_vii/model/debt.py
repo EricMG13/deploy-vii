@@ -48,7 +48,7 @@ from deploy_vii.model._cells import (
     periods_at,
     refs,
 )
-from deploy_vii.model.frame import Cell, Column, Frame, SourceRef
+from deploy_vii.model.frame import Arithmetic, Cell, Column, Frame, SourceRef
 from deploy_vii.model.registers import Cp1Registers, FacilityRow, iso_date
 
 PAYMENT_RANKS: tuple[str, ...] = (
@@ -158,17 +158,29 @@ def _stack_totals(
     sums = dict.fromkeys(_STACK_KEYS, Decimal(0))
     missing: set[str] = set()
     sources: dict[str, list[SourceRef | None]] = {key: [] for key in _STACK_KEYS}
+    operands: dict[str, list[tuple[Cell, int]]] = {key: [] for key in _STACK_KEYS}
     for row, value in pairs:
         for key in facility_keys(row, currency):
+            operand = (
+                Cell(value, basis="REPORTED", sources=refs([row.source]))
+                if value is not None
+                else Cell(None, "NOT_STATED", input_sources=refs([row.source]))
+            )
+            operands[key].append((operand, 1))
             if value is None:
                 missing.add(key)
                 continue
             sums[key] += value
             sources[key].append(row.source)
     return {
-        key: Cell(None, "COMPONENT_MISSING")
+        key: Cell(None, "COMPONENT_MISSING", arithmetic=Arithmetic("sum", tuple(operands[key])))
         if key in missing
-        else Cell(sums[key], basis="CALCULATED", sources=refs(sources[key]))
+        else Cell(
+            sums[key],
+            basis="CALCULATED",
+            sources=refs(sources[key]),
+            arithmetic=Arithmetic("sum", tuple(operands[key])),
+        )
         for key in _STACK_KEYS
     }
 
@@ -176,7 +188,7 @@ def _stack_totals(
 def _fac_cell(row: FacilityRow, currency: str) -> Cell:
     note = FOREIGN if row.currency != currency else None
     if row.carrying_value is None:
-        return Cell(None, "NOT_STATED", note=note)
+        return Cell(None, "NOT_STATED", note=note, input_sources=refs([row.source]))
     sources = refs([row.source])
     value = no_negative_zero(row.carrying_value)
     return Cell(value, basis="REPORTED", sources=sources, note=note)
@@ -194,7 +206,7 @@ def _stated_total(total: Cell, leases: list[FacilityRow], stated: Cell, currency
     excluded = sum(value for value in in_total if value is not None)
     differs = beyond_rounding(figure, total.value - excluded)
     note = DIFFERS if differs else None
-    return Cell(total.value, None, total.basis, figure, total.sources, note)
+    return replace(total, stated=figure, note=note)
 
 
 def _account(accounts: dict[str, Cell], metric_id: str) -> Cell:

@@ -18,7 +18,7 @@ from decimal import (
     Overflow,
 )
 
-from deploy_vii.model.frame import Cell, Column, SourceRef
+from deploy_vii.model.frame import Arithmetic, Cell, Column, SourceRef
 from deploy_vii.model.registers import Cp1Registers, iso_date
 
 CONTEXT = Context(
@@ -72,17 +72,18 @@ def calc(parts: Iterable[tuple[Cell, int]], note: str | None = None) -> Cell:
     has no value, noted with why each missing part is missing (its note).
     Noted `SIGN_NORMALISED` where a part was, then `note`."""
     cells = list(parts)
+    arithmetic = Arithmetic("sum", tuple(cells))
     total = Decimal(0)
     sources: list[SourceRef] = []
     for cell, sign in cells:
         if cell.value is None:
             why = join_notes(*(part.note for part, _ in cells if part.value is None))
-            return Cell(None, "COMPONENT_MISSING", note=why)
+            return Cell(None, "COMPONENT_MISSING", note=why, arithmetic=arithmetic)
         total += cell.value * sign
         sources.extend(cell.sources)
     normalised = any(flipped(cell) for cell, _ in cells)
     noted = join_notes(SIGN_NORMALISED if normalised else None, note)
-    return Cell(total, basis="CALCULATED", sources=refs(sources), note=noted)
+    return Cell(total, basis="CALCULATED", sources=refs(sources), note=noted, arithmetic=arithmetic)
 
 
 def opening_date(column: Column) -> str | None:

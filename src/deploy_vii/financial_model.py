@@ -9,6 +9,7 @@ from datetime import date
 from decimal import Decimal, localcontext
 from typing import Literal
 
+from deploy_vii.calculation_trace import Computation, trace_cells
 from deploy_vii.contracts import Contract, Identifier, Text
 from deploy_vii.financial_adapter import kernel_registers
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview, Observation
@@ -54,6 +55,7 @@ class ModelValue(Contract):
     currency: Text | None
     value: PeriodValue
     residual_formula: Text | None
+    computation_id: Identifier
 
 
 class MetricOperand(Contract):
@@ -83,12 +85,13 @@ class ModelMetric(Contract):
 
 
 class ModelReport(Contract):
-    schema_version: Literal["financial-model/1"] = "financial-model/1"
+    schema_version: Literal["financial-model/2"] = "financial-model/2"
     historical: HistoricalReport
     exclude_unrealised: bool
     bases: tuple[ModelBasis, ...]
     values: tuple[ModelValue, ...]
     metrics: tuple[ModelMetric, ...]
+    computations: tuple[Computation, ...]
     limitations: tuple[Text, ...]
 
 
@@ -279,6 +282,13 @@ def model_report(
     result = metrics.metric_frame(columns, frame, rolling, corporate=corporate)
     observations = {o.observation_id: o for o in records(book, Observation)}
     evidence = _evidence(book)
+    value_cells = {
+        _id("model-value", _basis_id(column, is_rolling), key): cell
+        for is_rolling, group, data in ((False, columns, frame), (True, rolling_columns, rolling))
+        for column in group
+        for key, cell in data[column.column_id].items()
+    }
+    computations, computation_roots = trace_cells(value_cells, book)
     values: list[ModelValue] = []
     for is_rolling, group, data in ((False, columns, frame), (True, rolling_columns, rolling)):
         for column in group:
@@ -294,6 +304,7 @@ def model_report(
                         currency=currency,
                         value=_value(cell, observations, evidence),
                         residual_formula=_RESIDUALS.get(key),
+                        computation_id=computation_roots[_id("model-value", basis, key)],
                     )
                 )
     with localcontext(CONTEXT):
@@ -304,13 +315,14 @@ def model_report(
         bases=_bases(regs, columns, rolling_columns, historical),
         values=tuple(values),
         metrics=ratios,
+        computations=computations,
         limitations=(
             "Historical Model calculations only; no readiness or analytical acceptance is granted",
             "Model debt includes finance leases; canonical CP-1 debt excludes both lease types",
             "Residuals explain arithmetic differences, not their economic causes "
             "or independent reconciliation",
             "Evidence quality tiers and analytical KPI trends remain unassessed",
-            "Full canonical CP-1 KPI coverage, statement formula register, "
+            "Full canonical CP-1 KPI coverage, independent derived-period reconciliation, "
             "pro forma and projections remain pending",
             "No CLI, journal or Workbench binding yet",
             *book.limitations,

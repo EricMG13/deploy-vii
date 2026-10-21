@@ -87,7 +87,7 @@ from deploy_vii.model._cells import (
     no_negative_zero,
     refs,
 )
-from deploy_vii.model.frame import Cell, Column, Frame, SourceRef
+from deploy_vii.model.frame import Arithmetic, Cell, Column, Frame, SourceRef
 from deploy_vii.model.periods import (
     _ADDITIVE,
     LTM_DAYS,
@@ -126,6 +126,7 @@ FLOW_METRICS = frozenset(
         "other_investing_financing",
         "net_cash_change",
         "pretax_income",
+        "net_income",
         "income_tax_expense",
         "operating_lease_cost",
         "lease_payments_in_financing",
@@ -213,7 +214,7 @@ def _row(value: Decimal | None, source: SourceRef | None, outflow: bool = False)
     is zero; an outflow written positive is read negative (exactly: no
     context rounds it) and noted."""
     if value is None:
-        return _UNSTATED
+        return replace(_UNSTATED, input_sources=refs([source]))
     value = no_negative_zero(value)
     cell = Cell(value, basis="REPORTED", sources=refs([source]))
     if outflow and value > 0:
@@ -301,14 +302,15 @@ def _sum(series: _Series, parts: Iterable[tuple[Cell, int]]) -> Cell:
     `COMPONENT_MISSING`, except in a sparse series, where an absent part is
     nothing."""
     cells = list(parts)
+    arithmetic = Arithmetic("sum", tuple(cells))
     if not cells:
         return ABSENT
     missing = [cell for cell, _ in cells if cell.value is None]
     unstated = next((c for c in missing if c.reason != "NOT_SOURCED"), None)
     if unstated is not None:
-        return Cell(None, "COMPONENT_MISSING", note=unstated.note)
+        return Cell(None, "COMPONENT_MISSING", note=unstated.note, arithmetic=arithmetic)
     if missing and (len(missing) == len(cells) or series.kind != "sparse"):
-        return ABSENT if len(missing) == len(cells) else _MISSING
+        return replace(ABSENT if len(missing) == len(cells) else _MISSING, arithmetic=arithmetic)
     return calc((cell, sign) for cell, sign in cells if cell.value is not None)
 
 
@@ -500,7 +502,7 @@ def _flow(series: _Series, register: _Register, spec: _Spec) -> Cell:
         return Cell(None, "COMPONENT_MISSING", stated=stated, note=PARTLY_STATED)
     total = _sum(series, terms)
     if total.value is None:
-        return Cell(None, total.reason, stated=stated, note=total.note)
+        return replace(total, stated=stated)
     differs = stated is not None and beyond_rounding(stated, total.value)
     note = join_notes(total.note, DIFFERS if differs else None)
     return replace(total, stated=stated, note=note)

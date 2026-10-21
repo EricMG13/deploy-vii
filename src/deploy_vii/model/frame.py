@@ -7,7 +7,7 @@ cell text verbatim, `[C<n>]` markers kept (D107).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
 
@@ -40,6 +40,17 @@ class Cell:
     sources: tuple[SourceRef, ...] = ()
     # "implied rate", "assumed refinanced", "held flat", "differs from CP-1 stated"
     note: str | None = None
+    # Audit metadata does not change legacy numeric equality or positional calls.
+    arithmetic: Arithmetic | None = field(default=None, compare=False, repr=False, kw_only=True)
+    input_sources: tuple[SourceRef, ...] = field(
+        default=(), compare=False, repr=False, kw_only=True
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Arithmetic:
+    operation: Literal["sum", "ratio_times"]
+    operands: tuple[tuple[Cell, int], ...]
 
 
 @dataclass(frozen=True, slots=True)

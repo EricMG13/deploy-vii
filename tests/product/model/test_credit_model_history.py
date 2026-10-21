@@ -17,7 +17,9 @@ from tests.product.model.history_frames import _frame, _value
 
 
 def test_flow_and_balance_metrics_are_cp1_controlled_ids() -> None:
-    assert len(FLOW_METRICS) == 25
+    # Deploy VII retains net income as a controlled flow for the r14 margin.
+    assert len(FLOW_METRICS) == 26
+    assert "net_income" in FLOW_METRICS
     assert len(BALANCE_METRICS) == 9
     assert not FLOW_METRICS & BALANCE_METRICS
     assert {"revenue", "gross_profit", "cash_lease_payments", "pretax_income"} <= (FLOW_METRICS)

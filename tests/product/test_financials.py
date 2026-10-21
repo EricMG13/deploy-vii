@@ -195,7 +195,8 @@ def test_omitted_financing_lines_stay_unknown_and_zero_requires_evidence() -> No
     pack, review = freeze(value)
     assert validate_financial_review(pack, review) == ()
     regs = kernel_registers(pack, review, value.book_id)
-    assert len(regs.accounts) == 35 * 2
+    assert len(regs.accounts) == 36 * 2  # Net income is a controlled flow.
+    assert all(r.value is None for r in regs.accounts if r.metric_id == "net_income")
     columns = historical_columns(regs)
     cells = statement_frame(account_frame(regs, columns), columns, regs)["Q:Q2"]
     assert cells["ebitda"].value == 60

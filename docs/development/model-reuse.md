@@ -79,3 +79,12 @@ and tasks/implementation/model-output-review.md. Per the user's
 key-area tournament limit and the skill's vendored/mechanical exclusion, no
 tournament is run over unchanged imported algorithms. New calculation or
 provenance logic will receive the scoped tournament and confidence review.
+
+The next historical output increment adds keyword-only arithmetic/provenance
+metadata to internal Cells without changing numeric equality or positional calls.
+Sums, debt subtotals and working-capital days ratios retain their actual inputs.
+Net income joins the controlled flows, with EBIT/net-income margins and reported
+EBITDA growth added from the r14 canonical list. See
+[arithmetic trace review](tasks/implementation/computation-review.md). The original
+source manifest remains a record of the imported base, not a claim that current
+files match their original hashes.
