@@ -76,8 +76,9 @@ for an assessed complete add-back bridge. A partial review can still be retained
 as a source artifact but cannot enter this Model conversion. Full CP-1 delivery
 must show those input gaps separately.
 
-Statement/ratio output and its numerator/denominator register, independent
-reconciliation of derived periods, final four-quarter readiness, CP-1A and
-execution/HTML binding remain pending. Synthetic tests verify deterministic
+[Historical Model output](model-output.md) now retains statement values and
+explicit ratio numerators/denominators. Full canonical KPI and statement-formula
+coverage, independent reconciliation of derived periods, final four-quarter
+readiness, CP-1A and execution/HTML binding remain pending. Synthetic tests verify deterministic
 behavior; public-case analytical qualification and native-host delivery remain
 unrun. No completed-module browser acceptance is claimed for this internal API.

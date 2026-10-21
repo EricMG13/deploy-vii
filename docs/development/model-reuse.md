@@ -3,14 +3,15 @@
 Selected 21 October 2026 against Deploy VI commit
 `bd71346301b373afa72655916a4c1b42bf4c9823`, from clean Deploy VII base `9199be4`.
 This is milestone C's internal arithmetic slice, not a completed CP-1 or Model
-module. The validated financial and historical-period APIs now call it; no product CLI,
+module. The validated financial, historical-period and Model output APIs now call it; no product CLI,
 execution adapter or Workbench delivery consumes those outputs yet.
 
 The selected eight modules are `_cells`, `frame`, `registers`, `periods`,
 `history`, `debt`, `statements` and `metrics`. Only three date functions and
 their regular expressions come from `reader`. The [source manifest](../review-evidence/model-port-sources.json)
 records every original path and SHA-256, including the synthetic regression
-fixtures. Imports and formatting are adapted; calculation behavior is preserved.
+fixtures. The original port adapted imports and formatting; later dated-period
+corrections are explicitly recorded below.
 Documentation now describes finite precision accurately. The old table parser,
 assembly/layout, projections, workbook, state, host policy and qualification
 receipts are not included.
@@ -71,7 +72,10 @@ The original port changed imports, documentation and formatting only.
 Subsequent period integration adapts `_calculated_quarters` and `_host_ltm`
 to reject mismatched stub subtraction, preserve component-owned LTM dates and
 require a proven twelve-month span. See [period integration](financial-periods.md)
-and tasks/implementation/period-review.md for reproduced cases and verification. Per the user's
+and tasks/implementation/period-review.md for reproduced cases and verification.
+Historical Model output also validates four-quarter rolling spans in `history`
+and supplies rolling metadata to statement assembly; see [Model output](model-output.md)
+and tasks/implementation/model-output-review.md. Per the user's
 key-area tournament limit and the skill's vendored/mechanical exclusion, no
 tournament is run over unchanged imported algorithms. New calculation or
 provenance logic will receive the scoped tournament and confidence review.

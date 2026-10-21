@@ -90,16 +90,18 @@ from deploy_vii.model._cells import (
 from deploy_vii.model.frame import Cell, Column, Frame, SourceRef
 from deploy_vii.model.periods import (
     _ADDITIVE,
+    LTM_DAYS,
     _dated,
     _first_day,
     _plan,
     _quarter_index,
     _Spec,
+    _start,
 )
 from deploy_vii.model.periods import (
     historical_columns as historical_columns,
 )
-from deploy_vii.model.registers import AccountRow, Cp1Registers, PeriodRow
+from deploy_vii.model.registers import AccountRow, Cp1Registers, PeriodRow, iso_date
 
 FLOW_METRICS = frozenset(
     {
@@ -565,6 +567,56 @@ def _earlier(spec: _Spec, quarters: dict[tuple[int, int], _Spec]) -> list[_Spec 
     return earlier
 
 
+def _rolling_days(spec: _Spec, earlier: list[_Spec | None], register: _Register) -> int | None:
+    """Return the span of four usable, contiguous quarters, else None."""
+    quarters = (*reversed(earlier), spec)
+    if len(quarters) != 4:
+        return None
+    first_start: int | None = None
+    next_start: int | None = None
+    for quarter in quarters:
+        if quarter is None or quarter.unbuilt is not None:
+            return None
+        start = _start(quarter, register.periods)
+        end = iso_date(quarter.column.end_date)
+        if start is None or end is None:
+            return None
+        end_day = end.toordinal()
+        if not 1 <= start <= end_day:
+            return None
+        if next_start is not None and start != next_start:
+            return None
+        if first_start is None:
+            first_start = start
+        next_start = end_day + 1
+    assert first_start is not None and next_start is not None
+    days = next_start - first_start
+    return days if LTM_DAYS[0] <= days <= LTM_DAYS[1] else None
+
+
+def ltm_columns(regs: Cp1Registers, columns: tuple[Column, ...]) -> tuple[Column, ...]:
+    """Metadata for `ltm_frames`, keyed by quarter but dated over all four quarters.
+
+    Keep these in a separate frame: the keys deliberately match the associated
+    quarter so `metric_frame` can select its twelve-month basis.
+    """
+    plan = {spec.column.column_id: spec for spec in _plan(regs)}
+    quarters = _quarter_index(plan.values())
+    register = _register(regs)
+    return tuple(
+        replace(
+            column,
+            kind="LTM",
+            label=f"LTM {column.label}",
+            days=_rolling_days(
+                plan[column.column_id], _earlier(plan[column.column_id], quarters), register
+            ),
+        )
+        for column in columns
+        if column.kind == "QUARTER"
+    )
+
+
 def _ltm_cell(
     series: _Series, register: _Register, spec: _Spec, earlier: list[_Spec | None]
 ) -> Cell:
@@ -574,6 +626,11 @@ def _ltm_cell(
         return _balance(series, register, spec)
     if series.kind == "exact":
         return Cell(None, "NOT_SOURCED")
+    if (
+        all(quarter is not None for quarter in earlier)
+        and _rolling_days(spec, earlier, register) is None
+    ):
+        return _UNSPANNED_PARTS
     quarters = (
         (_MISSING if quarter is None else _flow(series, register, quarter), 1)
         for quarter in (spec, *earlier)

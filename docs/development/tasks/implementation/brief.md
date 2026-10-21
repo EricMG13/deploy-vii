@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-432 product tests pass (97.15% combined coverage); CP-0 synthetic output is
+448 product tests pass (97.23% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -114,9 +114,14 @@ constructed-period operands now exist; see period-review.md and
 ../../financial-periods.md. Three reproduced period/span defects are corrected.
 The tournament covered only the two changed date algorithms, using fresh
 GPT-6.1 Sol/high review roles; confidence review covered the complete increment.
+Historical Model statement values and ratio numerators/denominators now exist;
+see model-output-review.md and ../../model-output.md. Rolling statements use
+verified full-year dates; gaps/overlaps cannot become known LTM flows. The two
+key span/provenance functions received the scoped tournament with the same
+explicit model matrix. Evidence tiers and analytical trends remain unassessed.
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
 live qualification remain pending. Next: complete
-statement/ratio output registers with explicit numerators and denominators,
+the remaining canonical CP-1 KPIs and full statement formula register,
 source-backed cash/FY explanations, independent derived-period checks and Model readiness.
 Then bind Model calculations and CP-1A to the tested execution journal and report. Tournaments remain key-area
 only; confidence review applies to all code changes.

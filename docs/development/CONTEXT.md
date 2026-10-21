@@ -30,6 +30,7 @@ Model kernel: [selected reuse and integration requirements](model-reuse.md).
 CP-1 source boundary: [contracts, validation and remaining work](financial-inputs.md).
 CP-1 statements: [source coverage and independent equations](statements.md).
 CP-1 constructed periods: [historical series and operands](financial-periods.md).
+Model historical output: [statement values and ratio operands](model-output.md).
 CP-1 arithmetic checks: [source-register reconciliation](financial-reconciliation.md).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). Product work starts with r14 coverage,
 contracts and an honest unrun Direction C shell, followed by source readiness.
