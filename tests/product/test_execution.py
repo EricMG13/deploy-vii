@@ -1,3 +1,4 @@
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,7 +22,7 @@ def fixture_store(tmp_path: Path) -> Execution:
 
 def candidate_for(store: Execution, module_id: str, attempt: int = 0) -> Module:
     snapshot = store.read()
-    run = snapshot.pack.run
+    run = snapshot.run
     return Module(
         run_id=run.run_id,
         issuer_id=run.issuer_id,
@@ -44,7 +45,7 @@ def candidate_for(store: Execution, module_id: str, attempt: int = 0) -> Module:
 def accept_cp0(store: Execution) -> str:
     _, review = readiness_fixture()
     ticket = store.begin("CP-PARSE")
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     result = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
     assert result.result is not None and result.result.status == "restricted"
     return ticket.ticket_id
@@ -86,7 +87,10 @@ def test_one_targeted_repair_then_block_and_retain_payloads(tmp_path: Path) -> N
     assert repair.repair_issues == rejected.issues
     blocked = store.finish(repair.ticket_id, "not json", lambda _: ())
     assert blocked.result is not None and blocked.result.status == "blocked"
-    assert [item.payload for item in store.read().attempts] == ['{"bad":true}', "not json"]
+    assert [store.payload(item.payload_sha256) for item in store.read().attempts] == [
+        '{"bad":true}',
+        "not json",
+    ]
     assert store.view().modules[0].status == "blocked"
     assert not store.view().modules[0].facts
     with pytest.raises(ValueError, match="repair"):
@@ -110,7 +114,7 @@ def test_interruption_and_process_resume_keep_same_budget(tmp_path: Path) -> Non
     repair = resumed.begin("CP-0")
     assert repair.number == 1
     _, review = readiness_fixture()
-    candidate = build_readiness(resumed.read().pack, review, attempt=1)
+    candidate = build_readiness(resumed.pack(), review, attempt=1)
     accepted = resumed.finish(repair.ticket_id, candidate.model_dump_json(), lambda _: ())
     assert accepted.result is not None and accepted.result.status == "restricted"
     with pytest.raises(ValueError, match="settled"):
@@ -124,7 +128,7 @@ def test_false_identity_or_input_binding_rejected(tmp_path: Path, change: str) -
     store = fixture_store(tmp_path)
     ticket = store.begin("CP-0")
     _, review = readiness_fixture()
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     raw = json.loads(candidate.model_dump_json())
     if change == "issuer":
         raw["issuer_id"] = "different"
@@ -150,7 +154,7 @@ def test_false_quote_never_reaches_module_validator(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
     ticket = store.begin("CP-0")
     _, review = readiness_fixture()
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     claim = candidate.claims[0]
     false = claim.citations[0].model_copy(update={"quote": "Invented evidence"})
     candidate = candidate.model_copy(
@@ -168,7 +172,7 @@ def test_module_validation_failure_is_retained_and_repaired(tmp_path: Path) -> N
     store = fixture_store(tmp_path)
     ticket = store.begin("CP-0")
     _, review = readiness_fixture()
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     rejected = store.finish(
         ticket.ticket_id, candidate.model_dump_json(), lambda _: ("Required register absent",)
     )
@@ -191,7 +195,7 @@ def test_validator_error_leaves_pending_ticket_and_does_not_consume_extra_attemp
         store.finish(ticket.ticket_id, candidate.model_dump_json(), crashed)
     retained = store.read().attempts[-1]
     assert retained.status == "pending"
-    assert retained.payload == candidate.model_dump_json()
+    assert store.payload(retained.payload_sha256) == candidate.model_dump_json()
     with pytest.raises(ValueError, match="different response"):
         store.finish(ticket.ticket_id, "{}", lambda _: ())
     store.finish(
@@ -202,7 +206,7 @@ def test_validator_error_leaves_pending_ticket_and_does_not_consume_extra_attemp
 
 def test_changed_pack_stales_consumers_and_original_budget_cannot_be_reset(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
-    old_pack = store.read().pack
+    old_pack = store.pack()
     cp0_ticket = accept_cp0(store)
     cp1_ticket = store.begin("CP-1")
     store.finish(cp1_ticket.ticket_id, candidate_for(store, "CP-1").model_dump_json(), lambda _: ())
@@ -261,7 +265,7 @@ def test_snapshot_tampering_incomplete_pointer_and_existing_store(tmp_path: Path
     store = fixture_store(tmp_path)
     original = store.read()
     with pytest.raises(FileExistsError):
-        Execution.create(store.directory, original.pack)
+        Execution.create(store.directory, store.pack())
     store._write(original)  # Identical content-addressed snapshot is idempotent.
     digest = (store.directory / "current").read_text().strip()
     path = store.directory / "snapshots" / f"{digest}.json"
@@ -315,7 +319,7 @@ def test_cumulative_accepted_view_suppresses_stale_facts_offline(
         (evidence / f"{mode}.json").write_text(view.model_dump_json(indent=2))
         (evidence / f"{mode}.html").write_text(render(view))
     snapshot = store.read()
-    changed = snapshot.pack.model_copy(update={"sources": ()})
+    changed = store.pack().model_copy(update={"sources": ()})
     store.replace_pack(changed)
     (evidence / "stale.html").write_text(render(store.view()))
     errors: list[str] = []
@@ -329,7 +333,7 @@ def test_cumulative_accepted_view_suppresses_stale_facts_offline(
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto((evidence / "accepted.html").resolve().as_uri() + "#CP-0")
         expect(page.locator('[data-fact-id="T7.run.preparation"]')).to_have_text(
-            snapshot.pack.content_hash()
+            snapshot.pack_sha256
         )
         page.screenshot(path=str(evidence / "accepted.png"), full_page=True)
         page.goto((evidence / "stale.html").resolve().as_uri() + "#CP-0")
@@ -357,7 +361,7 @@ def test_retained_response_interruption_and_parent_chain(tmp_path: Path) -> None
     retained = store.read()
     assert retained.parent == before.content_hash()
     result = store.interrupt(ticket.ticket_id, "Interrupted after retained response")
-    assert result.payload == candidate.model_dump_json()
+    assert store.payload(result.payload_sha256) == candidate.model_dump_json()
     assert result.interruption == "Interrupted after retained response"
     final = store.read()
     assert final.parent == retained.content_hash()
@@ -493,7 +497,7 @@ def test_input_status_is_bound_exactly(tmp_path: Path) -> None:
     blocked = block_module(store, "CP-4")
     ticket = store.begin("CP-3")
     candidate = candidate_for(store, "CP-3")
-    assert candidate_issues(store.read(), ticket, candidate) == ()
+    assert candidate_issues(store.read(), ticket, candidate, pack=store.pack()) == ()
     assert bound(candidate, "CP-4") == Input(
         input_id="CP-4", sha256=blocked.content_hash(), status="blocked"
     )
@@ -503,7 +507,10 @@ def test_input_status_is_bound_exactly(tmp_path: Path) -> None:
             for item in candidate.inputs
         )
         issues = candidate_issues(
-            store.read(), ticket, candidate.model_copy(update={"inputs": inputs})
+            store.read(),
+            ticket,
+            candidate.model_copy(update={"inputs": inputs}),
+            pack=store.pack(),
         )
         assert issues == ("Candidate does not bind the exact current upstream inputs",)
 
@@ -536,7 +543,7 @@ def test_pass_reachable_with_immaterial_inherited_gap(tmp_path: Path) -> None:
     pack, review = public_readiness_fixture()
     store = Execution.create(tmp_path / "execution", pack)
     ticket = store.begin("CP-0")
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     cp0 = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ()).result
     assert cp0 is not None and cp0.status == "restricted"
     assert len(cp0.limitations) == 1 and not cp0.inherited_limitations
@@ -562,7 +569,7 @@ def test_blocked_input_restricts_a_clean_module_even_when_not_synthetic(tmp_path
     pack, review = public_readiness_fixture()
     store = Execution.create(tmp_path / "execution", pack)
     ticket = store.begin("CP-0")
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
 
     def clean(module_id: str) -> Module:
@@ -587,13 +594,13 @@ def public_store_after_cp0(tmp_path: Path) -> Execution:
     pack, review = public_readiness_fixture()
     store = Execution.create(tmp_path / "execution", pack)
     ticket = store.begin("CP-0")
-    candidate = build_readiness(store.read().pack, review)
+    candidate = build_readiness(store.pack(), review)
     store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
     return store
 
 
 def settle_clean(store: Execution, module_id: str, *limitations: str) -> Module:
-    run = store.read().pack.run
+    run = store.read().run
     candidate = Module(
         run_id=run.run_id,
         issuer_id=run.issuer_id,
@@ -638,7 +645,7 @@ def test_blocked_ancestors_terminates_on_diamond_and_cycle(tmp_path: Path) -> No
     from deploy_vii.execution import blocked_ancestors
 
     store = public_store_after_cp0(tmp_path)
-    run = store.read().pack.run
+    run = store.read().run
 
     def head(module_id: str, *upstream: Input) -> Module:
         return Module(
@@ -694,7 +701,7 @@ def test_consumer_over_blocked_producer_is_staled_when_producer_changes(tmp_path
     assert changed["CP-2"].status == "restricted"  # not downstream of CP-4
 
     # Through the journal: replacing the pack stales the blocked producer and its consumer.
-    pack = store.read().pack
+    pack = store.pack()
     source = pack.sources[0].model_copy(update={"limitation": "New fidelity restriction"})
     store.replace_pack(pack.model_copy(update={"sources": (source,)}))
     heads = {item.module_id: item for item in store.read().heads}
@@ -709,12 +716,240 @@ def test_omitted_input_status_is_rejected_for_restricted_producer(tmp_path: Path
     ticket = store.begin("CP-1")
     candidate = candidate_for(store, "CP-1")
     assert bound(candidate, "CP-0").status == "restricted"
-    assert candidate_issues(store.read(), ticket, candidate) == ()
+    assert candidate_issues(store.read(), ticket, candidate, pack=store.pack()) == ()
     raw = json.loads(candidate.model_dump_json())
     for item in raw["inputs"]:
         item.pop("status", None)  # omission defaults to accepted
     omitted = Module.model_validate_json(json.dumps(raw))
     assert bound(omitted, "CP-0").status == "accepted"
-    assert candidate_issues(store.read(), ticket, omitted) == (
+    assert candidate_issues(store.read(), ticket, omitted, pack=store.pack()) == (
         "Candidate does not bind the exact current upstream inputs",
     )
+
+
+# --- Content-addressed journal storage (execution/5) ------------------------------------------
+
+
+class TransitionMeter:
+    """Bytes written per journal transition, from directory listings (new or changed files).
+
+    Call the instance after each transition; it returns the bytes of every file that is new or
+    changed since the previous call (the first call counts everything already on disk).
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self._seen: dict[Path, tuple[int, int, int]] = {}
+
+    def __call__(self) -> int:
+        written = 0
+        for path in sorted(self.directory.rglob("*")):
+            if path.is_file():
+                stat = path.stat()
+                key = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+                if self._seen.get(path) != key:
+                    self._seen[path] = key
+                    written += stat.st_size
+        return written
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def current_digest(store: Execution) -> str:
+    return (store.directory / "current").read_text().strip()
+
+
+def snapshot_bytes(store: Execution) -> bytes:
+    return (store.directory / "snapshots" / f"{current_digest(store)}.json").read_bytes()
+
+
+def blob_names(store: Execution) -> set[str]:
+    return {path.name for path in (store.directory / "blobs").iterdir()}
+
+
+def test_blob_store_writes_pack_and_payload_once(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    pack = store.pack()
+    pack_json = pack.model_dump_json()
+    assert blob_names(store) == {digest(pack_json)}
+    assert store.read().pack_sha256 == digest(pack_json)
+
+    payload = "z" * 100 + "MARKER-7" + "z" * 100  # validation messages elide the middle
+    first = store.begin("CP-0")
+    store.finish(first.ticket_id, payload, lambda _: ())
+    repair = store.begin("CP-0")
+    store.finish(repair.ticket_id, payload, lambda _: ())  # the same bytes in a second attempt
+    attempts = store.read().attempts
+    assert [item.payload_sha256 for item in attempts] == [digest(payload)] * 2
+    assert blob_names(store) == {digest(pack_json), digest(payload)}
+    assert store.payload(digest(payload)) == payload
+
+    snapshots = list((store.directory / "snapshots").iterdir())
+    assert snapshots
+    for path in snapshots:
+        raw = path.read_bytes()
+        assert b"MARKER-7" not in raw
+        assert pack_json.encode() not in raw
+        assert pack.sources[0].spans[0].text.encode() not in raw
+
+
+def test_snapshot_bytes_do_not_grow_with_attempts(tmp_path: Path) -> None:
+    payload_size = 20_000
+    store = fixture_store(tmp_path)
+    meter = TransitionMeter(store.directory)
+    written: list[int] = []
+    for number in range(5):
+        if number and number % 2 == 0:  # a new pack gives CP-0 a fresh input set and budget
+            pack = store.pack()
+            source = pack.sources[0].model_copy(update={"limitation": f"Pack revision {number}"})
+            store.replace_pack(pack.model_copy(update={"sources": (source,)}))
+        meter()  # discard bytes written by earlier transitions
+        ticket = store.begin("CP-0")
+        written.append(meter())
+        store.finish(ticket.ticket_id, f"{number}" + "x" * payload_size, lambda _: ())
+
+    attempts = store.read().attempts
+    assert len(attempts) == 5
+    record = max(len(item.model_dump_json()) for item in attempts)
+    assert record < payload_size  # a record carries a payload hash, not the payload
+    assert written[4] - written[0] <= 5 * record
+    assert written[4] - written[0] < 4 * payload_size  # payloads are not rewritten
+
+
+def test_missing_or_tampered_blob_is_rejected(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    ticket = store.begin("CP-0")
+    payload = candidate_for(store, "CP-0").model_dump_json()
+    pack_blob = store.directory / "blobs" / store.read().pack_sha256
+    payload_blob = store.directory / "blobs" / digest(payload)
+
+    original = pack_blob.read_bytes()
+    pack_blob.write_text("{}")
+    for call in (
+        store.pack,
+        store.view,
+        lambda: store.finish(ticket.ticket_id, payload, lambda _: ()),
+    ):
+        with pytest.raises(ValueError, match="hash mismatch"):
+            call()
+    pack_blob.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        store.pack()
+    # The response was retained before the pack was needed; it settles once the pack is restored.
+    retained = store.read().attempts[-1]
+    assert retained.status == "pending" and retained.payload_sha256 == digest(payload)
+    pack_blob.write_bytes(original)
+    assert store.pack().content_hash() == store.read().pack_sha256
+    assert store.finish(ticket.ticket_id, payload, lambda _: ()).status == "finished"
+
+    payload_blob.write_text("tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.payload(digest(payload))
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.view(ticket.ticket_id)
+    payload_blob.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        store.payload(digest(payload))
+    with pytest.raises(ValueError, match="blob hash"):
+        store.payload("../../current")
+
+
+def test_blob_write_refuses_a_different_payload_at_an_existing_hash(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    ticket = store.begin("CP-0")
+    before = current_digest(store)
+    (store.directory / "blobs" / digest("response")).write_text("not that response")
+    with pytest.raises(ValueError, match="corrupt"):
+        store.finish(ticket.ticket_id, "response", lambda _: ())
+    assert current_digest(store) == before  # no snapshot references the corrupt blob
+    assert store.read().attempts[-1].payload_sha256 is None
+    (store.directory / "blobs" / digest("response")).unlink()
+    assert store.finish(ticket.ticket_id, "response", lambda _: ()).status == "finished"
+
+
+def test_execution_4_store_is_rejected_with_message(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    legacy = json.loads(snapshot_bytes(store))
+    legacy["schema_version"] = "execution/4"
+    raw = json.dumps(legacy).encode()
+    name = hashlib.sha256(raw).hexdigest()
+    (store.directory / "snapshots" / f"{name}.json").write_bytes(raw)
+    (store.directory / "current").write_text(name + "\n")
+    with pytest.raises(ValueError, match=r"execution/4.*execution/5.*new execution directory"):
+        Execution(store.directory).read()
+    with pytest.raises(ValueError, match="execution/4"):
+        Execution(store.directory).begin("CP-0")
+
+
+def test_content_hash_is_over_snapshot_only(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    snapshot = store.read()
+    assert snapshot.content_hash() == current_digest(store)
+    pack_blob = store.directory / "blobs" / snapshot.pack_sha256
+    pack_bytes = pack_blob.read_bytes()
+    # The pack sha is the SHA-256 of the canonical JSON blob and is what current_inputs binds.
+    assert snapshot.pack_sha256 == hashlib.sha256(pack_bytes).hexdigest()
+    assert current_inputs(snapshot, "CP-0")[0] == Input(
+        input_id="prepared-pack", sha256=snapshot.pack_sha256
+    )
+
+    copy = pack_blob.with_name("copy")
+    copy.write_bytes(pack_bytes)
+    copy.replace(pack_blob)  # a same-hash copy changes nothing
+    assert store.read().content_hash() == snapshot.content_hash()
+    assert store.pack().content_hash() == snapshot.pack_sha256
+
+    pack_blob.write_text("{}")  # blob bytes are not part of the snapshot hash; reads reject them
+    assert store.read().content_hash() == snapshot.content_hash()
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.pack()
+    pack_blob.write_bytes(pack_bytes)
+
+    pack = store.pack()
+    source = pack.sources[0].model_copy(update={"limitation": "Different evidence"})
+    changed = pack.model_copy(update={"sources": (source,)})
+    store.replace_pack(changed)
+    after = store.read()
+    assert after.pack_sha256 == changed.content_hash() != snapshot.pack_sha256
+    assert after.parent == snapshot.content_hash()
+    assert current_inputs(after, "CP-0")[0].sha256 == after.pack_sha256
+
+
+def test_pack_blob_must_be_canonical_and_match_the_snapshot_run(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    snapshot = store.read()
+    pack = store.pack()
+
+    spaced = json.dumps(json.loads(pack.model_dump_json()), indent=1)  # same pack, other bytes
+    other_run = pack.run.model_copy(update={"issuer_id": "someone-else"})
+    for text in (spaced, pack.model_copy(update={"run": other_run}).model_dump_json()):
+        sha256 = digest(text)
+        (store.directory / "blobs" / sha256).write_text(text)
+        store._write(snapshot.model_copy(update={"pack_sha256": sha256}))
+        with pytest.raises(ValueError, match="canonical pack"):
+            store.pack()
+        store._write(snapshot)
+    assert store.pack() == pack
+
+
+def test_settle_refuses_a_payload_the_attempt_does_not_reference(tmp_path: Path) -> None:
+    from deploy_vii.execution import settle
+
+    store = fixture_store(tmp_path)
+    ticket = store.begin("CP-0")
+    with pytest.raises(ValueError, match="retained response"):
+        settle(store.read(), ticket, "unretained", lambda _: (), pack=store.pack())
+
+
+def test_transition_meter_counts_new_and_changed_files_once(tmp_path: Path) -> None:
+    directory = tmp_path / "listing"
+    directory.mkdir()
+    (directory / "a").write_bytes(b"12345")
+    meter = TransitionMeter(directory)
+    assert meter() == 5
+    assert meter() == 0
+    (directory / "a").write_bytes(b"1234567")
+    (directory / "b").write_bytes(b"xy")
+    assert meter() == 9

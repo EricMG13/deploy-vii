@@ -66,11 +66,15 @@ def consumer_entries(pack: PreparedPack) -> tuple[str, ...]:
     )
 
 
-def _validate_stage(pack: PreparedPack, attempt: Attempt) -> StepValidation:
+def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> StepValidation:
     step = attempt.steps[-1]
+
+    def text(index: int) -> str:
+        return store.payload(attempt.steps[index].payload_sha256)
+
     try:
         if step.step_id == "source_context":
-            context = SourceContextReview.model_validate_json(step.payload)
+            context = SourceContextReview.model_validate_json(text(-1))
             issues = validate_source_context(pack, context)
             if issues:
                 return StepValidation(issues=issues)
@@ -81,8 +85,8 @@ def _validate_stage(pack: PreparedPack, attempt: Attempt) -> StepValidation:
                 if report.status == "blocked"
                 else (),
             )
-        context = SourceContextReview.model_validate_json(attempt.steps[0].payload)
-        financial = FinancialSubmission.model_validate_json(attempt.steps[1].payload)
+        context = SourceContextReview.model_validate_json(text(0))
+        financial = FinancialSubmission.model_validate_json(text(1))
     except ValidationError as error:
         return StepValidation(issues=(f"Invalid CP-1 {step.step_id} submission: {error}",))
     if step.step_id == "financials":
@@ -113,11 +117,9 @@ def _validate_stage(pack: PreparedPack, attempt: Attempt) -> StepValidation:
         attempt.steps[1].output or ""
     ).narrative_inputs
     try:
-        narrative = NarrativeReview.model_validate_json(attempt.steps[2].payload)
+        narrative = NarrativeReview.model_validate_json(text(2))
         readiness = (
-            DownstreamReview.model_validate_json(step.payload)
-            if step.step_id == "readiness"
-            else None
+            DownstreamReview.model_validate_json(text(-1)) if step.step_id == "readiness" else None
         )
     except ValidationError as error:
         return StepValidation(issues=(f"Invalid CP-1 {step.step_id} submission: {error}",))
@@ -157,7 +159,14 @@ def _validate_stage(pack: PreparedPack, attempt: Attempt) -> StepValidation:
 
 def submit_cp1_step(store: Execution, ticket_id: str, step_id: str, payload: str) -> Attempt:
     """Submit one step or resume its exact retained response after a runtime failure."""
-    return store.submit_step(ticket_id, "CP-1", CP1_STEPS, step_id, payload, _validate_stage)
+    return store.submit_step(
+        ticket_id,
+        "CP-1",
+        CP1_STEPS,
+        step_id,
+        payload,
+        lambda pack, attempt: _validate_stage(store, pack, attempt),
+    )
 
 
 def cp1_statement_preview(
@@ -175,10 +184,11 @@ def cp1_statement_preview(
         raise ValueError("CP-1 source and financial stages must be valid")
     if current_inputs(snapshot, "CP-1") != attempt.inputs:
         raise ValueError("CP-1 statement preview inputs are stale")
-    verified = _validate_stage(snapshot.pack, attempt.model_copy(update={"steps": prefix}))
+    pack = store.pack(snapshot)
+    verified = _validate_stage(store, pack, attempt.model_copy(update={"steps": prefix}))
     if verified.issues or verified.output != prefix[-1].output:
         raise ValueError("Financial stage differs from trusted recomputation")
-    submission = FinancialSubmission.model_validate_json(prefix[-1].payload)
+    submission = FinancialSubmission.model_validate_json(store.payload(prefix[-1].payload_sha256))
     binding = {
         "snapshot_sha256": snapshot.content_hash(),
         "ticket_id": ticket_id,
@@ -186,7 +196,7 @@ def cp1_statement_preview(
     }
     if include_interface:
         return write_interface_preview(
-            snapshot.pack,
+            pack,
             submission.financial,
             submission.definition.book_id,
             destination,
@@ -194,7 +204,7 @@ def cp1_statement_preview(
             execution_binding=binding,
         )
     return write_statement_preview(
-        snapshot.pack,
+        pack,
         submission.financial,
         submission.definition.book_id,
         destination,
@@ -217,30 +227,32 @@ def cp1_register_preview(store: Execution, ticket_id: str, destination: Path) ->
         raise ValueError("All CP-1 source, financial, narrative and readiness stages must be valid")
     if current_inputs(snapshot, "CP-1") != attempt.inputs:
         raise ValueError("CP-1 register preview inputs are stale")
+    pack = store.pack(snapshot)
     for index, step in enumerate(attempt.steps, 1):
         verified = _validate_stage(
-            snapshot.pack, attempt.model_copy(update={"steps": attempt.steps[:index]})
+            store, pack, attempt.model_copy(update={"steps": attempt.steps[:index]})
         )
         if verified.issues or verified.output != step.output:
             raise ValueError(f"{step.step_id} stage differs from trusted recomputation")
         del verified
-    source = SourceContextReview.model_validate_json(attempt.steps[0].payload)
-    financial = FinancialSubmission.model_validate_json(attempt.steps[1].payload)
-    narrative = NarrativeReview.model_validate_json(attempt.steps[2].payload)
-    readiness = DownstreamReview.model_validate_json(attempt.steps[3].payload)
+    payloads = [store.payload(step.payload_sha256) for step in attempt.steps]
+    source = SourceContextReview.model_validate_json(payloads[0])
+    financial = FinancialSubmission.model_validate_json(payloads[1])
+    narrative = NarrativeReview.model_validate_json(payloads[2])
+    readiness = DownstreamReview.model_validate_json(payloads[3])
     report = canonical_tables(
-        snapshot.pack,
+        pack,
         source,
         financial.financial,
         financial.definition,
         financial.binding,
         narrative,
-        consumer_entries(snapshot.pack),
+        consumer_entries(pack),
         readiness,
         quarter_ids=financial.quarter_ids,
     )
     return write_register_preview(
-        snapshot.pack,
+        pack,
         report,
         destination,
         execution_binding={

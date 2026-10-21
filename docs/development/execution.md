@@ -51,14 +51,44 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
 
-Snapshots are content-addressed JSON, with a parent hash and atomic current
-pointer. POSIX file locking serializes transitions; raw files and pointer writes
-are fsynced. This is tested on the macOS host and the configured POSIX workflow,
-not Windows. Directory fsync/power-loss durability is not claimed. A failed
-pointer publication can leave an unreferenced snapshot; never delete it as part
-of automatic recovery. Full snapshots retain the pack and attempt history, trading
-storage for simple recovery. No compaction or garbage collection is enabled.
-Local hashes detect changed bytes, not an adversary rewriting every hash/pointer.
+## Storage (`execution/5`)
+
+```
+<directory>/
+  current                  pointer: hex SHA-256 of the current snapshot
+  snapshots/<sha256>.json  small immutable snapshots, each naming its parent
+  blobs/<sha256>           the prepared pack and every response payload, stored once
+  .lock                    POSIX flock serialising transitions
+```
+
+- A snapshot holds the run identity (`run`), `pack_sha256`, the attempts and the heads.
+  An attempt or step carries `payload_sha256`, not the response text. `parent` and
+  `snapshot.content_hash()` cover only this small snapshot, so a transition writes a
+  snapshot whose size does not include the pack or any payload.
+- The pack blob is the canonical `PreparedPack.model_dump_json()` UTF-8 bytes; its
+  SHA-256 is `pack_sha256` and is the hash bound as `Input("prepared-pack", ...)`.
+  The canonical form is deterministic (field order of the contract, Decimal strings),
+  so the pack hash is the same across runs. A payload blob is the response text as
+  UTF-8; identical responses in different attempts share one blob.
+- `Execution.pack(snapshot=None)` and `Execution.payload(sha256)` are the only readers.
+  Each reads the blob, checks its SHA-256 against the name it was asked for, and
+  rejects a missing or mismatching blob with `ValueError`; `pack()` also requires the
+  pack's run to equal the snapshot's `run` and the bytes to be the canonical form.
+  `read()` verifies the snapshot against the pointer and its schema but does not read
+  blobs, so a bad blob is reported when it is used, never as an empty value.
+- Writes are temp file, fsync, rename. Writing bytes whose hash already exists is a
+  no-op; a different file at an existing hash path is corruption and is refused, never
+  overwritten. A blob is written before the snapshot that references it, so a crash
+  leaves at worst an unreferenced blob or snapshot; never delete one as part of
+  automatic recovery. The pointer is replaced atomically after the snapshot is durable.
+- Transitions are serialised by POSIX file locking. This is tested on the macOS host
+  and the configured POSIX workflow, not Windows. Directory fsync and power-loss
+  durability are not claimed. No compaction or garbage collection is enabled.
+  Local hashes detect changed bytes, not an adversary rewriting every hash and pointer.
+- Attempt results (`Module`) and step outputs are still stored inline in the snapshot
+  and in `heads`; only the pack and the response payloads are blobs.
+- `tests/product/test_execution.py::TransitionMeter` reports the bytes written per
+  transition from a directory listing (new or changed files since its previous call).
 
 Analytical qualification, native-host qualification, model routing, provider
 request tracking and the US$50 OpenRouter cap remain separate pending adapters.
@@ -102,9 +132,9 @@ see [table projection](report-tables.md). Canonical Markdown, complete Workbench
 projection, final module validation and promotion remain pending. Historical Model
 calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
 
-New stores use `execution/4`, embedding `module/4` table layouts, status-carrying inputs, stated comparisons
-and calculation status. Existing explicit `execution/1`, `execution/2` and
-`execution/3` snapshots fail schema validation
+New stores use `execution/5` (blob storage above), embedding `module/4` table layouts,
+status-carrying inputs, stated comparisons and calculation status. Existing
+`execution/1` to `execution/4` snapshots are rejected with an explicit message
 rather than being silently rewritten. Migration is not implemented;
 retain old stores and use a new execution directory for this version. This is an
 artifact format boundary, not permission to reset a live provider budget.

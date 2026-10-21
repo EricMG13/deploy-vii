@@ -44,7 +44,7 @@ def test_cp0_trusted_submission_and_crash_between_promotion_writes(
     monkeypatch.setattr(store, "finish", original)
     result = submit_cp0_review(store, ticket.ticket_id, review.model_dump_json())
     assert result.result and result.result.status == "restricted"
-    assert result.steps[0].payload == review.model_dump_json()
+    assert store.payload(result.steps[0].payload_sha256) == review.model_dump_json()
     assert len(store.read().attempts) == 1
     assert store.begin("CP-1").number == 0
 
@@ -75,7 +75,10 @@ def test_cp0_invalid_review_consumes_shared_repair(tmp_path: Path, payload: str)
         ticket = store.begin("CP-0")
         result = submit_cp0_review(store, ticket.ticket_id, payload)
         assert result.result and result.result.status == expected
-        assert result.steps[0].status == "invalid" and result.steps[0].payload == payload
+        assert (
+            result.steps[0].status == "invalid"
+            and store.payload(result.steps[0].payload_sha256) == payload
+        )
         if unusable:
             assert result.issues == (
                 "No usable identity-confirmed evidence for the requested work",
@@ -102,7 +105,7 @@ def test_stage_crash_retains_exact_response_and_requires_explicit_resolution(
     with pytest.raises(ValueError, match="step response is pending"):
         store.finish(ticket.ticket_id, candidate_for(store, "CP-0").model_dump_json(), lambda _: ())
     with pytest.raises(ValueError, match="pending"):
-        store.replace_pack(store.read().pack)
+        store.replace_pack(store.pack())
 
     def valid(pack: PreparedPack, attempt: Attempt) -> StepValidation:
         return StepValidation(output="retained Python output")
@@ -297,7 +300,10 @@ def test_stale_stage_bindings_reject_and_retain_response(tmp_path: Path, stage: 
             payload = DownstreamReview(inputs_sha256="0" * 64).model_dump_json()
     result = submit_cp1_step(store, ticket.ticket_id, stage, payload)
     assert result.result and result.result.status == "rejected"
-    assert result.steps[-1].payload == payload and result.steps[-1].status == "invalid"
+    assert (
+        store.payload(result.steps[-1].payload_sha256) == payload
+        and result.steps[-1].status == "invalid"
+    )
     assert result.issues and store.begin("CP-1").number == 1
 
 
@@ -310,7 +316,7 @@ def test_module_payload_blocks_new_steps_and_validator_bug_stays_pending(tmp_pat
         )
     assert store.read().attempts[-1].steps[0].status == "pending"
     interrupted = store.interrupt(ticket.ticket_id, "Unrecoverable callback defect")
-    assert interrupted.steps[0].payload == "raw"
+    assert store.payload(interrupted.steps[0].payload_sha256) == "raw"
     repair = store.begin("CP-0")
 
     def crash(candidate: object) -> tuple[str, ...]:
@@ -343,7 +349,7 @@ def test_malformed_response_at_every_cp1_stage_consumes_attempt(tmp_path: Path, 
                 draft(output.narrative_inputs).model_dump_json(),
             )
     result = submit_cp1_step(store, ticket.ticket_id, stage, "malformed json")
-    assert result.issues and result.steps[-1].payload == "malformed json"
+    assert result.issues and store.payload(result.steps[-1].payload_sha256) == "malformed json"
     assert result.status == "finished"
 
 
@@ -364,7 +370,9 @@ def test_unassessed_source_gate_blocks_extraction(tmp_path: Path) -> None:
     repair = store.begin("CP-1")
     from deploy_vii.source_context import SourceContextReview
 
-    prior = SourceContextReview.model_validate_json(store.read().attempts[-2].steps[0].payload)
+    prior = SourceContextReview.model_validate_json(
+        store.payload(store.read().attempts[-2].steps[0].payload_sha256)
+    )
     empty = prior.model_copy(
         update={
             "sources": tuple(
@@ -447,8 +455,8 @@ def test_cli_creates_and_replaces_only_frozen_pack(
             ],
         )
         main()
-        assert json.loads(capsys.readouterr().out)["schema_version"] == "execution/4"
-    assert Execution(directory).read().pack == second
+        assert json.loads(capsys.readouterr().out)["schema_version"] == "execution/5"
+    assert Execution(directory).pack() == second
 
 
 def test_invalid_quarter_selection_is_retained_readiness_gap(tmp_path: Path) -> None:
@@ -473,7 +481,9 @@ def test_source_stage_requires_exact_current_pack_and_consumer_aliases_are_retai
     from deploy_vii.source_context import SourceContextReview
 
     store, ticket, _ = cp1_case(tmp_path)
-    prior = SourceContextReview.model_validate_json(store.read().attempts[-1].steps[0].payload)
+    prior = SourceContextReview.model_validate_json(
+        store.payload(store.read().attempts[-1].steps[0].payload_sha256)
+    )
     store.interrupt(ticket.ticket_id, "Fixture restart")
     repair = store.begin("CP-1")
     failed = submit_cp1_step(
@@ -483,7 +493,7 @@ def test_source_stage_requires_exact_current_pack_and_consumer_aliases_are_retai
         prior.model_copy(update={"pack_sha256": "0" * 64}).model_dump_json(),
     )
     assert failed.issues and failed.result and failed.result.status == "blocked"
-    pack = store.read().pack
+    pack = store.pack()
     selected = pack.model_copy(
         update={
             "run": pack.run.model_copy(update={"requested_modules": ("CP-4A", "CP-5A", "CP-2C")})
@@ -523,5 +533,5 @@ def test_legacy_snapshot_version_is_rejected_explicitly(tmp_path: Path, version:
 
     store = fixture_store(tmp_path)
     legacy = store.read().model_copy(update={"schema_version": version})
-    with pytest.raises(ValidationError, match="execution/4"):
+    with pytest.raises(ValidationError, match="execution/5"):
         ExecutionSnapshot.model_validate_json(legacy.model_dump_json())

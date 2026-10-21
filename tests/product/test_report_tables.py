@@ -204,7 +204,7 @@ def test_journal_preview_requires_valid_current_financial_stage_and_keeps_pendin
     assert receipt["execution_binding"]["snapshot_sha256"] == before
     assert store.read().attempts[-1].status == "pending"
     store.interrupt(ticket.ticket_id, "Fixture changes source snapshot")
-    pack = store.read().pack
+    pack = store.pack()
     changed = pack.model_copy(
         update={
             "sources": (
@@ -420,7 +420,7 @@ def test_layout_survives_engine_candidate_and_accepted_views_then_is_hidden_when
     store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
     assert store.view().modules[0].tables == (layout,)
     assert store.view(ticket.ticket_id).modules[0].tables == (layout,)
-    pack = store.read().pack
+    pack = store.pack()
     store.replace_pack(
         pack.model_copy(
             update={

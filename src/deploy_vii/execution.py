@@ -1,12 +1,16 @@
 """Single-writer execution journal; immutable snapshots, bounded repair, current lineage.
 
+A snapshot is small: the prepared pack and every response payload live once in
+content-addressed blobs (`blobs/<sha256>`) that snapshots reference by hash.
 Validators are trusted Python module implementations, never model-supplied verdicts.
 The journal does not invoke models, spend money, or claim analytical qualification.
 """
 
 import fcntl
 import hashlib
+import json
 import os
+import re
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -25,6 +29,7 @@ from deploy_vii.contracts import (
     Input,
     Module,
     ModuleView,
+    Run,
     Text,
     View,
 )
@@ -33,12 +38,13 @@ from deploy_vii.readiness import citation_issues
 from deploy_vii.registry import canonical, dependencies, edge_rule, modules, plan
 
 Validator = Callable[[Module], tuple[str, ...]]
+SCHEMA = "execution/5"
 
 
 class StepSubmission(Contract):
     step_id: Identifier
     inputs: tuple[Input, ...]
-    payload: str
+    payload_sha256: Hash
     status: Literal["pending", "valid", "invalid"] = "pending"
     output: str | None = None
     issues: tuple[Text, ...] = ()
@@ -67,7 +73,7 @@ class Attempt(Contract):
     status: Literal["pending", "finished"] = "pending"
     repair_of: Identifier | None = None
     repair_issues: tuple[str, ...] = ()
-    payload: str | None = None
+    payload_sha256: Hash | None = None
     issues: tuple[str, ...] = ()
     result: Module | None = None
     interruption: Text | None = None
@@ -75,15 +81,16 @@ class Attempt(Contract):
 
 
 class ExecutionSnapshot(Contract):
-    schema_version: Literal["execution/4"] = "execution/4"
+    schema_version: Literal["execution/5"] = "execution/5"
     parent: Hash | None = None
-    pack: PreparedPack
+    run: Run  # identity and scope are immutable; the pack blob must carry the same run
+    pack_sha256: Hash  # SHA-256 of the canonical-JSON pack blob
     attempts: tuple[Attempt, ...] = ()
     heads: tuple[Module, ...] = ()
 
 
 def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, ...]:
-    graph = dependencies(snapshot.pack.run.requested_modules)
+    graph = dependencies(snapshot.run.requested_modules)
     if module_id not in graph:
         raise ValueError("Module is not selected for this run")
     heads = {item.module_id: item for item in snapshot.heads}
@@ -101,7 +108,7 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         raise ValueError("Required upstream is unrun, stale or blocked")
 
     upstream = tuple(
-        bound(item) for item in plan(snapshot.pack.run.requested_modules) if item in required
+        bound(item) for item in plan(snapshot.run.requested_modules) if item in required
     )
     if module_id not in {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}:
         readiness = heads.get("CP-0")
@@ -118,13 +125,13 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         )
         if commands != (f"Run {module_id}",):
             raise ValueError("CP-0 has not authorized this consumer's source readiness")
-    return (Input(input_id="prepared-pack", sha256=snapshot.pack.content_hash()), *upstream)
+    return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream)
 
 
 def candidate_issues(
-    snapshot: ExecutionSnapshot, attempt: Attempt, candidate: Module
+    snapshot: ExecutionSnapshot, attempt: Attempt, candidate: Module, *, pack: PreparedPack
 ) -> tuple[str, ...]:
-    run = snapshot.pack.run
+    run = snapshot.run
     issues: list[str] = []
     if (
         candidate.run_id != run.run_id
@@ -144,7 +151,7 @@ def candidate_issues(
         issues.append("Candidate does not bind the exact current upstream inputs")
     records: tuple[Fact | Claim, ...] = (*candidate.facts, *candidate.claims)
     for record in records:
-        issues.extend(citation_issues(record.citations, snapshot.pack.sources))
+        issues.extend(citation_issues(record.citations, pack.sources))
     return tuple(dict.fromkeys(issues))
 
 
@@ -214,12 +221,19 @@ def settle(
     payload: str,
     validator: Validator,
     interruption: str | None = None,
+    *,
+    pack: PreparedPack,
 ) -> Attempt:
-    """Retain every response; only valid current candidates can supply accepted facts."""
+    """Retain every response; only valid current candidates can supply accepted facts.
+
+    The attempt must already reference the stored blob of `payload`.
+    """
+    if attempt.payload_sha256 != text_sha256(payload):
+        raise ValueError("Settled payload is not the retained response")
     candidate: Module | None = None
     try:
         candidate = Module.model_validate_json(payload)
-        issues = candidate_issues(snapshot, attempt, candidate)
+        issues = candidate_issues(snapshot, attempt, candidate, pack=pack)
     except ValidationError as error:
         issues = (f"Malformed candidate: {error}",)
     if interruption is not None:
@@ -229,9 +243,9 @@ def settle(
     issues = tuple(dict.fromkeys(issues))
     if issues:
         result = Module(
-            run_id=snapshot.pack.run.run_id,
-            issuer_id=snapshot.pack.run.issuer_id,
-            as_of=snapshot.pack.run.as_of,
+            run_id=snapshot.run.run_id,
+            issuer_id=snapshot.run.issuer_id,
+            as_of=snapshot.run.as_of,
             module_id=attempt.module_id,
             inputs=attempt.inputs,
             attempt=attempt.number,
@@ -242,7 +256,7 @@ def settle(
         assert candidate is not None
         synthetic = (
             ("Synthetic case; not real issuer qualification",)
-            if snapshot.pack.run.case_kind == "synthetic"
+            if snapshot.run.case_kind == "synthetic"
             else ()
         )
         own = tuple(dict.fromkeys((*candidate.limitations, *synthetic)))
@@ -260,12 +274,46 @@ def settle(
     return attempt.model_copy(
         update={
             "status": "finished",
-            "payload": payload,
             "issues": issues,
             "result": result,
             "interruption": interruption,
         }
     )
+
+
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _require_hash(value: str, what: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"Invalid {what}")
+    return value
+
+
+def _atomic_write(path: Path, raw: bytes) -> None:
+    """Write temp file, fsync, rename: readers see the old file or the whole new one."""
+    descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _put_once(folder: Path, name: str, raw: bytes, what: str) -> None:
+    """Content-addressed write, idempotent for identical bytes.
+
+    Different bytes already at the path are corruption and are never overwritten.
+    """
+    path = folder / name
+    if not path.exists():
+        _atomic_write(path, raw)
+    elif path.read_bytes() != raw:
+        raise ValueError(f"Existing {what} is corrupt")
 
 
 class Execution:
@@ -278,8 +326,11 @@ class Execution:
         plan(pack.run.requested_modules)
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "snapshots").mkdir()
+        (directory / "blobs").mkdir()
         store = cls(directory)
-        store._write(ExecutionSnapshot(pack=pack))
+        store._write(
+            ExecutionSnapshot(run=pack.run, pack_sha256=store._store(pack.model_dump_json()))
+        )
         return store
 
     @contextmanager
@@ -292,36 +343,57 @@ class Execution:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def read(self) -> ExecutionSnapshot:
-        digest = (self.directory / "current").read_text(encoding="ascii").strip()
-        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-            raise ValueError("Invalid execution pointer")
+        """Return the current snapshot after checking its hash; blobs are checked on access."""
+        digest = _require_hash(
+            (self.directory / "current").read_text(encoding="ascii").strip(), "execution pointer"
+        )
         raw = (self.directory / "snapshots" / (digest + ".json")).read_bytes()
         if hashlib.sha256(raw).hexdigest() != digest:
             raise ValueError("Execution snapshot hash mismatch")
+        probe = json.loads(raw)
+        version = probe.get("schema_version") if isinstance(probe, dict) else None
+        if version != SCHEMA:
+            raise ValueError(
+                f"Unsupported execution store schema {version!r}; this version reads {SCHEMA}. "
+                "Retain the old store and create a new execution directory; nothing is migrated."
+            )
         return ExecutionSnapshot.model_validate_json(raw)
 
+    def _store(self, text: str) -> str:
+        """Write `text` once as a blob and return its SHA-256 (idempotent for the same bytes)."""
+        raw = text.encode()
+        sha256 = hashlib.sha256(raw).hexdigest()
+        _put_once(self.directory / "blobs", sha256, raw, "execution blob")
+        return sha256
+
+    def _load(self, sha256: str) -> bytes:
+        path = self.directory / "blobs" / _require_hash(sha256, "blob hash")
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            raise ValueError(f"Execution blob {sha256} is missing") from None
+        if hashlib.sha256(raw).hexdigest() != sha256:
+            raise ValueError(f"Execution blob {sha256} hash mismatch")
+        return raw
+
+    def payload(self, sha256: str) -> str:
+        """Return the retained response text for a payload hash, verified against its bytes."""
+        return self._load(sha256).decode()
+
+    def pack(self, snapshot: ExecutionSnapshot | None = None) -> PreparedPack:
+        """Return the prepared pack of `snapshot` (default: the current one), verified."""
+        snapshot = self.read() if snapshot is None else snapshot
+        pack = PreparedPack.model_validate_json(self._load(snapshot.pack_sha256))
+        if pack.run != snapshot.run or pack.content_hash() != snapshot.pack_sha256:
+            raise ValueError("Execution pack blob is not the canonical pack of this snapshot")
+        return pack
+
     def _write(self, snapshot: ExecutionSnapshot) -> None:
-        # Full snapshots trade storage for simple, self-contained interruption recovery.
+        # Snapshots are small: the pack and payloads are referenced by hash, never embedded.
         raw = snapshot.model_dump_json().encode()
         digest = hashlib.sha256(raw).hexdigest()
-        path = self.directory / "snapshots" / (digest + ".json")
-        if path.exists():
-            if path.read_bytes() != raw:
-                raise ValueError("Existing execution snapshot is corrupt")
-        else:
-            with path.open("xb") as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-        descriptor, temporary = tempfile.mkstemp(prefix=".current-", dir=self.directory)
-        try:
-            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-                stream.write(digest + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.directory / "current")
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+        _put_once(self.directory / "snapshots", digest + ".json", raw, "execution snapshot")
+        _atomic_write(self.directory / "current", (digest + "\n").encode("ascii"))
 
     def begin(self, module_id: str) -> Attempt:
         module_id = canonical(module_id)
@@ -370,17 +442,20 @@ class Execution:
             if interruption is None and any(s.status == "pending" for s in attempt.steps):
                 raise ValueError("A step response is pending; resume that step first")
 
+            retained = (
+                None if attempt.payload_sha256 is None else self.payload(attempt.payload_sha256)
+            )
             if interruption is not None:
                 if not interruption.strip():
                     raise ValueError("An interruption requires a reason")
-                if attempt.payload is not None:
-                    payload = attempt.payload
-            if attempt.payload is not None and attempt.payload != payload:
+                if retained is not None:
+                    payload = retained
+            if retained is not None and retained != payload:
                 raise ValueError(
                     "Ticket already retains a different response; finish or interrupt it"
                 )
-            if attempt.payload is None:
-                attempt = attempt.model_copy(update={"payload": payload})
+            if retained is None:
+                attempt = attempt.model_copy(update={"payload_sha256": self._store(payload)})
                 snapshot = snapshot.model_copy(
                     update={
                         "parent": snapshot.content_hash(),
@@ -392,7 +467,9 @@ class Execution:
                 )
                 self._write(snapshot)  # Retain response before a validator can fail or crash.
 
-            finished = settle(snapshot, attempt, payload, validator, interruption)
+            finished = settle(
+                snapshot, attempt, payload, validator, interruption, pack=self.pack(snapshot)
+            )
             self._save_finished(snapshot, finished)
             return finished
 
@@ -452,7 +529,7 @@ class Execution:
                 raise ValueError("Ticket is absent, finished or belongs to another module")
             if current_inputs(snapshot, module_id) != attempt.inputs:
                 raise ValueError("Ticket inputs have changed")
-            if attempt.payload is not None:
+            if attempt.payload_sha256 is not None:
                 raise ValueError("A module response is already retained; resume its validation")
             completed = tuple(step for step in attempt.steps if step.status == "valid")
             if tuple(step.step_id for step in completed) != sequence[: len(completed)]:
@@ -462,7 +539,9 @@ class Execution:
 
             if len(attempt.steps) > len(completed):
                 submission = attempt.steps[-1]
-                if submission.status != "pending" or submission.payload != payload:
+                if submission.status != "pending" or submission.payload_sha256 != text_sha256(
+                    payload
+                ):
                     raise ValueError(
                         "Step already retains a different response; resume or interrupt"
                     )
@@ -471,7 +550,7 @@ class Execution:
             else:
                 submission = StepSubmission(
                     step_id=step_id,
-                    payload=payload,
+                    payload_sha256=self._store(payload),
                     inputs=(
                         *attempt.inputs,
                         *(
@@ -484,9 +563,8 @@ class Execution:
                 snapshot = with_attempt(snapshot, attempt)
                 self._write(snapshot)
 
-            outcome = StepValidation.model_validate_json(
-                validator(snapshot.pack, attempt).model_dump_json()
-            )
+            pack = self.pack(snapshot)
+            outcome = StepValidation.model_validate_json(validator(pack, attempt).model_dump_json())
             if not outcome.issues and outcome.output is None:
                 raise ValueError("Successful step validator must retain its output")
             submitted = submission.model_copy(
@@ -498,17 +576,16 @@ class Execution:
             )
             attempt = attempt.model_copy(update={"steps": (*completed, submitted)})
             if outcome.issues:
-                candidate = Module(
-                    run_id=snapshot.pack.run.run_id,
-                    issuer_id=snapshot.pack.run.issuer_id,
-                    as_of=snapshot.pack.run.as_of,
+                empty = Module(
+                    run_id=snapshot.run.run_id,
+                    issuer_id=snapshot.run.issuer_id,
+                    as_of=snapshot.run.as_of,
                     module_id=module_id,
                     inputs=attempt.inputs,
                     attempt=attempt.number,
-                )
-                finished = settle(
-                    snapshot, attempt, candidate.model_dump_json(), lambda _: outcome.issues
-                )
+                ).model_dump_json()
+                attempt = attempt.model_copy(update={"payload_sha256": self._store(empty)})
+                finished = settle(snapshot, attempt, empty, lambda _: outcome.issues, pack=pack)
                 self._save_finished(snapshot, finished)
                 return finished
             self._write(with_attempt(snapshot, attempt))
@@ -522,13 +599,14 @@ class Execution:
 
     def replace_pack(self, pack: PreparedPack) -> None:
         pack = PreparedPack.model_validate_json(pack.model_dump_json())
+        pack_json = pack.model_dump_json()
         with self._locked():
             snapshot = self.read()
-            if snapshot.pack.run != pack.run:
+            if snapshot.run != pack.run:
                 raise ValueError("Run identity and scope are immutable; create a new execution")
             if any(item.status == "pending" for item in snapshot.attempts):
                 raise ValueError("Cannot change evidence while an attempt is pending")
-            if pack == snapshot.pack:
+            if text_sha256(pack_json) == snapshot.pack_sha256:
                 return
             heads = tuple(
                 item.model_copy(
@@ -541,12 +619,17 @@ class Execution:
             )
             self._write(
                 snapshot.model_copy(
-                    update={"parent": snapshot.content_hash(), "pack": pack, "heads": heads}
+                    update={
+                        "parent": snapshot.content_hash(),
+                        "pack_sha256": self._store(pack_json),
+                        "heads": heads,
+                    }
                 )
             )
 
     def view(self, ticket_id: str | None = None) -> View:
         snapshot = self.read()
+        pack = self.pack(snapshot)
         heads = {item.module_id: item for item in snapshot.heads}
         if ticket_id is not None:
             attempt = next(
@@ -554,12 +637,12 @@ class Execution:
             )
             if attempt is None:
                 raise ValueError("Unknown candidate ticket")
-            if attempt.payload is None:
+            if attempt.payload_sha256 is None:
                 raise ValueError("Pending attempt has no candidate preview")
             if current_inputs(snapshot, attempt.module_id) != attempt.inputs:
                 raise ValueError("Candidate inputs are stale")
-            candidate = Module.model_validate_json(attempt.payload)
-            if candidate_issues(snapshot, attempt, candidate):
+            candidate = Module.model_validate_json(self.payload(attempt.payload_sha256))
+            if candidate_issues(snapshot, attempt, candidate, pack=pack):
                 raise ValueError("Invalid candidate identity or provenance cannot render")
             heads[attempt.module_id] = candidate
         views: list[ModuleView] = []
@@ -588,8 +671,8 @@ class Execution:
                 )
             )
         return View(
-            run=snapshot.pack.run,
+            run=snapshot.run,
             mode="candidate" if ticket_id else "accepted",
             modules=tuple(views),
-            sources=snapshot.pack.sources,
+            sources=pack.sources,
         )
