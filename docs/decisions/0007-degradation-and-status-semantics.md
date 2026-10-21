@@ -42,8 +42,9 @@ removed CP-3, CP-5 and CP-6 from the report. Any inherited limitation also force
    or any module up the input chain is `blocked` (a material inherited gap, read from the
    structured input statuses of the bound heads, never from limitation text), or when the
    run is synthetic; otherwise `accepted`. Other inherited limitations, including those
-   from `restricted` inputs, are displayed and do not downgrade. (Transitive rule: coordinator
-   ruling, M4 fix round 1.)
+   from `restricted` inputs, are displayed and do not downgrade. Display is transitive
+   (a consumer carries the own and inherited lists of its restricted inputs); only blocked
+   ancestors downgrade. (Transitive rule: coordinator ruling, M4 fix round 1.)
 5. **QA.** `cp1_quality` derives `module_status` from `own_status`
    (`blocked → blocked`, own-restricted → `restricted`, else `complete`).
 6. Schema: `Module` becomes `module/4` (`Input.status` and `inherited_limitations` added).

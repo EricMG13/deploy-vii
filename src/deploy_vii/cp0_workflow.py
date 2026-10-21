@@ -3,14 +3,14 @@
 from pydantic import ValidationError
 
 from deploy_vii.contracts import Module
-from deploy_vii.execution import Attempt, Execution, StepValidation
+from deploy_vii.execution import Attempt, Execution, StepValidation, text_sha256
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
 
 
-def _validate_review(pack: PreparedPack, attempt: Attempt) -> StepValidation:
+def _validate_review(store: Execution, pack: PreparedPack, attempt: Attempt) -> StepValidation:
     try:
-        review = ReadinessReview.model_validate_json(attempt.steps[0].payload)
+        review = ReadinessReview.model_validate_json(store.payload(attempt.steps[0].payload_sha256))
     except ValidationError as error:
         return StepValidation(issues=(f"Invalid CP-0 review: {error}",))
     issues = validate_review(pack, review)
@@ -40,19 +40,24 @@ def submit_cp0_review(store: Execution, ticket_id: str, payload: str) -> Attempt
     attempt = next((a for a in store.read().attempts if a.ticket_id == ticket_id), None)
     if attempt is None or attempt.module_id != "CP-0" or attempt.status != "pending":
         raise ValueError("Ticket is absent, finished or belongs to another module")
-    if attempt.steps and attempt.steps[0].payload != payload:
+    if attempt.steps and attempt.steps[0].payload_sha256 != text_sha256(payload):
         raise ValueError("Ticket already retains a different response; resume or interrupt")
     if not attempt.steps or attempt.steps[0].status == "pending":
         attempt = store.submit_step(
-            ticket_id, "CP-0", ("source_readiness",), "source_readiness", payload, _validate_review
+            ticket_id,
+            "CP-0",
+            ("source_readiness",),
+            "source_readiness",
+            payload,
+            lambda pack, current: _validate_review(store, pack, current),
         )
     if attempt.status == "finished":
         return attempt
     if len(attempt.steps) != 1 or attempt.steps[0].step_id != "source_readiness":
         raise ValueError("Retained steps do not match CP-0")
     # Recompute rather than treating stored or caller-supplied output as authority.
-    outcome = _validate_review(store.read().pack, attempt)
-    if outcome.issues or outcome.output != attempt.steps[0].output:
+    outcome = _validate_review(store, store.pack(), attempt)
+    if outcome.issues or not outcome.retained_as(attempt.steps[0]):
         raise ValueError("Retained CP-0 output differs from trusted validation")
     candidate = Module.model_validate_json(outcome.output or "")
     return store.finish(

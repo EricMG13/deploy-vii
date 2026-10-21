@@ -42,20 +42,98 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   `view()` after the own findings. The settled status is `restricted` for own
   limitations, a blocked module anywhere up the bound input chain (found from the heads'
   structured input statuses, not limitation text) or a synthetic run, otherwise
-  `accepted`, so Pass stays reachable downstream of an immaterial inherited note. A candidate must bind each
+  `accepted`, so Pass stays reachable downstream of an immaterial inherited note.
+  Inherited limitations are displayed transitively (each consumer carries its
+  restricted inputs' own and inherited lists), but only a blocked ancestor
+  downgrades the status; other inherited text never does. A candidate must bind each
   input's hash and status exactly. CP-1 QA derives `module_status` from own findings.
 - `view()` returns a cumulative accepted View. Stale and blocked heads expose
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
 
-Snapshots are content-addressed JSON, with a parent hash and atomic current
-pointer. POSIX file locking serializes transitions; raw files and pointer writes
-are fsynced. This is tested on the macOS host and the configured POSIX workflow,
-not Windows. Directory fsync/power-loss durability is not claimed. A failed
-pointer publication can leave an unreferenced snapshot; never delete it as part
-of automatic recovery. Full snapshots retain the pack and attempt history, trading
-storage for simple recovery. No compaction or garbage collection is enabled.
-Local hashes detect changed bytes, not an adversary rewriting every hash/pointer.
+## Storage (`execution/5`)
+
+```
+<directory>/
+  current                  pointer: hex SHA-256 of the current snapshot
+  snapshots/<sha256>.json  small immutable snapshots, each naming its parent
+  blobs/<sha256>           pack, payload, result and step-output blobs, each stored once
+  .lock                    POSIX flock serialising transitions
+```
+
+- A snapshot holds the run identity (`run`), `pack_sha256`, the attempts and the heads,
+  and nothing else of substance. An attempt carries `payload_sha256` and `result_sha256`;
+  a step carries `payload_sha256` and `output_sha256`; a head is a small record (below).
+  `parent` and `snapshot.content_hash()` cover only this snapshot, so the bytes written
+  by a transition depend on the number of records, not on any pack, payload, result or
+  output content.
+- Four blob kinds, each named by the SHA-256 of its bytes (identical content is one blob):
+
+  | Blob | Bytes (canonical form) | Read with | Checked |
+  | --- | --- | --- | --- |
+  | pack | `PreparedPack.model_dump_json()` UTF-8; its SHA-256 is `pack_sha256`, the hash bound as `Input("prepared-pack", ...)` | `pack(snapshot=None)` | hash; same `run` as the snapshot; bytes are exactly the canonical JSON |
+  | payload | the response text, UTF-8 (module response or step response) | `payload(sha256)` | hash |
+  | result | the settled `Module.model_dump_json()`, so `result_sha256 == module.content_hash()` (this is also the hash a consumer binds as an `Input`) | `result(sha256)` | hash; bytes are exactly the canonical module |
+  | step output | the validator's output text, UTF-8 | `step_output(sha256)` | hash |
+
+  The pack and module forms are deterministic (contract field order, Decimal strings),
+  so hashes are stable across runs.
+- A head is `Head(module_id, status, result_sha256, inputs, commands, notes)`. `status`
+  and `notes` are the live state: staling sets `status: "stale"` and appends a note
+  (`Input changed: ...` or `Prepared pack changed; ...`; an already-stale head keeps
+  its first note) and never rewrites the result blob. `inputs` and `commands` (the CP-0
+  T8 `exact_command` facts) duplicate fields of the blob so that no blob is loaded to
+  resolve them. `Execution.head_module(head)`
+  loads the blob, rejects it if its module id, inputs, commands or (for a live head)
+  status differ from the head, and applies the status and notes, which reproduces the
+  module the journal formerly kept inline (stale limitations included).
+- What is loaded, and when. `current_inputs`, `invalidate`, `blocked_ancestors` and
+  `begin` read only snapshot fields (no blob). `settle` loads the result blob of each
+  directly bound upstream head, only when a candidate validates, to carry its
+  limitations. `finish` and `submit_step` load the pack (after retaining the response)
+  and, on resume, the retained payload. `view()` loads the pack and every head's
+  result blob. `cp1_workflow` previews load the pack and the retained step payloads;
+  recomputed step outputs are compared by hash, not loaded.
+- Trust. Heads are trusted from the snapshot by `current_inputs`, `invalidate` and
+  `blocked_ancestors`; only `head_module` (used by `view()` and `settle`) cross-checks a
+  head against its blob, and a head blob must always be an `accepted`, `restricted` or
+  `blocked` module, stale or not. The trust boundary is the snapshot and pointer pair,
+  as before: a local hash chain detects changed bytes, not a rewritten snapshot.
+- Inline text that remains in a snapshot is bounded by one cap: at most 20 lines of at
+  most 300 characters, then a line counting the rest (`bounded_issues`; a longer line
+  ends in `…`). It applies to `Attempt.issues` and the `repair_issues` copy of them, to
+  `StepSubmission.issues`, and (300 characters, marker included) to `Attempt.interruption`.
+  Schema errors of a malformed response are `loc: message` lines with no input value or
+  URL, and pass through the same cap; citation and validator findings may quote caller
+  text (a locator, a field name) and are cut by it. The cap hides lines beyond the
+  twentieth from the stored record; the response itself is kept whole as a payload blob,
+  so schema and citation findings can be re-derived from it, but dropped validator and
+  step-validator lines are not recoverable without rerunning the validator, and a long
+  interruption reason survives only in its 300-character form.
+  Each attempt record also repeats its bound `inputs` (a few hundred bytes of hashes), so
+  bytes per transition still grow by one such record per attempt, and by nothing else.
+- Compatibility. A store written by the first `execution/5` commit (9a3f0c7: inline
+  results, step outputs and head modules) is not supported and the schema string was
+  not bumped, because `execution/5` is unreleased and no such store exists outside test
+  fixtures. `execution/1` to `execution/4` stores are rejected with an explicit message.
+- Every reader reads the blob, checks its SHA-256 against the name it was asked for, and
+  rejects a missing or mismatching blob with `ValueError`, never an empty value.
+  `read()` verifies the snapshot against the pointer and its schema but does not read
+  blobs, so a bad blob is reported when it is used.
+- Writes are temp file, fsync, rename. Writing bytes whose hash already exists is a
+  no-op; a different file at an existing hash path is corruption and is refused, never
+  overwritten. A blob is written before the snapshot that references it, so a crash
+  leaves at worst an unreferenced blob or snapshot; never delete one as part of
+  automatic recovery. The pointer is replaced atomically after the snapshot is durable.
+- Transitions are serialised by POSIX file locking. This is tested on the macOS host
+  and the configured POSIX workflow, not Windows. Directory fsync and power-loss
+  durability are not claimed. No compaction or garbage collection is enabled.
+  Local hashes detect changed bytes, not an adversary rewriting every hash and pointer.
+- CLI: commands that print an attempt (`begin`, `interrupt`, `cp0-submit`, `cp1-submit`)
+  add a `result` key read from the result blob for display; `create` and `status` print
+  the snapshot itself, which holds hashes. `step-output` prints the output blob.
+- `tests/product/test_execution.py::TransitionMeter` reports the bytes written per
+  transition from a directory listing (new or changed files since its previous call).
 
 Analytical qualification, native-host qualification, model routing, provider
 request tracking and the US$50 OpenRouter cap remain separate pending adapters.
@@ -99,9 +177,9 @@ see [table projection](report-tables.md). Canonical Markdown, complete Workbench
 projection, final module validation and promotion remain pending. Historical Model
 calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
 
-New stores use `execution/4`, embedding `module/4` table layouts, status-carrying inputs, stated comparisons
-and calculation status. Existing explicit `execution/1`, `execution/2` and
-`execution/3` snapshots fail schema validation
+New stores use `execution/5` (blob storage above), embedding `module/4` table layouts,
+status-carrying inputs, stated comparisons and calculation status. Existing
+`execution/1` to `execution/4` snapshots are rejected with an explicit message
 rather than being silently rewritten. Migration is not implemented;
 retain old stores and use a new execution directory for this version. This is an
 artifact format boundary, not permission to reset a live provider budget.
