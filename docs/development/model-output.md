@@ -84,7 +84,7 @@ This is deterministic implementation evidence only. Evidence quality tiers
 remain null with an explicit unassessed reason; they are not inferred from a
 matched quotation. Analytical KPI trends and commentary remain separate model
 work. The separate [canonical KPI register](canonical-kpis.md) now retains CP-1
-debt and explicit earnings variants; DCF and FFO interest coverage await definitions.
+debt and explicit earnings variants, FFO interest coverage, DCF and DCF/debt.
 [Selected historical readiness](model-readiness.md) now checks four complete
 quarters and their source reconciliations. Pro forma, projection integration,
 full CP-1 delivery and CP-1A remain outstanding. No CLI, execution journal
@@ -95,9 +95,9 @@ public-case analytical or native-host acceptance is claimed.
 underlying historical accounts and source equations; it remains a separate artifact
 from this Model output and does not treat residuals as independent evidence.
 
-DCF is named in the pinned r14 references without a formula. Its definition is
-awaiting the user's answer; neither dividend-only nor dividend-plus-buyback
-subtraction has been adopted. This does not block unrelated calculations.
+DCF is named in the pinned r14 references without a formula. Decision 0006 DC-4
+delegates it as FCF less dividends paid; share repurchases are not deducted. The
+canonical KPI register computes it; this Model output does not.
 
 Review and verification: [initial implementation review](tasks/implementation/model-output-review.md)
 and [arithmetic trace review](tasks/implementation/computation-review.md).

@@ -10,11 +10,11 @@ require separate qualification.
 | --- | --- | --- |
 | Mechanical scaffolding | Sonnet 5.5 / low (`dv-scaffold`) | Complete file contract, small decision space. |
 | Bounded implementation and normal repairs | Sonnet 5.5 / medium (`dv-feature`) | Default balance for caller tracing, edits and affected checks. |
-| Financial/provenance/parser/state boundary | Sonnet 5.5 / high (`dv-sensitive`) | Interacting invariants and consequential error paths. |
+| Financial/provenance/parser/state boundary | Opus 5.5 / high (`dv-sensitive`) | Interacting invariants and consequential error paths; the review regime's key areas ([decision 0010](decisions/0010-opus-sensitive-route.md)). |
 | Research and dependency tracing | Sonnet 5.5 / medium (`dv-research`) | Source-grounded comparison; high for unresolved interacting constraints. |
 | Architecture diagnosis | Fable 5.1 / high (`dv-architect`) | Concrete blocked boundary requiring sustained reasoning. |
 | Escalated repair | Fable 5.1 / high (`dv-escalate`) | Fresh diagnosis after two concrete failed repairs or a design blocker. |
-| Refactoring/optimisation sweep | Sonnet 5.5 / medium (`dv-feature`) | Bounded inspection; high for financial/state changes. Scripts measure performance. |
+| Refactoring/optimisation sweep | Sonnet 5.5 / medium (`dv-feature`) | Bounded inspection; financial/state changes route to `dv-sensitive`. Scripts measure performance. |
 | Coordinator and PR owner | The Claude Code session's selected model | Own scope/publication; routine Git/CLI work needs no extra agent. |
 
 Haiku 5.5 remains an optional worker candidate for simple classification or
@@ -23,7 +23,9 @@ and latest DeepSeek at high/xhigh under the [testing policy](testing-and-telemet
 that is product testing through OpenRouter, not development routing. Python still
 owns arithmetic.
 
-Native identifiers: `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`.
+Native identifiers: `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`,
+`claude-haiku-5-5`. The tiers are Sonnet for routine work, Opus for key-area
+implementation and Fable for diagnosis and escalation.
 Verify the actual interface and account entitlement. One implementation owner
 carries each task through its checks. The user's confidence-review and key-area
 rewrite-tournament requirements apply; this matrix adds no extra approval chain.

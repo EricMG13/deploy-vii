@@ -62,7 +62,7 @@ worker explicitly for a scoped task; descriptions avoid automatic broad routing.
 | --- | --- | --- |
 | dv-scaffold | Sonnet 5.5 | low |
 | dv-feature | Sonnet 5.5 | medium |
-| dv-sensitive | Sonnet 5.5 | high |
+| dv-sensitive | Opus 5.5 | high |
 | dv-research | Sonnet 5.5 | medium |
 | dv-architect | Fable 5.1 | high |
 | dv-escalate | Fable 5.1 | high |
