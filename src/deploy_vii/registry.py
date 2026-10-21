@@ -11,8 +11,8 @@ from deploy_vii.contracts import Contract, Identifier, Run, Status, Text
 
 EdgeRule = Literal["block", "restricted"]
 
-# CP-5 follows every selected analyst; challenge, exports and model/OS owners are not analysts.
-_NOT_CP5_FAN_IN = frozenset({"CP-5", "CP-6", "CP-8", "CP-MEMO", "CP-MODEL", "CP-OS"})
+# CP-5 follows every selected analyst, CP-MODEL included (DC-5); challenge, exports and OS do not.
+_NOT_CP5_FAN_IN = frozenset({"CP-5", "CP-6", "CP-8", "CP-MEMO", "CP-OS"})
 
 
 class Responsibility(Contract):

@@ -187,6 +187,12 @@ see [table projection](report-tables.md). Canonical Markdown, complete Workbench
 projection, final module validation and promotion remain pending. Historical Model
 calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
 
+CP-MODEL's artifact (decision 0006 DC-5) is the HTML Model destination plus the calculation
+JSON of the accepted CP-1 financial model; the r14 XLSX workbook export is deferred and
+recorded so in `docs/methodology/r14-coverage.json`. CP-MODEL requires accepted CP-1 (a
+blocked CP-1 blocks it) and, when selected, is an analyst input to CP-5 (restricted if
+blocked). No Pathway preset requests it, so it runs only when requested.
+
 New stores use `execution/5` (blob storage above), embedding `module/5` table layouts,
 status-carrying inputs, stated comparisons and calculation status. Existing
 `execution/1` to `execution/4` snapshots are rejected with an explicit message

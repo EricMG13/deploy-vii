@@ -21,6 +21,7 @@ from deploy_vii.execution import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
+from deploy_vii.registry import plan
 from deploy_vii.render import render
 from tests.product.test_readiness import readiness_fixture
 
@@ -519,6 +520,49 @@ def test_blocked_required_producer_under_restricted_rule_runs_limited(tmp_path: 
     )
     assert cp2.status == "restricted"
     assert any("Upstream CP-1A blocked" in text for text in cp2.inherited_limitations)
+
+
+def cp_model_store(tmp_path: Path) -> Execution:
+    """A run that requests CP-MODEL and CP-5, with CP-0 readiness accepted for that scope."""
+    pack, review = readiness_fixture()
+    scope = ("CP-0", "CP-1", "CP-MODEL", "CP-5")
+    pack = pack.model_copy(update={"run": pack.run.model_copy(update={"requested_modules": scope})})
+    consumers = tuple(
+        review.consumers[0].model_copy(update={"module_id": module_id})
+        for module_id in plan(scope)
+        if module_id not in {"CP-0", "CP-MODEL"}  # CP-MODEL needs no CP-0 consumer readiness
+    )
+    gap = review.gaps[0].model_copy(
+        update={"affected_modules": tuple(item.module_id for item in consumers)}
+    )
+    review = review.model_copy(
+        update={"pack_sha256": pack.content_hash(), "consumers": consumers, "gaps": (gap,)}
+    )
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-PARSE")
+    candidate = build_readiness(store.pack(), review)
+    result = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+    assert settled(store, result).status == "restricted"
+    return store
+
+
+def test_blocked_cp1_blocks_cp_model(tmp_path: Path) -> None:
+    """Decision 0006 DC-5: CP-MODEL requires accepted CP-1 and the edge blocks."""
+    store = cp_model_store(tmp_path)
+    block_module(store, "CP-1")
+    with pytest.raises(ValueError, match="upstream"):
+        store.begin("CP-MODEL")
+
+
+def test_blocked_cp_model_restricts_cp5(tmp_path: Path) -> None:
+    store = cp_model_store(tmp_path)
+    settle_module(store, "CP-1")
+    blocked = block_module(store, "CP-MODEL")
+    cp5 = settle_module(store, "CP-5")
+    assert bound(cp5, "CP-MODEL") == Input(
+        input_id="CP-MODEL", sha256=blocked.content_hash(), status="blocked"
+    )
+    assert cp5.status == "restricted"
 
 
 def test_unrun_stale_or_rejected_producer_never_degrades(tmp_path: Path) -> None:

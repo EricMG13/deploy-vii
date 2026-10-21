@@ -760,24 +760,30 @@
       "aliases": [],
       "source_path": "reference/deploy-v-r14/skills/cp-model/SKILL.md",
       "source_sha256": "c52bdb6071351d21a8b537605ff2cedfbf3f09bd76821be9530c7a41f9172045",
-      "purpose": "Builds the validated credit snapshot model workbook from accepted upstream handoffs.",
+      "purpose": "Publishes the accepted CP-1 financial model as the Model destination of the design system and its calculation JSON; no workbook.",
       "artifact_contract": {
         "allowed_sidecars": [],
         "conditional_table_ids": [],
-        "primary_kind": "xlsx_workbook",
-        "required_sheet_names": [
-          "Credit Snapshot",
-          "Model",
-          "KPIs",
-          "_INPUTS",
-          "_MAP",
-          "_CHECKS",
-          "_AUDIT"
-        ],
+        "primary_kind": "html_model_destination",
         "required_table_count": 0,
-        "required_table_ids": []
+        "required_table_ids": [],
+        "calculation_json": true,
+        "deferred": {
+          "xlsx_workbook": {
+            "required_sheet_names": [
+              "Credit Snapshot",
+              "Model",
+              "KPIs",
+              "_INPUTS",
+              "_MAP",
+              "_CHECKS",
+              "_AUDIT"
+            ],
+            "reason": "decision 0006 DC-5: the design system's Model destination replaces the workbook; export deferred"
+          }
+        }
       },
-      "implementation": "unrun",
+      "implementation": "partial (artifact defined; destination rendering in M6.5/M8)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"
@@ -969,7 +975,7 @@
       "type": "REQUIRED"
     },
     {
-      "source": "CP-0",
+      "source": "CP-1",
       "target": "CP-MODEL",
       "type": "REQUIRED"
     },
