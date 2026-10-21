@@ -259,3 +259,14 @@ current internal readiness decisions are not full CP-1 acceptance.
 Tournaments remain key-area only; confidence review applies to all code changes.
 
 Execution review: execution-review.md. Native/live qualification remains unrun.
+
+Source-first CP-1 journal submission now retains source context, bound financial
+extraction, Python calculations, narrative and downstream readiness in fixed
+order. The trusted CP-0 adapter and local execution CLI support interruption and
+exact-response resumption with the same module-wide one-repair budget. Final CP-1
+readiness remains a pending internal handoff, not Module promotion. See
+staged-execution-review.md and ../../execution.md. The scoped Sol/high tournament
+covers only journal transition and stage validation; routine adapters/CLI use
+confidence review and focused tests. Canonical Markdown/Workbench projection,
+CP-1A and live/native qualification remain pending. OpenRouter spend stays $0 of
+the authorized $50 cap; no live call or provider route changed.

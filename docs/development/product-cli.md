@@ -16,8 +16,9 @@ selected root; it does not scan for documents or credentials. Snapshot originals
 are keyed by SHA-256. The last-written `complete.json` identifies a completed
 snapshot; `load_pack` checks its pack identity and every retained original hash.
 Editing originals after capture does not change the frozen snapshot. Reprepare
-into a new directory for changed evidence; consumer invalidation/runtime retry
-tracking is the next execution increment, not implemented by these commands.
+into a new directory for changed evidence. The standalone preparation/delivery
+commands do not track retries. Use the execution commands below for invalidation
+and bounded repair.
 
 A preparation request contains `schema_version: preparation-request/1`, `run`
 (the `Run` contract) and `sources`, each with `source_id`, relative `path` and
@@ -62,3 +63,41 @@ and T1–T8 render as tagged panels; source IDs bind `[data-source-id]` in Evide
 The inspector retains source hash, locator, coverage, extraction limitations and
 workbook metadata. CP-0 charts are not applicable. Core financial chart/table
 parity is still pending with deterministic calculations.
+
+## Local staged execution
+
+These commands accept supplied review files and never call a provider. Keep
+execution directories and raw responses outside Git. Commands print JSON to
+stdout, except `step-output`, which prints the retained valid stage output.
+All examples use a frozen prepared pack and placeholder ticket IDs.
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 create --pack runs/example/pack-1
+uv run --locked deploy-vii execution --directory runs/example/execution-1 begin CP-0
+uv run --locked deploy-vii execution --directory runs/example/execution-1 cp0-submit --ticket TICKET --review runs/example/cp0-review.json
+uv run --locked deploy-vii execution --directory runs/example/execution-1 begin CP-1
+uv run --locked deploy-vii execution --directory runs/example/execution-1 cp1-submit --ticket TICKET --step source_context --review runs/example/context-review.json
+uv run --locked deploy-vii execution --directory runs/example/execution-1 step-output --ticket TICKET --step source_context
+uv run --locked deploy-vii execution --directory runs/example/execution-1 status
+```
+
+For CP-1 continue with `financials`, `narrative`, then `readiness`, each using its
+own contract. The completed source step hash for `FinancialSubmission` is computed
+from the full `StepSubmission` in `status`, not just its report. Use
+`StepSubmission.model_validate_json(...).content_hash()`; `FinancialSubmission`,
+`NarrativeReview`, and `DownstreamReview` expose `model_json_schema()` as above.
+Later review hashes bind the exact inputs retained in prior stage outputs.
+
+Repeat the identical submit command to resume a validator runtime failure. A
+successfully completed CP-1 step cannot be resubmitted; inspect `status` and advance
+to the next stage. To abandon a pending attempt explicitly:
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 interrupt --ticket TICKET --reason "Host attempt stopped; retained response cannot be completed"
+uv run --locked deploy-vii execution --directory runs/example/execution-1 replace-pack --pack runs/example/pack-2
+```
+
+An interruption consumes the attempt. `replace-pack` requires no pending ticket
+and identical run identity/scope, stales heads, and retains old snapshots and repair
+counts. It does not reconcile provider spend. See [execution contracts](execution.md)
+for format compatibility and the still-pending CP-1 delivery/promotion boundary.

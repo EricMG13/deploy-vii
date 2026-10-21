@@ -1,10 +1,10 @@
-# Execution journal — internal Python API
+# Execution journal
 
-`deploy_vii.execution.Execution` is the local execution substrate. It is not yet
-wired to the live model runner or the standalone `cp0` CLI. Those adapters must
-supply their actual module-specific validator; a model-supplied success flag is
-never a validator. The synthetic engine tests use explicit test validators and
-do not implement or qualify CP-1 or any other financial module.
+`deploy_vii.execution.Execution` is the local execution substrate. The `execution`
+CLI provides trusted CP-0 review submission and ordered CP-1 stage submission.
+The standalone `cp0` delivery command remains separate. Live model invocation and
+CP-1 final module projection are pending; a model-supplied success flag is never
+a validator. Synthetic protocol tests do not qualify analytical judgments.
 
 - `Execution.create(directory, pack)` starts a new store for a validated frozen
   pack. Use `load_pack` first when reading an on-disk prepared pack. Run identity,
@@ -47,3 +47,45 @@ Local hashes detect changed bytes, not an adversary rewriting every hash/pointer
 Analytical qualification, native-host qualification, model routing, provider
 request tracking and the US$50 OpenRouter cap remain separate pending adapters.
 Neither the journal nor its browser tests promote those qualification states.
+
+## Ordered review submissions
+
+`submit_step` is an internal API: sequence and validator are trusted Python module
+implementation arguments, never model-controlled choices. It retains raw UTF-8
+response text before invoking validation. Every step binds the current pack and
+upstream heads, plus every prior completed submission hash (including its retained
+output). Runtime exceptions leave the same response pending. A changed response
+requires explicit interruption, consuming the attempt. Invalid submissions consume
+the module's existing one-repair allowance; stages do not get separate budgets.
+A blocked stage may retain a diagnostic report. On failure, the module payload
+is a Python-built empty candidate; the actual raw response remains in its step.
+Finishing a module while a stage response awaits validation is disallowed;
+explicit interruption remains available.
+
+`submit_cp0_review` validates source readiness and constructs the candidate in
+Python, then promotes only that exact candidate. It resumes a crash between stage
+validation and module promotion without another review or attempt. No usable,
+identity-confirmed source produces rejection, then blocking if repair also fails.
+
+`submit_cp1_step` fixes the sequence:
+
+1. `source_context`: validate source/entity/event review and retain its report;
+   no usable assessed financial source stops extraction.
+2. `financials`: require `FinancialSubmission.context_step_sha256` to equal the
+   completed source submission hash; validate financial/context/definition bindings
+   and build `FinancialStage` with narrative inputs and historical Model output.
+   Calculation-gate failures retain `model: null` and explicit issues.
+3. `narrative`: validate `NarrativeReview` against the retained narrative inputs,
+   then build the selected consumers' `DownstreamInputs`.
+4. `readiness`: validate `DownstreamReview` against those exact inputs, then retain
+   the canonical downstream report with historical Model readiness distinct.
+
+The final step leaves the ticket pending. It does not accept CP-1 or CP-MODEL.
+Canonical Markdown, Workbench field projection, final module validation and
+promotion remain the next increment. Historical Model calculations are not the
+CP-MODEL workbook export. Every analytical qualification remains `unrun`.
+
+New stores use `execution/2`. Existing explicit `execution/1` snapshots fail schema
+validation rather than being silently rewritten. Migration is not implemented;
+retain old stores and use a new execution directory for this version. This is an
+artifact format boundary, not permission to reset a live provider budget.

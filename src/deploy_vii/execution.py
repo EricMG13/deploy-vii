@@ -11,10 +11,10 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from deploy_vii.contracts import (
     Claim,
@@ -35,6 +35,30 @@ from deploy_vii.registry import canonical, dependencies, modules, plan
 Validator = Callable[[Module], tuple[str, ...]]
 
 
+class StepSubmission(Contract):
+    step_id: Identifier
+    inputs: tuple[Input, ...]
+    payload: str
+    status: Literal["pending", "valid", "invalid"] = "pending"
+    output: str | None = None
+    issues: tuple[Text, ...] = ()
+
+    @model_validator(mode="after")
+    def coherent_state(self) -> Self:
+        if self.status == "pending" and (self.output is not None or self.issues):
+            raise ValueError("Pending step cannot have a validation result")
+        if self.status == "valid" and (self.output is None or self.issues):
+            raise ValueError("Valid step requires output and no issues")
+        if self.status == "invalid" and not self.issues:
+            raise ValueError("Invalid step requires issues")
+        return self
+
+
+class StepValidation(Contract):
+    output: str | None = None
+    issues: tuple[Text, ...] = ()
+
+
 class Attempt(Contract):
     ticket_id: Identifier
     module_id: Identifier
@@ -47,10 +71,11 @@ class Attempt(Contract):
     issues: tuple[str, ...] = ()
     result: Module | None = None
     interruption: Text | None = None
+    steps: tuple[StepSubmission, ...] = ()
 
 
 class ExecutionSnapshot(Contract):
-    schema_version: Literal["execution/1"] = "execution/1"
+    schema_version: Literal["execution/2"] = "execution/2"
     parent: Hash | None = None
     pack: PreparedPack
     attempts: tuple[Attempt, ...] = ()
@@ -305,6 +330,8 @@ class Execution:
                 raise ValueError("Ticket is absent or already finished")
             if current_inputs(snapshot, attempt.module_id) != attempt.inputs:
                 raise ValueError("Ticket inputs have changed")
+            if interruption is None and any(s.status == "pending" for s in attempt.steps):
+                raise ValueError("A step response is pending; resume that step first")
 
             if interruption is not None:
                 if not interruption.strip():
@@ -329,26 +356,126 @@ class Execution:
                 self._write(snapshot)  # Retain response before a validator can fail or crash.
 
             finished = settle(snapshot, attempt, payload, validator, interruption)
-            result = finished.result
-            assert result is not None
-            heads = invalidate(snapshot.heads, attempt.module_id)
-            if result.status != "rejected":
-                heads = (
-                    *tuple(item for item in heads if item.module_id != attempt.module_id),
-                    result,
-                )
-            snapshot = snapshot.model_copy(
+            self._save_finished(snapshot, finished)
+            return finished
+
+    def _save_finished(self, snapshot: ExecutionSnapshot, finished: Attempt) -> None:
+        """Caller holds the execution lock; preserve the existing invalidation policy."""
+        result = finished.result
+        assert result is not None
+        heads = invalidate(snapshot.heads, finished.module_id)
+        if result.status != "rejected":
+            heads = (*tuple(h for h in heads if h.module_id != finished.module_id), result)
+        self._write(
+            snapshot.model_copy(
                 update={
                     "parent": snapshot.content_hash(),
                     "heads": heads,
                     "attempts": tuple(
-                        finished if item.ticket_id == ticket_id else item
-                        for item in snapshot.attempts
+                        finished if a.ticket_id == finished.ticket_id else a
+                        for a in snapshot.attempts
                     ),
                 }
             )
-            self._write(snapshot)
-            return finished
+        )
+
+    def submit_step(
+        self,
+        ticket_id: str,
+        module_id: str,
+        sequence: tuple[str, ...],
+        step_id: str,
+        payload: str,
+        validator: Callable[[PreparedPack, Attempt], StepValidation],
+    ) -> Attempt:
+        """Retain an ordered response before trusted validation, sharing the module budget.
+
+        Sequence and validator come from the module implementation. Invalid model
+        responses finish this attempt; validator exceptions leave its exact input
+        pending for resumption. A valid step is not module acceptance.
+        """
+        if not sequence or len(sequence) != len(set(sequence)):
+            raise ValueError("Step sequence must be nonempty and unique")
+
+        def with_attempt(snapshot: ExecutionSnapshot, updated: Attempt) -> ExecutionSnapshot:
+            return snapshot.model_copy(
+                update={
+                    "parent": snapshot.content_hash(),
+                    "attempts": tuple(
+                        updated if prior.ticket_id == ticket_id else prior
+                        for prior in snapshot.attempts
+                    ),
+                }
+            )
+
+        with self._locked():
+            snapshot = self.read()
+            attempt = next((a for a in snapshot.attempts if a.ticket_id == ticket_id), None)
+            if attempt is None or attempt.status != "pending" or attempt.module_id != module_id:
+                raise ValueError("Ticket is absent, finished or belongs to another module")
+            if current_inputs(snapshot, module_id) != attempt.inputs:
+                raise ValueError("Ticket inputs have changed")
+            if attempt.payload is not None:
+                raise ValueError("A module response is already retained; resume its validation")
+            completed = tuple(step for step in attempt.steps if step.status == "valid")
+            if tuple(step.step_id for step in completed) != sequence[: len(completed)]:
+                raise ValueError("Retained steps do not match the module sequence")
+            if len(completed) >= len(sequence) or step_id != sequence[len(completed)]:
+                raise ValueError("Submit the next module step in order")
+
+            if len(attempt.steps) > len(completed):
+                submission = attempt.steps[-1]
+                if submission.status != "pending" or submission.payload != payload:
+                    raise ValueError(
+                        "Step already retains a different response; resume or interrupt"
+                    )
+                if submission.step_id != step_id:
+                    raise ValueError("Pending step identity differs")
+            else:
+                submission = StepSubmission(
+                    step_id=step_id,
+                    payload=payload,
+                    inputs=(
+                        *attempt.inputs,
+                        *(
+                            Input(input_id="step:" + step.step_id, sha256=step.content_hash())
+                            for step in completed
+                        ),
+                    ),
+                )
+                attempt = attempt.model_copy(update={"steps": (*attempt.steps, submission)})
+                snapshot = with_attempt(snapshot, attempt)
+                self._write(snapshot)
+
+            outcome = StepValidation.model_validate_json(
+                validator(snapshot.pack, attempt).model_dump_json()
+            )
+            if not outcome.issues and outcome.output is None:
+                raise ValueError("Successful step validator must retain its output")
+            submitted = submission.model_copy(
+                update={
+                    "status": "invalid" if outcome.issues else "valid",
+                    "output": outcome.output,
+                    "issues": outcome.issues,
+                }
+            )
+            attempt = attempt.model_copy(update={"steps": (*completed, submitted)})
+            if outcome.issues:
+                candidate = Module(
+                    run_id=snapshot.pack.run.run_id,
+                    issuer_id=snapshot.pack.run.issuer_id,
+                    as_of=snapshot.pack.run.as_of,
+                    module_id=module_id,
+                    inputs=attempt.inputs,
+                    attempt=attempt.number,
+                )
+                finished = settle(
+                    snapshot, attempt, candidate.model_dump_json(), lambda _: outcome.issues
+                )
+                self._save_finished(snapshot, finished)
+                return finished
+            self._write(with_attempt(snapshot, attempt))
+            return attempt
 
     def interrupt(self, ticket_id: str, reason: str) -> Attempt:
         if not reason.strip():

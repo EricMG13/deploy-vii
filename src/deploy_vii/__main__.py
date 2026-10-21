@@ -3,6 +3,7 @@ from pathlib import Path
 
 from deploy_vii.contracts import Run
 from deploy_vii.delivery import deliver_cp0
+from deploy_vii.execution_cli import configure, execute
 from deploy_vii.preparation import PreparationRequest, load_pack, prepare
 from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import plan
@@ -25,6 +26,7 @@ def main() -> None:
     readiness.add_argument("--pack", type=Path, required=True)
     readiness.add_argument("--review", type=Path, required=True)
     readiness.add_argument("--output", type=Path, required=True)
+    configure(commands.add_parser("execution", help="retain and resume staged reviews locally"))
     args = parser.parse_args()
     if args.command == "plan":
         print("\n".join(plan(tuple(args.modules))))
@@ -34,10 +36,12 @@ def main() -> None:
     elif args.command == "prepare":
         request = PreparationRequest.model_validate_json(args.request.read_bytes())
         print(prepare(request, args.root, args.output).content_hash())
-    else:
+    elif args.command == "cp0":
         pack = load_pack(args.pack)
         review = ReadinessReview.model_validate_json(args.review.read_bytes())
         print(deliver_cp0(pack, review, args.output))
+    else:
+        print(execute(args))
 
 
 if __name__ == "__main__":
