@@ -6,8 +6,9 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 from deploy_vii.contracts import Claim, Input, Module
-from deploy_vii.execution import Execution, current_inputs
-from deploy_vii.readiness import build_readiness
+from deploy_vii.execution import Execution, candidate_issues, current_inputs
+from deploy_vii.preparation import PreparedPack
+from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
 from deploy_vii.render import render
 from tests.product.test_readiness import readiness_fixture
 
@@ -67,7 +68,8 @@ def test_initial_gates_and_current_lineage(tmp_path: Path) -> None:
     candidate = candidate_for(store, "CP-1")
     result = store.finish(first.ticket_id, candidate.model_dump_json(), lambda _: ())
     assert result.result is not None
-    assert set(store.read().heads[0].limitations) <= set(result.result.limitations)
+    carried = {*result.result.limitations, *result.result.inherited_limitations}
+    assert set(store.read().heads[0].limitations) <= carried
     assert store.view().mode == "accepted"
 
 
@@ -386,3 +388,194 @@ def test_concurrent_finish_publishes_exactly_one_result(tmp_path: Path) -> None:
         results = list(pool.map(lambda _: finish(), range(2)))
     assert sorted(results) == ["finished", "refused"]
     assert len(store.read().heads) == 1
+
+
+# --- Degradation and status semantics (decision 0007) ---------------------------------------
+
+
+def settle_module(store: Execution, module_id: str, candidate: Module | None = None) -> Module:
+    ticket = store.begin(module_id)
+    payload = candidate if candidate is not None else candidate_for(store, module_id)
+    result = store.finish(ticket.ticket_id, payload.model_dump_json(), lambda _: ())
+    assert result.result is not None
+    return result.result
+
+
+def block_module(store: Execution, module_id: str) -> Module:
+    """Two failed attempts: the first is rejected, the repair leaves a blocked head."""
+    for _ in range(2):
+        ticket = store.begin(module_id)
+        result = store.finish(ticket.ticket_id, "not json", lambda _: ())
+    assert result.result is not None and result.result.status == "blocked"
+    return result.result
+
+
+def settle_through(store: Execution, *module_ids: str) -> None:
+    accept_cp0(store)
+    for module_id in module_ids:
+        settle_module(store, module_id)
+
+
+def bound(module: Module, module_id: str) -> Input:
+    return next(item for item in module.inputs if item.input_id == module_id)
+
+
+def test_blocked_optional_producer_does_not_halt_core_report(tmp_path: Path) -> None:
+    """Review C2: a blocked CP-4 used to remove CP-3, CP-5 and CP-6 from the report."""
+    store = fixture_store(tmp_path)
+    settle_through(store, "CP-1", "CP-1A", "CP-2")
+    blocked = block_module(store, "CP-4")
+
+    cp3 = settle_module(store, "CP-3")
+    cp5 = settle_module(store, "CP-5")
+    cp6 = settle_module(store, "CP-6")
+
+    for module in (cp3, cp5):
+        assert bound(module, "CP-4") == Input(
+            input_id="CP-4", sha256=blocked.content_hash(), status="blocked"
+        )
+    for module in (cp3, cp5, cp6):
+        assert module.status == "restricted"
+        assert any("Upstream CP-4 blocked" in text for text in module.inherited_limitations)
+        assert not any("Upstream CP-4 blocked" in text for text in module.limitations)
+    views = {item.module_id: item for item in store.view().modules}
+    assert views["CP-4"].status == "blocked"
+    assert {views[item].status for item in ("CP-3", "CP-5", "CP-6")} == {"restricted"}
+    assert views["CP-3"].limitations == (*cp3.limitations, *cp3.inherited_limitations)
+
+
+def test_blocked_required_producer_under_block_rule_still_halts(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    settle_through(store, "CP-1", "CP-1A")
+    block_module(store, "CP-2")
+    with pytest.raises(ValueError, match="upstream"):
+        store.begin("CP-3")
+
+
+def test_blocked_required_producer_under_restricted_rule_runs_limited(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    settle_through(store, "CP-1")
+    blocked = block_module(store, "CP-1A")
+    cp2 = settle_module(store, "CP-2")
+    assert bound(cp2, "CP-1A") == Input(
+        input_id="CP-1A", sha256=blocked.content_hash(), status="blocked"
+    )
+    assert cp2.status == "restricted"
+    assert any("Upstream CP-1A blocked" in text for text in cp2.inherited_limitations)
+
+
+def test_unrun_stale_or_rejected_producer_never_degrades(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    settle_through(store, "CP-1", "CP-1A", "CP-2")
+    first = store.begin("CP-4")
+    rejected = store.finish(first.ticket_id, "not json", lambda _: ())
+    assert rejected.result is not None and rejected.result.status == "rejected"
+    # CP-4 is selected and its edge to CP-3 is restricted, yet a rejected attempt has no head.
+    with pytest.raises(ValueError, match="upstream"):
+        store.begin("CP-3")
+
+    repair = store.begin("CP-4")
+    blocked = store.finish(repair.ticket_id, "not json", lambda _: ()).result
+    assert blocked is not None and blocked.status == "blocked"
+    snapshot = store.read()
+    for status in ("stale", "rejected", "unrun"):
+        changed = blocked.model_copy(update={"status": status})
+        heads = tuple(changed if item.module_id == "CP-4" else item for item in snapshot.heads)
+        with pytest.raises(ValueError, match="upstream"):
+            current_inputs(snapshot.model_copy(update={"heads": heads}), "CP-3")
+    assert store.begin("CP-3").number == 0  # only a settled blocked head degrades
+
+
+def test_input_status_is_bound_exactly(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    settle_through(store, "CP-1", "CP-1A", "CP-2")
+    blocked = block_module(store, "CP-4")
+    ticket = store.begin("CP-3")
+    candidate = candidate_for(store, "CP-3")
+    assert candidate_issues(store.read(), ticket, candidate) == ()
+    assert bound(candidate, "CP-4") == Input(
+        input_id="CP-4", sha256=blocked.content_hash(), status="blocked"
+    )
+    for false_status in ("accepted", "restricted"):
+        inputs = tuple(
+            item.model_copy(update={"status": false_status}) if item.input_id == "CP-4" else item
+            for item in candidate.inputs
+        )
+        issues = candidate_issues(
+            store.read(), ticket, candidate.model_copy(update={"inputs": inputs})
+        )
+        assert issues == ("Candidate does not bind the exact current upstream inputs",)
+
+
+def public_readiness_fixture() -> tuple[PreparedPack, ReadinessReview]:
+    """Test fixture, not qualification: a public-case pack with one CP-0 note only."""
+    pack, review = readiness_fixture()
+    run = pack.run.model_copy(update={"case_kind": "public"})
+    pack = PreparedPack.model_validate_json(pack.model_copy(update={"run": run}).model_dump_json())
+    note = "Source authority is unknown; one text extract only"
+    review = review.model_copy(
+        update={
+            "pack_sha256": pack.content_hash(),
+            "sources": tuple(
+                source.model_copy(update={"limitations": (note,)}) for source in review.sources
+            ),
+            "consumers": tuple(
+                consumer.model_copy(update={"limitations": (note,)})
+                for consumer in review.consumers
+            ),
+            "gaps": (),
+        }
+    )
+    assert validate_review(pack, review) == ()
+    return pack, review
+
+
+def test_pass_reachable_with_immaterial_inherited_gap(tmp_path: Path) -> None:
+    """Review W1, on a public-case test fixture (not a qualification run)."""
+    pack, review = public_readiness_fixture()
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-0")
+    candidate = build_readiness(store.read().pack, review)
+    cp0 = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ()).result
+    assert cp0 is not None and cp0.status == "restricted"
+    assert len(cp0.limitations) == 1 and not cp0.inherited_limitations
+
+    clean = Module(
+        run_id=pack.run.run_id,
+        issuer_id=pack.run.issuer_id,
+        as_of=pack.run.as_of,
+        module_id="CP-1",
+        inputs=current_inputs(store.read(), "CP-1"),
+    )
+    cp1 = settle_module(store, "CP-1", clean)
+    assert cp1.status == "accepted"
+    assert cp1.limitations == ()
+    assert cp1.inherited_limitations == cp0.limitations
+    assert [item.status for item in cp1.inputs] == ["accepted", "restricted"]
+    shown = next(item for item in store.view().modules if item.module_id == "CP-1")
+    assert shown.status == "accepted" and shown.limitations == cp0.limitations
+
+
+def test_blocked_input_restricts_a_clean_module_even_when_not_synthetic(tmp_path: Path) -> None:
+    """A blocked input is a material inherited gap: no own findings, still not accepted."""
+    pack, review = public_readiness_fixture()
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-0")
+    candidate = build_readiness(store.read().pack, review)
+    store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+
+    def clean(module_id: str) -> Module:
+        return Module(
+            run_id=pack.run.run_id,
+            issuer_id=pack.run.issuer_id,
+            as_of=pack.run.as_of,
+            module_id=module_id,
+            inputs=current_inputs(store.read(), module_id),
+        )
+
+    settle_module(store, "CP-1", clean("CP-1"))
+    block_module(store, "CP-1A")
+    cp2 = settle_module(store, "CP-2", clean("CP-2"))
+    assert cp2.limitations == ()
+    assert cp2.status == "restricted"
+    assert any("Upstream CP-1A blocked" in text for text in cp2.inherited_limitations)

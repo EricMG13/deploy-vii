@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from deploy_vii.contracts import Claim, Fact, Module, ModuleView, Run, Source, Span, View
+from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, Run, Source, Span, View
 from deploy_vii.registry import canonical, modules, plan
 
 
@@ -106,6 +106,22 @@ def test_module_duplicate_and_unrun_contracts() -> None:
     claim = Claim(claim_id="x", text="candidate", citations=())
     with pytest.raises(ValidationError):
         Module(**base, claims=(claim, claim))
+
+
+def test_module_v4_inherited_limitations_input_status_and_old_store_rejection() -> None:
+    base = {"run_id": "r", "issuer_id": "i", "as_of": date(2026, 10, 21), "module_id": "CP-3"}
+    assert Input(input_id="CP-4", sha256="a" * 64).status == "accepted"
+    with pytest.raises(ValidationError):
+        Input(input_id="CP-4", sha256="a" * 64, status="stale")
+    with pytest.raises(ValidationError):
+        Module(**base, status="restricted")
+    inherited = Module(
+        **base, status="restricted", inherited_limitations=("Upstream CP-4 blocked",)
+    )
+    assert inherited.limitations == ()
+    raw = inherited.model_dump_json().replace("module/4", "module/3")
+    with pytest.raises(ValidationError, match="module/4"):
+        Module.model_validate_json(raw)
 
 
 def test_view_rejects_duplicate_and_unrun_outputs() -> None:

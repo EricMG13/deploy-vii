@@ -9,11 +9,12 @@ from deploy_vii.contracts import Contract
 from deploy_vii.downstream_readiness import DownstreamReview
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_periods import _id
-from deploy_vii.narrative import _DIMENSIONS, EvidencePart, NarrativeReview
+from deploy_vii.narrative import _DIMENSIONS, EvidencePart, NarrativeReport, NarrativeReview
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.quality import (
     ClaimCandidate,
     CoverageField,
+    ModuleStatus,
     QualityInputs,
     QualityReport,
     QualityReview,
@@ -31,6 +32,13 @@ class CP1QualityReport(Contract):
     registers: CanonicalTables
     inputs: QualityInputs
     quality: QualityReport
+
+
+def _module_status(narrative: NarrativeReport) -> ModuleStatus:
+    """Own findings only (decision 0007): limitations inherited from inputs never restrict."""
+    if narrative.status == "blocked":
+        return "blocked"
+    return "restricted" if narrative.limitations or narrative.status != "candidate" else "complete"
 
 
 def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
@@ -139,7 +147,7 @@ def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
         claims=claims,
         coverage=tuple(coverage),
         source_gate=gate,
-        module_status="blocked" if narrative.status == "blocked" else "restricted",
+        module_status=_module_status(narrative),
         references=tuple(
             dict.fromkeys(
                 (

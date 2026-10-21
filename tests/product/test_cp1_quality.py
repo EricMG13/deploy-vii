@@ -570,3 +570,26 @@ def test_stale_external_context_and_substituted_narrative_are_rejected(
     # Recomputing against the unreviewed narrative: the supplied review no longer binds.
     issues = validate_canonical_quality(*base, review, report)
     assert len(issues) == 1 and issues[0].startswith("Invalid CP-1 QA report:")
+
+
+@pytest.mark.parametrize(
+    "status,limitations,module",
+    [
+        ("blocked", (), "blocked"),
+        ("blocked", ("Own finding",), "blocked"),
+        ("restricted", (), "restricted"),
+        ("candidate", ("Own finding",), "restricted"),
+        ("candidate", (), "complete"),
+    ],
+)
+def test_module_status_derives_from_own_findings_only(
+    registers: CanonicalTables, status: str, limitations: tuple[str, ...], module: str
+) -> None:
+    changed = altered(registers, narrative_status=status)
+    downstream = changed.downstream
+    narrative = downstream.inputs.narrative.model_copy(update={"limitations": limitations})
+    inputs = downstream.inputs.model_copy(update={"narrative": narrative})
+    changed = changed.model_copy(
+        update={"downstream": downstream.model_copy(update={"inputs": inputs})}
+    )
+    assert cp1_quality_inputs(changed).module_status == module

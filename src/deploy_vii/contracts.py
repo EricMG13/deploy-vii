@@ -11,6 +11,7 @@ Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Text = Annotated[str, Field(min_length=1)]
 Status = Literal["unrun", "candidate", "accepted", "restricted", "blocked", "stale", "rejected"]
+InputStatus = Literal["accepted", "restricted", "blocked"]
 
 
 class Contract(BaseModel):
@@ -99,8 +100,11 @@ class Citation(Contract):
 
 
 class Input(Contract):
+    """A bound input; a module input carries its producer's status (decision 0007)."""
+
     input_id: Identifier
     sha256: Hash
+    status: InputStatus = "accepted"
 
 
 class Fact(Contract):
@@ -227,7 +231,7 @@ def validate_tables(tables: tuple[ReportTable, ...], facts: tuple[Fact, ...]) ->
 
 
 class Module(Contract):
-    schema_version: Literal["module/3"] = "module/3"
+    schema_version: Literal["module/4"] = "module/4"
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
@@ -239,6 +243,7 @@ class Module(Contract):
     tables: tuple[ReportTable, ...] = ()
     claims: tuple[Claim, ...] = ()
     limitations: tuple[str, ...] = ()
+    inherited_limitations: tuple[str, ...] = ()
     attempt: int = Field(default=0, ge=0, le=1)
 
     @model_validator(mode="after")
@@ -251,7 +256,9 @@ class Module(Contract):
         ):
             if len(set(identities)) != len(identities):
                 raise ValueError("duplicate artifact record identity")
-        if self.status in {"restricted", "blocked", "stale", "rejected"} and not self.limitations:
+        if self.status in {"restricted", "blocked", "stale", "rejected"} and not (
+            self.limitations or self.inherited_limitations
+        ):
             raise ValueError("limited artifact requires explicit limitations")
         if self.status == "unrun" and (self.facts or self.claims or self.tables):
             raise ValueError("unrun module cannot carry outputs")

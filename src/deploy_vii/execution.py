@@ -30,7 +30,7 @@ from deploy_vii.contracts import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import citation_issues
-from deploy_vii.registry import canonical, dependencies, modules, plan
+from deploy_vii.registry import canonical, dependencies, edge_rule, modules, plan
 
 Validator = Callable[[Module], tuple[str, ...]]
 
@@ -88,11 +88,21 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         raise ValueError("Module is not selected for this run")
     heads = {item.module_id: item for item in snapshot.heads}
     required = graph[module_id]
-    if any(
-        item not in heads or heads[item].status not in {"accepted", "restricted"}
-        for item in required
-    ):
+
+    def bound(item: str) -> Input:
+        head = heads.get(item)
+        if head is None:
+            raise ValueError("Required upstream is unrun, stale or blocked")
+        # Only a settled blocked head degrades, and only under a restricted edge (decision 0007).
+        if head.status == "accepted" or head.status == "restricted":
+            return Input(input_id=item, sha256=head.content_hash(), status=head.status)
+        if head.status == "blocked" and edge_rule(module_id, item) == "restricted":
+            return Input(input_id=item, sha256=head.content_hash(), status="blocked")
         raise ValueError("Required upstream is unrun, stale or blocked")
+
+    upstream = tuple(
+        bound(item) for item in plan(snapshot.pack.run.requested_modules) if item in required
+    )
     if module_id not in {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}:
         readiness = heads.get("CP-0")
         commands = (
@@ -108,14 +118,7 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         )
         if commands != (f"Run {module_id}",):
             raise ValueError("CP-0 has not authorized this consumer's source readiness")
-    return (
-        Input(input_id="prepared-pack", sha256=snapshot.pack.content_hash()),
-        *tuple(
-            Input(input_id=item, sha256=heads[item].content_hash())
-            for item in plan(snapshot.pack.run.requested_modules)
-            if item in required
-        ),
-    )
+    return (Input(input_id="prepared-pack", sha256=snapshot.pack.content_hash()), *upstream)
 
 
 def candidate_issues(
@@ -133,8 +136,8 @@ def candidate_issues(
         or candidate.status != "candidate"
     ):
         issues.append("Candidate identity, attempt or status does not match the ticket")
-    supplied = {item.input_id: item.sha256 for item in candidate.inputs}
-    expected = {item.input_id: item.sha256 for item in attempt.inputs}
+    supplied = {item.input_id: (item.sha256, item.status) for item in candidate.inputs}
+    expected = {item.input_id: (item.sha256, item.status) for item in attempt.inputs}
     if any(supplied.get(key) != value for key, value in expected.items()) or any(
         key.startswith("CP-") and key not in expected for key in supplied
     ):
@@ -169,6 +172,23 @@ def invalidate(heads: tuple[Module, ...], changed: str) -> tuple[Module, ...]:
     )
 
 
+def inherited_limitations(
+    snapshot: ExecutionSnapshot, attempt: Attempt, own: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Limitations carried by the bound inputs, de-duplicated and never repeating own findings."""
+    heads = {item.module_id: item for item in snapshot.heads}
+    texts: list[str] = []
+    for item in attempt.inputs:
+        head = heads.get(item.input_id)
+        if head is None:
+            continue
+        if item.status == "blocked":
+            texts.extend(f"Upstream {item.input_id} blocked: {text}" for text in head.limitations)
+        else:
+            texts.extend((*head.limitations, *head.inherited_limitations))
+    return tuple(text for text in dict.fromkeys(texts) if text not in own)
+
+
 def settle(
     snapshot: ExecutionSnapshot,
     attempt: Attempt,
@@ -201,24 +221,22 @@ def settle(
         )
     else:
         assert candidate is not None
-        inherited = [
-            text
-            for module in snapshot.heads
-            if module.module_id in {item.input_id for item in attempt.inputs}
-            for text in module.limitations
-        ]
-        limits = tuple(
-            dict.fromkeys(
-                [*candidate.limitations, *inherited]
-                + (
-                    ["Synthetic case; not real issuer qualification"]
-                    if snapshot.pack.run.case_kind == "synthetic"
-                    else []
-                )
-            )
+        synthetic = (
+            ("Synthetic case; not real issuer qualification",)
+            if snapshot.pack.run.case_kind == "synthetic"
+            else ()
         )
+        own = tuple(dict.fromkeys((*candidate.limitations, *synthetic)))
+        inherited = inherited_limitations(snapshot, attempt, own)
+        # Own findings or a blocked input (a material inherited gap) restrict the module;
+        # limitations inherited from accepted or restricted inputs are shown, not penalised.
+        material = any(item.status == "blocked" for item in attempt.inputs)
         result = candidate.model_copy(
-            update={"status": "restricted" if limits else "accepted", "limitations": limits}
+            update={
+                "status": "restricted" if own or material else "accepted",
+                "limitations": own,
+                "inherited_limitations": inherited,
+            }
         )
     return attempt.model_copy(
         update={
@@ -543,7 +561,11 @@ class Execution:
                     facts=module.facts if visible and module else (),
                     tables=module.tables if visible and module else (),
                     claims=module.claims if visible and module else (),
-                    limitations=module.limitations if module else (),
+                    limitations=(
+                        tuple(dict.fromkeys((*module.limitations, *module.inherited_limitations)))
+                        if module
+                        else ()
+                    ),
                 )
             )
         return View(

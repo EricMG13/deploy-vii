@@ -22,8 +22,8 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   preserves an already retained response and consumes that attempt. It does not
   stop or inspect a host process, reconcile provider billing or make a second call.
 - The first failed attempt is rejected and inspectable; the second is blocked.
-  Successful candidates become accepted or restricted, carrying upstream and
-  synthetic-case limitations. The count is per exact module/input set and
+  Successful candidates become accepted or restricted by the degradation rules
+  below. The count is per exact module/input set and
   survives store reopening and switching evidence away and back. Already settled
   inputs cannot be rerun just to obtain another model answer.
 - `replace_pack(pack)` requires no pending attempt and stales all current heads.
@@ -31,6 +31,18 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
   and attempts remain in immutable snapshots. Reverting to an earlier settled
   pack does not reset its budget; automatic old-result reactivation is not yet
   implemented.
+- Degradation ([decision 0007](../decisions/0007-degradation-and-status-semantics.md)).
+  Each dependency edge has a rule in `methodology.json` (`edge_rules`): `block`
+  (the consumer cannot start) or `restricted` (it runs with an inherited limitation).
+  Required producers default to `block`, optional ones and CP-5's analyst fan-in to
+  `restricted`, with four explicit r14 overrides. A settled `blocked` head under a
+  `restricted` edge is bound as an `Input` with `status: "blocked"` and its hash; an
+  unrun, stale or rejected producer blocks every consumer. A module's own findings are
+  `limitations`; those carried from inputs are `inherited_limitations`, shown by
+  `view()` after the own findings. The settled status is `restricted` for own
+  limitations, a blocked input or a synthetic run, otherwise `accepted`, so Pass stays
+  reachable downstream of an immaterial inherited note. A candidate must bind each
+  input's hash and status exactly. CP-1 QA derives `module_status` from own findings.
 - `view()` returns a cumulative accepted View. Stale and blocked heads expose
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
@@ -86,7 +98,7 @@ see [table projection](report-tables.md). Canonical Markdown, complete Workbench
 projection, final module validation and promotion remain pending. Historical Model
 calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
 
-New stores use `execution/4`, embedding `module/3` table layouts, stated comparisons
+New stores use `execution/4`, embedding `module/4` table layouts, status-carrying inputs, stated comparisons
 and calculation status. Existing explicit `execution/1`, `execution/2` and
 `execution/3` snapshots fail schema validation
 rather than being silently rewritten. Migration is not implemented;
