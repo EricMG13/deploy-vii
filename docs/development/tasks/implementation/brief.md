@@ -427,3 +427,21 @@ Coordinator reran `make product-check` (986 passed, 97.59% coverage), `make chec
 `make secrets`: all exit 0. `r14-coverage.json` unchanged (CP-1 stays `partial`). Not
 verified: rendering of the new rows in Direction C fields (M3/M6), live or native
 qualification, `make audit`. OpenRouter spend: $0/$50. Publication waits for the PR session.
+
+M4, 21 October 2026 (`dvii-impl-m4-degradation`, `dv-sensitive`, base `1841ccf`, head
+`bc9328c`): decision 0007 records per-edge degradation rules (`edge_rules` in
+`methodology.json`; default required → block, optional → restricted; overrides CP-2←CP-1A,
+CP-4←CP-1, CP-8←CP-6, CP-MEMO←CP-6 from the pinned r14 texts; CP-5 always runs over the
+selected set). `Input` carries `status`; a blocked producer under a `restricted` edge reaches
+its consumer as a blocked-status input; `Module` (`module/4`) separates own `limitations`
+from `inherited_limitations`; status downgrades only for own findings, a blocked input or a
+blocked ancestor (tracked structurally, not by text), or a synthetic case; `cp1_quality`
+derives `module_status` from own status. The review C2 probe now leaves CP-3, CP-5 and CP-6
+runnable and restricted when CP-4 is blocked, and Pass is reachable downstream of an
+immaterial inherited note. MC-3 and MC-4 rows added. Reviews: inline confidence-review and
+tournament (`settle` readability rewrite adopted); independent task review approved after one
+fix round (transitive materiality). Coordinator reran `make product-check` (1001 passed,
+97.61%) and `make check`: exit 0; `make secrets` failed only on the M3 lane's design
+sample-data file in the all-branches history scan (being removed from that lane). Not
+verified: r14 shared files, LITE_CREDIT_22, a real pack, the CP-8/CP-MEMO/CP-MODEL edges.
+`r14-coverage.json` unchanged. OpenRouter spend: $0/$50.

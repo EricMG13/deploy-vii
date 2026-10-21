@@ -183,6 +183,9 @@
       "CP-1C",
       "CP-1D"
     ],
+    "edge_rules": {
+      "CP-1A": "restricted"
+    },
     "purpose": "Synthesises the fundamental credit view from the canonical data and supporting registers.",
     "table_ids": [
       "T2.1",
@@ -376,6 +379,9 @@
     "optional": [
       "CP-1D"
     ],
+    "edge_rules": {
+      "CP-1": "restricted"
+    },
     "purpose": "Interprets the legal and covenant package and what it actually permits.",
     "table_ids": [
       "T4C.11",
@@ -529,6 +535,9 @@
     "optional": [
       "CP-6"
     ],
+    "edge_rules": {
+      "CP-6": "block"
+    },
     "purpose": "Records the decision ledger and post-mortem against the realised outcome.",
     "table_ids": [
       "T7.1",
@@ -601,6 +610,9 @@
       "CP-6"
     ],
     "optional": [],
+    "edge_rules": {
+      "CP-6": "restricted"
+    },
     "purpose": "Editorially consolidates every eligible live issuer-run handoff into one governed Word credit research report without performing analysis.",
     "table_ids": []
   },

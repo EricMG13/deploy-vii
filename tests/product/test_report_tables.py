@@ -249,7 +249,7 @@ def test_statement_preview_cli_returns_file_and_preserves_journal(
 @pytest.mark.parametrize("version", [1, 2])
 def test_old_module_and_view_versions_are_rejected(version: int) -> None:
     value = module().model_copy(update={"schema_version": f"module/{version}"})
-    with pytest.raises(ValidationError, match="module/3"):
+    with pytest.raises(ValidationError, match="module/4"):
         Module.model_validate_json(value.model_dump_json())
     pack, financial = data()
     view = statement_view(pack, financial, financial.books[0].book_id)
