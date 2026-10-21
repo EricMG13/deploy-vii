@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-599 product tests pass (97.41% combined coverage); CP-0 synthetic output is
+648 product tests pass (97.38% combined coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -195,11 +195,20 @@ and ../../canonical-audit.md. Confidence review fixed sign/gap evidence omission
 the two-function Sol/high tournament retained exact diagnostics/provenance across
 960 validation cases and 2,252 definition rows. No Module acceptance is promoted.
 
+CP-1 source/entity context now records explicit evidence tiers, reporting scope,
+entity roles and dated subsequent events, preserving unknowns and scope differences.
+Financial extraction binds every cited period/observation alternative to its
+explicit entity/date/basis, with pro-forma evidence linked separately to events.
+Confidence review fixed a nested-input traversal crash and an unlinked pro-forma
+false pass. See source-context-review.md and ../../source-context.md. The tournament
+covers only the two provenance validators using the explicit Sol/high review
+matrix; routine assembly uses focused tests and confidence review. Source-first
+execution ordering, CP-1/Model delivery and analytical acceptance remain pending.
+
 Initial public Caesars FY2025 filing is locally hash-pinned; full core pack and
-live qualification remain pending. Next: complete source-tier/entity metadata,
-combine derived-period/KPI gaps, add the evidence-risk-credit narrative and full
-consumer readiness, then bind CP-1/Model outputs to the execution journal and
-Workbench. Remaining cross-statement checks, foreign-currency debt treatment
+live qualification remain pending. Next: combine derived-period/KPI gaps, add the
+evidence-risk-credit narrative and full consumer readiness, then bind CP-1/Model
+outputs to the execution journal and Workbench. Remaining cross-statement checks, foreign-currency debt treatment
 and CP-1A remain explicit
 requirements; current selected historical readiness is not full CP-1 acceptance.
 Tournaments remain key-area only; confidence review applies to all code changes.
