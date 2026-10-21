@@ -3,8 +3,16 @@
 import json
 from functools import lru_cache
 from importlib.resources import files
+from typing import Literal
+
+from pydantic import Field
 
 from deploy_vii.contracts import Contract, Identifier, Text
+
+EdgeRule = Literal["block", "restricted"]
+
+# CP-5 follows every selected analyst; challenge, exports and model/OS owners are not analysts.
+_NOT_CP5_FAN_IN = frozenset({"CP-5", "CP-6", "CP-8", "CP-MEMO", "CP-MODEL", "CP-OS"})
 
 
 class Responsibility(Contract):
@@ -13,6 +21,7 @@ class Responsibility(Contract):
     aliases: tuple[str, ...]
     required: tuple[str, ...]
     optional: tuple[str, ...]
+    edge_rules: dict[str, EdgeRule] = Field(default_factory=dict)
     purpose: Text
     table_ids: tuple[str, ...]
 
@@ -47,9 +56,30 @@ def dependencies(requested: tuple[str, ...]) -> dict[str, set[str]]:
     }
     if "CP-5" in selected:
         # QA follows every selected analyst; challenge and exports follow QA.
-        remaining["CP-5"] |= selected - {"CP-5", "CP-6", "CP-8", "CP-MEMO", "CP-MODEL", "CP-OS"}
+        remaining["CP-5"] |= selected - _NOT_CP5_FAN_IN
 
     return remaining
+
+
+def edge_rule(consumer: str, producer: str) -> EdgeRule:
+    """Degradation rule of one dependency edge (decision 0007).
+
+    An explicit `edge_rules` entry wins. Otherwise a required producer blocks its
+    consumer and an optional one, or CP-5's fan-in over analysts, restricts it.
+    """
+    entry = next((module for module in modules() if module.module_id == consumer), None)
+    if entry is not None:
+        if producer in entry.edge_rules:
+            return entry.edge_rules[producer]
+        if producer in entry.required:
+            return "block"
+        if producer in entry.optional or (
+            consumer == "CP-5"
+            and producer not in _NOT_CP5_FAN_IN
+            and any(module.module_id == producer for module in modules())
+        ):
+            return "restricted"
+    raise ValueError(f"No dependency edge from {producer} to {consumer}")
 
 
 def plan(requested: tuple[str, ...]) -> tuple[str, ...]:
