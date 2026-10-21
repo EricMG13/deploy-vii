@@ -5,8 +5,9 @@
 prior rows. `NarrativeReview` (`narrative-review/1`) binds that exact input hash.
 `canonical_narrative` recomputes the inputs from the five external contracts,
 checks the review and produces `canonical-narrative/1`. This is the internal
-synthesis protocol; live analysis, canonical Markdown and Workbench delivery are
-not yet qualified or connected.
+synthesis protocol. [Candidate projection](narrative-projection.md) now connects
+the findings, coverage and referenced records to the Workbench and Markdown
+preview. Full canonical handoff and live analysis remain unqualified.
 
 The catalogue includes source/entity/event records, original observations,
 statements, normalizations, definitions and multi-figure events, source and period

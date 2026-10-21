@@ -90,10 +90,11 @@
     }
     module.claims.forEach(claim => {
       const body = node("div"); body.append(node("p", claim.text, "text-content"));
+      body.dataset.claimId = claim.claim_id;
       const evidence = node("button", "Inspect supporting evidence", "source-button");
       evidence.type = "button"; evidence.addEventListener("click", () => inspect({
         "Claim": claim.claim_id, "Evidence": sourceText(claim.citations) || "No citation supplied",
-        "Limitation": claim.limitation
+        "Limitation": claim.limitation, "Artifact SHA-256": module.artifact_sha256
       }));
       body.append(evidence); content.append(panel("Finding", body));
     });

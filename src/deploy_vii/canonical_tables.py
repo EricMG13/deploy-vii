@@ -29,6 +29,7 @@ from deploy_vii.model_interface import (
     model_interface,
 )
 from deploy_vii.narrative import NarrativeReview
+from deploy_vii.narrative_projection import project_narrative
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.source_context import SourceContextReview
 from deploy_vii.statement_history import StatementHistoryReport, statement_history
@@ -79,7 +80,7 @@ COLUMNS = {
 
 
 class CanonicalTables(Contract):
-    schema_version: Literal["canonical-tables/1"] = "canonical-tables/1"
+    schema_version: Literal["canonical-tables/2"] = "canonical-tables/2"
     downstream: DownstreamReport
     statements: StatementHistoryReport
     interface: ModelInterface
@@ -809,6 +810,7 @@ def canonical_tables(
     )
     interface_facts = tuple(f for f in interface.module.facts if f.table_id != "model-readiness")
     interface_tables = tuple(t for t in interface.module.tables if t.table_id != "model-readiness")
+    analysis = project_narrative(book, downstream.inputs.narrative, pack.run.issuer_name)
     module = Module(
         run_id=financial.run_id,
         issuer_id=financial.issuer_id,
@@ -819,20 +821,22 @@ def canonical_tables(
             Input(input_id="downstream-report", sha256=downstream.content_hash()),
             Input(input_id="statement-history", sha256=history.content_hash()),
         ),
-        facts=(*projected_facts, *statements.facts, *interface_facts),
+        facts=(*projected_facts, *statements.facts, *interface_facts, *analysis.facts),
+        claims=analysis.claims,
         tables=tuple(
             sorted(
-                (*layouts, *statements.tables, *interface_tables),
+                (*layouts, *statements.tables, *interface_tables, *analysis.tables),
                 key=lambda t: (
                     (0, int(t.table_id[3:])) if t.table_id.startswith("T4.") else (1, t.table_id)
                 ),
             )
         ),
         limitations=(
-            "Canonical register candidate; final narrative/envelope, QA "
+            "Canonical register and narrative candidate; final envelope, QA "
             "and Module promotion are pending.",
             *("Statement subartifact: " + note for note in statements.limitations),
             *("Model interface subartifact: " + note for note in interface.module.limitations),
+            *("Narrative: " + note for note in downstream.inputs.narrative.limitations),
             *downstream.limitations,
         ),
     )

@@ -2,7 +2,7 @@
 
 `canonical_tables` recomputes the source, financial, definition, narrative and
 consumer-readiness pipeline from external contracts. Its immutable
-`canonical-tables/1` report binds those results, statement history, Model interface
+`canonical-tables/2` report binds those results, statement history, Model interface
 and a candidate Module. `validate_canonical_tables` recomputes from the caller's
 external inputs and compares content hashes, including exact decimal precision.
 It does not authenticate a report against its own embedded inputs.
@@ -58,7 +58,7 @@ A mismatch fails closed. This read-only command leaves the ticket pending and
 uses no new repair allowance or provider call.
 
 A fresh output directory contains `canonical-registers.json`, `view.json`,
-`tables.md`, `candidate.html` and a last-written `complete.json` (`register-preview/1`).
+`tables.md`, `candidate.html` and a last-written `complete.json` (`register-preview/2`).
 The receipt binds all file hashes, the candidate artifact, pack, snapshot, ticket
 and readiness-step hash. Schema checking in the internal writer alone is not
 external authentication; callers must supply recomputed reports. Existing output
@@ -74,7 +74,9 @@ separate requirements. Large source packs still need scalability/transport-bound
 qualification; small fixture performance is not a universal memory guarantee.
 
 This is a register candidate, not the required final analytical Markdown export.
-Narrative projection, full 17-section/canonical envelope, QA and numeric confidence,
+The [narrative projection](narrative-projection.md) adds findings, evidence trace,
+analytical/funding/story coverage and declared statement coverage. Full
+17-section/canonical envelope, QA and numeric confidence,
 coverage/definition-alignment confirmation, final acceptance, CP-1A and live/native
 qualification remain pending. JSON files are internal provenance, not another final
 analytical handoff format. No existing artifact version, store or spend budget is

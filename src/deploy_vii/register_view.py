@@ -8,7 +8,7 @@ from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import View
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.render import empty_view, render
-from deploy_vii.table_markdown import table_markdown, validate_table_markdown
+from deploy_vii.table_markdown import markdown_cell, table_markdown, validate_table_markdown
 
 
 def write_register_preview(
@@ -38,6 +38,7 @@ def write_register_preview(
                             "artifact_sha256": digest,
                             "facts": module.facts,
                             "tables": module.tables,
+                            "claims": module.claims,
                             "limitations": module.limitations,
                         }
                     )
@@ -50,9 +51,13 @@ def write_register_preview(
     )
     sections = [
         "# CP-1 canonical register preview",
-        "Candidate only. Final canonical narrative/envelope, QA and Module acceptance "
+        "Candidate only. Final canonical envelope, QA and Module acceptance "
         "remain pending. This is not the final downstream Markdown handoff.",
     ]
+    sections.append("## Analysis")
+    sections.extend(markdown_cell(claim.text) for claim in module.claims)
+    if not module.claims:
+        sections.append("No analytical findings supplied. Review coverage and gap registers.")
     facts = {f.fact_id: f for f in module.facts}
     for table in module.tables:
         # A table-local validated artifact avoids parsing the complete large report
@@ -75,7 +80,7 @@ def write_register_preview(
         "candidate.html": render(view),
     }
     receipt = {
-        "schema_version": "register-preview/1",
+        "schema_version": "register-preview/2",
         "artifact_sha256": digest,
         "pack_sha256": pack.content_hash(),
         "execution_binding": execution_binding,

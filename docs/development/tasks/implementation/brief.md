@@ -100,8 +100,8 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-890 product tests pass (97.45% branch-inclusive coverage), followed by focused checks
-for the final canonical register validator and labels; CP-0 synthetic output is
+900 product tests pass (reported 97.44% branch-inclusive coverage), followed by
+10 focused checks for the final narrative trace dimensions; CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -329,3 +329,17 @@ operation. Full narrative/envelope, numeric confidence/QA, definition/coverage
 confirmation, large-pack transport qualification, final CP-1 promotion and CP-1A
 remain pending, followed by D–H. No live calls; OpenRouter spend stays $0/$50.
 The existing Direction C navigation exception remains; no CSS change or new ignore.
+
+CP-1 narrative findings now render with separate Evidence, Risk mechanic and Credit
+implication passages, issuer binding, compact prior-record references and exact
+evidence trace. Supplemental tables expose all analytical dimensions, required
+event/funding stories, declared funding scope and source-statement coverage.
+No missing assessment becomes accepted. Statement trace inspectors retain source
+units and dates; records lacking intrinsic dimensions explicitly require canonical
+context. All narrative limitations are carried into the combined output.
+See narrative-projection-review.md and ../../narrative-projection.md. This is a
+presentation adapter over the validated narrative; confidence review and behavioral
+checks apply, with no new tournament. Formats are canonical-tables/2 and
+register-preview/2; journal/stage contracts remain unchanged. Full canonical
+envelope, QA/numeric confidence, complete analytical review, final promotion and
+CP-1A remain next, followed by D–H. No live calls or spend; $0/$50 remains.

@@ -116,3 +116,4 @@ After all four valid CP-1 stages, `register-preview --ticket TICKET --output
 runs/example/registers-1` recomputes every retained stage and writes all 18 canonical
 register tables with snapshot-bound evidence and a hashed receipt. It leaves the
 ticket pending. See [canonical register scope and remaining delivery work](canonical-tables.md).
+The same preview now includes [narrative findings, evidence trace and coverage](narrative-projection.md).

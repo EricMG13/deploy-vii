@@ -103,5 +103,6 @@ regenerated in a new attempt/directory. Preserve earlier stores and spend record
 against one snapshot before writing. Exact retained output and current upstream
 hashes must match. The candidate contains all canonical register table IDs with
 context-aware readiness, preserving the journal and its pending ticket. See
-[register projection and receipt](canonical-tables.md). Narrative/envelope, QA and
+[register projection and receipt](canonical-tables.md). Findings and evidence trace
+are now projected with coverage; the final envelope, QA and
 final acceptance remain pending.
