@@ -30,6 +30,7 @@ Model kernel: [selected reuse and integration requirements](model-reuse.md).
 CP-1 source boundary: [contracts, validation and remaining work](financial-inputs.md).
 CP-1 statements: [source coverage and independent equations](statements.md) and
 [typed tables/statement preview](report-tables.md).
+CP-1 Model interface: [source registers, Markdown transport and candidate preview](model-interface.md).
 Full statement-line construction: [period arithmetic and source comparisons](statement-history.md).
 CP-1 constructed periods: [historical series and operands](financial-periods.md).
 Model historical output: [statement computations and ratio operands](model-output.md).

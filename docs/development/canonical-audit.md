@@ -1,7 +1,7 @@
 # CP-1 source audit registers
 
 `canonical_audit(pack, financial_review, definition_review)` returns the immutable
-`canonical-audit/3` report. `DefinitionReview` (`definition-review/1`) binds the
+`canonical-audit/4` report. `DefinitionReview` (`definition-review/1`) binds the
 exact financial-review hash and one book. The report embeds the current statement
 and reconciliation artifacts, which bind run, issuer, as-of date, method, source
 pack, financial review and canonical dimensions. It is an internal source-stage
@@ -71,3 +71,9 @@ The local reference bundle is `artifacts/cp1-steps-reference.md`; no Deploy VI c
 policies or source packs are copied into this implementation.
 
 Review evidence: [source audit review](tasks/implementation/canonical-audit-review.md).
+
+Version `/4` corrects fixed-coupon metadata to `decimal_percent` (6.500 means
+6.5 percent); effective tax rates remain `decimal_fraction`. No amount is rescaled.
+Earlier audit schemas are rejected, not migrated. Retain old stores; regenerate
+stages embedding the older audit in a new execution attempt/directory without
+resetting provider spend. See [interface review](tasks/implementation/model-interface-review.md).

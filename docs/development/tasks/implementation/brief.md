@@ -100,7 +100,7 @@ qualification yet; OpenRouter spend in this task: US$0. The pinned r14 coverage
 map is in `docs/methodology/r14-coverage.json`; live analytical qualification
 remains unrun for every product module.
 Milestones A/B implementation: see shell-review.md and preparation-review.md.
-843 product tests pass (97.46% branch-inclusive coverage); CP-0 synthetic output is
+871 product tests pass (97.44% branch-inclusive coverage); CP-0 synthetic output is
 restricted, other modules unrun. The selected internal Model kernel and 219
 synthetic regressions are ported; see model-port-review.md and
 ../../model-reuse.md. The validated CP-1 input boundary and kernel adapter now exist; see
@@ -298,3 +298,18 @@ Other CP-1 registers, canonical envelope/QA/reader, complete Model presentation,
 final promotion and CP-1A remain pending. OpenRouter spend remains $0/$50; no live
 or native analytical acceptance is claimed. Existing Direction C navigation
 exception retained; no CSS edit or new suppression.
+
+Model interface T4.14–T4.19, dynamic source schedules and historical readiness now
+join the source/constructed statements in a journal-bound candidate preview.
+Canonical table transport decodes source text once and verifies exact table parity;
+the complete envelope and typed downstream consumer remain pending. Confidence
+review fixed fixed-coupon unit metadata, controlled NONE handling, copied-pack
+validation, null-cell units and unreadable wide tables. Only the parser received
+the scoped Sol/high tournament (30,037 differential cases); routine adapters and
+UI received focused checks. See model-interface-review.md and
+../../model-interface.md. Source audit advances to /4 with explicit old-schema
+rejection; keep prior stores and spend history. 871 product tests passed, followed
+by 72 focused checks for final UI/unit changes. Full CP-1/Model delivery, CP-1A,
+subsequent modules and live/native qualification remain pending. OpenRouter spend
+remains $0/$50. Existing Direction C navigation exception retained; table readability
+was fixed without adding an ignore.

@@ -92,3 +92,9 @@ and calculation status. Existing explicit `execution/1`, `execution/2` and
 rather than being silently rewritten. Migration is not implemented;
 retain old stores and use a new execution directory for this version. This is an
 artifact format boundary, not permission to reset a live provider budget.
+
+`interface-preview` extends the statement candidate with Model interface registers
+and canonical table transport checks; it does not settle the ticket. See
+[interface scope](model-interface.md). The source-audit coupon-unit correction now
+requires `canonical-audit/4`; older financial stage outputs embedding `/3` must be
+regenerated in a new attempt/directory. Preserve earlier stores and spend records.

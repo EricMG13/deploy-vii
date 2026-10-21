@@ -19,12 +19,14 @@ Units and partial-output scope appear before the values.
 `table_markdown(module, table_id)` is a table projection primitive, not the full
 r14 canonical Markdown handoff. Interface tables require literal field headings,
 no extra row-header column, and their exact `<!-- table-id: ... -->` tag.
-Known interface text matching null markers is rejected. Source markup and pipes
+Known interface text matching null markers is rejected, except the controlled
+`NONE` reference rate in the debt-facility interface. Source markup and pipes
 are entity-escaped; newlines become generated `<br>` (CRLF/CR normalize to LF).
-The raw JSON remains authoritative. The pinned Deploy VI parser does not decode
-these entities: a Deploy VII canonical reader/adapter and round-trip verification
-remain required before claiming downstream Markdown interoperability. No legacy
-parser was adopted.
+The raw JSON remains authoritative for this internal preview. The new
+[canonical table codec](model-interface.md) decodes generated entities once and
+checks exact table parity against a trusted Module. Full-envelope parsing and the
+typed downstream adapter remain pending before claiming complete Markdown
+interoperability. No legacy parser was adopted.
 
 ## Statement preview
 
@@ -69,3 +71,7 @@ This boundary does not authorize a new provider budget or discard earlier spend.
 
 Original table validation: [review](tasks/implementation/report-tables-review.md).
 Constructed statements: [review](tasks/implementation/statement-history-review.md).
+
+The combined [Model interface preview](model-interface.md) adds T4.14–T4.19 and
+contextual schedules to these statements. Table cells have a readable minimum
+width; horizontal overflow stays inside the keyboard-accessible table region.

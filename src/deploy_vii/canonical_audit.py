@@ -110,7 +110,7 @@ class AuditGap(Contract):
 
 
 class CanonicalAuditReport(Contract):
-    schema_version: Literal["canonical-audit/3"] = "canonical-audit/3"
+    schema_version: Literal["canonical-audit/4"] = "canonical-audit/4"
     # These existing artifacts bind run, issuer, dates, dimensions and hashes.
     statements: StatementReport
     reconciliation: ReconciliationReport
@@ -151,7 +151,7 @@ def _positions(book: FinancialBook) -> tuple[SourcePosition, ...]:
                 elif register == "facilities":
                     currency = row.currency
                     if field in {"spread_bps", "floor_bps", "fixed_rate"}:
-                        unit = "basis_points" if field != "fixed_rate" else "decimal_fraction"
+                        unit = "basis_points" if field != "fixed_rate" else "decimal_percent"
                         currency = None
                 elif register == "accounts" and row.metric_id == "effective_tax_rate":
                     unit, currency = "decimal_fraction", None

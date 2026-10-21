@@ -69,7 +69,7 @@ parity is still pending with deterministic calculations.
 These commands accept supplied review files and never call a provider. Keep
 execution directories and raw responses outside Git. Commands print JSON to
 stdout, except `step-output`, which prints the retained valid stage output, and
-`statement-preview`, which prints the candidate HTML path.
+`statement-preview` and `interface-preview`, which print the candidate HTML path.
 All examples use a frozen prepared pack and placeholder ticket IDs.
 
 ```sh
@@ -107,3 +107,7 @@ After the valid financial stage, `statement-preview --ticket TICKET --output
 runs/example/statements-1` creates a source and constructed-period statement
 candidate without settling the attempt. See [table projection and limits](report-tables.md);
 complete CP-1 delivery remains pending.
+
+`interface-preview --ticket TICKET --output runs/example/interface-1` also adds
+Model source registers, contextual schedules and verified Markdown table previews.
+It preserves the journal and pending ticket. See [interface scope and receipt](model-interface.md).

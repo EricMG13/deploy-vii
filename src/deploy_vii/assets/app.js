@@ -117,8 +117,10 @@
         });
       });
       if (!rows.length) matrix.append(node("p", "No rows supplied for this register.", "muted"));
-      if (layout.limitation) matrix.prepend(node("p", layout.limitation, "text-content"));
-      content.append(panel(layout.table_id + " · " + layout.title, matrix));
+      const body = node("div");
+      if (layout.limitation) body.append(node("p", layout.limitation, "text-content"));
+      body.append(matrix);
+      content.append(panel(layout.table_id + " · " + layout.title, body));
     });
     module.facts.forEach(fact => {
       if (laidOut.has(fact.table_id)) return;

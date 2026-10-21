@@ -289,7 +289,8 @@ def test_rate_and_monetary_dimensions_are_not_conflated() -> None:
     report = canonical_audit(*case(value))
     positions = {p.observation.observation_id: p for p in report.source_positions}
     assert positions["tax-rate"].currency is None
-    assert positions["tax-rate"].unit == positions["loan.Q2.fixed"].unit == "decimal_fraction"
+    assert positions["tax-rate"].unit == "decimal_fraction"
+    assert positions["loan.Q2.fixed"].unit == "decimal_percent"
     assert positions["loan.Q2.spread"].unit == "basis_points"
     assert positions["loan.Q2.spread"].currency is None
     assert positions["loan.Q2.carrying"].unit == "MILLIONS"

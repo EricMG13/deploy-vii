@@ -16,9 +16,10 @@ def configure(parser: argparse.ArgumentParser) -> None:
         actions.add_parser(name).add_argument("--pack", type=Path, required=True)
     actions.add_parser("status")
     actions.add_parser("begin").add_argument("module")
-    preview = actions.add_parser("statement-preview")
-    preview.add_argument("--ticket", required=True)
-    preview.add_argument("--output", type=Path, required=True)
+    for name in ("statement-preview", "interface-preview"):
+        preview = actions.add_parser(name)
+        preview.add_argument("--ticket", required=True)
+        preview.add_argument("--output", type=Path, required=True)
     for name in ("interrupt", "cp0-submit", "cp1-submit", "step-output"):
         action = actions.add_parser(name)
         action.add_argument("--ticket", required=True)
@@ -38,8 +39,15 @@ def execute(args: argparse.Namespace) -> str:
     store = Execution(args.directory)
     if args.action == "replace-pack":
         store.replace_pack(load_pack(args.pack))
-    elif args.action == "statement-preview":
-        return str(cp1_statement_preview(store, args.ticket, args.output))
+    elif args.action in {"statement-preview", "interface-preview"}:
+        return str(
+            cp1_statement_preview(
+                store,
+                args.ticket,
+                args.output,
+                include_interface=args.action == "interface-preview",
+            )
+        )
     elif args.action == "begin":
         return store.begin(args.module).model_dump_json()
     elif args.action == "interrupt":

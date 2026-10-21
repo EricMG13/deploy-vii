@@ -22,6 +22,7 @@ from deploy_vii.downstream_readiness import (
 from deploy_vii.execution import Attempt, Execution, StepValidation, current_inputs
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_model import ModelReport, model_report
+from deploy_vii.interface_view import write_interface_preview
 from deploy_vii.narrative import (
     NarrativeInputs,
     NarrativeReview,
@@ -159,7 +160,9 @@ def submit_cp1_step(store: Execution, ticket_id: str, step_id: str, payload: str
     return store.submit_step(ticket_id, "CP-1", CP1_STEPS, step_id, payload, _validate_stage)
 
 
-def cp1_statement_preview(store: Execution, ticket_id: str, destination: Path) -> Path:
+def cp1_statement_preview(
+    store: Execution, ticket_id: str, destination: Path, *, include_interface: bool = False
+) -> Path:
     """Render only a current, source-gated financial stage; never settle its ticket."""
     snapshot = store.read()
     attempt = next((a for a in snapshot.attempts if a.ticket_id == ticket_id), None)
@@ -176,14 +179,24 @@ def cp1_statement_preview(store: Execution, ticket_id: str, destination: Path) -
     if verified.issues or verified.output != prefix[-1].output:
         raise ValueError("Financial stage differs from trusted recomputation")
     submission = FinancialSubmission.model_validate_json(prefix[-1].payload)
+    binding = {
+        "snapshot_sha256": snapshot.content_hash(),
+        "ticket_id": ticket_id,
+        "financial_step_sha256": prefix[-1].content_hash(),
+    }
+    if include_interface:
+        return write_interface_preview(
+            snapshot.pack,
+            submission.financial,
+            submission.definition.book_id,
+            destination,
+            quarter_ids=submission.quarter_ids,
+            execution_binding=binding,
+        )
     return write_statement_preview(
         snapshot.pack,
         submission.financial,
         submission.definition.book_id,
         destination,
-        execution_binding={
-            "snapshot_sha256": snapshot.content_hash(),
-            "ticket_id": ticket_id,
-            "financial_step_sha256": prefix[-1].content_hash(),
-        },
+        execution_binding=binding,
     )
