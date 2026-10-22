@@ -235,19 +235,24 @@ _TEXT = st.text(alphabet=_ALPHABET, max_size=40)
 _QUOTE = st.text(alphabet=_ALPHABET, min_size=1, max_size=40)  # Citation.quote is Text
 
 
-@given(_QUOTE, _TEXT, st.one_of(st.none(), _TEXT))
+@given(_QUOTE, _TEXT, st.one_of(st.none(), _TEXT), st.one_of(st.none(), _TEXT))
 def test_no_classification_ever_turns_a_non_substring_into_an_acceptance(
-    quote: str, text: str, following: str | None
+    quote: str, text: str, following: str | None, preceding: str | None
 ) -> None:
-    pages = source((1, text), *(() if following is None else ((2, following),)))
-    found = issues(pages, "page:1", quote)
+    """The cited span has random neighbours on either side; acceptance is `quoted` alone."""
+    pages = source(
+        *(() if preceding is None else ((1, preceding),)),
+        (2, text),
+        *(() if following is None else ((3, following),)),
+    )
+    found = issues(pages, "page:2", quote)
     if quoted(quote, text):
         assert found == ()
         with pytest.raises(ValueError, match="matches"):
             explain(quote, text)
     else:
         (issue,) = found
-        assert issue.startswith("Quote/locator mismatch: quote not found under filing page:1 (")
+        assert issue.startswith("Quote/locator mismatch: quote not found under filing page:2 (")
 
 
 _OFFSET = re.compile(r"two runs .* at offset ([0-9]+);")

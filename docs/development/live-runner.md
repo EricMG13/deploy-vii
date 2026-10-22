@@ -121,24 +121,56 @@ from a pinned pool:
   `schema_keywords_unverified`; the validator still rejects an empty list in its own words);
   `source_context` states the same sources-once, citation and coverage rules
   (`prompts.SOURCES_ONCE_RULE`, `CITATION_RULE`, `COVERAGE_RULE`, one text each, task 2.9).
+  Task 7.0 teaches what the validator enforces: `CITATION_RULE` (both steps) adds "Copy a run
+  that is contiguous in the SOURCE block as printed; never reassemble a sentence across
+  interleaved table text. Never continue a quote onto the next page.", and rule h adds the
+  task 6.2 run-text rule for `analysis[].text` (`prompts.RUN_TEXT_RULE`: digits only in period,
+  filing and section labels, SEC file numbers and coverage counts; every other figure belongs in
+  a citation's quote), also a paragraph of `methods/cp0.md`. A test holds each example label in
+  the rule to `prose.bare_figures`, so the prompt never allows a figure the validator rejects.
+  Stored replay payloads are unaffected (the corpus replays payloads, not prompts).
 - **Quotes and absence claims (task 2.9).** Every citation check uses `deploy_vii.quotes`: quote
   and span text are compared after removing soft hyphens, mapping curly quotes, dashes and the
   minus sign to ASCII and collapsing every whitespace run to one space; the quote must still be
   one contiguous substring of the span its locator names. A failing citation is one issue,
   `Quote/locator mismatch: quote not found under <source> <locator> (normalised whitespace, quote
-  marks and dashes): "<first 60 characters>…"` (`no locator <locator> in <source>` when the
-  locator does not exist). The absence rule skips a negated absence ("no pages missing", "none
+  marks and dashes): "<quote>"` plus, since task 7.0, a clause saying why (below); the quote is
+  shown normalised, cut on a word boundary after at most 200 characters (60 until task 7.0) and
+  then `…` (`no locator <locator> in <source>` when the locator does not exist). The absence rule skips a negated absence ("no pages missing", "none
   missing", "not missing") and the coverage field restated as empty; `source_context` applies it
   to every free-text value outside citations.
 - **Hyphen-wrap (task 2.10).** On the span side only, the matcher also tries the span with each
   ASCII hyphen that ends a line (plus the spaces after the newline) joined to the next word:
   `PUT-\nCALL  RIGHT` reads `PUT-CALL RIGHT` (probe-4 Sol 9594d016 p135). Both readings are
   tried, so matching only widens; the model's quote is normalised as before and never has its
-  hyphens altered. Under a span with such a wrap the mismatch issue says `(normalised whitespace,
-  quote marks and dashes; hyphen-wrap)`; elsewhere the text is unchanged. Known layout limit: a
-  two-column table that interleaves another column inside a sentence (Sol p104, Grok p102) is not
-  handled, so a quote stitched across it fails; so do case changes and wrong-page citations.
-  A quote that joins one wrap and copies another as a space matches neither reading.
+  hyphens altered. The mismatch issue says `(normalised whitespace, quote marks and dashes;
+  hyphen-wrap)` only when a wrap lies inside the span region the failed quote occupies (the
+  classified region below, else its longest matching prefix); a wrap elsewhere in the span is
+  not named (task 7.0; probe-5 Gemini p84 printed it for an unrelated wrap). Known layout limit:
+  a two-column table that interleaves another column inside a sentence (Sol p104, Grok p102) is
+  not matched, so a quote stitched across it fails; so do case changes and wrong-page
+  citations. A quote that joins one wrap and copies another as a space matches neither reading.
+- **Mismatch text (task 7.0).** `quotes.explain` says why a quote failed; it never accepts one
+  (`quoted` is unchanged, and a property test holds that no classified quote is accepted). Over
+  both span readings, in order, it appends to the issue: a case or lookalike difference (the
+  quote matches once case and a closed set of quote-mark and dash lookalikes the normalisation
+  leaves alone are folded) `: the quote matches the span only ignoring case and character
+  variants; first difference at offset N: "F" (U+0046) in the quote, "f" (U+0066) in the span`;
+  a page straddle (the quote's first run ends the cited span with at most 200 normalised
+  characters of page furniture after it, and the rest starts the next span of the same source
+  with at most 200 characters of running header before it) `: the quote continues on
+  <next locator>; quote within one page`, or, cited on the page where it ends (probe-5 Gemini
+  50115c10 p44), `: the quote begins on <previous locator>; quote within one page`; a column
+  interleave (the quote is two runs of the span, in order, with other span text between them)
+  `: the quote matches the span as two runs separated by interleaved text (columns or table
+  cells) at offset N; quote one contiguous run or choose another locator`. Offsets count
+  characters of the normalised quote (for the interleave, the first run is its first N
+  characters); every run has at least two words. Otherwise the issue is unchanged. Against the
+  main checkout's pack this names Sol p104 (probe-4 and probe-6) and Grok p102 as interleaves,
+  Sol p13 as a case change, Gemini p76 and p44 as straddles; wrong-page quotes, Gemini's p84 year
+  and its whole-row p102/p104 reassemblies (cells out of order) stay unclassified. The journal
+  keeps issue lines of up to 600 characters (`execution.MAX_ISSUE_CHARS`, 300 until task 7.0) so
+  the clause reaches the MC-7 REPAIR prompt whole.
 - **Effort.** `high` by default; `xhigh` is sent only where the catalog lists it (the Luna entry does,
   the GLM entry does not). Otherwise the nearest lower supported level is sent and the request,
   mapping and catalog efforts are recorded; provider acceptance is `null` with a reason.
@@ -241,10 +273,17 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
 - Reports (`live-<batch>.md`): command, seed, cap and ledger totals, catalog source and hash,
   registry-derived module counts, max tokens, cells planned with steps run and steps not
   authorized by CP-0, the pool with exclusion reasons, and a per-step table (cell, model, seed,
-  attempt, status, classification, cost, issue count). The reconciled report lists the
+  attempt, status, classification, cost, issue count). Task 7.0: an attempt with no model
+  payload (status `no-response`: a timeout, an HTTP error or a provider error inside a 200, a
+  deadline hold) shows `-` for its issue count and is counted in the Cohorts table's
+  `No response` column, never as `Rejected`; the Pool table prints each model's largest
+  `Prompt token bound` (the reservation's prompt bound, also for an attempt sealed ineligible)
+  beside its largest reservation. The reconciled report lists the
   not-authorized steps from their records after the retained attempts (a record of another shape
   is refused before any lookup). No prompts, responses, source text or validator wording.
-- Make: `replay` (pytest, below), `live-probe CAP=`, `live-module MODULE= CAP=`, `live-regression CAP=`,
+- Make: `replay` (pytest, below), `live-probe CAP=`, `live-module MODULE= CAP=` (task 7.0: also
+  `MODELS=`, `MAX_TOKENS=`, `BATCH_ID=` and `SEED=`, each passed as its option only when set),
+  `live-regression CAP=`,
   `live-canary CAP=`; `DIRECTORY=` (default `artifacts/execution`) names the journal.
 
 ### `live schema-check` (task 2.11)
@@ -440,6 +479,14 @@ artifacts).
   entry is still `ok` (no outcome or issue text moved; the spans the rejected Luna 8634aa17
   quotes cite have no hyphen line wrap). Probe-4 attempts were not added; the Sol 9594d016 spans
   and quotes are unit fixtures in `test_readiness.py`.
+- Task 7.0 (mismatch text) changed one entry's wording: `probe-3-gpt-6-luna-8634aa17`'s first
+  issue now quotes 200 characters instead of 60 (no clause applies to its two quotes). The
+  corpus tool cannot revalidate it (`live corpus` reads the run/1 pack hash from the attempt
+  manifest, see task 2.11 below), so a script ran the tool's own `corpus._validate_now` over the
+  stored entry (its payload, input hashes and `czr-fy2025-v2` pack in the main checkout) and
+  rewrote `expected` only, refusing any change of outcome or issue count; `live`,
+  `expected_basis: "revalidated"` and every other key are as stored. With the main checkout's
+  packs linked in, all seven real entries replay `ok`.
 - Task 2.11 re-keyed the seven real entries to the `run/2` pack (main's `deploy-vii prepare`, 22
   October 2026, same PDF; pack sha256 77395ae0091b14ec0a5539ae45d3be0b272f2931c00a8a53e3e39d16eddeaf3c,
   was 0132418198863b1c7b4fbad4ffc4621fec852eec794b53b98ad450ecc23f776b at
@@ -711,6 +758,26 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   above the tolerance leave the attempt unresolved with the reason. Probe-2 predates the
   records: its holds stay unresolved until the coordinator writes the two files from the
   recorded checks (25.7172663 before, 25.724167155 after).
+- **Account usage and a hold without a generation id (task 7.0).** A held pool attempt with no
+  recorded generation id (a deadline expiry: nothing reached the provider's response, so there is
+  nothing to look up; it used to stand as spent) is adjusted from the same usage window only when
+  the delta is attributable to it alone: it is the batch ledger's only attempt without a measured
+  cost, and every other ledger attempt is a retained pool attempt whose charge is measured
+  (provider-reported or known-zero, or adjusted from the generation endpoint, read from the
+  ledger line). It then takes the delta less those charges (a residual below zero within
+  US$0.000001 is 0): ledger `adjust` with `source: "account-usage-delta"`, `generation_id: null`,
+  the figure and an `evidence` object (both usage figures and times, the delta, the held attempt,
+  the other attempts and their sum, the residual, the reservation, the tolerance, who recorded
+  the usage). Replay refuses that source with a generation id, without evidence, or above the
+  attempt's reservation. Two or more held attempts, a charge that is not measured (an estimate,
+  a 404 zero), a residual below zero by more than the tolerance, a residual above the
+  reservation (other spend on the account in the window, which the delta cannot tell apart) or
+  a missing usage record leave the attempt held, with `no provider_request_id recorded; nothing
+  to look up; <reason>`. `live reconcile` looks up attempts with a generation id first
+  (`reconcile.lookup_order`), so a hold that becomes the only one after those lookups is
+  attributed in the same run whatever order the attempt directories sort in. Fail closed on the
+  safe side of the cap: the figure never exceeds the hold it replaces. Not covered: the usage
+  counter updating late (an after-check that misses the attempt's own cost would understate it).
 
 ## Not covered here
 

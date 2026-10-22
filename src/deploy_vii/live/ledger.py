@@ -240,6 +240,33 @@ class Ledger:
         if source not in ADJUST_SOURCES:
             raise LedgerError(f"ledger line {number} adjusts from an unknown source")
         generation, checked = entry.get("generation_id"), entry.get("checked_at")
+        if not isinstance(checked, str) or not checked.strip():
+            raise LedgerError(f"ledger line {number} adjusts without a check time")
+        reconciled = _money(entry.get("reconciled_usd"), f"line {number} reconciled cost")
+        evidence = entry.get("evidence")
+        Ledger._source_rules(number, str(source), generation, evidence, reconciled, held)
+        return replace(
+            held,
+            actual_usd=reconciled,
+            charged_usd=reconciled,
+            basis=str(source),
+            adjustment=Adjustment(
+                previous, reconciled, generation, checked, number, str(source), evidence
+            ),
+        )
+
+    @staticmethod
+    def _source_rules(
+        number: int,
+        source: str,
+        generation: object,
+        evidence: object,
+        reconciled: Decimal,
+        held: AttemptRecord,
+    ) -> None:
+        """What each `adjust` source requires: a generation id except for the usage delta
+        (which names none), evidence exactly for the 404 and usage-delta sources, zero for a
+        404, at most the reservation for the usage delta."""
         if source == ADJUST_USAGE_SOURCE:
             if generation is not None:
                 raise LedgerError(
@@ -247,10 +274,6 @@ class Ledger:
                 )
         elif not isinstance(generation, str) or not generation.strip():
             raise LedgerError(f"ledger line {number} adjusts without a generation id")
-        if not isinstance(checked, str) or not checked.strip():
-            raise LedgerError(f"ledger line {number} adjusts without a check time")
-        reconciled = _money(entry.get("reconciled_usd"), f"line {number} reconciled cost")
-        evidence = entry.get("evidence")
         if source in _EVIDENCED:
             if not isinstance(evidence, dict) or not evidence:
                 raise LedgerError(f"ledger line {number}: a {source} adjustment needs evidence")
@@ -266,15 +289,6 @@ class Ledger:
                 f"ledger line {number}: a {source} adjustment above its reservation is not "
                 "attributable to the attempt"
             )
-        return replace(
-            held,
-            actual_usd=reconciled,
-            charged_usd=reconciled,
-            basis=str(source),
-            adjustment=Adjustment(
-                previous, reconciled, generation, checked, number, str(source), evidence
-            ),
-        )
 
     # -- writing -----------------------------------------------------------------------------
 

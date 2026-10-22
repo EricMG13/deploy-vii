@@ -1,7 +1,7 @@
 {
  "expected": {
   "issues": [
-   "Quote/locator mismatch: quote not found under czr-2025-10k page:37 (normalised whitespace, quote marks and dashes): \"Our principal operating activities occur in four reportable …\"",
+   "Quote/locator mismatch: quote not found under czr-2025-10k page:37 (normalised whitespace, quote marks and dashes): \"Our principal operating activities occur in four reportable segments: (1) Las Vegas, (2) Regional, (3) Caesars Digital, and (4) Managed and Branded, in addition to Corporate and Other.\"",
    "Quote/locator mismatch: quote not found under czr-2025-10k page:27 (normalised whitespace, quote marks and dashes): \"Item 1B. Unr esolved Staff Comments\""
   ],
   "validator_outcome": "rejected"
