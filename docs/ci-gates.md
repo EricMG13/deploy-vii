@@ -27,7 +27,7 @@ pyproject and gate scripts plus locally recorded `origin/main` at
 | jscpd 3% incl tests | Detect copy/paste | Repeated test cases may be clearer than abstractions; adds Node setup | Advisory for product code when it exists; no research-phase dependency. |
 | Gitleaks | Keep secrets out of history | Long custom range/floor logic has maintenance cost | Pinned full reachable-history scan initially; no provider secret in CI. |
 | PR line cap | Keep changes reviewable | Historical policies used 800 and separately authorized 4000 | Advisory full-diff reporting, no arbitrary blocking cap; justify scope in the PR. |
-| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/15-minute limits; investigate timeouts. |
+| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/40/10-minute limits (Product checks 40 since the M2 PR: the suite outgrew 15); investigate timeouts. |
 
 The existing checks protect valuable invariants. The concern is overlapping
 execution and misleading proxies for quality, not the existence of validation.
