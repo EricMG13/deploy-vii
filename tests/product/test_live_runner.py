@@ -54,8 +54,8 @@ from tests.product.live_support import (
     make_rtf_key,
     ok,
 )
-from tests.product.test_business_context import submission_fixture
-from tests.product.test_execution import accept_cp0, fixture_store
+from tests.product.test_business_context import cp1_fact, submission_fixture
+from tests.product.test_execution import accept_cp0, candidate_for, fixture_store
 from tests.product.test_live_client import (
     UPSTREAM_502,
     TricklingReply,
@@ -1992,9 +1992,15 @@ def test_an_unreadable_schema_check_record_fails_closed(tmp_path: Path, content:
 CP1A_STEP = StepSpec("business_context", "case-cp1a", ("filing",), max_tokens=4000)
 
 
-def cp1a_rig(tmp_path: Path, submission: str | None = None) -> Rig:
+def cp1a_rig(tmp_path: Path, submission: str | None = None, *, cp1: bool = False) -> Rig:
     store = fixture_store(tmp_path)
     accept_cp0(store)  # CP-0's T8 command for CP-1A is `Run CP-1A`
+    if cp1:  # settle CP-1 with one cited figure, so CP-1A's CONTEXT may offer it
+        ticket = store.begin("CP-1")
+        figure = candidate_for(store, "CP-1").model_copy(
+            update={"facts": (cp1_fact(store.pack()),)}
+        )
+        store.finish(ticket.ticket_id, figure.model_dump_json(), lambda _: ())
     keys = tmp_path / "keys"
     keys.mkdir()
     return Rig(
@@ -2084,3 +2090,22 @@ def test_cp1a_is_not_dispatched_when_cp0_does_not_authorise_it(tmp_path: Path) -
     with pytest.raises(NotAuthorized) as refused:
         store.begin("CP-1A")
     assert refused.value.module_id == "CP-1A" and refused.value.commands == ("DO NOT RUN",)
+
+
+def test_cp1a_context_offers_settled_cp1_figures_and_the_module_resolves_them(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(submission_fixture().model_dump_json())
+    text = "Liquidity was {T4.10.liquidity.FY2025|US$ m} at FY2025."
+    document["credit_translations"][0]["evidence"] = text
+    rig = cp1a_rig(tmp_path, json.dumps(document), cp1=True)
+    transport = FakeTransport(reply(rig))
+    result = rig.run(ChatClient(transport), step=CP1A_STEP)
+    assert result.status == "accepted", result.issues
+    user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
+    assert '"ref": "T4.10.liquidity.FY2025"' in user and "no figure may be referenced" not in user
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1A")
+    assert [item.input_id for item in head.inputs][:3] == ["prepared-pack", "CP-0", "CP-1"]
+    module = rig.store.head_module(head)
+    copied = next(f for f in module.facts if f.fact_id == "T4.10.liquidity.FY2025")
+    assert copied.table_id == "cp1_references" and copied.amount == Decimal("1100")

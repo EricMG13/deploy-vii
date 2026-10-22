@@ -191,3 +191,50 @@ def test_a_figure_bearing_claim_settles_rejected_instead_of_raising(tmp_path: Pa
     assert view.modules[0].status == "rejected" and not view.modules[0].claims
     for name, digest in receipt["files"].items():
         assert hashlib.sha256((target / name).read_bytes()).hexdigest() == digest
+
+
+# --- 7.2: CP-1A delivery, as CP-0's ---------------------------------------------------------
+
+
+def test_cp1a_candidate_and_accepted_delivery_are_distinct_and_hashed(tmp_path: Path) -> None:
+    from deploy_vii.business_context import REQUIRED_REGISTERS
+    from deploy_vii.delivery import deliver_cp1a
+    from tests.product.test_business_context import pack_fixture, submission_fixture
+
+    pack, submission = pack_fixture(), submission_fixture()
+    target = tmp_path / "cp1a"
+    assert deliver_cp1a(pack, submission, target) == target / "accepted.html"
+    receipt = json.loads((target / "complete.json").read_bytes())
+    assert receipt["schema_version"] == "cp1a-delivery/1"
+    assert receipt["status"] == "restricted"  # the fixture's own gaps restrict it
+    assert receipt["submission_sha256"] == submission.content_hash()
+    assert receipt["analytical_qualification"] == "unrun"
+    for name, digest in receipt["files"].items():
+        assert hashlib.sha256((target / name).read_bytes()).hexdigest() == digest
+    candidate = View.model_validate_json((target / "candidate-view.json").read_bytes())
+    accepted = View.model_validate_json((target / "accepted-view.json").read_bytes())
+    cp1a = {item.module_id: item for item in accepted.modules}["CP-1A"]
+    assert {item.module_id: item for item in candidate.modules}["CP-1A"].status == "candidate"
+    assert cp1a.status == "restricted"
+    assert {table.table_id for table in cp1a.tables} >= set(REQUIRED_REGISTERS)
+    with pytest.raises(FileExistsError):
+        deliver_cp1a(pack, submission, target)
+
+
+def test_a_cp1a_submission_with_validator_issues_settles_rejected(tmp_path: Path) -> None:
+    from deploy_vii.delivery import deliver_cp1a
+    from tests.product.test_business_context import pack_fixture, submission_fixture
+
+    submission = submission_fixture()
+    gaps = (submission.gaps[0].model_copy(update={"action": "Raise 11,456 of new equity"}),)
+    target = tmp_path / "rejected"
+    path = deliver_cp1a(pack_fixture(), submission.model_copy(update={"gaps": gaps}), target)
+    assert path == target / "candidate.html" and path.is_file()
+    receipt = json.loads((target / "complete.json").read_bytes())
+    assert receipt["status"] == "rejected" and receipt["structural_validation"] == "failed"
+    assert not (target / "accepted.html").exists()
+    rejected = json.loads((target / "rejected.json").read_bytes())
+    assert "gaps[0].action: Bare figure: 11,456" in rejected["limitations"]
+    assert not rejected["tables"] and not rejected["claims"]
+    for name, digest in receipt["files"].items():
+        assert hashlib.sha256((target / name).read_bytes()).hexdigest() == digest

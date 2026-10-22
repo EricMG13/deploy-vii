@@ -1480,3 +1480,36 @@ def test_a_generic_two_step_sequence_keeps_the_attempt_level_rule(tmp_path: Path
     finished = store.submit_step(ticket.ticket_id, "CP-0", ("a", "b"), "a", "raw", invalid)
     assert finished.status == "finished" and finished.step_repairs == ()
     assert finished.issues == ("bad",)
+
+
+def test_cp1a_binds_a_settled_cp1_as_context_and_goes_stale_with_it(tmp_path: Path) -> None:
+    from deploy_vii.execution import invalidate
+
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    # Unrun CP-1: CP-1A runs on CP-0 alone (CP-1 is context, not a required upstream).
+    assert [item.input_id for item in current_inputs(store.read(), "CP-1A")] == [
+        "prepared-pack",
+        "CP-0",
+    ]
+    ticket = store.begin("CP-1")
+    store.finish(ticket.ticket_id, candidate_for(store, "CP-1").model_dump_json(), lambda _: ())
+    cp1 = next(head for head in store.read().heads if head.module_id == "CP-1")
+    assert cp1.status == "restricted"
+    inputs = current_inputs(store.read(), "CP-1A")
+    assert inputs[-1] == Input(input_id="CP-1", sha256=cp1.result_sha256, status="restricted")
+    attempt = store.begin("CP-1A")
+    assert attempt.inputs == inputs
+    store.finish(attempt.ticket_id, candidate_for(store, "CP-1A").model_dump_json(), lambda _: ())
+    heads = invalidate(store.read().heads, "CP-1")
+    assert next(head for head in heads if head.module_id == "CP-1A").status == "stale"
+
+
+def test_a_blocked_cp1_is_not_cp1a_context(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    for _ in range(2):
+        ticket = store.begin("CP-1")
+        store.finish(ticket.ticket_id, "not json", lambda _: ())
+    assert {head.module_id: head.status for head in store.read().heads}["CP-1"] == "blocked"
+    assert "CP-1" not in [item.input_id for item in current_inputs(store.read(), "CP-1A")]

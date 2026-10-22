@@ -664,7 +664,7 @@ _ADVERSE = frozenset({"Extraction-Oriented", "Creditor-Adverse"})
 _QUALITY_ORDER: tuple[EvidenceQuality, ...] = ("High", "Medium", "Low")
 NOT_SCORABLE = "Not Scorable"
 MIN_SCORED_DIMENSIONS = 4  # r14 CP-2C: no composite unless at least four dimensions are scored
-# r14 rubric scores and their words; "1" < "3" < "5" also as text, so `max` is the most adverse.
+# r14 rubric scores and their words (1 creditor-favorable, 3 mixed, 5 adverse).
 ASSESSMENT: Mapping[str, str] = {
     "1": "Creditor-favorable",
     "3": "Mixed",
@@ -704,15 +704,18 @@ class GovernanceScore:
         return sum(item.score != NOT_SCORABLE for item in self.dimensions)
 
 
-def scorable(row: GovernanceItem) -> bool:
-    """A row informs its dimension's score when it names one and is evidenced: its direction,
-    category and evidence quality are none of the Insufficient values."""
+def evidenced(row: GovernanceItem) -> bool:
+    """Its direction, category and evidence quality are none of the Insufficient values."""
     return (
-        row.dimension is not None
-        and row.direction != "Insufficient Information"
+        row.direction != "Insufficient Information"
         and row.category != "Insufficient Information"
         and row.evidence_quality != "Insufficient"
     )
+
+
+def scorable(row: GovernanceItem) -> bool:
+    """A row informs its dimension's score when it names one and is `evidenced`."""
+    return row.dimension is not None and evidenced(row)
 
 
 def dimension_score(dimension: Dimension, rows: Sequence[GovernanceItem]) -> DimensionScore:
@@ -739,17 +742,19 @@ def governance_sponsor_score(rows: Sequence[GovernanceItem]) -> GovernanceScore:
     Scorable and the level Insufficient Information, unless one Extraction-Oriented or
     Creditor-Adverse row rests on High-quality evidence (r14: "unless one clearly High-risk
     documented action"), which sets High. Counts and severities only: no weight, no average."""
-    evidenced = [row for row in rows if scorable(row)]
     dimensions = tuple(
-        dimension_score(dimension, [row for row in evidenced if row.dimension == dimension])
+        dimension_score(dimension, [r for r in rows if scorable(r) and r.dimension == dimension])
         for dimension in DIMENSIONS
     )
     scores = [item.score for item in dimensions if item.score != NOT_SCORABLE]
-    high_action = any(r.direction in _ADVERSE and r.evidence_quality == "High" for r in evidenced)
+    # The override is the documented action itself, with or without a dimension label.
+    high_action = any(
+        evidenced(r) and r.direction in _ADVERSE and r.evidence_quality == "High" for r in rows
+    )
     if len(scores) < MIN_SCORED_DIMENSIONS:
         level = RISK_LEVEL["5"] if high_action else INSUFFICIENT_LEVEL
         return GovernanceScore(dimensions, NOT_SCORABLE, level, high_action)
-    composite = max(scores)
+    composite = max(scores, key=int)  # the most adverse
     return GovernanceScore(dimensions, composite, RISK_LEVEL[composite], high_action)
 
 
@@ -1150,7 +1155,7 @@ def _fact_registers(submission: BusinessContextSubmission, out: _Composer) -> No
             for o in submission.owners
         ),
     )
-    undisclosed = _gap("Not disclosed by the source (r14: null, never 0)")
+    undisclosed = _gap("Not disclosed by the source: left unsettled, never shown as zero")
     out.table(
         REGISTERS["operating_model"],
         _numbered(

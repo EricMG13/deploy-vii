@@ -578,8 +578,27 @@ def test_prose_sections_labels_and_numbering_come_from_the_bindings() -> None:
 def test_collapsed_blocks_show_one_line_of_summary() -> None:
     _, blocks = built()
     assert blocks["relative-value"].summary == "Secured 2032s preferred."
-    assert blocks["company-profile"].summary == "Ratings: Synthetic B1 / BB-"
+    # Task 7.2: the shipped CP-1A map; a keyvalue row is its register row label and cells.
+    profile = blocks["company-profile"].summary or ""
+    assert profile.startswith("Public shareholders [Management Language]: Public shareholders")
     assert all(b.summary is None for b in blocks.values() if b.state == "populated")
+
+
+def test_the_shipped_cp1a_map_fills_the_company_and_transaction_blocks() -> None:
+    _, blocks = built()
+    company = blocks["company-operating-model"]
+    assert company.kind == "keyvalue" and company.owner == "CP-1A"
+    assert [row.label for row in company.rows] == [
+        "Issuer",
+        "Business description",
+        "Country",
+        "Sector",
+    ]
+    assert [tab.label for tab in company.tabs] == ["Operating model"]
+    assert [tab.label for tab in blocks["company-profile"].tabs] == ["Revenue and business mix"]
+    transaction = blocks["transaction-summary"]
+    assert transaction.kind == "prose" and transaction.owner == "Primary"
+    assert transaction.lines[0].runs[0].text.startswith("No transaction is described")
 
 
 def test_a_doubly_bound_table_fails_closed_in_build() -> None:

@@ -305,3 +305,48 @@ def test_cp1_places_the_adjustment_bridge_and_kpi_register_twice_by_pathway() ->
         for table in ("T4.17", "T4.10"):
             placed = [b for (t, b) in by_block if t == table and b in composed]
             assert len(placed) <= 1, (pathway_.id, table, placed)
+
+
+# --- 7.2: the shipped CP-1A map ----------------------------------------------------------------
+
+
+def test_cp1a_map_binds_every_register_and_names_its_destinations() -> None:
+    from deploy_vii.bindings.cp1a import CP1A
+    from deploy_vii.bindings.shipped import SHIPPED_MAPS
+    from deploy_vii.business_context import CP1_REFERENCES, DESTINATIONS, REGISTERS
+
+    assert CP1A in SHIPPED_MAPS
+    bound = [e.fact_coord.table_id for e in CP1A.entries]
+    assert sorted(map(str, bound)) == sorted({*REGISTERS, CP1_REFERENCES})
+    assert "; ".join(dict.fromkeys(e.block_id for e in CP1A.entries)) == DESTINATIONS
+    by_table = {e.fact_coord.table_id: e for e in CP1A.entries}
+    assert by_table["company_description"].fact_coord.row_id == "company"  # key/value rows
+    assert by_table["company_description"].block_id == "company-operating-model"
+    assert by_table["operating_model"].block_id == "company-operating-model"
+    assert {by_table[t].block_id for t in ("ownership_register", "revenue_business_mix")} == {
+        "company-profile"
+    }
+    assert {by_table[t].block_id for t in ("transaction_summary", "events_timeline")} == {
+        "transaction-summary"
+    }
+    for table in ("gaps_ledger", "downstream_readiness", "T2D.11"):
+        assert by_table[table].block_id == "limitations"
+
+
+def test_cp1a_registers_bind_with_the_cp0_and_cp1_maps(cp1_view: View) -> None:
+    from deploy_vii.bindings.cp1a import CP1A
+    from deploy_vii.business_context import business_context, cp1a_module
+    from tests.product.test_business_context import cp1_fact, pack_fixture, submission_fixture
+
+    pack = pack_fixture()
+    base = submission_fixture(pack)
+    text = "Liquidity was {T4.10.liquidity.FY2025|US$ m} at FY2025."
+    translations = (base.credit_translations[0].model_copy(update={"evidence": text}),)
+    submission = base.model_copy(update={"credit_translations": translations})
+    module = cp1a_module(business_context(pack, submission, (cp1_fact(pack),)), (), 0)
+    assert any(f.table_id == "cp1_references" for f in module.facts)
+    maps = (CP0, CP1, CP1A)
+    assert validate_bindings(cp0_view(pack, module, accepted=False), maps) == ()
+    assert validate_bindings(cp1_view, maps) == ()
+    cp0 = build_readiness(*readiness_fixture())
+    assert validate_bindings(cp0_view(pack, cp0, accepted=False), maps) == ()

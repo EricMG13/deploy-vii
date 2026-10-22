@@ -624,6 +624,19 @@ def test_the_composite_needs_four_dimensions_unless_a_high_risk_action_is_docume
     assert (score.composite, score.risk_level) == ("3", "Medium")
 
 
+def test_a_high_risk_documented_action_needs_no_dimension_label() -> None:
+    # r14's override is the documented action itself: a flag the model left without a dimension
+    # (so it scores none) still sets the level High when adverse and on High evidence.
+    flag = governance(kind="behaviour_flag", direction="Extraction-Oriented",
+                      behaviour_type="dividend recap", amount_funding_source="New term loan",
+                      legal_capacity_link="Restricted payments basket", evidence_quality="High",
+                      dimension=None)  # fmt: skip
+    score = governance_sponsor_score([flag])
+    assert (score.scored, score.composite, score.risk_level) == (0, NOT_SCORABLE, "High")
+    unsupported = flag.model_copy(update={"category": "Insufficient Information"})
+    assert governance_sponsor_score([unsupported]).risk_level == "Insufficient Information"
+
+
 DIRECTIONS = ("Supportive", "Neutral", "Mixed", "Creditor-Adverse", "Insufficient Information")
 QUALITIES = ("High", "Medium", "Low", "Insufficient")
 

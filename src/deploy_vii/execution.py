@@ -215,6 +215,11 @@ class NotAuthorized(ValueError):
         self.commands = commands
 
 
+# Settled modules whose facts a consumer may reference without requiring them (CP-1A cites
+# CP-1 figures as `{ref|unit}` only when CP-1 is settled; its registry edge stays CP-0 only).
+CONTEXT_PRODUCERS: dict[str, tuple[str, ...]] = {"CP-1A": ("CP-1",)}
+
+
 def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, ...]:
     graph = dependencies(snapshot.run.requested_modules)
     if module_id not in graph:
@@ -236,6 +241,15 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
     upstream = tuple(
         bound(item) for item in plan(snapshot.run.requested_modules) if item in required
     )
+    # Task 7.2: a settled (accepted or restricted) context producer is bound when present, so
+    # the figures a consumer cites from it are lineage and go stale with it; never required.
+    context: list[Input] = []
+    for item in CONTEXT_PRODUCERS.get(module_id, ()):
+        head = heads.get(item)
+        if item not in graph or item in required or head is None:
+            continue
+        if head.status == "accepted" or head.status == "restricted":
+            context.append(Input(input_id=item, sha256=head.result_sha256, status=head.status))
     if module_id not in {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}:
         readiness = heads.get("CP-0")
         commands = (
@@ -245,7 +259,7 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         )
         if commands != (f"Run {module_id}",):
             raise NotAuthorized(module_id, commands)
-    return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream)
+    return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream, *context)
 
 
 def candidate_issues(
