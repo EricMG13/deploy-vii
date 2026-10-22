@@ -597,7 +597,7 @@
     const body = node("div");
     if (model) body.append(chip(model.status_glyph, model.status_word));
     let words;
-    if (!model || model.status_glyph === "unrun") words = "Model not run: CP-MODEL has not published the Model destination, so no calculation JSON has been emitted. The registers below are the CP-1 output it will publish.";
+    if (!model || model.status_glyph === "unrun") words = "Model not run: CP-MODEL has not published the Model destination, so no calculation JSON has been emitted.";
     else if (model.status_glyph === "na") words = `Model is not part of the ${front.pathway.title} Pathway, so it is not run.`;
     else words = "Its status and limitations are on the CP-MODEL page.";
     const text = node("p", words, "text-content");

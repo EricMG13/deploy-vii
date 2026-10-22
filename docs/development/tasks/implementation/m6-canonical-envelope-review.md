@@ -312,5 +312,20 @@ the Credit Snapshot blocks.
 - Acceptance previews: `artifacts/rendering/m6-5/fp01-fixture-candidate.html` and
   `fp01-accepted-envelope.html` (untracked).
 
+Deviations from the brief:
+
+- Edited outside the listed paths: `contracts.py` (`_PRESETS`: CP-MODEL in four presets), new
+  `cp1_render.py`, `execution_cli.py` (the `render` command), `docs/development/execution.md`
+  and `product-cli.md` (`execution-cli.md` does not exist), new `test_cp1_render.py` and
+  `test_cp1_bindings.py`, and the tests `test_report_view.py`, `test_registry.py`,
+  `test_credit_snapshot.py`, `test_financials.py`, `test_execution.py`.
+- `test_render.synthetic_view` and `test_financials.freeze` pin the pre-6.5 `requested_modules`
+  (no CP-MODEL): the default Run now includes it, which changes the synthetic pack hashes the
+  replay corpus records and the CP-0 consumer lists fixtures build from `plan(...)`.
+- CP-5 consequence: in the four presets CP-5 cannot begin until CP-MODEL has a head
+  (`test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run`).
+- `rendering_acceptance` is not set: the journal has no transition that changes a settled
+  head's statuses; the render receipt records it as it stands.
+
 Not verified: a live CP-1 render (none accepted yet; M7); `rendering_acceptance` on a real
 head; Linux baselines.

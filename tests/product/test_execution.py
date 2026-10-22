@@ -565,6 +565,16 @@ def test_blocked_cp_model_restricts_cp5(tmp_path: Path) -> None:
     assert cp5.status == "restricted"
 
 
+def test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run(tmp_path: Path) -> None:
+    """Decision 0009 (task 6.5): a preset that requests CP-MODEL makes it a CP-5 input."""
+    store = cp_model_store(tmp_path)
+    settle_module(store, "CP-1")
+    with pytest.raises(ValueError, match="upstream is unrun"):
+        store.begin("CP-5")
+    settle_module(store, "CP-MODEL")
+    assert store.begin("CP-5").module_id == "CP-5"
+
+
 def test_unrun_stale_or_rejected_producer_never_degrades(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
     settle_through(store, "CP-1", "CP-1A", "CP-2")

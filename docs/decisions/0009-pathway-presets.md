@@ -44,7 +44,11 @@ hides work still owed.
    strip, capital structure, EBITDA adjustments and financials blocks, Relative Value and
    Portfolio Decision through capital structure) also requests CP-MODEL, listed right after
    CP-1; Covenant & Refinancing and Distressed & Restructuring are unchanged (FP 04 prints
-   a MODEL-owned maturity wall, which has no spec yet).
+   a MODEL-owned maturity wall, which has no spec yet). Consequence, asserted by
+   `test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run`: CP-5 follows every
+   selected analyst, so in these presets `begin("CP-5")` is refused ("upstream is unrun")
+   until CP-MODEL has a head; CP-MODEL stays `unrun` until M8, so CP-5 cannot start under
+   them before then.
 
    **Portfolio Fit is pending an owner (plan M10).** It is not a module of any Pathway;
    the `portfolio-fit` block exists in the compositions below and shows its honest state
