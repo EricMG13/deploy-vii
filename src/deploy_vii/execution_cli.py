@@ -19,7 +19,11 @@ from deploy_vii.cp1_workflow import (
     submit_cp1_step,
     write_cp1_envelope,
 )
-from deploy_vii.cp_model_workflow import CpModelRefused, publish_cp_model
+from deploy_vii.cp_model_workflow import (
+    CpModelRefused,
+    publish_cp_model,
+    verify_cp_model_publication,
+)
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.preparation import load_pack
 
@@ -42,7 +46,8 @@ def configure(parser: argparse.ArgumentParser) -> None:
     render.add_argument("--envelope", type=Path, required=True)
     render.add_argument("--output", type=Path, required=True)
     render.add_argument("--pathway", choices=get_args(PathwayId))
-    actions.add_parser("cp-model-publish").add_argument("--output", type=Path, required=True)
+    for name in ("cp-model-publish", "cp-model-verify"):
+        actions.add_parser(name).add_argument("--output", type=Path, required=True)
     actions.add_parser("cp1-quality-inputs").add_argument("--ticket", required=True)
     for name in ("interrupt", "cp0-submit", "cp1-submit", "cp1-promote", "step-output"):
         action = actions.add_parser(name)
@@ -84,6 +89,12 @@ def execute(args: argparse.Namespace) -> str:
         except CpModelRefused as refused:
             print(f"cp-model-publish refused: {refused}", file=sys.stderr)
             raise SystemExit(2) from refused
+    elif args.action == "cp-model-verify":
+        issues = verify_cp_model_publication(store, args.output)
+        if issues:
+            print("cp-model-verify refused: " + "; ".join(issues), file=sys.stderr)
+            raise SystemExit(2)
+        return json.dumps({"verified": True, "issues": []})
     elif args.action == "envelope":
         return str(write_cp1_envelope(store, args.output))
     elif args.action == "render":

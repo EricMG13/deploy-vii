@@ -14,7 +14,7 @@ from deploy_vii.contracts import Module, ModuleView, View
 from deploy_vii.cp1_workflow import EnvelopeRefused, read_cp1_envelope
 from deploy_vii.envelope import Envelope
 from deploy_vii.execution import Execution
-from deploy_vii.render import render
+from deploy_vii.render import empty_view, render
 
 
 def _with_module(base: View, module_id: str, replacement: ModuleView) -> View:
@@ -96,7 +96,11 @@ def model_destination_html(store: Execution, directory: Path, model: Module) -> 
     """
     if model.module_id != "CP-MODEL" or model.status not in ("accepted", "restricted"):
         raise ValueError("The Model destination shows a settled CP-MODEL module")
-    view = envelope_view(store.view(), read_cp1_envelope(store, directory))
+    # The base is idle, not the journal's view: the page is a function of the envelope and the
+    # CP-MODEL module alone, so it re-derives (`verify_cp_model_publication`) after later
+    # modules settle.
+    base = empty_view(store.read().run, candidate=False)
+    view = envelope_view(base, read_cp1_envelope(store, directory))
     shown = next(item for item in view.modules if item.module_id == "CP-MODEL")
     return render(_with_module(view, "CP-MODEL", _settled(shown, model)))
 

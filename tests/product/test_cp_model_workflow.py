@@ -2,7 +2,7 @@
 
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -10,18 +10,29 @@ from playwright.sync_api import expect, sync_playwright
 
 import tests.product.test_financials as financials
 import tests.product.test_workflow as workflow
-from deploy_vii.contracts import PATHWAY_MODULES, Run
+from deploy_vii import cp_model_workflow
+from deploy_vii.contracts import PATHWAY_MODULES, Module, Run
 from deploy_vii.cp1_quality import cp1_quality_inputs
-from deploy_vii.cp1_workflow import cp1_registers, promote_cp1
+from deploy_vii.cp1_render import model_destination_html
+from deploy_vii.cp1_workflow import FinancialStage, cp1_registers, promote_cp1
 from deploy_vii.cp_model_workflow import (
     OWN_RESTRICTION,
     CpModelRefused,
+    _Basis,
     _basis,
     _verifier,
     candidate_module,
     publish_cp_model,
+    verify_cp_model_publication,
 )
-from deploy_vii.execution import Execution, Head, Qualification, text_sha256
+from deploy_vii.execution import (
+    Attempt,
+    Execution,
+    Head,
+    Qualification,
+    Validator,
+    text_sha256,
+)
 from deploy_vii.financial_model import ModelReport
 from deploy_vii.prose import prose_issues
 from deploy_vii.registry import _NOT_CP5_FAN_IN, plan
@@ -304,3 +315,294 @@ def test_the_model_panel_of_the_published_page_shows_the_json_link_and_provenanc
         assert page.locator("#view-root section h2").first.text_content() == "Model"
         assert_offline(requests, errors)
         browser.close()
+
+
+# --- fix round 1 -------------------------------------------------------------------------------
+
+
+def test_a_second_consecutive_failure_leaves_a_blocked_head_and_a_third_is_refused(
+    promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 0007: the first failure leaves no head; the repair's failure blocks CP-MODEL."""
+    store = fresh(promoted, tmp_path)
+    real = Path.write_text
+
+    def fail_on_receipt(self: Path, data: str, **kwargs: str) -> int:
+        if self.name == "receipt.json":
+            raise OSError("disk full")
+        return real(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_on_receipt)
+    with pytest.raises(CpModelRefused, match="disk full"):
+        publish_cp_model(store, output=tmp_path / "one")
+    assert "CP-MODEL" not in heads(store)
+    with pytest.raises(CpModelRefused, match="disk full"):
+        publish_cp_model(store, output=tmp_path / "two")
+    blocked = heads(store)["CP-MODEL"]
+    assert blocked.status == "blocked" and blocked.qualification is None
+    limitations = store.head_module(blocked).limitations
+    assert any("publication failed: " in text and "disk full" in text for text in limitations)
+    monkeypatch.undo()
+    with pytest.raises(CpModelRefused, match="settled or its one repair"):
+        publish_cp_model(store, output=tmp_path / "three")
+    assert not any(a.status == "pending" for a in store.read().attempts)
+
+
+def test_a_pending_attempt_is_a_refusal_the_cli_reports_with_exit_2(
+    promoted: Execution,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from deploy_vii.__main__ import main
+
+    store = fresh(promoted, tmp_path)
+    store.begin("CP-MODEL")  # left pending
+    argv = ["deploy-vii", "execution", "--directory", str(store.directory)]
+    monkeypatch.setattr("sys.argv", [*argv, "cp-model-publish", "--output", str(tmp_path / "out")])
+    with pytest.raises(SystemExit) as exit_:
+        main()
+    assert exit_.value.code == 2
+    assert "An attempt is pending" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_inputs_changed_after_the_files_are_written_interrupts_the_ticket(
+    promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = fresh(promoted, tmp_path)
+    real = Execution.finish
+    calls: list[str] = []
+
+    def finish_once_changed(self: Execution, ticket: str, *args: object, **kw: object) -> Attempt:
+        calls.append(ticket)
+        if len(calls) == 1:
+            raise ValueError("Ticket inputs have changed")
+        return real(self, ticket, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Execution, "finish", finish_once_changed)
+    with pytest.raises(CpModelRefused, match="Ticket inputs have changed"):
+        publish_cp_model(store, output=tmp_path / "model")
+    assert not any(a.status == "pending" for a in store.read().attempts)
+    assert "CP-MODEL" not in heads(store)
+    assert (tmp_path / "model" / "receipt.json").is_file()  # a receipt without a head: unpublished
+
+
+def tamper(store: Execution, change: Callable[[Attempt], Attempt]) -> None:
+    """Rewrite the promoted CP-1 attempt in the journal (a test-only corruption)."""
+    snapshot = store.read()
+    head = heads(store)["CP-1"]
+    attempts = tuple(
+        change(a) if a.result_sha256 == head.result_sha256 else a for a in snapshot.attempts
+    )
+    store._write(snapshot.model_copy(update={"attempts": attempts}))
+
+
+def steps_changed(index: int, **update: object) -> Callable[[Attempt], Attempt]:
+    def change(attempt: Attempt) -> Attempt:
+        steps = tuple(
+            s.model_copy(update=update) if i == index else s for i, s in enumerate(attempt.steps)
+        )
+        return attempt.model_copy(update={"steps": steps})
+
+    return change
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda a: a.model_copy(update={"steps": a.steps[:4]}),  # no quality step
+        steps_changed(4, step_id="other"),
+        steps_changed(1, step_id="other"),
+        steps_changed(4, status="invalid", output_sha256=None, issues=("x",)),
+        steps_changed(1, status="invalid", output_sha256=None, issues=("x",)),
+    ],
+    ids=["no-quality-step", "quality-id", "financials-id", "quality-output", "financials-output"],
+)
+def test_a_cp1_head_without_a_verified_handoff_is_refused(
+    promoted: Execution, tmp_path: Path, change: Callable[[Attempt], Attempt]
+) -> None:
+    store = fresh(promoted, tmp_path)
+    tamper(store, change)
+    refused_untouched(store, tmp_path / "model", "not promoted through a verified handoff")
+
+
+def test_a_cp1_without_a_calculated_model_is_refused_with_its_reasons(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store = fresh(promoted, tmp_path)
+    head = heads(store)["CP-1"]
+    attempt = next(a for a in store.read().attempts if a.result_sha256 == head.result_sha256)
+    assert attempt.steps[1].output_sha256 is not None
+    stage = FinancialStage.model_validate_json(store.step_output(attempt.steps[1].output_sha256))
+    bare = stage.model_copy(update={"model": None, "model_issues": ("No KPI inputs",)})
+    sha = store._store(bare.model_dump_json())
+    tamper(store, steps_changed(1, output_sha256=sha))
+    refused_untouched(store, tmp_path / "model", "no calculated Model to publish: No KPI inputs")
+
+
+def test_an_unreadable_journal_blob_is_a_refusal_not_a_traceback(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store = fresh(promoted, tmp_path)
+    head = heads(store)["CP-1"]
+    attempt = next(a for a in store.read().attempts if a.result_sha256 == head.result_sha256)
+    assert attempt.steps[4].output_sha256 is not None
+    (store.directory / "blobs" / attempt.steps[4].output_sha256).unlink()
+    refused_untouched(store, tmp_path / "model", "is missing")
+
+
+def test_a_candidate_the_journal_would_not_settle_is_refused_and_interrupted(
+    promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = fresh(promoted, tmp_path)
+    real = cp_model_workflow.candidate_module
+
+    def with_a_bare_figure(store: Execution, attempt: Attempt, basis: _Basis) -> Module:
+        module = real(store, attempt, basis)
+        claim = module.claims[0].model_copy(update={"text": "Leverage reached 7.3 times."})
+        return module.model_copy(update={"claims": (claim,)})
+
+    monkeypatch.setattr(cp_model_workflow, "candidate_module", with_a_bare_figure)
+    with pytest.raises(CpModelRefused, match="would settle rejected"):
+        publish_cp_model(store, output=tmp_path / "model")
+    assert "CP-MODEL" not in heads(store) and not (tmp_path / "model").exists()
+    assert not any(a.status == "pending" for a in store.read().attempts)
+
+
+def test_a_journal_that_settles_differently_than_predicted_is_reported(
+    promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = fresh(promoted, tmp_path)
+    real = cp_model_workflow._verifier
+    made: list[int] = []
+
+    def verifier_that_turns(store: Execution, ticket: str) -> Validator:
+        made.append(1)
+        if len(made) == 1:  # the in-memory prediction; the finish gets a differing verdict
+            return real(store, ticket)
+        return lambda _: ("forced difference",)
+
+    monkeypatch.setattr(cp_model_workflow, "_verifier", verifier_that_turns)
+    with pytest.raises(CpModelRefused, match=r"settled a different CP-MODEL.*forced difference"):
+        publish_cp_model(store, output=tmp_path / "model")
+    assert "CP-MODEL" not in heads(store)
+
+
+def test_the_destination_page_shows_only_a_settled_cp_model(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store = fresh(promoted, tmp_path)
+    ticket = store.begin("CP-MODEL")
+    candidate = candidate_module(store, ticket, _basis(store))
+    with pytest.raises(ValueError, match="settled CP-MODEL"):
+        model_destination_html(store, tmp_path, candidate)  # a candidate, not a head
+    other = candidate.model_copy(update={"module_id": "CP-1", "status": "accepted"})
+    with pytest.raises(ValueError, match="settled CP-MODEL"):
+        model_destination_html(store, tmp_path, other)
+
+
+def test_an_accepted_cp1_head_adds_no_own_limitation(promoted: Execution, tmp_path: Path) -> None:
+    """The candidate of an accepted CP-1 carries none. End to end, an accepted CP-1 cannot be
+    built here: the fixture's CP-1 is restricted by its own subartifact notes and the run is
+    synthetic, which would restrict CP-MODEL anyway."""
+    store = fresh(promoted, tmp_path)
+    ticket = store.begin("CP-MODEL")
+    basis = _basis(store)
+    accepted = basis.head.model_copy(update={"status": "accepted"})
+    candidate = candidate_module(store, ticket, _Basis(accepted, basis.handoff, basis.report))
+    assert candidate.limitations == ()
+
+
+def test_the_receipt_differs_between_runs_by_ticket_only(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    receipts = []
+    for label in ("a", "b"):
+        (tmp_path / label).mkdir()
+        store = fresh(promoted, tmp_path / label)
+        publish_cp_model(store, output=tmp_path / label / "model")
+        receipts.append(json.loads((tmp_path / label / "model" / "receipt.json").read_text()))
+    assert receipts[0].pop("ticket_id") != receipts[1].pop("ticket_id")
+    assert receipts[0] == receipts[1]
+
+
+def published(promoted: Execution, tmp_path: Path) -> tuple[Execution, Path]:
+    store = fresh(promoted, tmp_path)
+    publish_cp_model(store, output=tmp_path / "model")
+    return store, tmp_path / "model"
+
+
+def test_an_untouched_publication_verifies_even_after_later_modules_settle(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = published(promoted, tmp_path)
+    assert verify_cp_model_publication(store, output) == ()
+    settle_module(store, "CP-1A")  # the journal moves on; the page does not depend on it
+    assert verify_cp_model_publication(store, output) == ()
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "expected"),
+    [
+        ("model.html", lambda raw: raw.replace("Model", "Mode1", 1), "model.html differs"),
+        (
+            "calculation.json",
+            lambda raw: raw.replace("financial-model/3", "financial-model/9", 1),
+            "calculation.json differs",
+        ),
+        (
+            "receipt.json",
+            lambda raw: raw.replace('"restricted"', '"accepted"', 1),
+            "receipt.json differs",
+        ),
+    ],
+)
+def test_a_tampered_file_is_refused(
+    promoted: Execution,
+    tmp_path: Path,
+    name: str,
+    mutate: Callable[[str], str],
+    expected: str,
+) -> None:
+    store, output = published(promoted, tmp_path)
+    raw = (output / name).read_text()
+    assert mutate(raw) != raw
+    (output / name).write_text(mutate(raw))
+    issues = verify_cp_model_publication(store, output)
+    assert any(expected in issue for issue in issues), issues
+
+
+def test_a_missing_file_a_missing_head_and_a_stale_head_are_refused(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = published(promoted, tmp_path)
+    (output / "receipt.json").unlink()
+    issues = verify_cp_model_publication(store, output)
+    assert any("receipt.json cannot be read" in issue for issue in issues)
+    (tmp_path / "x").mkdir()
+    unpublished = fresh(promoted, tmp_path / "x")
+    no_head = ("CP-MODEL has no accepted or restricted head in the journal",)
+    assert verify_cp_model_publication(unpublished, output) == no_head
+    store.replace_pack(store.pack().model_copy(update={"sources": ()}))
+    assert verify_cp_model_publication(store, output) == no_head
+
+
+def test_the_verify_command_prints_ok_and_exits_2_with_the_issues(
+    promoted: Execution,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from deploy_vii.__main__ import main
+
+    store, output = published(promoted, tmp_path)
+    argv = ["deploy-vii", "execution", "--directory", str(store.directory)]
+    monkeypatch.setattr("sys.argv", [*argv, "cp-model-verify", "--output", str(output)])
+    main()
+    assert json.loads(capsys.readouterr().out) == {"verified": True, "issues": []}
+    (output / "calculation.json").write_text("{}")
+    with pytest.raises(SystemExit) as exit_:
+        main()
+    assert exit_.value.code == 2
+    assert "calculation.json differs" in capsys.readouterr().err

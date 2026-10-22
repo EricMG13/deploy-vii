@@ -322,13 +322,28 @@ page through the accepted route, `read_cp1_envelope`, with the Model panel popul
 writes `model.html`, `calculation.json` (CP-1's `ModelReport`, `financial-model/3`, in its
 canonical JSON) and `receipt.json` (last), and only then calls `finish`. The validator
 re-derives the candidate from the journal and refuses any difference, so two runs from the
-same inputs give the same files and the same head hash (tested). Any failure before `finish`
-(a file that cannot be written, a render error) interrupts the attempt: no head, no partial
-publication is promoted; the receipt names the head the journal is to hold, so a directory
-without that head in the journal is not a publication. The interrupted attempt consumes the
-one repair. A page cannot hold its own hash and the receipt names the head, so the manifest
-lists those two files with "Recorded in receipt.json" instead of a hash; the receipt holds
-the hashes of `model.html` and `calculation.json`.
+same inputs give the same `model.html`, `calculation.json`, module and head hash, byte for
+byte (tested); `receipt.json` differs between two runs by `ticket_id` only (tested). The page is
+a function of the CP-1 envelope and the CP-MODEL module alone (an idle base view), so it
+re-derives after later modules settle. A page cannot hold its own hash and the receipt names
+the head, so the manifest lists those two files with "Recorded in receipt.json" instead of a
+hash; the receipt holds the hashes of `model.html` and `calculation.json`.
+
+Failure. Any failure before or at `finish` (a file that cannot be written, a render error,
+a candidate the journal would not settle, "Ticket inputs have changed") interrupts the
+attempt and is raised as `CpModelRefused`, so the CLI exits 2 with the reason. A failure
+leaves no head from that attempt, but it consumes the attempt: the one repair may publish
+into a new directory, and a second consecutive failure leaves a `blocked` CP-MODEL head
+(decision 0007: the input set's repair is consumed; the journal's rule, not changed here),
+which degrades CP-5 to `restricted`; a third call is refused (`begin`). The receipt names the
+head the journal is to hold, so a directory whose head is not in the journal is not a
+publication.
+
+`verify_cp_model_publication(store, output)` (CLI `cp-model-verify --output DIR`, exit 2 with
+the issues) re-derives from the journal alone: the CP-MODEL head must equal the candidate
+rebuilt from the promoted CP-1, and `model.html`, `calculation.json` and `receipt.json` must
+equal the bytes re-derived for that head. A tampered file, a missing file, a missing or stale
+head or a CP-1 that no longer holds each yield an issue.
 
 M4 inheritance: settlement follows the journal's rules unchanged. CP-1's limitations are
 inherited and shown; a `restricted` CP-1 head also gives CP-MODEL the own limitation

@@ -148,8 +148,19 @@ stderr unless the run requests CP-MODEL, CP-1 holds a promoted accepted or restr
 that retains a calculated Model, and the output directory does not exist; nothing is written
 or begun on a refusal. Otherwise it writes `model.html` (the CP-1 page with the Model panel
 populated), `calculation.json` and `receipt.json` into the new directory, settles the CP-MODEL
-head only after all three are written, and prints the finished attempt. A write failure
-interrupts the attempt and leaves no head. Details: [execution](execution.md).
+head only after all three are written, and prints the finished attempt. Every refusal,
+including a pending attempt or an unreadable journal blob, exits 2 with the reason. A write
+failure interrupts the attempt (exit 2) and leaves no head; that consumes the attempt, and a
+second consecutive failure leaves a `blocked` CP-MODEL head (decision 0007), which makes CP-5
+`restricted`. Details: [execution](execution.md).
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 cp-model-verify --output runs/example/model-1
+```
+
+`cp-model-verify` re-derives `model.html`, `calculation.json` and `receipt.json` from the
+journal and compares bytes; it prints `{"verified": true, "issues": []}`, or exits 2 with the
+issues on stderr (tampered or missing file, missing or stale head).
 
 After the valid financial stage, `statement-preview --ticket TICKET --output
 runs/example/statements-1` creates a source and constructed-period statement

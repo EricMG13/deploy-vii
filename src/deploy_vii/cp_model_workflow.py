@@ -62,6 +62,16 @@ class _Basis:
 
 
 def _basis(store: Execution) -> _Basis:
+    """The promoted CP-1 basis, or `CpModelRefused`; a journal that cannot be read is a refusal."""
+    try:
+        return _read_basis(store)
+    except CpModelRefused:
+        raise
+    except (ValueError, OSError) as error:  # a missing or corrupt blob, an unreadable snapshot
+        raise CpModelRefused(f"CP-1 basis cannot be read from the journal: {error}") from error
+
+
+def _read_basis(store: Execution) -> _Basis:
     snapshot = store.read()
     if MODULE_ID not in snapshot.run.requested_modules:
         raise CpModelRefused("This run does not request CP-MODEL")
@@ -208,61 +218,97 @@ def _page(store: Execution, settled: Module) -> str:
         return model_destination_html(store, directory, settled)
 
 
+def _receipt(settled: Module, ticket: str, basis: _Basis, pack_sha256: str, page: str) -> str:
+    return (
+        json.dumps(
+            {
+                "schema_version": RECEIPT_SCHEMA,
+                "head_sha256": settled.content_hash(),
+                "status": settled.status,
+                "qualification": PUBLISHED.model_dump(mode="json"),
+                "ticket_id": ticket,
+                "cp1_head_sha256": basis.head.result_sha256,
+                "pack_sha256": pack_sha256,
+                "files": {PAGE: text_sha256(page), CALCULATION: text_sha256(basis.calculation)},
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _interrupt(store: Execution, ticket: str, reason: str) -> str:
+    """End a ticket without a head; if the journal refuses even that, say so in the reason."""
+    try:
+        store.interrupt(ticket, reason)
+    except ValueError as error:
+        return f"{reason}; the attempt could not be interrupted: {error}"
+    return reason
+
+
+def _prepare(
+    store: Execution, attempt: Attempt, basis: _Basis
+) -> tuple[str, Module, dict[str, str]]:
+    """The candidate payload, the module the journal will settle it to, and the files to write.
+
+    Nothing is written here. The settlement is `settle` run in memory, so the page can name the
+    head it will become; the receipt is last in the mapping and so last on disk.
+    """
+    ticket = attempt.ticket_id
+    candidate = candidate_module(store, attempt, basis)
+    payload = candidate.model_dump_json()
+    snapshot = store.read()
+    _, settled = settle(
+        snapshot,
+        _attempt(store, ticket).model_copy(update={"payload_sha256": text_sha256(payload)}),
+        payload,
+        _verifier(store, ticket),
+        pack=store.pack(snapshot),
+        load=store.head_module,
+    )
+    if settled.status not in ("accepted", "restricted"):
+        raise CpModelRefused(f"CP-MODEL would settle {settled.status}: {settled.limitations}")
+    page = _page(store, settled)
+    receipt = _receipt(settled, ticket, basis, snapshot.pack_sha256, page)
+    return payload, settled, {PAGE: page, CALCULATION: basis.calculation, RECEIPT: receipt}
+
+
 def publish_cp_model(store: Execution, *, output: Path) -> Attempt:
     """Publish the promoted CP-1 as the Model destination and its calculation JSON.
 
-    Refused, before anything is written or begun, unless the run requests CP-MODEL, CP-1 holds
-    an accepted or restricted head recorded by promotion, that head retains a calculated Model
-    and `output` does not exist. Then: begin, build the candidate in Python, settle it in
-    memory (`settle`, the journal's own rule) to learn the head it will become, render the page
-    for that head, write `model.html`, `calculation.json` and `receipt.json` (last), and only
-    then finish the attempt. Any failure before the finish interrupts the attempt: no head.
+    Refused (`CpModelRefused`), before anything is written or begun, unless the run requests
+    CP-MODEL, CP-1 holds an accepted or restricted head recorded by promotion, that head
+    retains a calculated Model, `output` does not exist and the journal can begin an attempt
+    (none pending, input set not settled). Then: begin, build the candidate in Python, settle
+    it in memory (`settle`, the journal's own rule) to learn the head it will become, render the
+    page for that head, write `model.html`, `calculation.json` and `receipt.json` (last), and
+    only then finish the attempt. Any failure before or at the finish interrupts the attempt
+    (no head from this attempt); a second consecutive failure leaves a `blocked` head, which is
+    the journal's repair rule (decision 0007), not an addition here.
     """
     basis = _basis(store)
     if output.exists():
         raise CpModelRefused(f"Output {output} already exists; publish into a new directory")
-    attempt = store.begin(MODULE_ID)
+    try:
+        attempt = store.begin(MODULE_ID)
+    except ValueError as error:
+        raise CpModelRefused(f"CP-MODEL cannot begin: {error}") from error
     ticket = attempt.ticket_id
     try:
-        candidate = candidate_module(store, attempt, basis)
-        payload = candidate.model_dump_json()
-        snapshot = store.read()
-        _, settled = settle(
-            snapshot,
-            _attempt(store, ticket).model_copy(update={"payload_sha256": text_sha256(payload)}),
-            payload,
-            _verifier(store, ticket),
-            pack=store.pack(snapshot),
-            load=store.head_module,
-        )
-        if settled.status not in ("accepted", "restricted"):
-            raise CpModelRefused(f"CP-MODEL would settle {settled.status}: {settled.limitations}")
-        page = _page(store, settled)
-        receipt = {
-            "schema_version": RECEIPT_SCHEMA,
-            "head_sha256": settled.content_hash(),
-            "status": settled.status,
-            "qualification": PUBLISHED.model_dump(mode="json"),
-            "ticket_id": ticket,
-            "cp1_head_sha256": basis.head.result_sha256,
-            "pack_sha256": snapshot.pack_sha256,
-            "files": {PAGE: text_sha256(page), CALCULATION: text_sha256(basis.calculation)},
-        }
-        _write(
-            output,
-            {
-                PAGE: page,
-                CALCULATION: basis.calculation,
-                RECEIPT: json.dumps(receipt, indent=2) + "\n",
-            },
-        )
+        payload, settled, files = _prepare(store, attempt, basis)
+        _write(output, files)
     except Exception as error:
         # Documented fail-closed: record why this attempt ends without a head, then re-raise.
-        store.interrupt(ticket, f"CP-MODEL publication failed: {error}")
+        reason = _interrupt(store, ticket, f"CP-MODEL publication failed: {error}")
         if isinstance(error, CpModelRefused):
             raise
-        raise CpModelRefused(f"CP-MODEL publication failed: {error}") from error
-    finished = store.finish(ticket, payload, _verifier(store, ticket), qualification=PUBLISHED)
+        raise CpModelRefused(reason) from error
+    try:
+        finished = store.finish(ticket, payload, _verifier(store, ticket), qualification=PUBLISHED)
+    except ValueError as error:  # e.g. the inputs changed after the files were written
+        raise CpModelRefused(
+            _interrupt(store, ticket, f"CP-MODEL publication failed: {error}")
+        ) from error
     head = next((h for h in store.read().heads if h.module_id == MODULE_ID), None)
     if finished.issues or head is None or head.result_sha256 != settled.content_hash():
         raise CpModelRefused(
@@ -270,3 +316,51 @@ def publish_cp_model(store: Execution, *, output: Path) -> Attempt:
             + "; ".join(finished.issues)
         )
     return finished
+
+
+NO_HEAD = "CP-MODEL has no accepted or restricted head in the journal"
+
+
+def verify_cp_model_publication(store: Execution, output: Path) -> tuple[str, ...]:
+    """Issues found checking `output` against the journal; empty means it verifies.
+
+    Re-derives from the journal alone: the CP-MODEL head must equal the candidate rebuilt from
+    the promoted CP-1, and `model.html`, `calculation.json` and `receipt.json` must equal the
+    bytes re-derived for that head. Nothing is trusted from the directory.
+    """
+    snapshot = store.read()
+    head = next((h for h in snapshot.heads if h.module_id == MODULE_ID), None)
+    if head is None or head.status not in ("accepted", "restricted"):
+        return (NO_HEAD,)
+    attempt = next((a for a in snapshot.attempts if a.result_sha256 == head.result_sha256), None)
+    if attempt is None:
+        return ("CP-MODEL head has no attempt in the journal",)
+    try:
+        basis = _basis(store)
+        settled = store.result(head.result_sha256)
+        expected = candidate_module(store, attempt, basis)
+        page = _page(store, settled)
+    except ValueError as error:  # includes CpModelRefused and EnvelopeError
+        return (f"CP-MODEL cannot be re-derived from the journal: {error}",)
+    issues: list[str] = []
+    if (settled.inputs, settled.facts, settled.tables, settled.claims) != (
+        expected.inputs,
+        expected.facts,
+        expected.tables,
+        expected.claims,
+    ):
+        issues.append("CP-MODEL head differs from its re-derivation from the journal")
+    derived = {
+        PAGE: page,
+        CALCULATION: basis.calculation,
+        RECEIPT: _receipt(settled, attempt.ticket_id, basis, snapshot.pack_sha256, page),
+    }
+    for name, text in derived.items():
+        try:
+            found = (output / name).read_text(encoding="utf-8")
+        except (OSError, ValueError) as error:
+            issues.append(f"{name} cannot be read: {error}")
+            continue
+        if found != text:
+            issues.append(f"{name} differs from its re-derivation from the journal")
+    return tuple(issues)
