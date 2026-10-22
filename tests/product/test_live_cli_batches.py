@@ -1,7 +1,9 @@
 """`deploy-vii live` subcommands over a fake transport: no network, key never an argument."""
 
 import argparse
+import hashlib
 import json
+import re
 import socket
 import stat
 from decimal import Decimal
@@ -14,6 +16,8 @@ from deploy_vii.live import cli
 from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import Ledger
+from deploy_vii.live.prompts import schema_text
+from deploy_vii.live.schema import strict_schema
 from deploy_vii.registry import modules
 from tests.product.live_support import (
     FAKE_KEY,
@@ -817,3 +821,174 @@ def test_one_batch_with_an_ineligible_model_a_refused_cp1_and_a_deadline_hold_th
 
 def ledger(rig: Rig, batch: str = "b1") -> Ledger:
     return cli.open_ledger(rig.root / "artifacts" / "model-tests" / ".ledgers" / f"{batch}.jsonl")
+
+
+# --- 2.11: `live schema-check` ----------------------------------------------------------------
+
+SOL_400 = (
+    Path(__file__).parent / "fixtures" / "live" / "sol-400-invalid-json-schema-source-context.json"
+)
+CHECK_COST = Decimal("0.0000123")
+
+
+class SchemaResponder:
+    """Fake transport for `schema-check`: refuses the listed (model, step) with probe-5b's real
+    400 body, answers every other call with 16 tokens cut at the length limit."""
+
+    def __init__(self, refuse: set[tuple[str, str]]) -> None:
+        self.refuse = refuse
+        self.requests: list[Request] = []
+        self.key_requests: list[Request] = []
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL:
+            self.key_requests.append(request)
+            return key_status("2.5")
+        self.requests.append(request)
+        body = json.loads(request.body or b"{}")
+        model, step = body["model"], body["response_format"]["json_schema"]["name"]
+        if (model, step) in self.refuse:
+            fixture = json.loads(SOL_400.read_text(encoding="utf-8"))
+            return Response(fixture["http_status"], fixture["body_text"].encode("utf-8"))
+        usage = {"prompt_tokens": 900, "completion_tokens": 16, "cost": float(CHECK_COST)}
+        return ok('{"sch', model=model, finish_reason="length", usage=usage)
+
+
+def check_argv(
+    rig: Rig, *words: str, batch: str | None = "s1", cap: str | None = None
+) -> list[str]:
+    out = [
+        "schema-check",
+        "--settings",
+        str(rig.settings),
+        "--catalog",
+        str(FIXTURES / "models-subset.json"),
+        "--report-directory",
+        str(rig.reports),
+        *words,
+    ]
+    out += ["--batch-id", batch] if batch else []
+    return out + (["--cap", cap] if cap else [])
+
+
+def check_rows(text: str) -> dict[tuple[str, str], list[str]]:
+    rows = step_lines(text, "openai/") + step_lines(text, "z-ai/")
+    return {(row[0], row[1]): row for row in rows}
+
+
+def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_reports_each(
+    rig: Rig,
+) -> None:
+    journal = rig.store.read().content_hash()
+    responder = SchemaResponder({(LUNA, "source_context")})
+    steps = "source_readiness,source_context"
+    assert rig.run(check_argv(rig, "--models", f"{LUNA},{GLM}", "--steps", steps), responder) == 0
+    bodies = [json.loads(item.body or b"{}") for item in responder.requests]
+    sent = [(b["model"], b["response_format"]["json_schema"]["name"]) for b in bodies]
+    assert sent == [(m, s) for m in (LUNA, GLM) for s in ("source_readiness", "source_context")]
+    for body in bodies:
+        assert body["max_tokens"] == 16 and "reasoning" not in body
+        assert [message["role"] for message in body["messages"]] == ["user"]
+        assert body["provider"] == {"allow_fallbacks": False, "require_parameters": True}
+        fmt = body["response_format"]["json_schema"]
+        assert fmt["strict"] is True
+        assert fmt["schema"] == strict_schema(cli.STEPS[fmt["name"]].schema)  # as a probe sends
+    assert len(responder.key_requests) == 2  # account usage before and after, for reconcile
+    text = rig.report("s1")
+    rows = check_rows(text)
+    refused = rows[(LUNA, "source_context")]
+    assert refused[2:6] == ["http_error", "http_error", "400", "0"]  # known-zero: refused
+    assert refused[9] == (
+        "HTTP 400: Provider returned error; OpenAI invalid_json_schema: Invalid schema for "
+        "response_format 'source_context'. Please ensure it is a valid JSON Schema."
+    )
+    others = [rows[key] for key in rows if key != (LUNA, "source_context")]
+    assert [row[2:6] for row in others] == [["accepted", "truncated", "200", "0.0000123"]] * 3
+    assert rows[(GLM, "source_context")][8] == "nullable-enum, const-to-enum, drop-length"
+    assert (
+        rows[(GLM, "source_readiness")][8] == "none" and rows[(GLM, "source_readiness")][9] == "-"
+    )
+    digest = hashlib.sha256(schema_text(cli.STEPS["source_context"].schema).encode()).hexdigest()
+    assert refused[7] == digest
+    assert "- Accepted: 3; http_error: 1; other: 0; ineligible: 0" in text
+    for forbidden in (FAKE_KEY, '{"sch', "messages", "user_REDACTED"):
+        assert forbidden not in text
+    state = ledger(rig, "s1").state()
+    assert state.cap == Decimal("0.05") and state.reserved == Decimal(0)
+    assert state.spent == 3 * CHECK_COST and len(state.attempts) == 4
+    evidence = rig.root / "artifacts" / "model-tests" / "s1" / "schema-check"
+    manifests = {
+        (m["model"], m["step_id"]): m
+        for m in (json.loads(p.read_text()) for p in sorted(evidence.rglob("manifest.json")))
+    }
+    assert len(manifests) == 4
+    record = manifests[(LUNA, "source_context")]
+    assert record["schema"] == "schema-check-attempt/1" and record["status"] == "http_error"
+    assert record["http_status"] == 400 and record["hashes"]["schema_sha256"] == digest
+    assert record["schema_relaxations"] == ["nullable-enum", "const-to-enum", "drop-length"]
+    assert record["journal"] == "none: schema-check submits nothing"
+    # Nothing was submitted: no journal copy, the execution journal is unchanged.
+    assert not (rig.store.directory / "live").exists()
+    assert rig.store.read().content_hash() == journal
+
+
+def test_schema_check_cap_refusal_sends_nothing_and_stops_the_batch(rig: Rig) -> None:
+    responder = SchemaResponder(set())
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context", cap="0.0000001")
+    assert rig.run(argv, responder) == cli.EXIT_CAP
+    assert responder.requests == []
+    text = rig.report("s1")
+    assert "- Stopped: cap: " in text
+    (row,) = step_lines(text, "openai/")
+    assert row[2:4] == ["refused", "not sent"] and row[5] == "not dispatched"
+    (manifest,) = (rig.root / "artifacts" / "model-tests" / "s1").rglob("manifest.json")
+    assert json.loads(manifest.read_text())["status"] == "refused"
+    path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "s1.jsonl"
+    assert Ledger(path, Decimal("0.0000001")).state().attempts == ()  # nothing was reserved
+
+
+def test_schema_check_defaults_and_refusals(rig: Rig, capsys: pytest.CaptureFixture[str]) -> None:
+    parser = argparse.ArgumentParser()
+    cli.configure(parser)
+    args = parser.parse_args(["schema-check", "--models", LUNA])
+    assert args.cap == Decimal("0.05") and args.steps == tuple(cli.STEPS)
+    for bad in ("source_context,source_context", "nope", ""):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["schema-check", "--models", LUNA, "--steps", bad])
+    responder = SchemaResponder(set())
+    # An effort cannot be honoured: schema-check sends no reasoning parameter.
+    assert rig.run(check_argv(rig, "--models", f"{LUNA}@high"), responder) == cli.EXIT_FAILED
+    assert "schema-check sends no reasoning" in capsys.readouterr().out
+    assert responder.requests == [] and responder.key_requests == []
+    argv = check_argv(rig, "--models", LUNA, "--steps", "financials", batch=None)
+    assert rig.run(argv, responder) == 0
+    (report,) = rig.reports.glob("live-schema-*.md")
+    assert re.fullmatch(r"live-schema-\d{8}\.md", report.name)
+    assert rig.run(argv, responder) == cli.EXIT_FAILED  # the day's batch exists: choose another
+
+
+def test_schema_check_records_an_ineligible_model_without_sending(rig: Rig) -> None:
+    responder = SchemaResponder(set())
+    catalog = four_models(rig, **{SOL: {"parameters": FULL[:-1]}})  # no structured_outputs
+    argv = [*check_argv(rig, "--models", f"{SOL},{DEEP}", "--steps", "source_context"), *catalog]
+    assert rig.run(argv, responder) == 0
+    assert [json.loads(r.body or b"{}")["model"] for r in responder.requests] == [DEEP]
+    text = rig.report("s1")
+    (row,) = step_lines(text, "openai/")
+    assert row[2:4] == ["ineligible", "missing parameters: structured_outputs"]
+    assert "ineligible: 1" in text
+
+
+def test_a_recorded_schema_rejection_makes_that_step_ineligible_before_dispatch(
+    rig: Rig,
+) -> None:
+    refusing = SchemaResponder({(LUNA, "source_context")})
+    assert rig.run(check_argv(rig, "--models", LUNA, "--steps", "source_context"), refusing) == 0
+    responder = Responder(rig.review)
+    assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], responder) == 0
+    assert len(responder.requests) == 1  # CP-0 only; source_context was never sent
+    cp0, context = step_lines(rig.report(), "module-00")
+    assert cp0[2] == "source_readiness" and cp0[6] == "accepted"
+    assert context[2] == "source_context" and context[6] == "ineligible"
+    assert context[7] == "ineligible: schema rejected by provider (s1)"
+    assert context[8] == "0"  # nothing reserved, nothing spent

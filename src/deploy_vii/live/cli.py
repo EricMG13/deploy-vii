@@ -8,6 +8,7 @@ a summary table only: no response bodies, prompts, source text or validator word
 """
 
 import argparse
+import hashlib
 import json
 import random
 import re
@@ -36,6 +37,7 @@ from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import NoEligibleModel, draw
 from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, LedgerError
+from deploy_vii.live.prompts import schema_text
 from deploy_vii.live.reconcile import (
     Outcome,
     RetainedAttempt,
@@ -46,7 +48,18 @@ from deploy_vii.live.reconcile import (
     usage_path,
 )
 from deploy_vii.live.retention import AttemptWriter
-from deploy_vii.live.runner import COHORT, DEFAULT_MAX_TOKENS, STEPS, StepSpec, dispatch
+from deploy_vii.live.runner import (
+    COHORT,
+    DEFAULT_MAX_TOKENS,
+    SCHEMA_CHECK_MAX_TOKENS,
+    STEPS,
+    SchemaCheck,
+    StepSpec,
+    check_schema,
+    dispatch,
+    schema_rejections,
+)
+from deploy_vii.live.schema import schema_relaxations
 from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsError, load_settings
 from deploy_vii.registry import canonical, modules
 
@@ -67,6 +80,7 @@ HELD_FOOTNOTE = (
 # A step CP-0 did not authorize (its T8 command is not `Run <id>`): nothing sent, nothing spent.
 NOT_AUTHORIZED = "not-authorized"
 NOT_AUTHORIZED_SCHEMA = "live-step-not-authorized/1"
+SCHEMA_CHECK_CAP = Decimal("0.05")  # a call costs about US$0.0005 (task 2.11)
 
 Transport = Callable[[Request], Response]
 
@@ -201,6 +215,35 @@ def _models(text: str) -> tuple[ModelSelection, ...]:
         raise argparse.ArgumentTypeError(str(error)) from None
 
 
+def _steps(text: str) -> tuple[str, ...]:
+    names = tuple(text.split(","))
+    unknown = [name for name in names if name not in STEPS]
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown step(s) {unknown}; known: {', '.join(STEPS)}")
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError("--steps names a step more than once")
+    return names
+
+
+def _schema_check_parser(actions: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    check = actions.add_parser(
+        "schema-check",
+        help="one minimal strict response_format call per model and step schema (cents)",
+    )
+    check.add_argument("--models", type=_models, required=True, help="ID,... (no @EFFORT)")
+    check.add_argument(
+        "--steps", type=_steps, default=tuple(STEPS), help="STEP,... (default: every step)"
+    )
+    check.add_argument(
+        "--cap", type=_cap, default=SCHEMA_CHECK_CAP, help=f"default {SCHEMA_CHECK_CAP} USD"
+    )
+    check.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
+    check.add_argument("--batch-id", type=_batch_id, help="default: schema-<UTC date>")
+    check.add_argument("--artifact-root", type=Path, help="default: settings artifact_root")
+    check.add_argument("--catalog", type=Path, help="saved models JSON; else fetched")
+    check.add_argument("--report-directory", type=Path, default=REPORT_DIRECTORY)
+
+
 def configure(parser: argparse.ArgumentParser) -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--directory", type=Path, required=True, help="execution journal")
@@ -262,6 +305,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     reconcile.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
     reconcile.add_argument("--artifact-root", type=Path, help="default: settings artifact_root")
     reconcile.add_argument("--report-directory", type=Path, default=REPORT_DIRECTORY)
+    _schema_check_parser(actions)
 
 
 def seed_for(pool: PinnedPool, slug: str, start: int) -> int:
@@ -347,6 +391,7 @@ def _run_cell(
     max_tokens: int,
     evidence: Path,
     batch: Batch,
+    rejections: Mapping[tuple[str, str, str], str],
 ) -> None:
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
@@ -376,6 +421,7 @@ def _run_cell(
             key_index=key_index,
             bytes_per_token=bytes_per_token,
             effort=effort,
+            schema_rejections=rejections,
         )
         batch.rows.append(
             Row(
@@ -695,27 +741,35 @@ def _record_usage_after(
             print(f"account usage failure record not written: {type(unwritten).__name__}")
 
 
-def run_live(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
-    """Run one live subcommand and return its exit status."""
-    transport = transport or urllib_transport
-    settings: LiveSettings = load_settings(args.settings)
+def _open_batch(args: argparse.Namespace, settings: LiveSettings, batch_id: str) -> Path:
+    """Refuse a cap above the ceilings or an existing report; return the report path."""
     if args.cap > settings.caps.cumulative_ceiling:
         raise CliError(
             f"--cap {args.cap} exceeds the cumulative ceiling {settings.caps.cumulative_ceiling}"
         )
-    batch_id = args.batch_id or utc_stamp().replace(":", "").replace("-", "")
     root = args.artifact_root or settings.artifact_root
-    report = args.report_directory / f"live-{batch_id}.md"
+    report: Path = args.report_directory / f"live-{batch_id}.md"
     if report.exists():
         raise CliError(f"{report} already exists; choose another --batch-id")
-    ledgers = root / ".ledgers"
-    prior = committed_elsewhere(ledgers)
+    prior = committed_elsewhere(root / ".ledgers")
     if prior + args.cap > settings.caps.cumulative_ceiling:
         raise CliError(
             f"prior ledgers hold {format(prior, 'f')} USD and --cap is {format(args.cap, 'f')}: "
             f"together they exceed the cumulative ceiling {settings.caps.cumulative_ceiling}"
         )
     args.report_directory.mkdir(parents=True, exist_ok=True)  # fail before any spend
+    return report
+
+
+def run_live(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
+    """Run one live subcommand and return its exit status."""
+    transport = transport or urllib_transport
+    settings: LiveSettings = load_settings(args.settings)
+    batch_id = args.batch_id or utc_stamp().replace(":", "").replace("-", "")
+    root = args.artifact_root or settings.artifact_root
+    report = _open_batch(args, settings, batch_id)
+    ledgers = root / ".ledgers"
+    rejections = schema_rejections(root)  # an unreadable schema-check record fails here
     seed = args.seed if args.seed is not None else secrets.randbits(31)
     catalog = Catalog.from_file(args.catalog) if args.catalog else Catalog.fetch(transport)
     pool = (
@@ -749,6 +803,7 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 max_tokens=args.max_tokens,
                 evidence=root / batch_id,
                 batch=batch,
+                rejections=rejections,
             )
     except CapExceeded as stop:
         batch.stopped = f"cap: {stop}"
@@ -951,6 +1006,158 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
     return 0
 
 
+def _check_cells(check: SchemaCheck) -> tuple[object, ...]:
+    return (
+        check.model,
+        check.step_id,
+        check.outcome,
+        check.classification,
+        "-" if check.http_status is None else check.http_status,
+        "not dispatched" if check.charged_usd is None else usd_cell(check.charged_usd, check.held),
+        check.attempt_id,
+        check.schema_sha256,
+        ", ".join(check.relaxations) or "none",
+        check.detail or "-",
+    )
+
+
+def _ineligible_check(candidate: PinnedCandidate, step_id: str) -> tuple[object, ...]:
+    """The row of a model the catalog rules out: nothing reserved, nothing sent, no attempt."""
+    schema = STEPS[step_id].schema
+    return (
+        candidate.slug,
+        step_id,
+        "ineligible",
+        candidate.exclusion_reason or "",
+        "-",
+        "0",
+        "none",
+        hashlib.sha256(schema_text(schema).encode()).hexdigest(),
+        ", ".join(schema_relaxations(schema)) or "none",
+        "-",
+    )
+
+
+def render_schema_report(
+    batch_id: str,
+    pool: PinnedPool,
+    ledger: Ledger,
+    steps: Sequence[str],
+    rows: Sequence[tuple[object, ...]],
+    stopped: str | None,
+) -> str:
+    """One row per (model, step): the provider's verdict on the sent schema. The provider's
+    error text is shown (key scrubbed); response bodies, prompts and content never are."""
+    state = ledger.state()
+    counts = {
+        name: sum(row[2] == name for row in rows)
+        for name in ("accepted", "http_error", "other", "ineligible", "refused")
+    }
+    header = (
+        "Model",
+        "Step",
+        "Outcome",
+        "Class",
+        "HTTP",
+        "USD",
+        "Attempt",
+        "Sent schema sha256",
+        "Relaxations",
+        "Provider detail",
+    )
+    lines = [
+        f"# Live batch {batch_id} (schema-check)",
+        "",
+        "- Command: schema-check (one strict response_format call per model and step; "
+        f"max_tokens {SCHEMA_CHECK_MAX_TOKENS}, no reasoning parameter, nothing submitted)",
+        f"- Steps: {', '.join(steps)}",
+        f"- Cap: {format(state.cap, 'f')} USD; reserved {format(state.reserved, 'f')}, "
+        f"spent {format(state.spent, 'f')}, remaining {format(state.remaining, 'f')}",
+        f"- Catalog: {pool.catalog_source} (sha256 {pool.catalog_sha256}), looked up "
+        f"{pool.looked_up_at}",
+        f"- Accepted: {counts['accepted']}; http_error: {counts['http_error']}; other: "
+        f"{counts['other']}; ineligible: {counts['ineligible']}; refused: {counts['refused']}",
+        f"- Stopped: {stopped or 'no'}",
+        "",
+        "## Results",
+        "",
+        _row(header),
+        _row(("---",) * len(header)),
+        *(_row(row) for row in rows),
+        "",
+    ]
+    lines += [HELD_FOOTNOTE, ""] if any(str(row[5]).startswith(HELD) for row in rows) else []
+    return "\n".join(lines)
+
+
+def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
+    """`live schema-check`: the provider's verdict on each sent step schema, for cents.
+
+    A rejection recorded here (an HTTP 400) makes the same (model, step, schema) cell of a later
+    probe or module batch under the same artifact root ineligible before dispatch."""
+    transport = transport or urllib_transport
+    effort = [item.model_id for item in args.models if item.effort is not None]
+    if effort:
+        raise CliError(f"schema-check sends no reasoning parameter; drop @EFFORT from {effort}")
+    settings: LiveSettings = load_settings(args.settings)
+    batch_id = args.batch_id or "schema-" + utc_stamp()[:10].replace("-", "")
+    root = args.artifact_root or settings.artifact_root
+    report = _open_batch(args, settings, batch_id)
+    catalog = Catalog.from_file(args.catalog) if args.catalog else Catalog.fetch(transport)
+    pool = catalog.pin_selected(batch_id, args.models)
+    ledger = Ledger(root / ".ledgers" / f"{batch_id}.jsonl", args.cap)
+    ledger.state()  # an opened ledger is bound to its first cap; a different one raises here
+    usage_client = ChatClient(
+        transport, key_path=settings.credential_file, key_index=settings.credential_token_index
+    )
+    rows: list[tuple[object, ...]] = []
+    stopped: str | None = None
+    writer, client = AttemptWriter(root), ChatClient(transport)
+
+    def checks() -> str | None:
+        """Run every (model, step) in order; the reason the batch stopped, if it did."""
+        for candidate in pool.candidates:
+            for step_id in args.steps:
+                if not candidate.eligible:
+                    rows.append(_ineligible_check(candidate, step_id))
+                    continue
+                check = check_schema(
+                    candidate,
+                    step_id,
+                    batch_id=batch_id,
+                    ledger=ledger,
+                    client=client,
+                    writer=writer,
+                    key_path=settings.credential_file,
+                    key_index=settings.credential_token_index,
+                    bytes_per_token=settings.prompt_bytes_per_token_lower_bound,
+                )
+                rows.append(_check_cells(check))
+                if check.outcome == "refused":
+                    return f"cap: {check.detail}"
+        return None
+
+    try:
+        record_usage(root, batch_id, "before", usage_client, args.live_command)
+        stopped = checks()
+    except BaseException as failure:
+        stopped = f"aborted: {type(failure).__name__}"
+        raise
+    finally:
+        _record_usage_after(root, batch_id, usage_client, args.live_command, sys.exception())
+        _finish_report(
+            report,
+            render_schema_report(batch_id, pool, ledger, args.steps, rows, stopped),
+            sys.exception(),
+        )
+    state = ledger.state()
+    print(
+        f"{report}: {len(rows)} checks, spent {format(state.spent, 'f')} "
+        f"of {format(state.cap, 'f')} USD"
+    )
+    return EXIT_CAP if stopped else 0
+
+
 def execute(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
     if args.live_command == "corpus":
         try:
@@ -969,6 +1176,8 @@ def execute(args: argparse.Namespace, *, transport: Transport | None = None) -> 
             return EXIT_FAILED
         return 0
     try:
+        if args.live_command == "schema-check":
+            return run_schema_check(args, transport=transport)
         if args.live_command == "reconcile":
             return run_reconcile(args, transport=transport)
         return run_live(args, transport=transport)

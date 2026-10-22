@@ -15,13 +15,22 @@ from hypothesis import strategies as st
 
 from deploy_vii.execution import Execution
 from deploy_vii.live import prompts, runner, submission
-from deploy_vii.live.catalog import Catalog, PinnedPool, parse_selection
+from deploy_vii.live.catalog import Catalog, ModelSelection, PinnedPool, parse_selection
 from deploy_vii.live.client import ChatClient, Response, TransportError, urllib_transport
 from deploy_vii.live.credential import CredentialError
+from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import CapExceeded, Ledger
 from deploy_vii.live.retention import AttemptWriter
-from deploy_vii.live.runner import DispatchResult, StepSpec, dispatch
+from deploy_vii.live.runner import (
+    SCHEMA_CHECK_RECORD,
+    DispatchResult,
+    SchemaCheck,
+    StepSpec,
+    check_schema,
+    dispatch,
+    schema_rejections,
+)
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
@@ -1553,3 +1562,125 @@ def test_a_call_past_its_deadline_is_a_held_timeout_and_the_manifest_records_it(
     assert rig.ledger.state().spent == Decimal(manifest["budgets"]["reserved_usd"])
     assert metrics["local"]["latency_s"] >= 0.05
     assert not result.ticket_interrupted  # attempt 1 of 3: the ticket stays pending
+
+
+# --- 2.11: schema-check verdicts the runner honours -------------------------------------------
+
+
+def check_record(
+    root: Path,
+    batch: str,
+    status: str,
+    http_status: int | None,
+    finished: str,
+    *,
+    sha: str = "a" * 64,
+) -> None:
+    directory = root / batch / "schema-check" / "openai__gpt-6-luna" / f"{batch}-1"
+    directory.mkdir(parents=True)
+    manifest = {
+        "schema": SCHEMA_CHECK_RECORD,
+        "experiment_id": batch,
+        "model": LUNA,
+        "step_id": "source_context",
+        "status": status,
+        "http_status": http_status,
+        "finished_at": finished,
+        "hashes": {"schema_sha256": sha},
+    }
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_only_the_latest_400_verdict_for_the_exact_schema_blocks_a_cell(tmp_path: Path) -> None:
+    key = (LUNA, "source_context", "a" * 64)
+    assert schema_rejections(tmp_path / "absent") == {}  # no artifact root yet: none recorded
+    check_record(tmp_path, "s1", "http_error", 400, "2026-10-22T10:00:00Z")
+    assert schema_rejections(tmp_path) == {key: "s1"}
+    check_record(tmp_path, "s2", "http_error", 400, "2026-10-22T09:00:00Z", sha="b" * 64)
+    assert schema_rejections(tmp_path)[(LUNA, "source_context", "b" * 64)] == "s2"
+    # Not verdicts on the schema: a rate limit, a refused reservation, an interrupted call.
+    check_record(tmp_path, "s3", "http_error", 429, "2026-10-22T11:00:00Z")
+    check_record(tmp_path, "s4", "refused", None, "2026-10-22T11:00:00Z")
+    check_record(tmp_path, "s5", "interrupted", None, "2026-10-22T11:00:00Z")
+    assert schema_rejections(tmp_path)[key] == "s1"
+    check_record(tmp_path, "s6", "accepted", 200, "2026-10-22T12:00:00Z")  # a later acceptance
+    assert key not in schema_rejections(tmp_path)
+
+
+def run_check(
+    tmp_path: Path, transport: FakeTransport, *, context: int = 1_048_576, key: str = FAKE_KEY
+) -> tuple[SchemaCheck, Ledger, Path]:
+    catalog = catalog_of(catalog_row(LUNA, context=context))
+    (candidate,) = catalog.pin_selected("s1", (ModelSelection(LUNA, None),)).candidates
+    keys = tmp_path / "keys"
+    keys.mkdir(exist_ok=True)
+    ledger = Ledger(tmp_path / "ledger" / "s1.jsonl", Decimal("0.05"), clock=lambda: NOW)
+    check = check_schema(
+        candidate,
+        "source_context",
+        batch_id="s1",
+        ledger=ledger,
+        client=ChatClient(transport),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(keys, key),
+        key_index=1,
+        bytes_per_token=BYTES_PER_TOKEN,
+        clock=lambda: NOW,
+    )
+    (manifest,) = (tmp_path / "artifacts" / "s1" / "schema-check").rglob("manifest.json")
+    return check, ledger, manifest.parent
+
+
+def test_a_check_whose_prompt_cannot_fit_is_sealed_ineligible_unsent(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    check, ledger, directory = run_check(tmp_path, transport, context=100)
+    assert check.outcome == "ineligible" and check.classification == "not sent"
+    assert check.detail is not None and check.detail.startswith("ineligible: context 100 < ")
+    assert transport.requests == [] and ledger.state().attempts == ()
+    manifest = load(directory / "manifest.json")
+    assert manifest["budgets"]["reserved_usd"] is None and manifest["status"] == "ineligible"
+
+
+def test_a_check_timeout_is_other_and_holds_nothing_it_did_not_reserve(tmp_path: Path) -> None:
+    check, ledger, directory = run_check(tmp_path, FakeTransport(TimeoutError("slow")))
+    assert (check.outcome, check.classification, check.http_status) == ("other", "timeout", None)
+    assert check.held and check.charged_usd == ledger.state().spent  # the reservation is held
+    assert load(directory / "metrics.json")["ledger"]["unreconciled"] is True
+
+
+def test_a_check_connection_failure_settles_held_seals_and_propagates(tmp_path: Path) -> None:
+    transport = FakeTransport(OSError(f"reset by peer {FAKE_KEY}"))
+    with pytest.raises(TransportError):
+        run_check(tmp_path, transport)
+    (manifest_path,) = (tmp_path / "artifacts").rglob("manifest.json")
+    manifest = load(manifest_path)
+    assert manifest["status"] == "interrupted" and "TESTONLY" not in json.dumps(manifest)
+    (record,) = Ledger(tmp_path / "ledger" / "s1.jsonl", Decimal("0.05")).state().attempts
+    assert record.status == "settled" and record.actual_usd is None  # held for reconcile
+
+
+def test_a_check_402_is_sealed_then_stops_with_credit_exhausted(tmp_path: Path) -> None:
+    body = json.dumps({"error": {"code": 402, "message": "Insufficient credits"}}).encode()
+    with pytest.raises(CreditExhausted):
+        run_check(tmp_path, FakeTransport(Response(402, body)))
+    (manifest_path,) = (tmp_path / "artifacts").rglob("manifest.json")
+    assert load(manifest_path)["status"] == "other"
+
+
+def test_a_check_with_a_multi_token_key_file_records_the_counts_only(tmp_path: Path) -> None:
+    key = f"old {FAKE_KEY}\nnew {SECOND_FAKE_KEY}"
+    transport = FakeTransport(ok('{"a', model=LUNA, finish_reason="length"))
+    check, _, directory = run_check(tmp_path, transport, key=key)
+    assert check.outcome == "accepted" and check.classification == "truncated"
+    manifest = load(directory / "manifest.json")
+    assert manifest["credential"]["key_tokens_found"] == 2
+    assert "sk-or-" not in json.dumps(manifest)
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1]", '{"schema": "other/1"}'])
+def test_an_unreadable_schema_check_record_fails_closed(tmp_path: Path, content: str) -> None:
+    check_record(tmp_path, "s1", "http_error", 400, "2026-10-22T10:00:00Z")
+    (path,) = tmp_path.rglob("manifest.json")
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError, match="schema-check record"):
+        schema_rejections(tmp_path)

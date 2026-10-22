@@ -73,11 +73,17 @@ class ChatRequest:
     reasoning_effort: str | None  # None: reasoning is switched on without an effort value
     accepted_model_ids: Sequence[str] = ()
     timeout_s: float = DEFAULT_TIMEOUT_SECONDS
+    # False: no `reasoning` parameter at all, the provider default applies (`live schema-check`).
+    reasoning: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.reasoning and self.reasoning_effort is not None:
+            raise ValueError("reasoning_effort needs reasoning: a request without it sends none")
 
     def body(self) -> dict[str, Any]:
         # Routing is pinned to the drawn model: no `models` list, no provider fallbacks,
         # and providers that would ignore a requested parameter are never chosen.
-        return {
+        body: dict[str, Any] = {
             "model": self.model,
             "messages": [dict(message) for message in self.messages],
             "max_tokens": self.max_tokens,
@@ -87,6 +93,9 @@ class ChatRequest:
             else {"effort": self.reasoning_effort},
             "provider": {"allow_fallbacks": False, "require_parameters": True},
         }
+        if not self.reasoning:
+            del body["reasoning"]
+        return body
 
 
 @dataclass(frozen=True)

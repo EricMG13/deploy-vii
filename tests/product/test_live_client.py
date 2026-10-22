@@ -52,6 +52,15 @@ def test_no_effort_switches_reasoning_on_without_an_effort_value() -> None:
     assert body["reasoning"] == {"enabled": True}
 
 
+def test_a_request_without_reasoning_sends_no_reasoning_parameter() -> None:
+    """`live schema-check` (task 2.11): the provider default applies, nothing is asked for."""
+    body = make_request(reasoning_effort=None, reasoning=False).body()
+    assert "reasoning" not in body
+    assert body["provider"] == {"allow_fallbacks": False, "require_parameters": True}
+    with pytest.raises(ValueError, match="reasoning_effort needs reasoning"):
+        make_request(reasoning_effort="high", reasoning=False)
+
+
 def test_request_pins_routing_and_grants_no_tools() -> None:
     body = make_request().body()
     assert body["provider"] == {"allow_fallbacks": False, "require_parameters": True}

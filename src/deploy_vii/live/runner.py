@@ -52,7 +52,16 @@ SUBMITTED = frozenset({"ok", "truncated"})
 POOLABLE_STATUSES = frozenset({"accepted", "rejected"})
 
 
-__all__ = ["STEPS", "DispatchResult", "StepDef", "StepSpec", "dispatch"]
+__all__ = [
+    "STEPS",
+    "DispatchResult",
+    "SchemaCheck",
+    "StepDef",
+    "StepSpec",
+    "check_schema",
+    "dispatch",
+    "schema_rejections",
+]
 
 
 @dataclass(frozen=True)
@@ -541,25 +550,46 @@ def _reserved(plan: _Plan, run: _Run) -> dict[str, object]:
     return _nullable("reserved_usd", None if unsent else plan.reserve_usd, reason)
 
 
-def _metrics(plan: _Plan, run: _Run, cost: _Cost) -> dict[str, Any]:
-    result, usage = run.result, run.result.usage if run.result else None
+_NOT_RECEIVED = "not dispatched or no response received"
+
+
+def _provider_usage(result: ChatResult | None) -> dict[str, object]:
+    """The provider-reported usage; every unknown value is null with its reason."""
+    usage = result.usage if result else None
     missing = usage.missing if usage else {}
-    why = "not dispatched or no response received"
     provider: dict[str, object] = {}
     for name in ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens"):
         value = getattr(usage, name, None)
-        provider.update(_nullable(name, value, missing.get(name, why)))
+        provider.update(_nullable(name, value, missing.get(name, _NOT_RECEIVED)))
     provider.update(
         _nullable(
             "cached_tokens",
             getattr(usage, "cached_tokens", None),
-            missing.get("cached_tokens", why),
+            missing.get("cached_tokens", _NOT_RECEIVED),
         )
     )
-    provider.update(_nullable("cost_usd", usage.cost if usage else None, missing.get("cost", why)))
-    settlement = run.settlement
+    provider.update(
+        _nullable("cost_usd", usage.cost if usage else None, missing.get("cost", _NOT_RECEIVED))
+    )
+    return provider
+
+
+def _ledger_block(cost: _Cost, settlement: Settlement | None) -> dict[str, Any]:
     return {
-        "provider": provider,
+        "attempt_cost_usd": cost.amount,
+        "cost_basis": cost.basis,
+        "cost_reason": cost.reason,
+        "charged_usd": settlement.charged if settlement else None,
+        "unreconciled": settlement.unreconciled if settlement else None,
+        "overrun": settlement.overrun if settlement else None,
+    }
+
+
+def _metrics(plan: _Plan, run: _Run, cost: _Cost) -> dict[str, Any]:
+    result = run.result
+    why = _NOT_RECEIVED
+    return {
+        "provider": _provider_usage(result),
         "local": {
             **_nullable("latency_s", result.latency_s if result else None, why),
             **_nullable("time_to_first_token_s", None, "request is not streamed"),
@@ -575,14 +605,7 @@ def _metrics(plan: _Plan, run: _Run, cost: _Cost) -> dict[str, Any]:
                 f"{TOKEN_OVERHEAD} fixed overhead tokens (decision 0008)"
             ),
         },
-        "ledger": {
-            "attempt_cost_usd": cost.amount,
-            "cost_basis": cost.basis,
-            "cost_reason": cost.reason,
-            "charged_usd": settlement.charged if settlement else None,
-            "unreconciled": settlement.unreconciled if settlement else None,
-            "overrun": settlement.overrun if settlement else None,
-        },
+        "ledger": _ledger_block(cost, run.settlement),
         "validation": {"outcome": run.status, "issue_count": len(run.issues)},
         "repair_count": plan.attempt.number,
         "retries_on_this_ticket_step": plan.links["retry_of_attempt_id"] is not None,
@@ -717,10 +740,14 @@ def dispatch(
     clock: Callable[[], str] = utc_stamp,
     max_retries: int = DEFAULT_MAX_RETRIES,
     credit: CreditState | None = None,
+    schema_rejections: Mapping[tuple[str, str, str], str] | None = None,
 ) -> DispatchResult:
     """Run one attempt of `step` on the model drawn from `pool` with `seed`.
 
     Retries on a pending ticket are bounded by `max_retries`; see `DispatchResult`.
+    `schema_rejections` (from `schema_rejections(artifact_root)`) holds the (model, step, sent
+    schema sha256) cells a `live schema-check` saw refused; such a step is sealed ineligible
+    before anything is reserved or sent (task 2.11).
     Credit exhaustion (a 402, or a `credit` state already known to be exhausted) raises
     CreditExhausted; the runner never switches model or cohort on its own (DC-8).
     `key_index` is `[model_tests].credential_token_index`; a refused key (401) is never retried
@@ -743,6 +770,11 @@ def dispatch(
         max_retries,
         bytes_per_token,
     )
+    rejected = (schema_rejections or {}).get(
+        (plan.candidate.slug, step.step_id, plan.hashes["schema_sha256"])
+    )
+    if plan.misfit is None and rejected is not None:
+        plan.misfit = f"schema rejected by provider ({rejected})"
     loaded = load_key_with_note(key_path, key_index)
     key = loaded.key
     if loaded.tokens_found > 1:
@@ -808,3 +840,323 @@ def dispatch(
         issues=run.issues,
         ticket_interrupted=run.ticket_interrupted,
     )
+
+
+# --- `live schema-check` (task 2.11) ------------------------------------------------------------
+#
+# One strict `response_format` call per (model, step schema) with the smallest legal prompt, so a
+# provider's verdict on a schema costs cents, not a CP-0 call. Reserved, retained and settled like
+# any attempt (same client, key path and classification); nothing reaches an execution journal.
+
+SCHEMA_CHECK_CASE = "schema-check"
+SCHEMA_CHECK_RECORD = "schema-check-attempt/1"
+SCHEMA_CHECK_MAX_TOKENS = 16  # the brief's floor; a provider minimum above it answers a 400
+SCHEMA_CHECK_TIMEOUT_SECONDS = 120.0
+SCHEMA_CHECK_PROMPT = "Reply with one JSON object that conforms to the response format."
+
+
+@dataclass(frozen=True)
+class SchemaCheck:
+    """One (model, step) result. `outcome`: accepted (ok or truncated: the provider took the
+    schema), http_error (with the provider's `detail`), other (timeout, fallback, credit),
+    ineligible or refused (nothing sent)."""
+
+    model: str
+    step_id: str
+    outcome: str
+    classification: str
+    http_status: int | None
+    detail: str | None
+    schema_sha256: str
+    relaxations: tuple[str, ...]
+    attempt_id: str
+    charged_usd: Decimal | None
+    held: bool
+
+
+@dataclass
+class _Check:
+    candidate: PinnedCandidate
+    step_id: str
+    batch_id: str
+    chat: ChatRequest
+    locator: AttemptLocator
+    reserve_usd: Decimal
+    prompt_tokens: int
+    cap_usd: Decimal
+    clock: Callable[[], str]
+    started_at: str
+    status: str = "interrupted"
+    result: ChatResult | None = None
+    error: str | None = None
+    settlement: Settlement | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    key_note: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def schema(self) -> type[BaseModel]:
+        return STEPS[self.step_id].schema
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append(
+            {"seq": len(self.events) + 1, "at": self.clock(), "event": name, **fields}
+        )
+
+
+def schema_check_request(candidate: PinnedCandidate, step_id: str) -> ChatRequest:
+    """The minimal strict request: one short user message, 16 tokens, no reasoning parameter."""
+    return ChatRequest(
+        model=candidate.slug,
+        messages=({"role": "user", "content": SCHEMA_CHECK_PROMPT},),
+        max_tokens=SCHEMA_CHECK_MAX_TOKENS,
+        response_format=response_format(step_id, STEPS[step_id].schema),
+        reasoning_effort=None,
+        accepted_model_ids=(candidate.slug, candidate.canonical_slug),
+        timeout_s=SCHEMA_CHECK_TIMEOUT_SECONDS,
+        reasoning=False,
+    )
+
+
+def _check_manifest(check: _Check, cost: _Cost) -> dict[str, Any]:
+    result, sent = check.result, check.chat.response_format["json_schema"]["schema"]
+    return {
+        "schema": SCHEMA_CHECK_RECORD,
+        "experiment_id": check.batch_id,
+        "case_id": SCHEMA_CHECK_CASE,
+        "attempt_id": check.locator.attempt,
+        "model": check.candidate.slug,
+        "module_id": STEPS[check.step_id].module_id,
+        "step_id": check.step_id,
+        "started_at": check.started_at,
+        "finished_at": check.clock(),
+        "cohort": COHORT,
+        "status": check.status,
+        "classification": result.classification if result else None,
+        "http_status": result.http_status if result else None,
+        "error": check.error,
+        "error_detail": result.error_detail if result else None,
+        "journal": "none: schema-check submits nothing",
+        "code": {"live_package_sha256": code_sha256()},
+        "hashes": {
+            "schema_sha256": hashlib.sha256(schema_text(check.schema).encode()).hexdigest(),
+            "request_sha256": hashlib.sha256(
+                json.dumps(check.chat.body(), sort_keys=True).encode()
+            ).hexdigest(),
+        },
+        "schema_keywords_unverified": unverified_keywords(sent),
+        "schema_relaxations": schema_relaxations(check.schema),
+        "endpoint": CHAT_URL,
+        "routing": {"allow_fallbacks": False, "require_parameters": True, "models": None},
+        "reasoning": "not sent: the provider default applies",
+        "served": {
+            "model": result.served_model if result else None,
+            "provider": result.served_provider if result else None,
+            "provider_request_id": result.provider_request_id if result else None,
+            "identity_verified": bool(result and result.identity_verified),
+        },
+        "budgets": {
+            "cap_usd": check.cap_usd,
+            "max_tokens": check.chat.max_tokens,
+            "reserved_usd": check.reserve_usd if check.status not in _UNSENT else None,
+            "timeout_s": check.chat.timeout_s,
+        },
+        "pinned_candidate": check.candidate.to_record(),
+        "credential": {
+            "recorded": False,
+            "response_scrubbed": bool(result and result.redacted),
+            **check.key_note,
+        },
+        "cost": {"basis": cost.basis, "reason": cost.reason},
+    }
+
+
+def _seal_check(check: _Check, writer: AttemptWriter, cost: _Cost) -> None:
+    result = check.result
+    checks: dict[str, Any] = {"verdict": {"outcome": check.status, "error": check.error}}
+    if result is not None:
+        checks["classification"] = {
+            "classification": result.classification,
+            "finish_reason": result.finish_reason,
+            "identity_verified": result.identity_verified,
+            "error_detail": result.error_detail,
+        }
+    metrics = {
+        "provider": _provider_usage(result),
+        "local": _nullable("latency_s", result.latency_s if result else None, _NOT_RECEIVED),
+        "estimate": {"prompt_tokens_upper_bound": check.prompt_tokens},
+        "ledger": _ledger_block(cost, check.settlement),
+    }
+    upstream = ["response.json", "output.md"] if result and result.redacted else []
+    writer.seal(
+        check.locator,
+        _check_manifest(check, cost),
+        check.events,
+        metrics,
+        checks,
+        scrubbed_upstream=upstream,
+    )
+
+
+def _unsent_check(check: _Check, writer: AttemptWriter, status: str, reason: str) -> None:
+    check.status, check.error = status, reason
+    check.event(status, reason=reason)
+    writer.record_response(check.locator, response_envelope(None, reason), None)
+    _seal_check(check, writer, _Cost(None, "not-dispatched", f"{status}; nothing was sent"))
+
+
+def _result(check: _Check) -> SchemaCheck:
+    result = check.result
+    unsent = check.status in _UNSENT
+    return SchemaCheck(
+        model=check.candidate.slug,
+        step_id=check.step_id,
+        outcome=check.status,
+        classification="not sent" if unsent or result is None else result.classification,
+        http_status=result.http_status if result else None,
+        detail=check.error if unsent or result is None else result.error_detail,
+        schema_sha256=hashlib.sha256(schema_text(check.schema).encode()).hexdigest(),
+        relaxations=tuple(schema_relaxations(check.schema)),
+        attempt_id=check.locator.attempt,
+        charged_usd=check.settlement.charged if check.settlement else None,
+        held=bool(check.settlement and check.settlement.unreconciled),
+    )
+
+
+def check_schema(
+    candidate: PinnedCandidate,
+    step_id: str,
+    *,
+    batch_id: str,
+    ledger: Ledger,
+    client: ChatClient,
+    writer: AttemptWriter,
+    key_path: Path,
+    key_index: int,
+    bytes_per_token: Decimal,
+    clock: Callable[[], str] = utc_stamp,
+) -> SchemaCheck:
+    """Send `step_id`'s sent schema to `candidate` once and record the provider's verdict.
+
+    Evidence goes to `<root>/<batch_id>/schema-check/<model>/<attempt>/`. A reservation the cap
+    refuses is sealed and returned as outcome `refused` (nothing sent; the caller stops); a
+    connection failure propagates after the reservation is settled as held; a 402 raises
+    CreditExhausted after the attempt is sealed (DC-8)."""
+    chat = schema_check_request(candidate, step_id)
+    tokens = prompt_token_bound(chat.body(), bytes_per_token)
+    prefix = f"{candidate.slug.replace('/', '__')}-{step_id}"
+    base = AttemptLocator(batch_id, SCHEMA_CHECK_CASE, candidate.slug, prefix)
+    attempt_id, _ = next_attempt_id(ledger, writer, base, prefix)
+    check = _Check(
+        candidate=candidate,
+        step_id=step_id,
+        batch_id=batch_id,
+        chat=chat,
+        locator=replace(base, attempt=attempt_id),
+        reserve_usd=reservation_usd(candidate, tokens, chat.max_tokens),
+        prompt_tokens=tokens,
+        cap_usd=ledger.cap,
+        clock=clock,
+        started_at=clock(),
+    )
+    writer.begin(
+        check.locator,
+        {
+            "endpoint": CHAT_URL,
+            "method": "POST",
+            "body": chat.body(),
+            "non_secret_parameters": {
+                "timeout_s": chat.timeout_s,
+                "accepted_model_ids": list(chat.accepted_model_ids),
+                "prompt_tokens_upper_bound": tokens,
+            },
+            "authentication": "Authorization header omitted; the credential is never recorded",
+        },
+    )
+    misfit = candidate.misfit(tokens, chat.max_tokens)
+    if misfit is not None:
+        _unsent_check(check, writer, "ineligible", f"ineligible: {misfit}")
+        return _result(check)
+    try:
+        ledger.reserve(attempt_id, check.reserve_usd)
+    except CapExceeded as error:
+        _unsent_check(check, writer, "refused", str(error))
+        return _result(check)  # the caller stops the batch: nothing further fits the cap
+    check.event("reserved", usd=check.reserve_usd, prompt_tokens_upper_bound=tokens)
+    loaded = load_key_with_note(key_path, key_index)
+    if loaded.tokens_found > 1:
+        check.key_note = loaded.note()
+    try:
+        check.event("request_sent", model=candidate.slug)
+        answer = check.result = client.complete(chat, key=loaded.key)
+        check.status = (
+            "accepted"
+            if answer.classification in SUBMITTED
+            else "http_error"
+            if answer.classification == "http_error"
+            else "other"
+        )
+        check.event(
+            "response_received",
+            classification=answer.classification,
+            http_status=answer.http_status,
+        )
+    except BaseException as failure:
+        check.error = redact(f"{type(failure).__name__}: {failure}", loaded.key)
+        check.event("interrupted", error=check.error)
+        raise
+    finally:
+        result = check.result
+        writer.record_response(
+            check.locator,
+            response_envelope(result, check.error or "no response received"),
+            result.content if result else None,
+        )
+        cost = _cost(candidate, result)
+        try:
+            check.settlement = ledger.settle(
+                attempt_id, cost.amount, f"{cost.reason}; schema-check status={check.status}"
+            )
+            check.event("ledger_settled", charged=check.settlement.charged, basis=cost.basis)
+        finally:
+            _seal_check(check, writer, cost)
+    if answer.classification == "insufficient_credit":
+        raise CreditExhausted(from_dispatch_402(clock(), answer.http_status))
+    return _result(check)
+
+
+def _check_record(path: Path) -> dict[str, Any]:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:  # a JSONDecodeError or undecodable bytes: the record is corrupt
+        raise ValueError(f"{path} is not a schema-check record (not JSON)") from None
+    fields = {"experiment_id", "model", "step_id", "status", "finished_at", "hashes"}
+    if (
+        not isinstance(record, dict)
+        or record.get("schema") != SCHEMA_CHECK_RECORD
+        or not fields <= set(record)
+        or not isinstance(record["hashes"], dict)
+        or "schema_sha256" not in record["hashes"]
+    ):
+        raise ValueError(f"{path} is not a {SCHEMA_CHECK_RECORD} schema-check record")
+    return record
+
+
+def schema_rejections(artifact_root: Path) -> dict[tuple[str, str, str], str]:
+    """(model, step, sent schema sha256) -> the batch whose schema-check saw it refused.
+
+    Only verdicts count: an accepted call or an HTTP 400 (other errors, refusals and
+    interruptions say nothing about the schema). The latest verdict per key wins (finished_at,
+    then batch id), so a later accepted check lifts an earlier rejection, and a changed schema
+    has a new hash and is never blocked by a verdict on the old one. An unreadable record fails
+    closed (ValueError) before anything is spent."""
+    latest: dict[tuple[str, str, str], tuple[str, str, bool]] = {}
+    for path in sorted(artifact_root.glob(f"*/{SCHEMA_CHECK_CASE}/*/*/manifest.json")):
+        record = _check_record(path)
+        rejected = record["status"] == "http_error" and record.get("http_status") == 400
+        if record["status"] != "accepted" and not rejected:
+            continue
+        key = (str(record["model"]), str(record["step_id"]), str(record["hashes"]["schema_sha256"]))
+        verdict = (str(record["finished_at"]), str(record["experiment_id"]), rejected)
+        if key not in latest or verdict[:2] > latest[key][:2]:
+            latest[key] = verdict
+    return {key: batch for key, (_, batch, rejected) in latest.items() if rejected}
