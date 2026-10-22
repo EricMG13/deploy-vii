@@ -72,7 +72,7 @@ file with `--cov-append`.
 **Parallel execution.** `make coverage` runs `pytest -n auto --dist loadfile` (decision
 [0011](decisions/0011-parallel-test-execution.md)): one worker per CPU, all tests of a file on
 one worker. The 90% floor applies to the single combined TOTAL report. Debug serially with
-`-n 0` (or `PYTEST_XDIST_AUTO_NUM_WORKERS=1`); cap workers with `--maxprocesses N` where memory
+`-n 0` (`PYTEST_XDIST_AUTO_NUM_WORKERS=1` still runs one worker subprocess); cap workers with `--maxprocesses N` where memory
 is short (the heaviest tests peak near 2.3 GiB per worker).
 
 Use read-only contents permissions and checkout without persistent credentials.

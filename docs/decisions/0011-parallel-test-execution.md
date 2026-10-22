@@ -35,8 +35,9 @@ repeats on every run, so a second run met the first run's directory. `tests/prod
 - **Memory.** Workers multiply peak memory: the heaviest bindings tests peak near 2.3 GiB per
   process (`docs/ci-gates.md`, Linux parity). `--maxprocesses N` caps `-n auto`; set it on a
   small machine.
-- **Serial runs.** `-n 0` (or `PYTEST_XDIST_AUTO_NUM_WORKERS=1`) disables workers; use it when
-  debugging an order- or path-sensitive failure.
+- **Serial runs.** Only `-n 0` is truly serial (no workers); use it when debugging an order- or
+  path-sensitive failure. `PYTEST_XDIST_AUTO_NUM_WORKERS=1` with `-n auto` runs one xdist
+  worker in a subprocess (`popen-gw0` paths), not a serial run.
 - **Hosted worker count.** If `-n auto` resolves to 1 on the hosted runner, set
   `PYTEST_XDIST_AUTO_NUM_WORKERS: 4` in the job environment.
 
@@ -44,6 +45,11 @@ repeats on every run, so a second run met the first run's directory. `tests/prod
 
 - `pyproject.toml` (dev group), `uv.lock`, the `coverage` target and `docs/ci-gates.md`
   change; the 40-minute budget stays.
+- `tests/product/evidence.py` (`evidence_path`), `tests/product/test_evidence.py` and the seven
+  test files whose evidence sites changed (`test_browser`, `test_delivery`, `test_execution`,
+  `test_interface_view`, `test_narrative_projection`, `test_register_view`,
+  `test_report_tables`) are new or changed because xdist names a test's temporary directory
+  `popen-gw<n>`, which repeats across runs and collided with earlier evidence directories.
 - Results must be identical serial and parallel; a test that needs a shared path takes a
   per-test path, never a serial marker.
 - Not verified: the hosted wall time (the next PR shows it).
