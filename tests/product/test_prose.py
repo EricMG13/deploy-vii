@@ -11,7 +11,16 @@ from pydantic import ValidationError
 
 from deploy_vii.contracts import Citation, Claim, Fact, Module
 from deploy_vii.execution import candidate_issues
-from deploy_vii.prose import LABELS, Run, bare_figures, check, prose_issues, tokenize, valid_syntax
+from deploy_vii.prose import (
+    LABELS,
+    Run,
+    bare_figures,
+    check,
+    issues,
+    prose_issues,
+    tokenize,
+    valid_syntax,
+)
 from deploy_vii.readiness import build_readiness
 from tests.product.test_execution import fixture_store, settled
 from tests.product.test_readiness import readiness_fixture
@@ -106,6 +115,7 @@ def test_unresolved_reference_is_an_issue() -> None:
             "[a]b]",
             "Debt [revenue",
             "{" + "x" * 161 + "}",
+            "Debt} then {revenue}",
         ),
     ],
 )
@@ -115,6 +125,7 @@ def test_malformed_tokens_are_rejected_by_the_claim_contract(text: str) -> None:
     with pytest.raises(ValidationError, match="Malformed run text"):
         Claim(claim_id="c", text=text, citations=())
     assert check(text, refs=REFS, gaps=GAPS)[0].startswith("Malformed run text")
+    assert issues(text, {})[0].startswith("Malformed run text")
 
 
 def test_tokenize_classifies_figures_chips_and_gaps() -> None:

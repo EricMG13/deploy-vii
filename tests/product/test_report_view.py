@@ -369,6 +369,11 @@ def test_claim_runs_resolve_with_the_cell_number_rule_and_report_ids() -> None:
         ClaimRun(text="1", kind="fig", ref_id="G1", prov="cited")
     with pytest.raises(ValidationError):
         ClaimRun(text="x", kind="text", ref_id="C1")
+    with pytest.raises(ValidationError):
+        ClaimRun(text="∅ C1", kind="gap", ref_id="C1", prov="gap")
+    percent = fact("p", amount=Decimal("0.125"), unit="PERCENT", period="FY25", citations=(A,))
+    assert figure_unit(percent) == "%"
+    assert [r.text for r in resolve("{p|%}", bind((percent,)), {"p": ("C1",)})] == ["12.5%"]
     assert ClaimRun(text="\n\n", kind="text").text == "\n\n"  # spacing between runs is kept
 
 
