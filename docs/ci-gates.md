@@ -57,9 +57,17 @@ rely on any of them for coverage or for a green result. Where `textutil` is abse
 and compared with the real tool on macOS) first on PATH, so the credential loader and the
 live-runner tests run on both platforms; real-pack replay entries stay counted skips
 (`skipped-pack-absent`) and are never a pass, while synthetic case packs cover the same code.
-To reproduce the hosted run, commit and then, from the repository root, pipe the committed tree
-into a clean container (no key file, no artifacts, no textutil):
-`git archive HEAD | docker run --rm -i ubuntu:24.04 bash -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates git make nodejs >/dev/null && mkdir /w && tar -x -C /w && cd /w && curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh && . $HOME/.local/bin/env && git init -q && uv sync --locked && uv run --locked playwright install --with-deps chromium && make product-check'`.
+To reproduce the hosted run, commit, write the committed tree to a tar under a directory the
+Docker VM can mount (with Colima, under `$HOME`), and run a clean container with no key file,
+no artifacts and no textutil: `git archive HEAD -o "$DIR/tree.tar"`, then
+`docker run --rm -v "$DIR":/lx:ro ubuntu:24.04 bash /lx/run.sh`, where `run.sh` does
+`apt-get update -qq && apt-get install -y -qq curl ca-certificates git make nodejs`,
+`mkdir /w && tar -x -C /w -f /lx/tree.tar && cd /w`, installs uv 0.12.5
+(`curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh`), then `uv sync --locked`,
+`uv run --locked playwright install --with-deps chromium` and `make product-check`. The
+memory-heavy bindings tests peak near 2.3 GiB, so a single pytest process was killed
+(exit 137) in a 3.8 GiB Docker VM; give the VM more memory or run one process per test
+file with `--cov-append`.
 
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and
