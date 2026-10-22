@@ -41,7 +41,7 @@ from deploy_vii.live.draw import Draw, draw
 from deploy_vii.live.ledger import CapExceeded, Ledger, Settlement
 from deploy_vii.live.prompts import UpstreamInput, build, response_format, schema_text
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter, response_envelope
-from deploy_vii.live.schema import unverified_keywords
+from deploy_vii.live.schema import schema_relaxations, unverified_keywords
 from deploy_vii.live.submission import STEPS, StepDef, Submitted, submit_model_payload
 
 COHORT = "openrouter-pool"
@@ -621,10 +621,12 @@ def _manifest(plan: _Plan, run: _Run) -> dict[str, Any]:
         "endpoint": CHAT_URL,
         "routing": {"allow_fallbacks": False, "require_parameters": True, "models": None},
         "tools": {"offered": False, "tool_choice": None},
-        # Kept in the strict schema; strict-mode acceptance is not documented (live.schema).
+        # Kept in the sent schema; strict-mode acceptance is not documented (live.schema).
         "schema_keywords_unverified": unverified_keywords(
             plan.chat.response_format["json_schema"]["schema"]
         ),
+        # How the sent schema departs from the strict copy (task 2.11; Pydantic still validates).
+        "schema_relaxations": schema_relaxations(plan.step.schema),
         "served": {
             "model": result.served_model if result else None,
             "provider": result.served_provider if result else None,

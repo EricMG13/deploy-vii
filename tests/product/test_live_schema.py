@@ -1,13 +1,13 @@
 """Strict response schemas: every property required, defaults nullable, nulls resolved back."""
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from deploy_vii.live import schema as strict
 from deploy_vii.live.prompts import response_format, schema_text
@@ -71,8 +71,8 @@ def test_transformed_schema_has_no_unsupported_keyword_and_no_default(step: str)
 def test_defaulted_fields_become_nullable_and_required_fields_do_not() -> None:
     transformed = strict.strict_schema(ReadinessReview)
     root = transformed["properties"]
-    assert root["schema_version"] == {
-        "anyOf": [{"const": "readiness-review/1", "type": "string"}, {"type": "null"}],
+    assert root["schema_version"] == {  # the sent copy: `const` is sent as a one-value enum
+        "anyOf": [{"enum": ["readiness-review/1"], "type": "string"}, {"type": "null"}],
         "title": "Schema Version",
     }
     assert root["pack_sha256"]["type"] == "string"  # required: not made nullable
@@ -81,10 +81,15 @@ def test_defaulted_fields_become_nullable_and_required_fields_do_not() -> None:
     assert consumer["missing_source"]["anyOf"].count({"type": "null"}) == 1
     claim = transformed["$defs"]["Claim"]["properties"]
     assert {"type": "null"} in claim["limitation"]["anyOf"]
-    # Enums carry null too.
+    # A defaulted enum is nullable through its type only (OpenAI's documented shape): null is
+    # never a member of the enum (task 2.11).
     context = strict.strict_schema(SCHEMAS["source_context"])
     scan = context["$defs"]["SourceContext"]["properties"]["event_scan"]
-    assert scan["type"] == ["string", "null"] and None in scan["enum"]
+    assert scan == {
+        "enum": ["events_identified", "no_events_identified", "unassessed"],
+        "title": "Event Scan",
+        "type": ["string", "null"],
+    }
 
 
 def test_transform_is_pure() -> None:
@@ -102,7 +107,8 @@ def test_union_discriminators_stay_required_and_non_null() -> None:
     ]
     assert tags
     for tag in tags:
-        assert "anyOf" not in tag and tag.get("type") == "string" and "const" in tag
+        assert "anyOf" not in tag and tag.get("type") == "string" and "const" not in tag
+        assert len(tag["enum"]) == 1  # the tag's constant, sent as a one-value enum
 
 
 @pytest.mark.parametrize("step_id", sorted(SCHEMAS))
@@ -125,11 +131,131 @@ def test_prompt_schema_text_is_the_strict_response_schema(step_id: str) -> None:
 
 def test_unverified_keywords_are_listed_not_stripped() -> None:
     found = strict.unverified_keywords(strict.strict_schema(ReadinessReview))
-    assert {"pattern", "minLength"} <= set(found) and found == sorted(found)
+    assert "pattern" in found and found == sorted(found)
     context = strict.unverified_keywords(strict.strict_schema(SCHEMAS["source_context"]))
     assert "format" in context
     transformed = json.dumps(strict.strict_schema(ReadinessReview))
-    assert '"pattern"' in transformed and '"minLength"' in transformed
+    assert '"pattern"' in transformed
+
+
+# --- sent-schema relaxation (task 2.11, probe-5b source_context HTTP 400) -----------------
+
+
+def sent_keys(schema: dict[str, Any]) -> set[str]:
+    return {key for node in nodes(schema) for key in node}
+
+
+@pytest.mark.parametrize("step", sorted(SCHEMAS))
+def test_sent_schema_has_no_const_no_length_and_no_null_enum_member(step: str) -> None:
+    sent = strict.strict_schema(SCHEMAS[step])
+    assert not sent_keys(sent) & {"const", "minLength", "maxLength"}
+    assert not [n for n in nodes(sent) if None in n.get("enum", ())]
+    # The rewritten and dropped keywords are not named as unverified either.
+    assert not {"const", "minLength", "maxLength"} & set(strict.unverified_keywords(sent))
+
+
+def test_source_context_sent_schema_keeps_every_other_constraint() -> None:
+    strict_copy = strict.strict_copy(SCHEMAS["source_context"])
+    sent = strict.strict_schema(SCHEMAS["source_context"])
+    assert {"const", "minLength", "maxLength"} <= sent_keys(strict_copy)  # what 5ae16ef9 sent
+    kept = {"pattern", "format", "maxItems", "anyOf", "$ref", "enum", "additionalProperties"}
+    assert kept <= sent_keys(sent)
+    assert sent_keys(sent) == sent_keys(strict_copy) - {"const", "minLength", "maxLength"}
+    patterns = sorted({n["pattern"] for n in nodes(sent) if "pattern" in n})
+    assert patterns == sorted({n["pattern"] for n in nodes(strict_copy) if "pattern" in n})
+    assert strict.schema_relaxations(SCHEMAS["source_context"]) == [
+        "nullable-enum",
+        "const-to-enum",
+        "drop-length",
+    ]
+
+
+def test_the_readiness_submission_keeps_min_items_and_needs_no_relaxation() -> None:
+    model = SCHEMAS["source_readiness"]
+    sent = strict.strict_schema(model)
+    assert sent == strict.strict_copy(model)  # cf6bf65b's accepted schema, unchanged
+    assert strict.schema_relaxations(model) == []
+    assert '"minItems":1' in json.dumps(sent, separators=(",", ":"))
+
+
+@pytest.mark.parametrize("step", sorted(SCHEMAS))
+def test_relaxation_is_idempotent_and_pure(step: str) -> None:
+    model = SCHEMAS[step]
+    before = model.model_json_schema()
+    strict_copy = strict.strict_copy(model)
+    snapshot = json.dumps(strict_copy, sort_keys=True)
+    once = strict.relax(strict_copy)
+    assert json.dumps(strict_copy, sort_keys=True) == snapshot  # the input is not mutated
+    assert strict.relax(once) == once == strict.strict_schema(model)
+    assert model.model_json_schema() == before
+
+
+def test_a_nullable_enum_that_still_lists_null_loses_it_and_the_rest_is_kept() -> None:
+    node = {"type": ["string", "null"], "enum": ["a", None, "b"], "title": "T"}
+    assert strict.relax(node) == {"type": ["string", "null"], "enum": ["a", "b"], "title": "T"}
+    assert strict.relaxations(node) == ["nullable-enum"]
+    nested = {"properties": {"minLength": {"type": "string", "minLength": 1, "maxLength": 3}}}
+    # A property that happens to be called minLength is a name, not a keyword: it stays.
+    assert strict.relax(nested) == {"properties": {"minLength": {"type": "string"}}}
+    assert strict.relaxations(nested) == ["drop-length"]
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"const": None},
+        {"enum": ["a", None], "type": "string"},
+        {"enum": ["a", None]},
+        {"const": "a", "enum": ["a", "b"]},
+    ],
+    ids=["const-null", "null-enum-non-null-type", "null-enum-untyped", "const-beside-enum"],
+)
+def test_shapes_the_relaxation_cannot_express_fail_closed(node: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="cannot be relaxed"):
+        strict.relax({"properties": {"x": node}})
+
+
+def _source_context_document(tmp_path: Path) -> dict[str, Any]:
+    payload = replay_support.cp1_seed_payloads(tmp_path)["source_context"]
+    document: dict[str, Any] = json.loads(payload)
+    return document
+
+
+def test_the_stored_contract_still_resolves_a_null_event_scan_to_its_default(
+    tmp_path: Path,
+) -> None:
+    """The relaxation is on the way out only: Pydantic validates the reply as before."""
+    model = SCHEMAS["source_context"]
+    document = _source_context_document(tmp_path)
+    for source in document["sources"]:
+        source["event_scan"] = None
+        source["event_ids"] = []
+        source["event_scan_citations"] = []
+    normalised, paths = strict.normalise(model, json.dumps(document))
+    assert paths and all(path.endswith(".event_scan") for path in paths)
+    review = model.model_validate_json(normalised)
+    assert {source.event_scan for source in review.sources} == {"unassessed"}  # the default
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda d: d["sources"][0]["scopes"][0].update(period_label=""), "at least 1 character"),
+        (lambda d: d["sources"][0]["scopes"][0].update(scope_id="x" * 161), "at most 160"),
+        (lambda d: d["sources"][0].update(event_scan="maybe"), "Input should be"),
+        (lambda d: d.update(schema_version="source-context-review/2"), "Input should be"),
+    ],
+    ids=["empty-period", "long-identifier", "unknown-enum-value", "wrong-constant"],
+)
+def test_the_stored_contract_still_rejects_what_the_sent_schema_no_longer_says(
+    tmp_path: Path, change: Callable[[dict[str, Any]], None], message: str
+) -> None:
+    model = SCHEMAS["source_context"]
+    document = _source_context_document(tmp_path)
+    change(document)
+    normalised, _ = strict.normalise(model, json.dumps(document))
+    with pytest.raises(ValidationError, match=message):
+        model.model_validate_json(normalised)
 
 
 # --- null resolution on parse -------------------------------------------------------------

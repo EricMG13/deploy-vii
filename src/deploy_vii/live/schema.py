@@ -3,18 +3,29 @@
 OpenAI strict mode (probe-2: HTTP 400 `invalid_json_schema`, "Missing 'limitation'") requires
 every object to list all of its properties in `required` and to set `additionalProperties:
 false`. Pydantic leaves defaulted fields out of `required`, so `strict_schema` rewrites a copy
-of `model_json_schema()`: every property becomes required, a property that had a default becomes
-nullable instead (`type` gains "null", an enum gains null, `$ref`/union/const nodes are wrapped in
+of `model_json_schema()` (`strict_copy`): every property becomes required, a property that had
+a default becomes nullable instead (`type` gains "null", `$ref`/union/const nodes are wrapped in
 `anyOf` with `{"type": "null"}`), and `default` keywords are removed. The one exception is the
 tag of a discriminated union: it stays required and non-null, because a null tag would leave the
 branch unresolvable.
+
+The copy that is sent (and printed in the prompt) is then relaxed (`relax`, task 2.11): OpenAI
+refused the `source_context` schema (probe-5b 5ae16ef9, HTTP 400 `invalid_json_schema`, no
+keyword named) while accepting the readiness schema, and the three constructs only the refused
+one carried are rewritten on the way out: a nullable enum lists its values without null and is
+nullable through its `type` (OpenAI's documented shape; "nullable-enum"), `const: v` becomes
+`enum: [v]` ("const-to-enum"), and `minLength`/`maxLength` are dropped ("drop-length").
+`pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
+widens what the provider is asked to enforce: the reply is still validated by the unchanged
+Pydantic contract, so every dropped constraint is still enforced on the way in.
 
 The contracts are not changed. Before a payload reaches Pydantic, `normalise` replaces a null
 that stands for an omitted defaulted field with that field's default, walking the payload with
 the *original* schema (the same field list). A payload with nothing to resolve is returned
 byte-for-byte; one that cannot be parsed is returned unchanged for the validator to reject.
-`pattern`, `minLength`, `format` and the other keywords the fetched provider documentation does
-not list as supported are kept and named by `unverified_keywords` for the attempt manifest.
+`pattern`, `format` and the other keywords the fetched provider documentation does not list as
+supported are kept and named by `unverified_keywords` for the attempt manifest, beside the
+relaxations applied (`schema_relaxations`).
 """
 
 import copy
@@ -45,6 +56,11 @@ UNVERIFIED = frozenset(
     }
 )
 _REF = "#/$defs/"
+# Relaxations of the sent copy, in the order the manifest lists them (see the module docstring).
+RELAXATIONS = ("nullable-enum", "const-to-enum", "drop-length")
+_LENGTH = frozenset({"minLength", "maxLength"})
+# Keys whose values are data (names, constants, defaults), never schema nodes.
+_DATA = frozenset({"enum", "const", "required", "default", "discriminator"})
 
 
 def _nodes(node: object) -> Iterator[dict[str, Any]]:
@@ -55,7 +71,7 @@ def _nodes(node: object) -> Iterator[dict[str, Any]]:
             if key in {"properties", "$defs"} and isinstance(value, dict):
                 for child in value.values():
                     yield from _nodes(child)
-            elif key not in {"enum", "const", "required", "default", "discriminator"}:
+            elif key not in _DATA:
                 yield from _nodes(value)
     elif isinstance(node, list):
         for item in node:
@@ -99,10 +115,9 @@ def _nullable(prop: dict[str, Any]) -> dict[str, Any]:
         return {**prop, "anyOf": [*prop["anyOf"], {"type": "null"}]}
     if not ({"$ref", "oneOf", "allOf", "const"} & set(prop)) and "type" in prop:
         kind = prop["type"]
-        result = {**prop, "type": [*(kind if isinstance(kind, list) else [kind]), "null"]}
-        if "enum" in prop:
-            result["enum"] = [*prop["enum"], None]
-        return result
+        # An enum keeps its values only: null is admitted by the type (OpenAI's documented
+        # nullable-enum shape); `normalise` and Pydantic read the original schema, not this one.
+        return {**prop, "type": [*(kind if isinstance(kind, list) else [kind]), "null"]}
     outer = {key: prop[key] for key in ANNOTATIONS if key in prop}
     inner = {key: value for key, value in prop.items() if key not in ANNOTATIONS}
     return {"anyOf": [inner, {"type": "null"}], **outer}
@@ -132,7 +147,7 @@ def _strip_defaults(node: object) -> None:
             _strip_defaults(item)
 
 
-def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
+def strict_copy(model: type[BaseModel]) -> dict[str, Any]:
     """A strict-mode copy of `model.model_json_schema()`; the model's own schema is untouched."""
     schema = copy.deepcopy(model.model_json_schema())
     tags = _tags(schema)
@@ -146,6 +161,77 @@ def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
         if "properties" in node and id(node) not in done:
             _strict_object(node, set())
     return schema
+
+
+def _nullable_enum(node: dict[str, Any]) -> bool:
+    kind = node.get("type")
+    return "enum" in node and isinstance(kind, list) and "null" in kind
+
+
+def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
+    """One node (a fresh copy, children already relaxed) with its own keywords relaxed."""
+    if "const" in node:
+        if "enum" in node or node["const"] is None:
+            raise ValueError(f"schema node cannot be relaxed (const beside enum, or null): {node}")
+        node = {("enum" if key == "const" else key): value for key, value in node.items()}
+        node["enum"] = [node["enum"]]
+    if None in node.get("enum", ()):
+        if not _nullable_enum(node):
+            raise ValueError(f"schema node cannot be relaxed (null enum, no null type): {node}")
+        node["enum"] = [value for value in node["enum"] if value is not None]
+    return node
+
+
+def _relax(node: object) -> object:
+    if isinstance(node, list):
+        return [_relax(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _LENGTH:
+            continue
+        if key in {"properties", "$defs"} and isinstance(value, dict):
+            out[key] = {name: _relax(child) for name, child in value.items()}
+        else:
+            out[key] = copy.deepcopy(value) if key in _DATA else _relax(value)
+    return _relaxed_node(out)
+
+
+def relax(schema: dict[str, Any]) -> dict[str, Any]:
+    """The sent copy of a strict schema (see the module docstring); pure and idempotent.
+
+    A shape the relaxation cannot express (a null `const`, a null enum member whose type does
+    not admit null, `const` beside `enum`) raises ValueError, so nothing is sent for it."""
+    relaxed = _relax(schema)
+    assert isinstance(relaxed, dict)  # a dict maps to a dict
+    return relaxed
+
+
+def relaxations(schema: dict[str, Any]) -> list[str]:
+    """The relaxations `relax` applies to `schema` (a strict copy), in `RELAXATIONS` order.
+
+    "nullable-enum" is named wherever the result relies on the documented nullable-enum reading
+    (an enum under a type that admits null), whether `_nullable` or `relax` produced it."""
+    found = set()
+    for node in _nodes(schema):
+        if _nullable_enum(node):
+            found.add("nullable-enum")
+        if "const" in node:
+            found.add("const-to-enum")
+        if _LENGTH & set(node):
+            found.add("drop-length")
+    return [name for name in RELAXATIONS if name in found]
+
+
+def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """The schema that is sent and printed in the prompt: the relaxed strict copy."""
+    return relax(strict_copy(model))
+
+
+def schema_relaxations(model: type[BaseModel]) -> list[str]:
+    """The relaxations `strict_schema(model)` carries, for the attempt manifest."""
+    return relaxations(strict_copy(model))
 
 
 def unverified_keywords(schema: dict[str, Any]) -> list[str]:

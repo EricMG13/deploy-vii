@@ -1256,8 +1256,28 @@ def test_manifest_names_schema_keywords_whose_strict_acceptance_is_unverified(
     # acceptance but task 2.10's `minItems` on `analysis`; the stored review's patterns are
     # enforced in Python after composition.
     assert manifest["schema_keywords_unverified"] == ["minItems"]
+    assert manifest["schema_relaxations"] == []  # the accepted readiness schema needs none
     sent = json.loads(transport.requests[0].body or b"{}")["response_format"]["json_schema"]
     assert sent["schema"] == strict_schema(ReadinessSubmission)
+
+
+def test_manifest_records_the_relaxations_and_hashes_the_schema_actually_sent(
+    tmp_path: Path,
+) -> None:
+    """Task 2.11: the recorded schema is the relaxed copy on the wire, named with its rewrites."""
+    rig, extraction = cp1_rig(tmp_path)
+    step = StepSpec("financials", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    transport = FakeTransport(ok(extraction.model_dump_json(), model=LUNA))
+    result = rig.run(ChatClient(transport), step=step)
+    assert result.status == "accepted", result.issues
+    manifest = load(result.directory / "manifest.json")
+    assert manifest["schema_relaxations"] == ["nullable-enum", "const-to-enum", "drop-length"]
+    unverified = manifest["schema_keywords_unverified"]
+    assert unverified and not {"const", "minLength", "maxLength"} & set(unverified)
+    sent = json.loads(transport.requests[0].body or b"{}")["response_format"]["json_schema"]
+    text = json.dumps(sent["schema"], sort_keys=True, separators=(",", ":"))
+    assert '"const"' not in text and "Length" not in text
+    assert manifest["hashes"]["schema_sha256"] == hashlib.sha256(text.encode()).hexdigest()
 
 
 def cp1_rig(tmp_path: Path) -> tuple[Rig, Any]:
