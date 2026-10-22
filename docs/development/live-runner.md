@@ -42,8 +42,8 @@ from a pinned pool:
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts. |
 | `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `submit_model_payload` (decision 0008). |
-| `schema.py` | `strict_schema` (strict-mode copy of a step schema), `normalise` (nulls for omitted defaults back to the default), `unverified_keywords`. |
-| `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
+| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `unverified_keywords`. |
+| `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
 
 ## Rules and where they are enforced
 
@@ -154,8 +154,9 @@ and estimates are separate objects.
 
 ## CLI and Make targets (Task B)
 
-`deploy-vii live {probe,module,regression,canary,corpus,reconcile}` (`live/cli.py`; `reconcile` is
-described under Charge reconciliation below). Common options:
+`deploy-vii live {probe,module,regression,canary,corpus,reconcile,schema-check}` (`live/cli.py`;
+`reconcile` is described under Charge reconciliation below, `schema-check` at the end of this
+section). Common options of the four batch commands:
 `--directory` (execution journal; cells run on journal copies under `<directory>/live/<batch>/`),
 `--settings`, `--cap USD` (required; positive; at most the settings cumulative ceiling), `--seed`
 (default random, recorded in the report), `--batch-id`, `--artifact-root`, `--effort`, `--catalog`
@@ -239,6 +240,54 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   is refused before any lookup). No prompts, responses, source text or validator wording.
 - Make: `replay` (pytest, below), `live-probe CAP=`, `live-module MODULE= CAP=`, `live-regression CAP=`,
   `live-canary CAP=`; `DIRECTORY=` (default `artifacts/execution`) names the journal.
+
+### `live schema-check` (task 2.11)
+
+`deploy-vii live schema-check --models ID,ID,... [--steps STEP,...] [--cap USD]` asks each
+provider for its verdict on each sent step schema before a batch spends on it. Per model and step
+(default steps: all five in `STEPS` order) it sends one request through the normal `ChatClient`
+with the DC-7 key path and the same classification: the step's `response_format` exactly as a
+probe sends it (`strict: true`, the relaxed strict copy), one user message ("Reply with one JSON
+object that conforms to the response format."), `max_tokens` 16 and no `reasoning` parameter (the
+provider default applies; `ChatRequest(reasoning=False)`). Routing stays pinned (`allow_fallbacks:
+false`, `require_parameters: true`). `@EFFORT` on `--models` is refused (nothing to send it with);
+eligibility is checked as for `--models` batches and an ineligible model gets one `ineligible`
+row per step, unsent. Each call is reserved and settled in `<artifact-root>/.ledgers/<batch>.jsonl`
+under `--cap` (default US$0.05; a call costs about US$0.0005, but the reservation is the
+worst case, `ceil(request bytes / 3.0) + 64` prompt tokens at the pinned prompt price plus 16
+completion tokens; the prompt bounds are 1,628 (`source_readiness`), 2,450 (`source_context`),
+10,446 (`financials`), 2,044 (`narrative`) and 924 (`readiness`) tokens). The cumulative-ceiling
+check and the account-usage records before and after are those of any batch, so `live
+reconcile --batch-id schema-<date>` settles a held charge. The default batch id is
+`schema-<UTC date YYYYMMDD>`; a second run that day needs `--batch-id`. Evidence goes to
+`<artifact-root>/<batch>/schema-check/<model>/<attempt>/` (request, response, events, metrics,
+checks, then `manifest.json` with schema `schema-check-attempt/1`: model, step, status, class,
+HTTP status, `error_detail`, the sent `schema_sha256`, `schema_relaxations`,
+`schema_keywords_unverified`, budgets, pinned candidate). Nothing is submitted: no journal copy,
+no execution journal entry. A cap refusal seals the attempt `refused` and stops the batch (exit 3);
+a 402 stops it as DC-8 (exit 4); a connection failure settles the reservation as held and aborts
+(exit 2). Otherwise the exit is 0 whatever the verdicts.
+
+The report `live-<batch>.md` has one row per (model, step): outcome (`accepted` when the
+provider answered `ok` or `truncated`, so it took the schema; `http_error`; `other` for a timeout,
+fallback or credit refusal; `ineligible`; `refused`), class, HTTP status, USD, attempt, the sent
+schema hash, the relaxations and the provider detail. The detail is the client's `error_detail`,
+which since task 2.11 carries the upstream provider's own message from OpenRouter's
+`error.metadata.raw` (prefixed with `provider_name` and `provider_error_code`, key scrubbed),
+for example `HTTP 400: Provider returned error; OpenAI invalid_json_schema: Invalid schema for
+response_format 'source_context'. Please ensure it is a valid JSON Schema.` No prompt, response
+body or content is shown.
+
+Runner use. `probe`, `module`, `regression` and `canary` read every `schema-check-attempt/1`
+manifest under their artifact root before the first cell (an unreadable one fails the batch
+before any spend). Only verdicts count: an `accepted` row or an `http_error` with HTTP 400; the
+latest per (model, step, sent schema sha256) wins, by `finished_at` then batch id. A cell whose
+step has a standing rejection is sealed `ineligible: schema rejected by provider (<batch>)`
+before anything is reserved or sent, exactly like a context misfit, and the cell stops. A later
+accepted check lifts the rejection, and a changed schema has a new hash, so an old verdict never
+blocks it. Any 400 for that exact request shape counts, also one caused by something other than
+the schema (for example a provider minimum above 16 tokens): the report's detail says which, and a
+later accepted check lifts it. Run `schema-check` for every pool change before a CP-0 call.
 
 ## Replay corpus (Task C, tier I2)
 
@@ -334,6 +383,18 @@ artifacts).
   entry is still `ok` (no outcome or issue text moved; the spans the rejected Luna 8634aa17
   quotes cite have no hyphen line wrap). Probe-4 attempts were not added; the Sol 9594d016 spans
   and quotes are unit fixtures in `test_readiness.py`.
+- Task 2.11 re-keyed the seven real entries to the `run/2` pack (main's `deploy-vii prepare`, 22
+  October 2026, same PDF; pack sha256 77395ae0091b14ec0a5539ae45d3be0b272f2931c00a8a53e3e39d16eddeaf3c,
+  was 0132418198863b1c7b4fbad4ffc4621fec852eec794b53b98ad450ecc23f776b at
+  `artifacts/public-case/caesars-fy2025-preparation-1`, `run/1`, which the `run/2` loader rejects).
+  A re-prepared case pack is placed as its own `artifacts/public-case/<case-dir>/` (here
+  `czr-fy2025-v2`, whose `complete.json` records the new hash), so `find_case_pack` finds it by
+  `pack_sha256` with no code change. Only `pack_sha256`, `pack_source` and
+  `input_hashes.prepared-pack` changed; each entry was revalidated on the new pack first and its
+  outcome and issues were identical, so `expected`, `live`, `expected_basis` and
+  `outcome_changed_by` are as before. `live corpus` cannot re-key (it reads the run/1 hash from
+  the attempt manifest), so a script applied the three keys; `--outcome-changed-by` does not apply
+  (no outcome changed). Against the main checkout's packs all 13 entries replay `ok`.
 
 ### Shape-error issue text (task 2.7a)
 
@@ -391,7 +452,8 @@ Probe-2 showed that OpenAI refuses the raw `model_json_schema()` under `strict: 
 key in properties. Missing 'limitation'"; US$0). `live/schema.py` now builds the schema sent in
 `response_format`: a pure transform of a copy of `model_json_schema()` in which every object node
 has `additionalProperties: false` and `required` equal to all of its property keys; a property
-that had a default becomes nullable instead (`type` gains `"null"`, an enum gains `null`, and
+that had a default becomes nullable instead (`type` gains `"null"`, an enum gained `null` until
+task 2.11 and now keeps its values only, and
 `$ref`, union and `const` nodes are wrapped in `anyOf` with `{"type": "null"}`); `default`
 keywords are removed; `$defs` stay inside the schema. The tag of a discriminated union (the
 narrative `kind`) stays required and non-null, because a null tag would leave the branch
@@ -416,6 +478,33 @@ bounds. They are kept, not stripped, and each attempt manifest lists the ones it
 `schema_keywords_unverified`. A schema refusal costs US$0 on Luna, so a probe settles them. Since
 task 2.10 the `source_readiness` submission schema uses one of them, `minItems: 1` on `analysis`.
 
+### The sent copy (task 2.11)
+
+Probe-5b: OpenAI refused the `source_context` schema (Sol 5ae16ef9, HTTP 400
+`invalid_json_schema`, "Invalid schema for response_format 'source_context'. Please ensure it is a
+valid JSON Schema.", no keyword named; US$0) minutes after accepting the readiness schema. The
+schema was unchanged since probe-3 (same `schema_sha256`). Of the constructs only the refused
+schema carried, three are now rewritten on the way out by `schema.relax`, a pure and idempotent
+pass over the strict copy (`strict_schema = relax(strict_copy)`):
+
+| Relaxation | Strict copy | Sent |
+| --- | --- | --- |
+| `nullable-enum` | `{"type": ["string", "null"], "enum": ["a", "b", null]}` | `{"type": ["string", "null"], "enum": ["a", "b"]}` (OpenAI's documented shape) |
+| `const-to-enum` | `{"const": "v", "type": "string"}` | `{"enum": ["v"], "type": "string"}` |
+| `drop-length` | `minLength` / `maxLength` | dropped |
+
+`pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. A shape the pass cannot
+express (a null `const`, `const` beside `enum`, a null enum member whose type does not admit null)
+raises `ValueError`, so nothing is sent for it; no step schema has one. The manifest lists the
+relaxations applied as `schema_relaxations` (in that order, only those applied; `[]` for the
+`source_readiness` submission, whose sent schema is unchanged), `schema_keywords_unverified` is
+computed on the sent schema (so it no longer names `const`, `minLength` or `maxLength`), and
+`schema_sha256` hashes the sent schema, which the prompt prints. Validation is unchanged:
+`normalise` walks the original schema and the Pydantic contracts enforce every length, constant
+and enum on the reply, so a dropped constraint is still a validator issue (and MC-7 repair input).
+The model no longer reads the length limits in the schema text. Whether OpenAI accepts the relaxed
+schema, and which construct it refused, is what `live schema-check` (below) answers.
+
 ## Errors inside a 200 body (task 2.7a)
 
 OpenRouter commits `200 OK` before inference and pads a non-streaming call with whitespace while it
@@ -432,7 +521,10 @@ what `live reconcile` looks up. There is no automatic retry inside an attempt: e
 reserve again (US$0.28 per DeepSeek call in probe-2), so a retry stays a new, separately reserved
 attempt chosen by the caller. A timed-out call has no usage, so it settles `unknown` with the
 reservation held and `unreconciled: true`. Fixtures: `tests/product/fixtures/live/` holds the three
-DeepSeek bodies and one Luna 400 body (its `user_id` value replaced; nothing else).
+DeepSeek bodies and two 400 bodies, probe-2 Luna and probe-5b Sol `source_context` (their
+`user_id` values replaced; nothing else). A non-2xx error's detail is `HTTP <status>: <message>`
+plus, since task 2.11, `; <provider_name> <provider_error_code>: <provider message>` taken from
+`error.metadata.raw` (its `error.message` when the raw text is JSON, else the raw text).
 
 Task 2.10 (probe-4). A provider error can also sit inside `choices[0]` of a 200: DeepSeek
 9d68b734 returned `finish_reason: "error"`, `choices[0].error` `{code: 502, message: "Upstream

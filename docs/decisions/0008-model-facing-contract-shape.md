@@ -178,6 +178,45 @@ Records: [live-probe-4.md](../development/tasks/implementation/live-probe-4.md),
 [live-probe-4-reconciled.md](../development/tasks/implementation/live-probe-4-reconciled.md) and
 the analysis, [live-probe-4-analysis.md](../development/tasks/implementation/live-probe-4-analysis.md).
 
+## Amendment, 22 Oct 2026 (probe-5)
+
+Probe-5 (Gemini 4 Argon, 2 draws, US$0.804) and probe-5b (Sol and Grok, US$0.939; no holds)
+ran on the task 2.10 prompt. Gemini: 0 of 2, layout-dominated (4 of 7 issues the p102/p104
+two-column stitch, 2 page-break straddles, 1 misquoted year). Sol: CP-0 accepted (cf6bf65b, 0
+issues) with CP-1 READY_WITH_LIMITATIONS, so CP-1 was authorised and its `source_context` step
+ran for the first time on OpenAI; the all-CONDITIONAL pattern of probe-4 ended once the CONTEXT
+carried each consumer's title and purpose (plausible, not proven: one prompt per probe). That
+step got HTTP 400 `invalid_json_schema` ("Invalid schema for response_format
+'source_context'", no keyword named, US$0). The schema was not a task 2.10 regression: its
+`schema_sha256` c1f3dc7f… is byte-identical to probe-3's, which GLM's provider accepted; it
+comes from the stored contract, sent as its strict copy. Grok: 0 of 1 (one wrong page). Task
+2.11 relaxes the *sent* copy only (`live.schema.relax`): a nullable enum lists its values without
+null and is nullable through its type (OpenAI's documented shape), `const` becomes a one-value
+`enum`, and `minLength`/`maxLength` are dropped; `pattern`, `format`, `minItems`, `maxItems`,
+`anyOf` and `$ref` stay. The prompt prints the same relaxed schema (one source of truth), the
+manifest names `schema_relaxations` beside `schema_keywords_unverified`, and `schema_sha256`
+hashes what is sent. The way in is unchanged: `normalise` and the Pydantic contracts still
+read the original schema, so an empty `period`, an over-long identifier, an unknown enum value or
+a wrong constant is still rejected by the validator and repaired through MC-7. The cost is that
+the model no longer sees length limits in the schema; it learns them from validator issues.
+Which construct OpenAI refused is not known, so `deploy-vii live schema-check` sends one
+16-token strict call per (model, step schema) through the normal client, ledger and key path
+(default cap US$0.05, nothing submitted) and reports the provider's own error text; a recorded
+HTTP 400 for the exact (model, step, sent schema hash) makes that step ineligible in later
+batches under the same artifact root before anything is reserved. Every pool change is to be
+checked this way before a CP-0 call. M7 backlog from the analysis (§6): a page-boundary hint for
+a quote that continues on the next page; the 60-character truncation in quote-mismatch text;
+the `hyphen-wrap` label printed only when the wrap is relevant; a check on free-text `period`
+fields; a no-response column in the cohort tables. Records:
+[live-probe-5.md](../development/tasks/implementation/live-probe-5.md),
+[live-probe-5-reconciled.md](../development/tasks/implementation/live-probe-5-reconciled.md),
+[live-probe-5b.md](../development/tasks/implementation/live-probe-5b.md),
+[live-probe-5b-reconciled.md](../development/tasks/implementation/live-probe-5b-reconciled.md)
+and the analysis,
+[live-probe-5-analysis.md](../development/tasks/implementation/live-probe-5-analysis.md). Not
+verified: which keyword OpenAI rejected and whether it accepts the relaxed schema (the
+coordinator's `schema-check` run answers both).
+
 ## Evidence
 
 - [live-probe-2.md](../development/tasks/implementation/live-probe-2.md): batch report and
