@@ -123,6 +123,20 @@ directory and prints the `envelope.md` path; it refuses an existing directory an
 missing, stale or blocked head. Conditions and formats: [execution](execution.md) and
 [canonical envelope](canonical-tables.md).
 
+To render the Front Page from the exported envelope (task 6.5):
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 render --envelope runs/example/envelope-1 --output runs/example/page-1 --pathway credit_snapshot
+```
+
+`render` verifies the envelope against the journal (`read_cp1_envelope`), writes
+`accepted.html` (or `refused.html` when the envelope does not verify, with CP-1 blocked
+and the reasons listed) and a `complete.json` receipt into a new directory, and prints the
+receipt. `--pathway` is optional and must be the run's own Pathway: a run's scope is
+immutable. The receipt records `head_rendering_acceptance` as the journal holds it and
+`browser_acceptance: unrun`; the command accepts nothing. Details:
+[execution](execution.md).
+
 After the valid financial stage, `statement-preview --ticket TICKET --output
 runs/example/statements-1` creates a source and constructed-period statement
 candidate without settling the attempt. See [table projection and limits](report-tables.md);

@@ -11,6 +11,7 @@ import pytest
 from playwright.sync_api import Browser, Page, Playwright, expect, sync_playwright
 
 from deploy_vii.contracts import Run, View
+from deploy_vii.cp1_render import refused_view
 from deploy_vii.display import format_value
 from deploy_vii.render import empty_view, render
 from deploy_vii.report_view import (
@@ -30,10 +31,15 @@ from deploy_vii.report_view import (
     build,
     pathways,
 )
-from tests.product.credit_snapshot import credit_snapshot_fixture
+from tests.product.credit_snapshot import (
+    CREDIT_SNAPSHOT_MAPS,
+    credit_snapshot_fixture,
+    credit_snapshot_view,
+)
 from tests.product.oracle import expected_display, parity_record
 from tests.product.png import decode, different_fraction, encode
 from tests.product.test_charts import mark, twin_for
+from tests.product.test_cp1_render import accepted_view
 from tests.product.test_render import synthetic_view
 
 
@@ -1355,6 +1361,161 @@ def test_front_page_screenshot_matches_the_reviewed_baseline(
         f"{fraction:.4%} of pixels differ from {baseline} (tolerance {PIXEL_TOLERANCE:.2%}); "
         f"compare {evidence}"
     )
+
+
+# --- task 6.5: the Model destination, FP 02 blocks, the accepted route, the shell items ---------
+
+
+@pytest.fixture(scope="module")
+def earnings_page(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """FP 02 over the Credit Snapshot fixture's registers (SYNTHETIC; the Pathway is the run's)."""
+    candidate = credit_snapshot_view()
+    view = View.model_validate_json(
+        candidate.model_copy(
+            update={"run": candidate.run.model_copy(update={"pathway": "earnings_update"})}
+        ).model_dump_json()
+    )
+    pathway = next(p for p in pathways() if p.id == "earnings_update")
+    path = tmp_path_factory.mktemp("earnings") / "earnings.html"
+    path.write_text(render(view, build(view, pathway, CREDIT_SNAPSHOT_MAPS)), encoding="utf-8")
+    return path
+
+
+@pytest.mark.browser
+def test_earnings_update_renders_its_ebitda_adjustments_and_metric_strip(
+    earnings_page: Path,
+) -> None:
+    with sync_playwright() as playwright:
+        browser, page, requests, errors = open_front(playwright, earnings_page, 1440, 900)
+        adjustments = page.locator("#block-ebitda-adjustments")
+        expect(adjustments.locator("h3")).to_have_text("EBITDA adjustments")
+        expect(adjustments.locator(".block-head")).to_contain_text("MODEL")
+        expect(adjustments.locator(".block-head a.full")).to_have_text("Open in Model →")
+        assert adjustments.locator("th[scope=row]").all_text_contents() == [
+            "Reported EBITDA",
+            "Add-backs",
+            "Adjusted EBITDA",
+        ]
+        strip = page.locator("#block-metric-strip")
+        expect(strip.locator("h3")).to_have_text("Metric strip")
+        expect(strip.locator(".block-head")).to_contain_text("MODEL")
+        # FP 02 prints S.1 to S.3; no producer supplies the series, so three honest n/a frames.
+        assert strip.locator("figure.chart-figure").count() == 3
+        assert strip.locator("figure .fig-id").all_text_contents() == ["S.1", "S.2", "S.3"]
+        expect(strip).to_contain_text("Charts need S.1\u2013S.3 series")
+        assert_offline(requests, errors)
+        browser.close()
+
+
+@pytest.mark.browser
+def test_the_rail_dot_and_limitations_panel_follow_bindings_outside_the_pathway(
+    earnings_page: Path, front_page: tuple[Path, View, ReportView]
+) -> None:
+    credit_path, _, credit = front_page
+    assert not credit.unplaced  # FP 01 places T4.17 and T4.10 itself: nothing is outside
+    with sync_playwright() as playwright:
+        browser, page, requests, errors = open_front(playwright, credit_path, 1440, 900)
+        expect(page.locator("[data-dest=limits] .rail-dot")).to_have_count(0)
+        assert page.locator("[data-dest=limits]").get_attribute("aria-label") == "Limitations"
+        browser.close()
+        browser, page, requests, errors = open_front(playwright, earnings_page, 1440, 900)
+        # No module has limitations here: only the bindings outside the Pathway light the rail.
+        expect(page.locator("[data-dest=limits] .rail-dot")).to_have_count(1)
+        assert (
+            page.locator("[data-dest=limits]").get_attribute("aria-label")
+            == "Limitations · with limitations"
+        )
+        page.goto(earnings_page.as_uri() + "#limitations")
+        outside = page.locator("#view-root section", has_text="Bound outside this Pathway")
+        items = outside.locator("li").all_text_contents()
+        assert any(
+            item.startswith("Capital structure · capital-structure (Absent): CP-1 output bound")
+            for item in items
+        ), items
+        assert any(item.startswith("Key findings · key-findings ") for item in items), items
+        assert_offline(requests, errors)
+        browser.close()
+
+
+@pytest.mark.browser
+def test_the_model_destination_states_that_the_model_has_not_run(tmp_path: Path) -> None:
+    run = Run(
+        run_id="covenant",
+        issuer_id="test",
+        issuer_name="Synthetic issuer",
+        as_of=synthetic_view().run.as_of,
+        case_kind="synthetic",
+        pathway="covenant_refinancing",
+    )
+    other = tmp_path / "covenant.html"
+    other.write_text(render(empty_view(run)), encoding="utf-8")
+    path = tmp_path / "accepted.html"
+    path.write_text(render(accepted_view()), encoding="utf-8")
+    with sync_playwright() as playwright:
+        browser, page, requests, errors = open_front(playwright, path, 1440, 900)
+        page.locator("[data-dest=model]").click()  # the rail's Model goes to CP-1's page
+        panel = page.locator("#view-root section", has_text="Model not run")
+        expect(panel.locator("h2")).to_have_text("Model")
+        expect(panel.locator(".chip")).to_have_text("Not run")
+        expect(panel).to_contain_text("no calculation JSON has been emitted")
+        # No grid is invented: the panel comes first, then CP-1's own register detail.
+        assert page.locator("[data-dest][aria-current=page]").get_attribute("aria-label") == "Model"
+        assert page.locator("#view-root section h2").first.text_content() == "Model"
+        expect(page.locator("[data-table-id]").first).to_be_attached()
+        page.goto(other.as_uri() + "#CP-1")
+        expect(page.locator("#view-root section", has_text="not part of")).to_contain_text(
+            "Model is not part of the Covenant & Refinancing Pathway"
+        )
+        assert_offline(requests, errors)
+        browser.close()
+
+
+@pytest.mark.browser
+def test_the_accepted_envelope_page_shows_the_cp1_blocks_and_no_candidate_label(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "accepted.html"
+    path.write_text(render(accepted_view()), encoding="utf-8")
+    with sync_playwright() as playwright:
+        browser, page, requests, errors = open_front(playwright, path, 1440, 900)
+        expect(page.locator(".candidate-label")).to_have_count(0)
+        expect(page.locator("#block-financials-credit-metrics")).to_have_attribute(
+            "data-state", "populated"
+        )
+        assert page.locator("#block-capital-structure [role=tab]").all_text_contents() == [
+            "Capital structure",
+            "EBITDA adjustments",
+            "Transaction and new debt",
+        ]
+        strip = page.locator("#block-model-chart-strip")
+        assert strip.locator("figure .fig-id").all_text_contents() == ["S.1", "S.2", "S.3", "S.4"]
+        # CP-1 is accepted: its chip says Pass, and the Model panel still states CP-MODEL unrun.
+        page.goto(path.as_uri() + "#CP-1")
+        expect(page.locator("#view-root > div > .chip")).to_have_text("Pass")
+        expect(page.locator("#view-root")).to_contain_text("Model not run")
+        assert_offline(requests, errors)
+        browser.close()
+
+
+@pytest.mark.browser
+def test_a_refused_envelope_page_shows_every_cp1_block_blocked_with_the_reason(
+    tmp_path: Path,
+) -> None:
+    reason = "Envelope module is not the CP-1 head's settled module"
+    base = empty_view(synthetic_view().run, candidate=False)
+    path = tmp_path / "refused.html"
+    path.write_text(render(refused_view(base, (reason,))), encoding="utf-8")
+    with sync_playwright() as playwright:
+        browser, page, requests, errors = open_front(playwright, path, 1440, 900)
+        for block_id in ("model-chart-strip", "capital-structure", "financials-credit-metrics"):
+            block = page.locator(f"#block-{block_id}")
+            expect(block).to_have_attribute("data-state", "blocked")
+            expect(block).to_contain_text(reason)
+            assert block.locator("td, figure").count() == 0, block_id  # no refused data shown
+        page.goto(path.as_uri() + "#limitations")
+        expect(page.locator("#view-root")).to_contain_text(f"Canonical envelope refused: {reason}")
+        assert_offline(requests, errors)
+        browser.close()
 
 
 # --- the helpers the acceptance relies on, tested on their own ---------------------------------

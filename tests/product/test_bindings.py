@@ -15,7 +15,7 @@ from deploy_vii.cp1_workflow import cp1_register_preview
 from deploy_vii.delivery import cp0_view
 from deploy_vii.model_interface import SCHEMAS
 from deploy_vii.readiness import build_readiness
-from deploy_vii.report_view import FactCoord
+from deploy_vii.report_view import FactCoord, pathways
 from tests.product.test_readiness import readiness_fixture
 from tests.product.test_register_view import completed
 from tests.product.test_render import synthetic_view
@@ -204,10 +204,13 @@ def test_shipped_maps_use_each_slot_once_and_stay_in_their_module() -> None:
 def test_fp01_chart_strip_and_tabbed_capital_structure_bindings() -> None:
     from deploy_vii.bindings import RAIL_DESTINATIONS
 
-    by_table = {e.fact_coord.table_id: e for e in CP1.entries}
+    by_table = {
+        e.fact_coord.table_id: e
+        for e in CP1.entries
+        if e.block_id not in {"ebitda-adjustments", "metric-strip"}  # FP 02 second placements
+    }
     # FP 01 has no separate metric strip: the KPI dashboard feeds the Model chart strip.
     assert by_table["T4.10"].block_id == "model-chart-strip"
-    assert "metric-strip" not in {e.block_id for e in CP1.entries}
     # Capital structure is tabbed, in the order FP 01 prints the tabs.
     assert [e.title for e in CP1.entries if e.block_id == "capital-structure"] == [
         "Capital structure",
@@ -223,3 +226,82 @@ def test_fp01_chart_strip_and_tabbed_capital_structure_bindings() -> None:
     assert {e.block_id for e in CP0.entries} <= RAIL_DESTINATIONS
     assert RAIL_DESTINATIONS == {"evidence", "limitations", "header"}
     assert Binding.model_validate_json(by_table["T4.17"].model_dump_json()) == by_table["T4.17"]
+
+
+def _on_pathway(view: View, pathway: str) -> View:
+    return View.model_validate_json(
+        view.model_copy(
+            update={"run": view.run.model_copy(update={"pathway": pathway})}
+        ).model_dump_json()
+    )
+
+
+def _placement(table: str, block: str, slot: str) -> Binding:
+    return Binding(
+        fact_coord=FactCoord(module_id="CP-1", table_id=table),
+        block_id=block,
+        cell_slot=slot,
+        unit_class="text",
+    )
+
+
+def test_a_register_may_be_placed_once_per_pathway_composition() -> None:
+    """T4.17 feeds FP 01's capital-structure tab and FP 02's ebitda-adjustments block."""
+    both = BindingMap(
+        module_id="CP-1",
+        entries=(
+            _placement("T4.17", "capital-structure", "bridge"),
+            _placement("T4.17", "ebitda-adjustments", "bridge"),
+        ),
+    )
+    fact_ = fact("a", table="T4.17")
+    # Each Pathway composes exactly one of the two blocks: one placement, not a double binding.
+    for pathway in ("credit_snapshot", "earnings_update"):
+        view = _on_pathway(with_facts("CP-1", (fact_,)), pathway)
+        assert validate_bindings(view, (both,)) == (), pathway
+
+
+def test_two_placements_inside_one_composition_are_still_doubly_bound() -> None:
+    twice = BindingMap(
+        module_id="CP-1",
+        entries=(
+            _placement("T4.17", "capital-structure", "bridge"),
+            _placement("T4.17", "model-chart-strip", "bridge"),  # FP 01 composes both
+        ),
+    )
+    issues = validate_bindings(with_facts("CP-1", (fact("a", table="T4.17"),)), (twice,))
+    assert len(issues) == 1 and "doubly bound" in issues[0]
+    # A rail destination is composed in every Pathway, so it counts as a placement too.
+    rail = BindingMap(
+        module_id="CP-1",
+        entries=(
+            _placement("T4.17", "capital-structure", "bridge"),
+            _placement("T4.17", "evidence", "bridge"),
+        ),
+    )
+    assert len(validate_bindings(with_facts("CP-1", (fact("a", table="T4.17"),)), (rail,))) == 1
+
+
+def test_the_same_block_twice_is_doubly_bound_even_outside_the_composition() -> None:
+    outside = BindingMap(
+        module_id="CP-1",
+        entries=(
+            _placement("T4.17", "ebitda-adjustments", "one"),
+            _placement("T4.17", "ebitda-adjustments", "two"),
+        ),
+    )
+    issues = validate_bindings(with_facts("CP-1", (fact("a", table="T4.17"),)), (outside,))
+    assert len(issues) == 1 and "doubly bound" in issues[0]
+
+
+def test_cp1_places_the_adjustment_bridge_and_kpi_register_twice_by_pathway() -> None:
+    by_block = {(e.fact_coord.table_id, e.block_id): e for e in CP1.entries}
+    assert ("T4.17", "capital-structure") in by_block
+    assert ("T4.17", "ebitda-adjustments") in by_block
+    assert ("T4.10", "model-chart-strip") in by_block
+    assert ("T4.10", "metric-strip") in by_block
+    for pathway_ in pathways():
+        composed = {e.block_id for e in CP1.entries if e.block_id in pathway_.blocks}
+        for table in ("T4.17", "T4.10"):
+            placed = [b for (t, b) in by_block if t == table and b in composed]
+            assert len(placed) <= 1, (pathway_.id, table, placed)

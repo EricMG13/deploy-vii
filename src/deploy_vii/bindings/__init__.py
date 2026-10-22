@@ -14,7 +14,7 @@ from pydantic import model_validator
 
 from deploy_vii.contracts import Contract, Fact, Identifier, Text, View
 from deploy_vii.display import UnitClass
-from deploy_vii.report_view import FactCoord, Section
+from deploy_vii.report_view import FactCoord, Section, pathways
 
 # Modules whose facts reach the Front Page or module pages; the other statuses show none.
 SHOWN_STATUSES = frozenset({"accepted", "restricted", "candidate"})
@@ -79,10 +79,16 @@ def _name(module_id: str, fact: Fact) -> str:
 def validate_bindings(view: View, maps: Iterable[BindingMap]) -> tuple[str, ...]:
     """One message per unbound or doubly bound fact, per shared slot and per repeated map.
 
-    A fact in an accepted, restricted or candidate module must match exactly one binding.
-    Empty when valid.
+    A fact in an accepted, restricted or candidate module must match exactly one binding in the
+    run's Pathway. A register may be placed in several blocks when no Pathway composes more than
+    one of them (T4.17 feeds FP 01's capital structure and FP 02's EBITDA adjustments), so a
+    fact is doubly bound when two of its bindings name one block, or name two blocks the run's
+    Pathway composes (a rail destination is composed everywhere). Empty when valid.
     """
     maps = tuple(maps)
+    composed = RAIL_DESTINATIONS | set(
+        next(item for item in pathways() if item.id == view.run.pathway).blocks
+    )
     issues: list[str] = []
     for module_id, count in Counter(m.module_id for m in maps).items():
         if count > 1:
@@ -100,9 +106,11 @@ def validate_bindings(view: View, maps: Iterable[BindingMap]) -> tuple[str, ...]
         candidates = by_module.get(module.module_id, [])
         for fact in module.facts:
             hits = [e for e in candidates if e.matches(module.module_id, fact)]
+            blocks = Counter(e.block_id for e in hits)
+            placed = {block for block in blocks if block in composed}
             if not hits:
                 issues.append(f"unbound fact {_name(module.module_id, fact)}")
-            elif len(hits) > 1:
+            elif max(blocks.values()) > 1 or len(placed) > 1:
                 slots = ", ".join(f"{e.block_id}/{e.cell_slot}" for e in hits)
                 issues.append(f"doubly bound fact {_name(module.module_id, fact)}: {slots}")
     return tuple(issues)

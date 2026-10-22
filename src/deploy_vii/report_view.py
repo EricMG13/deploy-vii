@@ -638,6 +638,7 @@ class Unplaced(Contract):
 
     module_id: Identifier
     block_id: Identifier
+    title: Text  # the block's head, so the Limitations page names it as the Front Page does
     state: Literal["absent"] = "absent"
     note: Text
 
@@ -1098,6 +1099,16 @@ _CREDIT_SNAPSHOT: Mapping[str, _Spec] = MappingProxyType(
         "what-changed": _Spec("What changed since the last Report", "CP-8", "prose", ("CP-8",)),
     }
 )
+# Heads and owner codes as FP 02 prints them (``rbot-fp-02-earnings-update.dc.html``): the two
+# Model-owned blocks the Earnings Update composition adds for CP-1's registers.
+_EARNINGS_UPDATE: Mapping[str, _Spec] = MappingProxyType(
+    {
+        "ebitda-adjustments": _Spec(
+            "EBITDA adjustments", "MODEL", "dense", ("CP-1",), route_label="Open in Model"
+        ),
+        "metric-strip": _Spec("Metric strip", "MODEL", "chart", ("CP-1",)),
+    }
+)
 _NO_PRODUCER = "No module produces this block yet."
 _UNBOUND_OWNER = "Unbound"
 _PERIOD_CLASSES = (
@@ -1107,27 +1118,51 @@ _PERIOD_CLASSES = (
     (re.compile(r"PF"), "Pro forma"),
     (re.compile(r"OPEN\b"), "Opening"),
 )
-# FP 01's Model chart strip: the series a producer must supply before a chart can be drawn.
-_STRIP_FIGURES = (
-    ("S.1", "Leverage", "x"),
-    ("S.2", "Interest cover", "x"),
-    ("S.3", "Liquidity", None),
-    ("S.4", "Maturity wall", None),
+# The Model chart strip of FP 01 (S.1 to S.4) and the metric strip of FP 02 (S.1 to S.3): the
+# series a producer must supply before a chart can be drawn.
+_STRIP_FIGURES: Mapping[str, tuple[tuple[str, str, str | None], ...]] = MappingProxyType(
+    {
+        "model-chart-strip": (
+            ("S.1", "Leverage", "x"),
+            ("S.2", "Interest cover", "x"),
+            ("S.3", "Liquidity", None),
+            ("S.4", "Maturity wall", None),
+        ),
+        "metric-strip": (
+            ("S.1", "Leverage", "x"),
+            ("S.2", "Interest cover", "x"),
+            ("S.3", "Liquidity", None),
+        ),
+    }
 )
-_STRIP_NOTE = "Charts need S.1\u2013S.4 series; KPI register shown as a table"
+
+
+def _strip_note(block_id: str) -> str:
+    figures = _STRIP_FIGURES[block_id]
+    return (
+        f"Charts need {figures[0][0]}\u2013{figures[-1][0]} series; KPI register shown as a table"
+    )
 
 
 def _spec_of(block_id: str) -> _Spec:
-    if block_id in _CREDIT_SNAPSHOT:
-        return _CREDIT_SNAPSHOT[block_id]
+    for composition in (_CREDIT_SNAPSHOT, _EARNINGS_UPDATE):
+        if block_id in composition:
+            return composition[block_id]
     # Blocks only another Pathway lists are not produced yet: they keep the idle view's wording.
     return _Spec(block_id.replace("-", " ").capitalize(), _UNBOUND_OWNER, "prose", ())
 
 
 def _honest_state(
-    spec: _Spec, statuses: Mapping[str, Status], pathway: Pathway
+    spec: _Spec,
+    statuses: Mapping[str, Status],
+    pathway: Pathway,
+    blocked_because: Mapping[str, str] = MappingProxyType({}),
 ) -> tuple[BlockState, str]:
-    """State and words of a block no binding filled, from its producers' statuses."""
+    """State and words of a block no binding filled, from its producers' statuses.
+
+    A blocked producer's first limitation (``blocked_because``) is quoted, so the block says
+    why it is empty (a refused envelope names its verification failure).
+    """
     seen = {code: statuses.get(code) for code in spec.producers}
     codes = " · ".join(spec.producers)
     if not seen:
@@ -1137,7 +1172,16 @@ def _honest_state(
     if any(status in {"accepted", "restricted", "candidate"} for status in seen.values()):
         return "absent", f"Absent: {codes} produced no output bound to this block."
     if any(status == "blocked" for status in seen.values()):
-        return "blocked", f"Blocked: {codes} is blocked; the reasons are listed under Limitations."
+        why = "; ".join(
+            f"{code}: {blocked_because[code]}"
+            for code, status in seen.items()
+            if status == "blocked" and code in blocked_because
+        )
+        quoted = f" ({why})" if why else ""
+        return (
+            "blocked",
+            f"Blocked: {codes} is blocked{quoted}; the reasons are listed under Limitations.",
+        )
     outside = [code for code, status in seen.items() if status == "not_in_pathway"]
     if len(outside) == len(seen):
         return "not_in_pathway", f"Not in this Pathway: {codes} is not part of {pathway.title}."
@@ -1375,9 +1419,9 @@ def _meta(spec: _Spec, scale: str | None, as_of: date) -> str | None:
 
 
 def _na_strip(block_id: str, owner: str, scale: str | None) -> tuple[Figure, ...]:
-    """The four chart frames of the strip when no producer supplies their series."""
+    """The chart frames of the strip when no producer supplies their series."""
     figures = []
-    for fig_id, title, unit in _STRIP_FIGURES:
+    for fig_id, title, unit in _STRIP_FIGURES[block_id]:
         reason = "The KPI register carries no series for this chart"
         twin = Block(
             block_id=f"{block_id}-{fig_id.replace('.', '').lower()}-twin",
@@ -1475,9 +1519,14 @@ def _block(
                 base_column=base,
                 absent_columns=absent,
                 figures=_na_strip(block_id, spec.owner, primary.scale) if degraded else (),
-                note=_STRIP_NOTE if degraded else None,
+                note=_strip_note(block_id) if degraded else None,
             )
-    words_state, note = _honest_state(spec, statuses, pathway)
+    blocked_because = {
+        code: module.limitations[0]
+        for code, module in modules.items()
+        if module.status == "blocked" and module.limitations
+    }
+    words_state, note = _honest_state(spec, statuses, pathway, blocked_because)
     if shown:
         words_state = "absent"
         note = f"Absent: {' · '.join(spec.producers)} supplied no rows for this block."
@@ -1505,6 +1554,14 @@ def _call(statuses: Mapping[str, Status]) -> tuple[tuple[CallItem, ...], CallWit
     return pending, None
 
 
+def pathway_has_model_block(pathway: Pathway) -> bool:
+    """Whether the composition holds a block the Model destination owns (owner ``MODEL``).
+
+    Such a Pathway requests CP-MODEL after CP-1 (decision 0009); ``contracts`` lists it.
+    """
+    return any(_spec_of(block_id).owner == "MODEL" for block_id in pathway.blocks)
+
+
 def _unplaced(view: View, pathway: Pathway, maps: tuple["BindingMap", ...]) -> tuple[Unplaced, ...]:
     """One entry per shown module and block it binds to that is neither composed nor a rail page.
 
@@ -1524,9 +1581,14 @@ def _unplaced(view: View, pathway: Pathway, maps: tuple["BindingMap", ...]) -> t
         module = shown.get(module_map.module_id)
         if module is None:
             continue
+        composed = {
+            entry.fact_coord for entry in module_map.entries if entry.block_id in pathway.blocks
+        }
         for entry in module_map.entries:
             if entry.block_id in pathway.blocks or entry.block_id in RAIL_DESTINATIONS:
                 continue
+            if entry.fact_coord in composed:
+                continue  # a second placement of a register this Pathway shows in another block
             table_id = entry.fact_coord.table_id
             if table_id is None or table_id in carried[module.module_id]:
                 listed[(module.module_id, entry.block_id)] = None
@@ -1534,6 +1596,7 @@ def _unplaced(view: View, pathway: Pathway, maps: tuple["BindingMap", ...]) -> t
         Unplaced(
             module_id=module_id,
             block_id=block_id,
+            title=_spec_of(block_id).title,
             note=f"{module_id} output bound to {block_id}, not in this Pathway.",
         )
         for module_id, block_id in listed

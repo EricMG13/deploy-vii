@@ -24,6 +24,9 @@ def synthetic_view() -> View:
         issuer_name="Synthetic issuer",
         as_of=date(2026, 10, 21),
         case_kind="synthetic",
+        # Pinned to the Credit Snapshot set before decision 0009 added CP-MODEL (task 6.5): the
+        # pack, journal and replay-corpus hashes built on this Run stay as recorded.
+        requested_modules=("CP-0", "CP-1", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
     )
     empty = empty_view(run)
     citation = Citation(
@@ -188,7 +191,7 @@ def test_not_in_pathway_is_distinct_from_unrun() -> None:
     in_scope = {m for m, s in statuses.items() if s == "unrun"}
     # Requested modules and their required producers are unrun; everything else is outside.
     assert in_scope == set(dependencies(_run().requested_modules))
-    assert {"CP-0", "CP-1", "CP-1A", "CP-2", "CP-3", "CP-4", "CP-5", "CP-6"} == in_scope
+    assert {"CP-0", "CP-1", "CP-MODEL", "CP-1A", "CP-2", "CP-3", "CP-4", "CP-5", "CP-6"} == in_scope
     assert statuses["CP-1B"] == statuses["CP-8"] == statuses["CP-OS"] == "not_in_pathway"
     assert status_word("unrun") != status_word("not_in_pathway")
     assert status_word("not_in_pathway") == ("not_in_pathway", "Not in this Pathway")

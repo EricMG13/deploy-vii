@@ -590,6 +590,21 @@
     module.limitations.slice(1).forEach(text => content.append(panel("Limitation", node("p", text, "text-content"))));
     return content;
   };
+  // The Model destination (decision 0006 DC-5): the CP-MODEL artifact above the CP-1 register detail.
+  // CP-MODEL emits no calculation JSON yet (M8), so a module that has not run says so and offers none.
+  const renderModelArtifact = () => {
+    const model = report.modules.find(item => item.module_id === "CP-MODEL");
+    const body = node("div");
+    if (model) body.append(chip(model.status_glyph, model.status_word));
+    let words;
+    if (!model || model.status_glyph === "unrun") words = "Model not run: CP-MODEL has not published the Model destination, so no calculation JSON has been emitted. The registers below are the CP-1 output it will publish.";
+    else if (model.status_glyph === "na") words = `Model is not part of the ${front.pathway.title} Pathway, so it is not run.`;
+    else words = "Its status and limitations are on the CP-MODEL page.";
+    const text = node("p", words, "text-content");
+    if (model && model.status_glyph !== "unrun" && model.status_glyph !== "na") { const link = node("a", "CP-MODEL"); link.href = "#CP-MODEL"; text.append(" ", link); }
+    body.append(text);
+    return panel("Model", body);
+  };
   const TABLE_KINDS = new Set(["dense", "keyvalue", "period_grid"]);
   const renderFront = () => {
     const root = node("div", null, "front-grid");
@@ -635,7 +650,7 @@
     }
     if (front.unplaced.length) {
       const list = node("ul", null, "text-content");
-      front.unplaced.forEach(entry => { const item = node("li"); item.textContent = `${entry.block_id} (${report.block_states[entry.state].word}): ${entry.note}`; list.append(item); });
+      front.unplaced.forEach(entry => { const item = node("li"); item.textContent = `${entry.title} · ${entry.block_id} (${report.block_states[entry.state].word}): ${entry.note}`; list.append(item); });
       root.append(panel("Bound outside this Pathway", list));
     }
     report.modules.forEach(item => item.limitations.forEach(text => root.append(panel(item.module_id, node("p", text, "text-content")))));
@@ -652,7 +667,8 @@
     if (module) return module.module_id === "CP-1" ? "model" : "analysis";
     return {front: "front", analysis: "analysis", FIT: "fit", evidence: "evidence", limitations: "limits"}[route] || null;
   };
-  const hasLimitations = report.modules.some(item => item.limitations.length);
+  // Bindings outside this Pathway are listed under Limitations too, so they light the rail.
+  const hasLimitations = report.modules.some(item => item.limitations.length) || front.unplaced.length > 0;
   const showNavigator = (open) => {
     $("navigator").classList.toggle("open", open); $("toggle-nav").setAttribute("aria-expanded", String(open));
   };
@@ -772,7 +788,7 @@
     if (report.mode === "candidate") head.append(node("span", "CANDIDATE PREVIEW · NOT ACCEPTED", "candidate-label"));
     if (route === "front") $("call-root").append(callBand());
     root.append(head);
-    if (module) root.append(renderModule(module));
+    if (module) { if (module.module_id === "CP-1") root.append(renderModelArtifact()); root.append(renderModule(module)); }
     else if (route === "front") root.append(renderFront());
     else if (route === "analysis") root.append(renderAnalysis());
     else if (route === "evidence") root.append(renderSources());

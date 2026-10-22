@@ -657,10 +657,27 @@ def test_every_bound_block_is_composed_a_rail_destination_or_listed_under_limita
         for entry in module_map.entries
         if any(m.module_id == module_map.module_id and m.facts for m in view.modules)
     }
+    # A register this Pathway places in another of its blocks is not "outside" it (task 6.5):
+    # FP 02's EBITDA adjustments and metric strip are second placements in FP 01 and back.
+    second = {
+        entry.block_id
+        for module_map in CREDIT_SNAPSHOT_MAPS
+        for entry in module_map.entries
+        if any(
+            other.fact_coord == entry.fact_coord and other.block_id in preset.blocks
+            for other in module_map.entries
+        )
+    }
     assert shown
     for block_id in shown:
-        assert block_id in preset.blocks or block_id in RAIL_DESTINATIONS or block_id in listed
+        assert (
+            block_id in preset.blocks
+            or block_id in RAIL_DESTINATIONS
+            or block_id in listed
+            or block_id in second
+        )
     assert listed.isdisjoint(preset.blocks) and listed.isdisjoint(RAIL_DESTINATIONS)
+    assert all(item.title for item in report.unplaced)
     assert all(item.state == "absent" for item in report.unplaced)
     assert all(
         f"bound to {item.block_id}, not in this Pathway" in item.note for item in report.unplaced
@@ -671,7 +688,8 @@ def test_earnings_update_lists_the_chart_strip_and_capital_structure_bindings() 
     preset = next(p for p in pathways() if p.id == "earnings_update")
     report = build(_on_pathway("earnings_update"), preset, CREDIT_SNAPSHOT_MAPS)
     listed = {(item.module_id, item.block_id) for item in report.unplaced}
-    assert ("CP-1", "model-chart-strip") in listed
+    # The KPI dashboard sits in FP 02's metric strip, so FP 01's strip is not "outside" it.
+    assert ("CP-1", "model-chart-strip") not in listed
     assert ("CP-1", "capital-structure") in listed
     credit = build(credit_snapshot_view(), CREDIT, CREDIT_SNAPSHOT_MAPS)
     assert not credit.unplaced
@@ -681,8 +699,11 @@ def test_unplaced_bindings_reach_the_data_island() -> None:
     preset = next(p for p in pathways() if p.id == "earnings_update")
     view = _on_pathway("earnings_update")
     island = json.loads(_island(render(view, build(view, preset, CREDIT_SNAPSHOT_MAPS))))
-    assert {"model-chart-strip", "capital-structure"} <= {
-        item["block_id"] for item in island["report"]["unplaced"]
+    unplaced = island["report"]["unplaced"]
+    assert "capital-structure" in {item["block_id"] for item in unplaced}
+    # The block's head travels with its id, for the Limitations page.
+    assert {"Capital structure"} == {
+        item["title"] for item in unplaced if item["block_id"] == "capital-structure"
     }
 
 

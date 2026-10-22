@@ -23,7 +23,13 @@ from deploy_vii.downstream_readiness import (
     downstream_inputs,
     validate_downstream_review,
 )
-from deploy_vii.envelope import Envelope, EnvelopeError, envelope_issues, write_envelope
+from deploy_vii.envelope import (
+    Envelope,
+    EnvelopeError,
+    envelope_issues,
+    read_envelope,
+    write_envelope,
+)
 from deploy_vii.execution import (
     Attempt,
     Execution,
@@ -500,3 +506,92 @@ def write_cp1_envelope(store: Execution, destination: Path) -> Path:
         (destination / name).write_text(raw, encoding="utf-8")
     (destination / "complete.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     return destination / "envelope.md"
+
+
+# --- Reading an exported envelope back (task 6.5): the first downstream consumer ------------
+
+
+class EnvelopeRefused(ValueError):
+    """An exported CP-1 envelope that does not verify against the journal; ``issues`` says why."""
+
+    def __init__(self, issues: tuple[str, ...]) -> None:
+        super().__init__("; ".join(issues))
+        self.issues = issues
+
+
+_EXPORTED_FILES = ("envelope.md", "envelope.json")
+
+
+def cp1_binding_issues(
+    envelope: Envelope, receipt: dict[str, object], snapshot: ExecutionSnapshot
+) -> tuple[str, ...]:
+    """What ties a verified envelope to the journal that promoted it.
+
+    `read_envelope` checks the Markdown only against its own sidecar, so a consistently
+    rewritten pair passes it. The pair is genuine only when its module is the CP-1 head's
+    settled blob, built on the journal's run and prepared pack, with the head's status, and
+    when the receipt records the same hashes, QA report and statuses.
+    """
+    head = next((h for h in snapshot.heads if h.module_id == "CP-1"), None)
+    if head is None or head.status not in ("accepted", "restricted"):
+        return ("CP-1 has no accepted or restricted head in the journal",)
+    issues: list[str] = []
+    if envelope.run != snapshot.run:
+        issues.append("Envelope run differs from the journal's run")
+    if envelope.pack_sha256 != snapshot.pack_sha256:
+        issues.append("Envelope pack differs from the journal's prepared pack")
+    if envelope.module.content_hash() != head.result_sha256:
+        issues.append("Envelope module is not the CP-1 head's settled module")
+    if envelope.module.status != head.status:
+        issues.append("Envelope status differs from the CP-1 head")
+    qualification = (
+        None if head.qualification is None else head.qualification.model_dump(mode="json")
+    )
+    quality = None if envelope.quality is None else envelope.quality.content_hash()
+    expected: dict[str, object] = {
+        "schema_version": "cp1-envelope/1",
+        "module_sha256": head.result_sha256,
+        "pack_sha256": snapshot.pack_sha256,
+        "registers_sha256": envelope.registers_sha256,
+        "quality_report_sha256": quality,
+        "status": head.status,
+        "qualification": qualification,
+    }
+    issues.extend(
+        f"Receipt {key} does not match the journal"
+        for key, value in expected.items()
+        if receipt.get(key) != value
+    )
+    return tuple(issues)
+
+
+def read_cp1_envelope(store: Execution, directory: Path) -> Envelope:
+    """The CP-1 envelope exported to `directory`, verified against the journal; else refused.
+
+    Reads `complete.json`, `envelope.md` and `envelope.json` once, checks the files against the
+    receipt's SHA-256 hashes, the Markdown against the sidecar (`read_envelope`) and the pair
+    against the journal (`cp1_binding_issues`). Any failure raises `EnvelopeRefused` carrying
+    every issue found; nothing partial is returned. The contract comes from the sidecar; the
+    Markdown is verified against it, not decoded.
+    """
+    try:
+        receipt = json.loads((directory / "complete.json").read_text(encoding="utf-8"))
+        raw = {name: (directory / name).read_text(encoding="utf-8") for name in _EXPORTED_FILES}
+    except (OSError, ValueError) as error:  # missing, unreadable or not JSON: nothing to verify
+        raise EnvelopeRefused((f"Envelope export cannot be read: {error}",)) from error
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("files"), dict):
+        raise EnvelopeRefused(("Envelope receipt is not a cp1-envelope receipt",))
+    issues = [
+        f"{name} differs from the receipt's hash"
+        for name, text in raw.items()
+        if receipt["files"].get(name) != text_sha256(text)
+    ]
+    if issues:
+        raise EnvelopeRefused(tuple(issues))
+    try:
+        envelope = read_envelope(raw["envelope.md"], raw["envelope.json"])
+    except EnvelopeError as error:
+        raise EnvelopeRefused(error.issues) from error
+    if issues := list(cp1_binding_issues(envelope, receipt, store.read())):
+        raise EnvelopeRefused(tuple(issues))
+    return envelope

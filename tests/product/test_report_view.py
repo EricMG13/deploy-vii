@@ -464,12 +464,15 @@ FRONT_PAGES = {
     "distressed_restructuring": "rbot-fp-05-distressed-restructuring.dc.html",
     "portfolio_decision": "rbot-fp-06-portfolio-decision.dc.html",
 }
-# Independent table: the module sets exactly as the M3 brief lists them (Task C).
+# Independent table: the module sets exactly as the M3 brief lists them (Task C), with CP-MODEL
+# right after CP-1 where the composition holds a Model-owned block (decision 0009, task 6.5).
 BRIEF_MODULES = {
-    "credit_snapshot": ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
-    "earnings_update": ("CP-0", "CP-1", "CP-1B", "CP-1D", "CP-5"),
+    "credit_snapshot": (
+        *("CP-0", "CP-1", "CP-MODEL", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
+    ),
+    "earnings_update": ("CP-0", "CP-1", "CP-MODEL", "CP-1B", "CP-1D", "CP-5"),
     "relative_value": (
-        *("CP-0", "CP-1", "CP-1C", "CP-2", "CP-2D"),
+        *("CP-0", "CP-1", "CP-MODEL", "CP-1C", "CP-2", "CP-2D"),
         *("CP-3", "CP-3C", "CP-3D", "CP-5"),
     ),
     "covenant_refinancing": (
@@ -480,7 +483,7 @@ BRIEF_MODULES = {
         *("CP-0", "CP-1", "CP-1A", "CP-2", "CP-2A"),
         *("CP-2G", "CP-2H", "CP-4", "CP-4C", "CP-5"),
     ),
-    "portfolio_decision": ("CP-0", "CP-1", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
+    "portfolio_decision": ("CP-0", "CP-1", "CP-MODEL", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
 }
 
 
@@ -528,18 +531,21 @@ def test_pathway_blocks_agree_with_the_shipped_bindings() -> None:
 
     credit = next(p for p in pathways() if p.id == "credit_snapshot")
     bound = {entry.block_id for entry in CP1.entries}
-    # Bindings to Front Page blocks must name blocks of the Credit Snapshot composition; the
-    # only other targets are the rail destinations (Evidence, Limitations, the issuer header).
+    earnings = next(p for p in pathways() if p.id == "earnings_update")
+    # Bindings to Front Page blocks must name blocks of the Credit Snapshot or Earnings Update
+    # composition; the only other targets are the rail destinations (Evidence, Limitations, the
+    # issuer header).
     assert RAIL_DESTINATIONS == {"evidence", "limitations", "header"}
     assert {"financials-credit-metrics", "capital-structure", "model-chart-strip"} <= set(
         credit.blocks
     )
-    assert bound - set(credit.blocks) <= RAIL_DESTINATIONS
+    assert bound - set(credit.blocks) - set(earnings.blocks) <= RAIL_DESTINATIONS
     assert {e.block_id for e in CP0.entries} <= RAIL_DESTINATIONS
-    # FP 01 has no separate metric strip: it stays in the Earnings Update composition only.
-    assert "metric-strip" not in bound and "metric-strip" not in credit.blocks
-    earnings = next(p for p in pathways() if p.id == "earnings_update")
-    assert "metric-strip" in earnings.blocks
+    # FP 01 has no separate metric strip or EBITDA adjustments block: those two are FP 02's
+    # second placements of the KPI dashboard and adjusted EBITDA bridge registers.
+    second = {"metric-strip", "ebitda-adjustments"}
+    assert second <= bound and not second & set(credit.blocks)
+    assert second <= set(earnings.blocks)
 
 
 def test_portfolio_fit_block_is_present_though_it_has_no_module_yet() -> None:

@@ -231,6 +231,8 @@ What changed:
 - Small refactors: `table_markdown.null_confusable` (the interface null-marker rule, shared by
   both writers), `canonical_tables.REGISTER_NOTE` (the register note promotion removes).
 
+The contract comes from the sidecar (`envelope.json`); the Markdown is verified against it, not decoded.
+
 Promotion conditions: CP-0 `Run CP-1`; the four stages valid and recomputing; the review binds
 the current QA inputs and upgrades no ceiling; QA not `Blocked`; claims resolve; the
 `canonical-handoff` slot present and the promoted envelope verifying. Settlement is decision
@@ -277,3 +279,38 @@ Not verified: real Caesars packs (absent from the worktree, so `make replay` ski
 `pack-absent`); envelope size and timing on a real-size pack (the fixture is 45k facts, 3.5 MB
 Markdown, a 43 MB sidecar, about 22 s per promotion); the 20,000-row codec limit against real
 gap counts; live model QA reviews; rendering of the envelope by downstream consumers; Linux CI.
+
+## 6.5 CP-1 bindings
+
+Task `dvii-impl-m6-cp1-bindings`. The accepted envelope drives the Model destination and
+the Credit Snapshot blocks.
+
+- Accepted route: `cp1_workflow.read_cp1_envelope(store, directory)` verifies an exported
+  envelope against the journal (receipt file hashes, `read_envelope`, module hash equals the
+  CP-1 head's `result_sha256`, run, prepared pack, status, QA report, qualification) and raises
+  `EnvelopeRefused` with every issue otherwise. New `cp1_render.py`: `envelope_view`,
+  `refused_view` (CP-1 blocked, issues as limitations, no values), `render_cp1_envelope`; CLI
+  `execution render --envelope DIR --output DIR [--pathway P]` (see product-cli.md).
+- FP 02: `ebitda-adjustments` (T4.17) and `metric-strip` (T4.10, S.1 to S.3 n/a frames) are
+  second placements. `validate_bindings` now treats a fact as doubly bound only when two of its
+  bindings name one block or two blocks the run's Pathway composes; `_unplaced` skips a second
+  placement; `Unplaced.title` is exported.
+- Presets: Credit Snapshot, Earnings Update, Relative Value and Portfolio Decision (each holds
+  a `MODEL`-owned block by `_Spec.owner`) request CP-MODEL after CP-1 (decision 0009
+  amendment). Covenant & Refinancing's maturity wall is MODEL-owned in the design but has no spec.
+- Shell: the CP-1 page opens with a Model panel (CP-MODEL status; "Model not run" and no
+  calculation JSON until M8); the rail dot also lights for unplaced bindings; the Limitations
+  panel prints block titles.
+- Statuses: CP-1 `implementation` -> implemented; CP-MODEL stays partial. The journal has no
+  transition that sets a settled head's `rendering_acceptance`, so it stays `unrun`; the render
+  receipt records it and `browser_acceptance: unrun`.
+- Ripple: adding CP-MODEL to default Runs changed pack hashes and CP-0 consumer lists in
+  fixtures. The shared synthetic Runs (`test_render.synthetic_view`, `test_financials.freeze`) are
+  pinned to the previous set so the replay corpus and its hashes are untouched; other fixture
+  assertions updated (`test_report_view`, `test_registry`, `test_credit_snapshot`).
+- Baselines: none shifted (FP 01 fixture has no unplaced bindings or module limitations).
+- Acceptance previews: `artifacts/rendering/m6-5/fp01-fixture-candidate.html` and
+  `fp01-accepted-envelope.html` (untracked).
+
+Not verified: a live CP-1 render (none accepted yet; M7); `rendering_acceptance` on a real
+head; Linux baselines.

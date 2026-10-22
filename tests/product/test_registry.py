@@ -66,9 +66,14 @@ def test_cp5_fan_in_includes_selected_cp_model_but_does_not_pull_it_in() -> None
     assert edge_rule("CP-5", "CP-MODEL") == "restricted"
     order = plan(("CP-5", "CP-MODEL"))
     assert order.index("CP-MODEL") < order.index("CP-5")
-    # CP-5 itself requires only CP-0, and no Pathway preset (decision 0009) requests CP-MODEL.
+    # CP-5 itself requires only CP-0; only the presets whose composition holds a Model-owned
+    # block request CP-MODEL (decision 0009), and CP-5 then follows it in the plan.
     assert "CP-MODEL" not in plan(("CP-5",))
-    assert all("CP-MODEL" not in requested for requested in PATHWAY_MODULES.values())
+    wanting = {pid for pid, requested in PATHWAY_MODULES.items() if "CP-MODEL" in requested}
+    assert wanting == {"credit_snapshot", "earnings_update", "relative_value", "portfolio_decision"}
+    for pid in wanting:
+        order = plan(PATHWAY_MODULES[pid])
+        assert order.index("CP-1") < order.index("CP-MODEL") < order.index("CP-5")
 
 
 def test_coverage_map_cp_model_matches_dc5() -> None:

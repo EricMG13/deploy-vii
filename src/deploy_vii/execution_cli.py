@@ -3,9 +3,12 @@
 import argparse
 import json
 from pathlib import Path
+from typing import get_args
 
+from deploy_vii.contracts import PathwayId
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_render import render_cp1_envelope
 from deploy_vii.cp1_workflow import (
     CP1_STEPS,
     cp1_register_preview,
@@ -33,6 +36,10 @@ def configure(parser: argparse.ArgumentParser) -> None:
     envelope = actions.add_parser("envelope")
     envelope.add_argument("--module", required=True, choices=("CP-1",))
     envelope.add_argument("--output", type=Path, required=True)
+    render = actions.add_parser("render")
+    render.add_argument("--envelope", type=Path, required=True)
+    render.add_argument("--output", type=Path, required=True)
+    render.add_argument("--pathway", choices=get_args(PathwayId))
     actions.add_parser("cp1-quality-inputs").add_argument("--ticket", required=True)
     for name in ("interrupt", "cp0-submit", "cp1-submit", "cp1-promote", "step-output"):
         action = actions.add_parser(name)
@@ -70,6 +77,9 @@ def execute(args: argparse.Namespace) -> str:
         return attempt_json(store, promote_cp1(store, args.ticket, review))
     elif args.action == "envelope":
         return str(write_cp1_envelope(store, args.output))
+    elif args.action == "render":
+        receipt = render_cp1_envelope(store, args.envelope, args.output, pathway=args.pathway)
+        return json.dumps(receipt)
     elif args.action in {"statement-preview", "interface-preview"}:
         return str(
             cp1_statement_preview(

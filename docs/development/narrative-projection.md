@@ -54,10 +54,11 @@ not an authentication API. `validate_canonical_tables` recomputes against extern
 inputs and rejects altered Claims or fields. `cp1_register_preview` remains the
 journal trust boundary.
 
-Remaining delivery work includes the full canonical envelope and ordered H2s,
-QA and numeric confidence, definition-alignment and extraction-completeness
-confirmation, typed final handoff consumer, full Model workbook presentation,
-large-pack transport qualification and final promotion. Rendering a supplied chain
+Remaining delivery work is definition-alignment and extraction-completeness
+confirmation, the calculation JSON of CP-MODEL (M8) and large-pack transport
+qualification. The canonical envelope, QA and promotion landed in task 6.4 and the
+typed consumer that renders the accepted envelope (`read_cp1_envelope`) in task 6.5.
+Rendering a supplied chain
 does not prove its issuer-specific reasoning, contrary evidence, causal downside,
 materiality or semantic sufficiency. Those require the full analytical review and
 live qualification. CP-1A and subsequent milestones remain open.

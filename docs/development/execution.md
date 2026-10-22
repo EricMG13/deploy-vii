@@ -246,8 +246,9 @@ identity-confirmed source produces rejection, then blocking if repair also fails
 
 The final step leaves the ticket pending. It does not accept CP-1 or CP-MODEL;
 promotion (below) does. Source and constructed statement previews are available through
-`statement-preview`; see [table projection](report-tables.md). Complete Workbench
-projection remains pending (task 6.5). Historical Model calculations are not the CP-MODEL
+`statement-preview`; see [table projection](report-tables.md). The accepted CP-1
+envelope renders as the Front Page through `render` (task 6.5, below). Historical Model
+calculations are not the CP-MODEL
 workbook export. Every analytical qualification remains `unrun`.
 
 ### CP-1 promotion (task 6.4)
@@ -292,7 +293,25 @@ CP-MODEL's artifact (decision 0006 DC-5) is the HTML Model destination plus the 
 JSON of the accepted CP-1 financial model; the r14 XLSX workbook export is deferred and
 recorded so in `docs/methodology/r14-coverage.json`. CP-MODEL requires accepted CP-1 (a
 blocked CP-1 blocks it) and, when selected, is an analyst input to CP-5 (restricted if
-blocked). No Pathway preset requests it, so it runs only when requested.
+blocked). The presets whose composition holds a Model-owned block (Credit Snapshot,
+Earnings Update, Relative Value, Portfolio Decision) request it right after CP-1
+(decision 0009, task 6.5). Nothing runs it yet, so it stays `unrun` and the Model
+destination says "Model not run"; its calculation JSON is M8.
+
+### Rendering the accepted envelope (task 6.5)
+
+`read_cp1_envelope(store, directory)` reads an exported envelope back and refuses it
+(`EnvelopeRefused`, every issue listed) unless it verifies against the journal: the files
+match the receipt's hashes, the Markdown verifies against its sidecar (`read_envelope`
+checks the pair only against itself, so a consistently rewritten pair would pass it), and
+the sidecar's module is the CP-1 head's settled module (`result_sha256`) on the journal's
+run and prepared pack, with the head's status, QA report and statuses as the receipt
+records them. `render_cp1_envelope` and the `render` command then build the Front Page
+from that envelope: the CP-1 registers come from it, never from a candidate. A refused
+envelope renders CP-1 blocked with the issues as its limitations and no CP-1 value at
+all. The command records the head's `rendering_acceptance` as it stands (`unrun`) and
+never sets it: only a browser acceptance run can, and the journal has no transition that
+changes a settled head's statuses.
 
 New stores use `execution/5` (blob storage above), embedding `module/5` table layouts,
 status-carrying inputs, stated comparisons and calculation status. Existing
