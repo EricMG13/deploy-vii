@@ -248,16 +248,19 @@
     const panel = node("div"); panel.append(node("p", `Table twin · ${block.title}`, "twin-title"), dataTable(block, false, block));
     return panel;
   };
-  const lineNodes = (line, block) => {
+  // Runs renderer: Front Page lines join their runs with a space; claim runs (MC-2) keep the
+  // spacing Python resolved, so they join with nothing.
+  const runNodes = (runs, block, separator) => {
     const out = [];
-    line.runs.forEach((run, index) => {
-      if (index) out.push(document.createTextNode(" "));
+    runs.forEach((run, index) => {
+      if (index && separator) out.push(document.createTextNode(separator));
       if (run.kind === "text") out.push(document.createTextNode(run.text));
       else if (run.kind === "pen") { const pen = node("span", null, "pen-tag"); pen.append(icon("pen", 10), document.createTextNode(run.text)); out.push(pen); }
       else out.push(cellNode({text: run.text, prov: run.kind === "gap" ? "gap" : provOfRef(run.ref_id), ref_id: run.kind === "gap" ? null : run.ref_id, gap_ref: run.kind === "gap" ? run.ref_id : null}, block, block.title, true));
     });
     return out;
   };
+  const lineNodes = (line, block) => runNodes(line.runs, block, " ");
   const sectionColumn = (block, name, lines, kind) => {
     const column = node("div", null, "sw-col " + kind);
     const head = node("div", null, "sw-head"); head.append(icon(kind === "strengths" ? "tick" : "close", 12), document.createTextNode(name));
@@ -552,9 +555,10 @@
       content.append(panel("Analysis", node("p", message, "empty-state")));
     }
     module.claims.forEach(claim => {
-      const body = node("div"); body.append(node("p", claim.text, "text-content")); body.dataset.claimId = claim.claim_id;
+      const body = node("div"), text = node("p", null, "text-content");
+      text.append(...runNodes(claim.runs, {title: "Finding", rows: []}, "")); body.append(text); body.dataset.claimId = claim.claim_id;
       const evidence = node("button", "Inspect supporting evidence", "source-button"); evidence.type = "button";
-      evidence.addEventListener("click", () => openInspector(() => passportCard(report.run.case_kind === "synthetic" ? "synthetic" : "cited", claim.claim_id, claim.text, [
+      evidence.addEventListener("click", () => openInspector(() => passportCard(report.run.case_kind === "synthetic" ? "synthetic" : "cited", claim.claim_id, claim.plain, [
         ["Claim", claim.claim_id], ["Evidence", sourceText(claim.citations) || "No citation supplied"], ["Limitation", claim.limitation], ["Artifact SHA-256", module.artifact_sha256]]), null, evidence));
       body.append(evidence); content.append(panel("Finding", body));
     });

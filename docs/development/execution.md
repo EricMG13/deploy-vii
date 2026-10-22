@@ -61,6 +61,47 @@ projection is pending. A model-supplied success flag is never a validator. Synth
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
 
+## Claim run text (decision 0005 MC-2)
+
+`Claim.text` of every module is run text (`deploy_vii.prose`): literal text plus
+references that Python resolves and spells. The model never writes a number.
+
+- Grammar. `{<ref>}` or `{<ref>|<unit>}` is a figure; `[<ref>]` is a chip, drawn as a
+  gap when `<ref>` names a gap. `<ref>` follows `contracts.Identifier`
+  (`[A-Za-z0-9][A-Za-z0-9_.:-]*`, at most 160 characters) and names the module's own
+  records: a `Fact.fact_id` (a table cell is a fact, so this is also the table-row
+  reference) or a `Fact.calculation_id` that exactly one fact carries. A gap is an
+  unsettled fact (`status` other than `known`); the page shows its report-wide `G#`.
+  Braces and square brackets are reserved: one outside a well-formed reference is
+  malformed, and the `Claim` contract refuses it.
+- Labels. Outside references a numeric character must sit inside a label
+  (`prose.LABELS`): periods (`FY2025`, `FY25`, `FY2025/26`, `Q2`, `H1`, `30 June 2026`,
+  `June 30, 2026`, `2026-06-30`, a year `19xx`/`20xx`), filings (`10-K`, `10-Q`, `8-K`,
+  `20-F`, `6-K`, `40-F`, `S-1`, `F-1`, with `/A`), instruments (a coupon followed by an
+  instrument noun, as in `6.50% senior secured notes due 2032`; `2032s`;
+  `Term Loan B-2`), sections (`Item 1A`, `Note 12`, `Section 4.03(a)`, `Exhibit 10.1`,
+  `Rule 144A`) and ordinals or versions (`2nd`, `r14`, `v2.1`, `CP-1A`). The run's
+  issuer name is also literal. Any other numeric token is a bare figure.
+- Validation. `candidate_issues` adds `prose_issues(candidate, names=(issuer_name,))`:
+  an unresolved reference, a bare figure, a figure that names a gap, a text or unsettled
+  fact, a figure with neither a citation nor a calculation, a numeric fact used as a chip,
+  or a unit token that is neither the fact's unit nor the unit Python shows
+  (`report_view.figure_unit`) is an issue, so the attempt settles `rejected` (attempt 0)
+  or `blocked` (the repair). The unit token is an expectation, never display text.
+- Resolution. `report_view.resolve(text, prose.bind(facts), module_refs(index, module_id))`
+  spells each figure with `fact_spelling` (the cell's number rule; exact text past the
+  100-exponent bound) plus the amount's scale label, and marks provenance with the
+  fact's report-wide id (`K#` before `C#`/`S#`, `G#` for gaps). It raises on any issue,
+  so a stored module accepted before this rule cannot render a bare figure.
+- Limits. The rule is lexical. A year label also admits a four-digit count in the year
+  range ("2000 employees"), a section label admits any number after its word
+  ("Note 750"), and spelled-out numbers ("twelve") are words. Semantic review of the
+  prose remains required.
+- CP-1 narrative prose uses the same label rule with no references (`narrative._prose`):
+  its numbers and gaps are evidence parts. The projection writes each evidence part into
+  the claim as `[<fact id>]` of its evidence-trace Evidence cell, which resolves to the
+  `E#` label.
+
 ## Storage (`execution/5`)
 
 ```

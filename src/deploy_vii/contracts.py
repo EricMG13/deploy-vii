@@ -7,11 +7,16 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+from deploy_vii.prose import valid_syntax
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=160)]
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Text = Annotated[str, Field(min_length=1)]
+# Model prose: literal text plus {ref|unit} figure and [ref] chip references (decision 0005
+# MC-2). The syntax is checked here; references resolve where the facts are (prose_issues).
+RunText = Annotated[Text, AfterValidator(valid_syntax)]
 Status = Literal[
     "unrun",
     "candidate",
@@ -184,7 +189,7 @@ class Fact(Contract):
 
 class Claim(Contract):
     claim_id: Identifier
-    text: Text
+    text: RunText
     citations: tuple[Citation, ...]
     limitation: str | None = None
 

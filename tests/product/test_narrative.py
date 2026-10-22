@@ -106,10 +106,32 @@ def test_empty_review_retains_every_input_gap_and_explicit_unassessed_dimensions
     assert report.status != "candidate"
 
 
-@pytest.mark.parametrize("text", ["Debt rose 12%", "More than \uff12 times", "Ratio ½", "   "])
+@pytest.mark.parametrize(
+    "text",
+    [
+        *("Debt rose 12%", "More than \uff12 times", "Ratio \u00bd", "   "),
+        *("Leverage of 3.5x in FY2025", "See [external](https://example.invalid)"),
+        "Debt {narrative-evidence:x|US$ m}",
+    ],
+)
 def test_model_prose_cannot_introduce_numeric_literals_or_blank_reasoning(text: str) -> None:
     with pytest.raises(ValueError):
         ProsePart(text=text)
+
+
+def test_cp1_narrative_accepts_period_and_filing_labels() -> None:
+    """Review W5: periods, filings, instruments and sections no longer burn the repair budget."""
+    for text in (
+        "Leverage rose between FY2024 and FY2025, per the 10-K and the Q2 2026 10-Q",
+        "The 6.50% notes due 2032 rank behind Term Loan B-2, as Item 1A and Note 12 describe",
+        "Liquidity is tested at 30 June 2026 under Section 4.03(a) of method r14 for CP-1",
+    ):
+        assert ProsePart(text=text).text == text
+    inputs = narrative_inputs(*case())
+    review = populated(inputs)
+    labelled = review.findings[0].model_copy(update={"title": "Liquidity after the FY2025 10-K"})
+    labelled_review = review.model_copy(update={"findings": (labelled,)})
+    assert validate_narrative_review(inputs, labelled_review) == ()
 
 
 @pytest.mark.parametrize(

@@ -175,3 +175,18 @@ register preview has been exercised on the synthetic readiness fixture, not on r
 output, so the shell's rendering of live CP-0 results is untested. Live rendering of real CP-0
 and CP-1 output (M7) and Linux baselines remain outstanding; `rendering_acceptance` for CP-0
 and CP-1 is `partial` (synthetic fixture plus candidate registers) until then.
+
+## Claim runs on module pages (M6 task 6.2, decision 0005 MC-2)
+
+A module page draws each `Claim` from `claims[].runs`, which `render()` adds to the data
+island next to `text` (`report_view.resolve`; grammar in
+[execution.md](development/execution.md#claim-run-text-decision-0005-mc-2)). `app.js`
+renders them with the Front Page runs renderer (`runNodes`, shared with `lineNodes`): a
+`fig` run is a provenance-marked button that opens its `C#`/`K#`/`S#` passport, a `gap` run
+is the gap chip (`∅ G#`, the gap reason as its title) and a `text` run is a text node. Claim
+runs keep the spacing Python resolved, so they join with no separator; Front Page lines keep
+their single space. The "Inspect supporting evidence" passport title is `claims[].plain`, the
+resolved text. The raw run text never reaches a text node, and a claim that does not resolve
+stops the render. Tested by `test_claim_runs_render_through_runs_renderer` (browser) and
+`test_claim_runs_reach_the_data_island_resolved`. The Front Page shows no claims, so the
+pixel baselines are unchanged.

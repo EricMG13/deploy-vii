@@ -108,6 +108,17 @@ def test_module_duplicate_and_unrun_contracts() -> None:
         Module(**base, claims=(claim, claim))
 
 
+def test_claim_text_is_run_text_with_well_formed_references() -> None:
+    """MC-2: the contract checks reference syntax; resolution needs the module's facts."""
+    text = "Revenue {fact-1|US$ m} in FY2025; debt [gap.debt] is open."
+    assert Claim(claim_id="x", text=text, citations=()).text == text
+    # Same shape as module/5: a bare figure is a module-validation issue, not a schema error.
+    assert Claim(claim_id="x", text="Debt rose 12%", citations=()).text == "Debt rose 12%"
+    for malformed in ("Revenue {fact-1", "Revenue {}", "See [] and", "Unit {fact-1|}"):
+        with pytest.raises(ValidationError, match="Malformed run text"):
+            Claim(claim_id="x", text=malformed, citations=())
+
+
 def test_module_v5_inherited_limitations_input_status_and_old_store_rejection() -> None:
     base = {"run_id": "r", "issuer_id": "i", "as_of": date(2026, 10, 21), "module_id": "CP-3"}
     assert Input(input_id="CP-4", sha256="a" * 64).status == "accepted"

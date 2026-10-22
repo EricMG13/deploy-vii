@@ -95,3 +95,83 @@ cap at Directly Sourced.
 Not verified: that each register-level ceiling is semantically right for every record beyond
 the fixture registers; an Estimated or Proxy record from a real producer; any live model
 output against the ceilings.
+
+## 6.2 Prose runs
+
+Task `dvii-impl-m6-prose-runs`. Review W5, decision 0005 MC-2: numbers in model prose
+appear only as resolved references, for `Claim.text` of every module and for CP-1's
+narrative prose.
+
+What changed:
+
+- `prose.py` (new): the run-text grammar (`tokenize`, `check`, `bare_figures`, `LABELS`),
+  binding (`bind`: fact ids and single-carrier calculation ids) and module validation
+  (`issues`, `prose_issues`). Grammar, labels and limits are documented in
+  `docs/development/execution.md` "Claim run text".
+- `contracts.py`: `Claim.text` is `RunText`, a `Text` with an `AfterValidator` that refuses
+  malformed references (unbalanced or empty braces and brackets, an empty unit, an id over
+  160 characters). A bare figure is not a schema error, so `module/5` is unchanged: the
+  shape is the same, no committed accepted fixture's bytes change, and a stored module
+  whose claims carry free figures still loads (it cannot render; see below).
+- `execution.candidate_issues` adds `prose_issues(candidate, names=(issuer_name,))`, so a
+  claim with an unresolved reference or a bare figure settles `rejected` (or `blocked` on
+  the repair) before any module validator runs.
+- `narrative._prose` delegates to `prose.check` with no resolvable ids: periods, filings,
+  instruments, sections and versions pass; bare figures and any run reference fail, as
+  numbers enter CP-1 prose through evidence parts. This relaxes the old any-digit rule.
+- `narrative_projection`: a finding's evidence part becomes `[<fact id>]` of its
+  evidence-trace Evidence cell in the claim text (previously the literal `[E#]`), and the
+  projection fails closed if a claim does not resolve. Table text keeps `[E#]`.
+- `report_view`: `figure_unit`, `ClaimRun`, `module_refs` and `resolve`. `render()` adds
+  `claims[].runs` and `claims[].plain` to the data island; `app.js` draws claims through the
+  shared runs renderer (`runNodes`) and uses `plain` as the passport title.
+
+Adopted id grammar: `contracts.Identifier`. A figure or chip names a `Fact.fact_id` of
+the same module or a `Fact.calculation_id` exactly one of its facts carries; a gap is an
+unsettled fact, shown with its report-wide `G#`. No new id space. Ledger gaps reach CP-1
+claims as evidence chips to their trace rows.
+
+Deviations from the brief:
+
+- `resolve` lives in `report_view.py`, not `prose.py`. `contracts` imports `prose` for the
+  `Claim` validator, so `prose` cannot import `report_view` (which imports `contracts`) at
+  load; `resolve` needs the cell spelling and the report-wide ids that `report_view` owns.
+  `prose._fact_issues` imports `report_view.figure_unit` inside the function for the same
+  reason. Its signature is `resolve(text, bound, refs, *, names)` with `bound = prose.bind(facts)`
+  (bound once per module) instead of `(facts, calculations, gaps)`: calculations and gaps
+  are facts of the module here.
+- Figures are spelled with `fact_spelling`, which uses `exact_text` on its exact path, not
+  with `exact_text` alone: `exact_text` of a `decimal_fraction` followed by `%` would show
+  0.125 as "0.125%". The prose figure therefore reads as its table cell does, with the
+  amount's scale label appended.
+- Edited outside the listed paths: `execution.py` (the module validator the brief names),
+  `narrative_projection.py` and `tests/product/test_narrative_projection.py` (the one
+  Python producer of CP-1 `Claim.text`; its `[E#]` labels would not resolve). The
+  projection test's markdown-link injection prose changed to an `<img>` injection because
+  brackets are now reserved in CP-1 prose.
+
+I2 replay: `make replay` does not exist on this base (it comes from the M2 lane), so no
+corpus entry was replayed. Expected effect: a `source_readiness` payload whose analysis
+claims carry digits outside labels now passes its CP-0 step but settles `rejected` at
+`finish` with `Claim <id>: Bare figure: <token>` issues; claims with only labels and words
+are unchanged. A CP-1 narrative review whose prose has periods, filings or section numbers
+now validates where it was refused; one with brackets or braces is now refused.
+
+Evidence: `tests/product/test_prose.py` (`test_prose_runs_allow_labels_reject_bare_figures`
+and its 16 accepted / 13 rejected rows, `test_unresolved_reference_is_an_issue`, malformed
+tokens, tokenizer classification, names, two hypothesis properties, module-level fact-kind
+and unit issues, calculation-id ambiguity, and settlement as `rejected`),
+`test_narrative.py` (`test_cp1_narrative_accepts_period_and_filing_labels`, new rejected
+rows), `test_contracts.py` (`Claim` syntax), `test_report_view.py` (resolution, spelling,
+provenance, fail-closed paths), `test_render.py` (`test_claim_runs_reach_the_data_island_resolved`,
+`test_a_claim_that_does_not_resolve_cannot_render`, and the browser test
+`test_claim_runs_render_through_runs_renderer`) and the CP-1 preview browser test. The Front
+Page shows no claims: pixel baselines are unchanged and were not regenerated. Rewrite
+tournament on `resolve` (incumbent held) and `prose.issues` (readability challenger won: one
+tokenization, no message-prefix test, issues in reading order).
+
+Not verified: replay of the I2 probe corpus (target absent); live model output against the
+grammar; the CP-0 method prompt (`methods/cp0.md`) does not yet teach run text, and changing
+it is a model-facing change that needs E1/E2 evidence; the Markdown register preview
+(`register_view`) still prints raw claim text, so CP-1 claims there show `[<fact id>]`
+tokens; text facts reached by a chip are Python-held fact text, not checked by this rule.

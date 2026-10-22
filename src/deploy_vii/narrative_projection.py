@@ -4,8 +4,10 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from deploy_vii import prose
 from deploy_vii.contracts import Citation, Claim, Fact, ReportTable, TableColumn
 from deploy_vii.financial_contracts import FinancialBook
+from deploy_vii.financial_periods import _id
 from deploy_vii.model_interface import _Cell, _Tables
 from deploy_vii.narrative import (
     _DIMENSIONS,
@@ -84,6 +86,16 @@ def _fields(value: object, path: str = "") -> Iterator[str]:
         yield f"{path or '/'} = {json.dumps(value, ensure_ascii=False, allow_nan=False)}"
 
 
+def _trace_fact_id(identity: str) -> str:
+    """The fact id of an evidence-trace row's Evidence cell, as ``_Tables.row`` derives it."""
+    return _id(
+        "interface-fact",
+        "evidence-trace",
+        _id("interface-row", "evidence-trace", identity),
+        "evidence",
+    )
+
+
 def _passage(
     passage: Passage,
     issuer_name: str,
@@ -91,8 +103,15 @@ def _passage(
     uses: dict[str, list[str]],
     labels: dict[str, str],
     owner: str,
+    *,
+    chips: bool = False,
 ) -> tuple[str, tuple[Citation, ...]]:
-    """Resolve tokens in order; source records remain distinct from analyst prose."""
+    """Resolve tokens in order; source records remain distinct from analyst prose.
+
+    With ``chips`` (claim text, decision 0005 MC-2) evidence is a ``[<fact id>]`` run reference
+    to its evidence-trace Evidence cell, which Python resolves to that cell's ``E#`` label;
+    table text keeps the literal ``[E#]``.
+    """
     fragments: list[str] = []
     citations: list[Citation] = []
     for part in passage:
@@ -102,7 +121,8 @@ def _passage(
             fragments.append(issuer_name)
         elif isinstance(part, EvidencePart):
             record = catalogue[part.evidence_id]
-            fragments.append(f"[{labels[record.evidence_id]}]")
+            marker = _trace_fact_id(record.evidence_id) if chips else labels[record.evidence_id]
+            fragments.append(f"[{marker}]")
             citations.extend(record.citations)
             uses.setdefault(record.evidence_id, []).append(owner)
     return "".join(fragments), tuple(dict.fromkeys(citations))
@@ -132,7 +152,13 @@ def project_narrative(
             ("Credit implication", "credit_implication", finding.credit_implication),
         ):
             text, refs = _passage(
-                passage, issuer_name, catalogue, uses, labels, f"{finding.finding_id}/{field}"
+                passage,
+                issuer_name,
+                catalogue,
+                uses,
+                labels,
+                f"{finding.finding_id}/{field}",
+                chips=True,
             )
             sections.append(f"{label}\n{text}")
             citations.extend(refs)
@@ -345,4 +371,8 @@ def project_narrative(
         )
         for t in tables.layouts()
     )
+    bound = prose.bind(facts)
+    for claim in claims:  # fail closed if a chip misses its trace row
+        if found := prose.issues(claim.text, bound, names=(issuer_name,)):
+            raise ValueError(f"Narrative claim does not resolve: {claim.claim_id}: {found[0]}")
     return NarrativeProjection(tuple(claims), facts, layouts)

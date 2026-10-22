@@ -34,6 +34,7 @@ from deploy_vii.contracts import (
     View,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.prose import prose_issues
 from deploy_vii.readiness import citation_issues
 from deploy_vii.registry import canonical, dependencies, edge_rule, idle_statuses, modules, plan
 
@@ -207,6 +208,8 @@ def candidate_issues(
     records: tuple[Fact | Claim, ...] = (*candidate.facts, *candidate.claims)
     for record in records:
         issues.extend(citation_issues(record.citations, pack.sources))
+    # Decision 0005 MC-2: claim numbers are resolved references to this module's own facts.
+    issues.extend(prose_issues(candidate, names=(run.issuer_name,)))
     return tuple(dict.fromkeys(issues))
 
 

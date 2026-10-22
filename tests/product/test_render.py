@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from playwright.sync_api import expect, sync_playwright
 from pydantic import ValidationError
 
-from deploy_vii.contracts import Citation, Fact, ModuleView, Run, Source, Span, View
+from deploy_vii.contracts import Citation, Claim, Fact, ModuleView, Run, Source, Span, View
 from deploy_vii.registry import dependencies, modules
 from deploy_vii.render import display, empty_view, render
 from deploy_vii.report_view import build, pathways, status_word
@@ -329,3 +330,86 @@ def test_scope_counts_come_from_the_registry_even_with_rejected_modules() -> Non
     assert counts["modules"] == len(modules()) == len({m.module_id for m in modules()})
     assert counts["alternates"] == sum(len(m.aliases) for m in modules())
     assert counts == _payload(render(view))["responsibilities"]
+
+
+def claim_view(text: str | None = None) -> View:
+    """The synthetic view with a CP-1 claim that cites a figure and names a gap."""
+    view = synthetic_view()
+    cp1 = next(m for m in view.modules if m.module_id == "CP-1")
+    debt = Fact(
+        fact_id="debt",
+        label="Merger debt",
+        table_id="T4.6",
+        row_id="debt",
+        status="missing",
+        limitation="No stated amount",
+    )
+    claim = Claim(
+        claim_id="c1",
+        text=text or "Cash was {cash|US$} for FY2025 per the 10-K;\nmerger debt is open [debt].",
+        citations=cp1.facts[0].citations,
+    )
+    module = cp1.model_copy(update={"facts": (*cp1.facts, debt), "claims": (claim,)})
+    return View.model_validate_json(
+        view.model_copy(
+            update={"modules": tuple(module if m.module_id == "CP-1" else m for m in view.modules)}
+        ).model_dump_json()
+    )
+
+
+PLAIN = "Cash was 0 US$ for FY2025 per the 10-K;\nmerger debt is open ∅ G1."
+
+
+def test_claim_runs_reach_the_data_island_resolved() -> None:
+    modules_payload = _payload(render(claim_view()))["modules"]
+    claim = next(m for m in modules_payload if m["module_id"] == "CP-1")["claims"][0]
+    literal = {"ref_id": None, "prov": "none", "kind": "text"}
+    assert claim["runs"] == [
+        {**literal, "text": "Cash was "},
+        {"text": "0 US$", "kind": "fig", "ref_id": "S1", "prov": "synthetic"},
+        {**literal, "text": " for FY2025 per the 10-K;\nmerger debt is open "},
+        {"text": "∅ G1", "kind": "gap", "ref_id": "G1", "prov": "gap"},
+        {**literal, "text": "."},
+    ]
+    assert claim["plain"] == PLAIN
+    assert not any(c in run["text"] for run in claim["runs"] for c in "{}[]")
+
+
+def test_a_claim_that_does_not_resolve_cannot_render() -> None:
+    with pytest.raises(ValueError, match="Bare figure: 12%"):
+        render(claim_view("Cash rose 12% to {cash|US$}."))
+    with pytest.raises(ValueError, match="Unresolved reference: elsewhere"):
+        render(claim_view("Cash is held [elsewhere]."))
+
+
+@pytest.mark.browser
+def test_claim_runs_render_through_runs_renderer(tmp_path: Path) -> None:
+    html = tmp_path / "candidate.html"
+    html.write_text(render(claim_view()), encoding="utf-8")
+    errors: list[str] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800}, offline=True)
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(html.as_uri() + "#CP-1")
+        text = page.locator('[data-claim-id="c1"] p')
+        shown = text.evaluate(
+            "n => { const c = n.cloneNode(true);"
+            " c.querySelectorAll('svg').forEach(s => s.remove()); return c.textContent; }"
+        )
+        assert shown == PLAIN
+        gap = text.locator("button.gap-fig")
+        expect(gap).to_have_text("∅ G1")
+        expect(gap).to_have_attribute("data-ref", "G1")
+        expect(gap).to_have_attribute("title", "No stated amount")
+        figure = text.locator('button.fig[data-ref="S1"]')
+        expect(figure).to_have_text("synthetic0 US$")  # the glyph's title, then the figure
+        inspector = page.get_by_role("complementary", name="Evidence inspector")
+        gap.click()
+        expect(inspector).to_contain_text("No stated amount")
+        page.locator('[data-claim-id="c1"]').get_by_role(
+            "button", name="Inspect supporting evidence"
+        ).click()
+        expect(inspector.locator(".passport-title")).to_have_text(PLAIN)
+        assert not errors
+        browser.close()

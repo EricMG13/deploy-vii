@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from deploy_vii.contracts import Citation, Fact, ModuleView, Run, View
+from deploy_vii.prose import bind
 from deploy_vii.registry import canonical, dependencies
 from deploy_vii.report_view import (
     Block,
@@ -17,6 +18,7 @@ from deploy_vii.report_view import (
     Cell,
     ChartMark,
     ChartSpec,
+    ClaimRun,
     FactCoord,
     FactRefs,
     Line,
@@ -28,7 +30,10 @@ from deploy_vii.report_view import (
     Row,
     TextRun,
     build_index,
+    figure_unit,
+    module_refs,
     pathways,
+    resolve,
     status_word,
 )
 from tests.product.test_render import synthetic_view
@@ -316,6 +321,55 @@ def test_index_allocates_stable_report_wide_ids_with_a_reverse_index() -> None:
     assert ("Reason", "not disclosed") in {(f.name, f.value) for f in gap.fields}
     # deterministic: a second call gives identical output
     assert build_index(view_with(facts)) == (passports, index)
+
+
+def test_claim_runs_resolve_with_the_cell_number_rule_and_report_ids() -> None:
+    """MC-2: Python spells each figure and marks its provenance; the model supplies none."""
+    facts = (
+        fact(
+            "rev", amount=Decimal("1234.5"), unit="MILLIONS", currency="USD", period="FY25"
+        ).model_copy(update={"citations": (A,)}),
+        fact("cover", amount=Decimal("2.456"), unit="MULTIPLE", period="FY25", calculation_id="k"),
+        fact("debt", status="missing", limitation="not disclosed"),
+        fact("name", text="Senior notes", citations=(A,)),
+        fact("plain", text="E7"),
+        fact("bp", amount=Decimal("25"), unit="basis_points", period="FY25", citations=(B,)),
+        fact("huge", amount=Decimal("1E+200"), unit="MILLIONS", period="FY25", citations=(B,)),
+    )
+    view = view_with(facts)
+    _, index = build_index(view)
+    refs = module_refs(index, "CP-1")
+    text = "Revenue {rev|US$ m}, cover {k|x}; debt [debt]; [name] per [plain] at {bp|bp} {huge}."
+    runs = resolve(text, bind(facts), refs, names=(view.run.issuer_name,))
+    assert [(r.text, r.kind, r.ref_id, r.prov) for r in runs] == [
+        ("Revenue ", "text", None, "none"),
+        ("1,235 US$ m", "fig", "C1", "cited"),
+        (", cover ", "text", None, "none"),
+        ("2.46x", "fig", "K1", "calculated"),
+        ("; debt ", "text", None, "none"),
+        ("∅ G1", "gap", "G1", "gap"),
+        ("; ", "text", None, "none"),
+        ("Senior notes", "fig", "C1", "cited"),
+        (" per ", "text", None, "none"),
+        ("E7", "text", None, "none"),  # no citation or calculation: Python's text, no passport
+        (" at ", "text", None, "none"),
+        ("25 bp", "fig", "C2", "cited"),
+        (" ", "text", None, "none"),
+        ("1E+200 MILLIONS", "fig", "C2", "cited"),  # exact text keeps its own unit once
+        (".", "text", None, "none"),
+    ]
+    assert figure_unit(facts[0]) == "US$ m" and figure_unit(facts[3]) is None
+    with pytest.raises(ValueError, match="does not resolve: Unit % differs"):
+        resolve("Revenue {rev|%}", bind(facts), refs)
+    with pytest.raises(ValueError, match="does not resolve: Bare figure: 12%"):
+        resolve("Revenue rose 12%", bind(facts), refs)
+    with pytest.raises(ValueError, match="has no report reference"):
+        resolve("Revenue {rev}", bind(facts), {})
+    with pytest.raises(ValidationError):
+        ClaimRun(text="1", kind="fig", ref_id="G1", prov="cited")
+    with pytest.raises(ValidationError):
+        ClaimRun(text="x", kind="text", ref_id="C1")
+    assert ClaimRun(text="\n\n", kind="text").text == "\n\n"  # spacing between runs is kept
 
 
 def test_synthetic_runs_mark_cited_values_as_synthetic() -> None:

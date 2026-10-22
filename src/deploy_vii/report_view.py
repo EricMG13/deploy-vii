@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import model_validator
 
+from deploy_vii import prose
 from deploy_vii.contracts import (
     PATHWAY_MODULES,
     Contract,
@@ -936,6 +937,111 @@ def scale_label(unit: str, currency: str | None) -> str | None:
         if part
     )
     return label or None
+
+
+# --- Claim run text (decision 0005 MC-2, M6 task 6.2) -------------------------------------------
+
+
+def figure_unit(fact: Fact) -> str | None:
+    """The unit a figure in prose shows with its number, from the fact alone.
+
+    An amount shows its scale label after the number (prose has no block head to state it);
+    a percent, multiple or exact-text spelling already ends in its unit, which this returns.
+    ``None`` for a text fact or an amount whose unit has no label.
+    """
+    if fact.amount is None:
+        return None
+    unit_class = _unit_class(fact.unit)
+    if unit_class is None or abs(fact.amount.adjusted()) > _EXACT_TEXT_ADJUSTED:
+        return _UNIT_SUFFIX.get(fact.unit or "", f" {fact.unit}").strip() or None
+    if unit_class == "percent":
+        return "%"
+    if unit_class == "multiple":
+        return "x"
+    if fact.unit == "currency":
+        return _CURRENCY_LABEL.get(fact.currency or "", fact.currency or "") or None
+    return scale_label(str(fact.unit), fact.currency)
+
+
+class ClaimRun(Contract):
+    """One span of a resolved claim: literal text (spacing kept), a figure or chip, or a gap.
+
+    ``prov`` is the DOM provenance token, as ``block.state`` is for blocks. A chip whose fact has
+    neither a citation nor a calculation is literal text: Python's own spelling, no passport.
+    """
+
+    text: Text
+    kind: Literal["text", "fig", "gap"]
+    ref_id: Identifier | None = None
+    prov: Provenance | Literal["none"] = "none"
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        if self.kind == "text":
+            if self.ref_id is not None or self.prov != "none":
+                raise ValueError("A literal claim run carries no reference")
+            return self
+        _shown(self.text)
+        if self.kind == "gap" and not (
+            self.prov == "gap" and self.ref_id and _GAP_REF.fullmatch(self.ref_id)
+        ):
+            raise ValueError("A gap claim run needs gap provenance and a G# reference")
+        if self.kind == "fig" and not (
+            self.prov in {"cited", "calculated", "synthetic"}
+            and self.ref_id
+            and _REF_OF_PROV[self.prov].fullmatch(self.ref_id)
+        ):
+            raise ValueError("A figure claim run needs a C#, K# or S# reference of its kind")
+        return self
+
+
+def module_refs(index: ReportIndex, module_id: str) -> dict[str, tuple[str, ...]]:
+    """Report-wide ids of one module's facts, keyed by fact id."""
+    return {
+        fact_id: ids for (owner, fact_id), ids in _refs_by_fact(index).items() if owner == module_id
+    }
+
+
+def resolve(
+    text: str,
+    bound: Mapping[str, Fact],
+    refs: Mapping[str, tuple[str, ...]],
+    *,
+    names: Iterable[str] = (),
+) -> tuple[ClaimRun, ...]:
+    """Resolve run text against one module's bound facts (``prose.bind``) and their
+    report-wide ids (``module_refs``).
+
+    Every figure is spelled by ``fact_spelling`` (the cell's number rule, exact text past
+    the 100-exponent bound) with the unit of ``figure_unit``; the model's unit token is only
+    checked. Fails closed on any ``prose.issues`` finding and on a figure with no report id.
+    """
+    names = tuple(names)
+    found = prose.issues(text, bound, names=names)
+    if found:
+        raise ValueError("Claim run text does not resolve: " + "; ".join(found))
+    gaps = {ref for ref, fact in bound.items() if fact.status != "known"}
+    runs: list[ClaimRun] = []
+    for run in prose.tokenize(text, gaps=gaps):
+        if run.kind == "text":
+            runs.append(ClaimRun(text=run.text, kind="text"))
+            continue
+        fact = bound[run.text]
+        item = _cell(fact, refs.get(fact.fact_id, ()))
+        if run.kind == "gap":
+            runs.append(ClaimRun(text=item.text, kind="gap", ref_id=item.gap_ref, prov="gap"))
+            continue
+        shown = item.text
+        unit = figure_unit(fact) if run.figure and item.unit_class == "amount" else None
+        if unit:
+            shown = f"{shown} {unit}"
+        if item.ref_id is None and run.figure:
+            raise ValueError(f"Figure {run.text} has no report reference")
+        if item.ref_id is None:
+            runs.append(ClaimRun(text=shown, kind="text"))
+        else:
+            runs.append(ClaimRun(text=shown, kind="fig", ref_id=item.ref_id, prov=item.prov))
+    return tuple(runs)
 
 
 @dataclass(frozen=True)
