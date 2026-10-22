@@ -811,8 +811,14 @@ def test_timeout_reaches_every_request_manifest_and_the_report_header(rig: Rig) 
     assert "- Timeout: 600.0 s per call (every model)" in rig.report("b2")
 
 
+def test_exponent_notation_timeout_is_accepted_and_reaches_the_manifests(rig: Rig) -> None:
+    argv = [*rig.argv("probe"), *four_models(rig), "--models", FOUR, "--timeout", "1e3"]
+    assert rig.run(argv, Responder(rig.review)) == 0
+    assert _deadlines(rig, "b1") == {(1000.0, 1000.0)}
+
+
 @pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf", "slow"])
-def test_a_bad_timeout_is_refused_by_the_parser(value: str) -> None:
+def test_a_bad_timeout_is_refused_by_the_parser(value: str, rig: Rig) -> None:
     parser = argparse.ArgumentParser()
     cli.configure(parser)
     for word in (["probe"], ["module", "--module", "CP-0"], ["regression"], ["canary"]):
@@ -820,6 +826,10 @@ def test_a_bad_timeout_is_refused_by_the_parser(value: str) -> None:
         with pytest.raises(SystemExit) as refused:
             parser.parse_args([*word, "--cap", "1", "--directory", "d", "--timeout", value])
         assert refused.value.code == 2
+    with pytest.raises(SystemExit):
+        parser.parse_args([*rig.argv("probe"), "--timeout", value])
+    assert not (rig.root / "artifacts" / "model-tests" / ".ledgers").exists()
+    assert not list(rig.reports.glob("live-*.md"))
 
 
 def test_one_batch_with_an_ineligible_model_a_refused_cp1_and_a_deadline_hold_then_reconcile(
