@@ -1,9 +1,11 @@
 """CP-1 candidate registers -> Financials and credit metrics, capital structure, chart strip.
 
 FP 01 has no separate metric strip: the Model chart strip holds S.1 to S.4 and the KPI
-dashboard register (T4.10) feeds it. ``metric-strip`` belongs to the Earnings Update
-composition only. Capital structure is a tabbed block: the debt facility register, the
-adjusted EBITDA bridge (T4.17) and the pro forma adjustments.
+dashboard register (T4.10) feeds it. FP 02 places the same two registers again, in its own
+``metric-strip`` and ``ebitda-adjustments`` blocks: a second placement per Pathway
+composition, never a second binding inside one (``validate_bindings``). Capital structure is
+a tabbed block: the debt facility register, the adjusted EBITDA bridge (T4.17) and the pro
+forma adjustments.
 
 Registers without a Front Page block go to Evidence or Limitations; module register detail
 belongs on the module's Full analysis page. ``unit_class`` is the table's default; the
@@ -54,6 +56,9 @@ CP1 = BindingMap(
             "T4.17", "capital-structure", "amount", "adjusted-ebitda-bridge", "EBITDA adjustments"
         ),
         _bind("pro-forma", "capital-structure", "amount", None, "Transaction and new debt"),
+        # Earnings Update (FP 02): the same registers placed in that Pathway's own blocks.
+        _bind("T4.17", "ebitda-adjustments", "amount", "adjusted-ebitda-bridge", "House view"),
+        _bind("T4.10", "metric-strip", "text", "kpi-dashboard", "KPI dashboard"),
         # Evidence.
         _bind("T4.1", "evidence", "text", "source-register"),
         _bind("T4.2", "evidence", "text", "entity-periods"),

@@ -61,7 +61,7 @@ analysis" page and in Evidence, not on the Front Page.
 | Completed work | Design-system blocks to populate | Evidence/limitation behavior |
 | --- | --- | --- |
 | CP-0 readiness | Issuer/as-of header, source inventory, readiness and gap states, Evidence/Limitations destinations | Source IDs, readable/unreadable status and missing documents; no final credit verdict. |
-| CP-1 + deterministic Model | Financial tables, debt/capital structure, EBITDA bridge, leverage/coverage, model grid and eligible charts | Preserve period, currency, scale, units, basis, formula and input lineage. Missing inputs stay missing. |
+| CP-1 + deterministic Model | Financial tables, debt/capital structure, EBITDA bridge, leverage/coverage, model grid and eligible charts | Preserve period, currency, scale, units, basis, formula and input lineage. Missing inputs stay missing. Done (task 6.5): an accepted CP-1 envelope that verifies against its journal fills the financials, capital structure (three tabs), chart-strip and FP 02 EBITDA-adjustment and metric-strip blocks, and the Model destination states "Model not run" until CP-MODEL publishes; a refused envelope shows CP-1 blocked with its reasons and no value. |
 | CP-1A business context | Company/profile, operating model, ownership and transaction context | Supply CP-2's required context; do not drop it to fit shorter stage numbering. |
 | CP-2 synthesis | Credit assessment, strengths/weaknesses, risks and supported summary fields | Respect selected methodology and CP-6 ownership for final recommendations; interim views say pending synthesis. |
 | CP-3 relative value | Instrument levels, comparable values, pricing/talk, security preference and RV panels | Link deterministic pricing; distinguish market observations from indicative talk. |
@@ -175,3 +175,18 @@ register preview has been exercised on the synthetic readiness fixture, not on r
 output, so the shell's rendering of live CP-0 results is untested. Live rendering of real CP-0
 and CP-1 output (M7) and Linux baselines remain outstanding; `rendering_acceptance` for CP-0
 and CP-1 is `partial` (synthetic fixture plus candidate registers) until then.
+
+## Claim runs on module pages (M6 task 6.2, decision 0005 MC-2)
+
+A module page draws each `Claim` from `claims[].runs`, which `render()` adds to the data
+island next to `text` (`report_view.resolve`; grammar in
+[execution.md](development/execution.md#claim-run-text-decision-0005-mc-2)). `app.js`
+renders them with the Front Page runs renderer (`runNodes`, shared with `lineNodes`): a
+`fig` run is a provenance-marked button that opens its `C#`/`K#`/`S#` passport, a `gap` run
+is the gap chip (`∅ G#`, the gap reason as its title) and a `text` run is a text node. Claim
+runs keep the spacing Python resolved, so they join with no separator; Front Page lines keep
+their single space. The "Inspect supporting evidence" passport title is `claims[].plain`, the
+resolved text. The raw run text never reaches a text node, and a claim that does not resolve
+stops the render. Tested by `test_claim_runs_render_through_runs_renderer` (browser) and
+`test_claim_runs_reach_the_data_island_resolved`. The Front Page shows no claims, so the
+pixel baselines are unchanged.

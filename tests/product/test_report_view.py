@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from deploy_vii.contracts import Citation, Fact, ModuleView, Run, View
+from deploy_vii.prose import bind
 from deploy_vii.registry import canonical, dependencies
 from deploy_vii.report_view import (
     Block,
@@ -17,6 +18,7 @@ from deploy_vii.report_view import (
     Cell,
     ChartMark,
     ChartSpec,
+    ClaimRun,
     FactCoord,
     FactRefs,
     Line,
@@ -28,7 +30,10 @@ from deploy_vii.report_view import (
     Row,
     TextRun,
     build_index,
+    figure_unit,
+    module_refs,
     pathways,
+    resolve,
     status_word,
 )
 from tests.product.test_render import synthetic_view
@@ -318,6 +323,60 @@ def test_index_allocates_stable_report_wide_ids_with_a_reverse_index() -> None:
     assert build_index(view_with(facts)) == (passports, index)
 
 
+def test_claim_runs_resolve_with_the_cell_number_rule_and_report_ids() -> None:
+    """MC-2: Python spells each figure and marks its provenance; the model supplies none."""
+    facts = (
+        fact(
+            "rev", amount=Decimal("1234.5"), unit="MILLIONS", currency="USD", period="FY25"
+        ).model_copy(update={"citations": (A,)}),
+        fact("cover", amount=Decimal("2.456"), unit="MULTIPLE", period="FY25", calculation_id="k"),
+        fact("debt", status="missing", limitation="not disclosed"),
+        fact("name", text="Senior notes", citations=(A,)),
+        fact("plain", text="E7"),
+        fact("bp", amount=Decimal("25"), unit="basis_points", period="FY25", citations=(B,)),
+        fact("huge", amount=Decimal("1E+200"), unit="MILLIONS", period="FY25", citations=(B,)),
+    )
+    view = view_with(facts)
+    _, index = build_index(view)
+    refs = module_refs(index, "CP-1")
+    text = "Revenue {rev|US$ m}, cover {k|x}; debt [debt]; [name] per [plain] at {bp|bp} {huge}."
+    runs = resolve(text, bind(facts), refs, names=(view.run.issuer_name,))
+    assert [(r.text, r.kind, r.ref_id, r.prov) for r in runs] == [
+        ("Revenue ", "text", None, "none"),
+        ("1,235 US$ m", "fig", "C1", "cited"),
+        (", cover ", "text", None, "none"),
+        ("2.46x", "fig", "K1", "calculated"),
+        ("; debt ", "text", None, "none"),
+        ("∅ G1", "gap", "G1", "gap"),
+        ("; ", "text", None, "none"),
+        ("Senior notes", "fig", "C1", "cited"),
+        (" per ", "text", None, "none"),
+        ("E7", "text", None, "none"),  # no citation or calculation: Python's text, no passport
+        (" at ", "text", None, "none"),
+        ("25 bp", "fig", "C2", "cited"),
+        (" ", "text", None, "none"),
+        ("1E+200 MILLIONS", "fig", "C2", "cited"),  # exact text keeps its own unit once
+        (".", "text", None, "none"),
+    ]
+    assert figure_unit(facts[0]) == "US$ m" and figure_unit(facts[3]) is None
+    with pytest.raises(ValueError, match="does not resolve: Unit % differs"):
+        resolve("Revenue {rev|%}", bind(facts), refs)
+    with pytest.raises(ValueError, match="does not resolve: Bare figure: 12%"):
+        resolve("Revenue rose 12%", bind(facts), refs)
+    with pytest.raises(ValueError, match="has no report reference"):
+        resolve("Revenue {rev}", bind(facts), {})
+    with pytest.raises(ValidationError):
+        ClaimRun(text="1", kind="fig", ref_id="G1", prov="cited")
+    with pytest.raises(ValidationError):
+        ClaimRun(text="x", kind="text", ref_id="C1")
+    with pytest.raises(ValidationError):
+        ClaimRun(text="∅ C1", kind="gap", ref_id="C1", prov="gap")
+    percent = fact("p", amount=Decimal("0.125"), unit="PERCENT", period="FY25", citations=(A,))
+    assert figure_unit(percent) == "%"
+    assert [r.text for r in resolve("{p|%}", bind((percent,)), {"p": ("C1",)})] == ["12.5%"]
+    assert ClaimRun(text="\n\n", kind="text").text == "\n\n"  # spacing between runs is kept
+
+
 def test_synthetic_runs_mark_cited_values_as_synthetic() -> None:
     passports, _ = build_index(view_with((fact("a", text="x", citations=(A,)),), "synthetic"))
     assert [(p.ref_id, p.kind) for p in passports] == [("S1", "synthetic")]
@@ -405,12 +464,15 @@ FRONT_PAGES = {
     "distressed_restructuring": "rbot-fp-05-distressed-restructuring.dc.html",
     "portfolio_decision": "rbot-fp-06-portfolio-decision.dc.html",
 }
-# Independent table: the module sets exactly as the M3 brief lists them (Task C).
+# Independent table: the module sets exactly as the M3 brief lists them (Task C), with CP-MODEL
+# right after CP-1 where the composition holds a Model-owned block (decision 0009, task 6.5).
 BRIEF_MODULES = {
-    "credit_snapshot": ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
-    "earnings_update": ("CP-0", "CP-1", "CP-1B", "CP-1D", "CP-5"),
+    "credit_snapshot": (
+        *("CP-0", "CP-1", "CP-MODEL", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
+    ),
+    "earnings_update": ("CP-0", "CP-1", "CP-MODEL", "CP-1B", "CP-1D", "CP-5"),
     "relative_value": (
-        *("CP-0", "CP-1", "CP-1C", "CP-2", "CP-2D"),
+        *("CP-0", "CP-1", "CP-MODEL", "CP-1C", "CP-2", "CP-2D"),
         *("CP-3", "CP-3C", "CP-3D", "CP-5"),
     ),
     "covenant_refinancing": (
@@ -421,7 +483,7 @@ BRIEF_MODULES = {
         *("CP-0", "CP-1", "CP-1A", "CP-2", "CP-2A"),
         *("CP-2G", "CP-2H", "CP-4", "CP-4C", "CP-5"),
     ),
-    "portfolio_decision": ("CP-0", "CP-1", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
+    "portfolio_decision": ("CP-0", "CP-1", "CP-MODEL", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
 }
 
 
@@ -469,18 +531,21 @@ def test_pathway_blocks_agree_with_the_shipped_bindings() -> None:
 
     credit = next(p for p in pathways() if p.id == "credit_snapshot")
     bound = {entry.block_id for entry in CP1.entries}
-    # Bindings to Front Page blocks must name blocks of the Credit Snapshot composition; the
-    # only other targets are the rail destinations (Evidence, Limitations, the issuer header).
+    earnings = next(p for p in pathways() if p.id == "earnings_update")
+    # Bindings to Front Page blocks must name blocks of the Credit Snapshot or Earnings Update
+    # composition; the only other targets are the rail destinations (Evidence, Limitations, the
+    # issuer header).
     assert RAIL_DESTINATIONS == {"evidence", "limitations", "header"}
     assert {"financials-credit-metrics", "capital-structure", "model-chart-strip"} <= set(
         credit.blocks
     )
-    assert bound - set(credit.blocks) <= RAIL_DESTINATIONS
+    assert bound - set(credit.blocks) - set(earnings.blocks) <= RAIL_DESTINATIONS
     assert {e.block_id for e in CP0.entries} <= RAIL_DESTINATIONS
-    # FP 01 has no separate metric strip: it stays in the Earnings Update composition only.
-    assert "metric-strip" not in bound and "metric-strip" not in credit.blocks
-    earnings = next(p for p in pathways() if p.id == "earnings_update")
-    assert "metric-strip" in earnings.blocks
+    # FP 01 has no separate metric strip or EBITDA adjustments block: those two are FP 02's
+    # second placements of the KPI dashboard and adjusted EBITDA bridge registers.
+    second = {"metric-strip", "ebitda-adjustments"}
+    assert second <= bound and not second & set(credit.blocks)
+    assert second <= set(earnings.blocks)
 
 
 def test_portfolio_fit_block_is_present_though_it_has_no_module_yet() -> None:

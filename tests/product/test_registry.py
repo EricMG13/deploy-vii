@@ -1,6 +1,10 @@
+import json
+from pathlib import Path
+
 import pytest
 
-from deploy_vii.registry import dependencies, edge_rule, modules
+from deploy_vii.contracts import PATHWAY_MODULES
+from deploy_vii.registry import dependencies, edge_rule, modules, plan
 
 
 def test_edge_rule_defaults_required_block_optional_restricted() -> None:
@@ -45,3 +49,44 @@ def test_methodology_edge_rules_only_name_declared_producers() -> None:
     for module in modules():
         declared = {*module.required, *module.optional}
         assert set(module.edge_rules) <= declared, module.module_id
+
+
+def test_cp_model_requires_cp1_and_reaches_cp0_through_it() -> None:
+    # Decision 0006 DC-5: the Model destination publishes accepted CP-1 output.
+    catalog = {module.module_id: module for module in modules()}
+    assert catalog["CP-MODEL"].required == ("CP-1",)
+    assert plan(("CP-MODEL",)) == ("CP-0", "CP-1", "CP-MODEL")
+    assert edge_rule("CP-MODEL", "CP-1") == "block"
+    with pytest.raises(ValueError, match="No dependency edge"):
+        edge_rule("CP-MODEL", "CP-0")
+
+
+def test_cp5_fan_in_includes_selected_cp_model_but_does_not_pull_it_in() -> None:
+    assert "CP-MODEL" in dependencies(("CP-5", "CP-MODEL"))["CP-5"]
+    assert edge_rule("CP-5", "CP-MODEL") == "restricted"
+    order = plan(("CP-5", "CP-MODEL"))
+    assert order.index("CP-MODEL") < order.index("CP-5")
+    # CP-5 itself requires only CP-0; only the presets whose composition holds a Model-owned
+    # block request CP-MODEL (decision 0009), and CP-5 then follows it in the plan.
+    assert "CP-MODEL" not in plan(("CP-5",))
+    wanting = {pid for pid, requested in PATHWAY_MODULES.items() if "CP-MODEL" in requested}
+    assert wanting == {"credit_snapshot", "earnings_update", "relative_value", "portfolio_decision"}
+    for pid in wanting:
+        order = plan(PATHWAY_MODULES[pid])
+        assert order.index("CP-1") < order.index("CP-MODEL") < order.index("CP-5")
+
+
+def test_coverage_map_cp_model_matches_dc5() -> None:
+    path = Path(__file__).resolve().parents[2] / "docs/methodology/r14-coverage.json"
+    coverage = json.loads(path.read_text())
+    entry = next(m for m in coverage["modules"] if m["module_id"] == "CP-MODEL")
+    contract = entry["artifact_contract"]
+    assert contract["primary_kind"] == "html_model_destination"
+    assert contract["calculation_json"] is True
+    deferred = contract["deferred"]["xlsx_workbook"]
+    assert "Credit Snapshot" in deferred["required_sheet_names"]
+    assert "DC-5" in deferred["reason"]
+    assert entry["implementation"].startswith("partial")
+    edges = {(e["source"], e["target"]) for e in coverage["reference_edges"]}
+    assert ("CP-1", "CP-MODEL") in edges
+    assert ("CP-0", "CP-MODEL") not in edges

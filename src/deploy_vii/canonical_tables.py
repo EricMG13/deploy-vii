@@ -79,6 +79,13 @@ COLUMNS = {
 }
 
 
+# The register candidate's own first limitation; CP-1 promotion (cp1_workflow) replaces it.
+REGISTER_NOTE = (
+    "Canonical register and narrative candidate; final envelope, QA "
+    "and Module promotion are pending."
+)
+
+
 class CanonicalTables(Contract):
     schema_version: Literal["canonical-tables/2"] = "canonical-tables/2"
     downstream: DownstreamReport
@@ -832,8 +839,7 @@ def canonical_tables(
             )
         ),
         limitations=(
-            "Canonical register and narrative candidate; final envelope, QA "
-            "and Module promotion are pending.",
+            REGISTER_NOTE,
             *("Statement subartifact: " + note for note in statements.limitations),
             *("Model interface subartifact: " + note for note in interface.module.limitations),
             *("Narrative: " + note for note in downstream.inputs.narrative.limitations),

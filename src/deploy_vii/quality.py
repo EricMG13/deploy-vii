@@ -1,7 +1,8 @@
 """Hash-bound QA judgments and exact r14 confidence arithmetic.
 
-Producer-owned inputs define coverage, source gate and inherited findings.
-Analysts classify materiality/lineage and add findings; they never supply a score.
+Producer-owned inputs define coverage, source gate, inherited findings and each
+evidence ID's lineage ceiling (MC-5). Analysts classify materiality, keep or lower
+lineage within that ceiling and add findings; they never supply a score.
 """
 
 from fractions import Fraction
@@ -37,6 +38,16 @@ WEIGHTS: dict[Lineage, int] = {
     "Insufficient Information": 0,
 }
 PENALTIES: dict[Severity, int] = {"CRITICAL": 40, "MATERIAL": 15, "MINOR": 3}
+# MC-5: the register that produced an evidence ID fixes its highest lineage class.
+LineageBasis = Literal["citation", "calculation", "estimate", "gap", "missing", "coverage"]
+CEILINGS: dict[LineageBasis, Lineage] = {
+    "citation": "Directly Sourced",
+    "calculation": "Calculated",
+    "estimate": "Assumption-Based",
+    "gap": "Insufficient Information",
+    "missing": "Insufficient Information",
+    "coverage": "Insufficient Information",
+}
 
 
 def _nonblank(value: str) -> str:
@@ -76,8 +87,26 @@ class QaFinding(Contract):
         return self
 
 
+class EvidenceCeiling(Contract):
+    """Producer-derived maximum lineage class; the analyst may keep or lower it."""
+
+    evidence_id: Identifier
+    ceiling: Lineage
+    basis: LineageBasis
+
+    @model_validator(mode="after")
+    def ceiling_follows_basis(self) -> Self:
+        if self.ceiling != CEILINGS[self.basis]:
+            raise ValueError(f"QA lineage ceiling does not follow its basis: {self.evidence_id}")
+        return self
+
+    @classmethod
+    def of(cls, evidence_id: str, basis: LineageBasis) -> Self:
+        return cls(evidence_id=evidence_id, ceiling=CEILINGS[basis], basis=basis)
+
+
 class QualityInputs(Contract):
-    schema_version: Literal["quality-inputs/1"] = "quality-inputs/1"
+    schema_version: Literal["quality-inputs/2"] = "quality-inputs/2"
     artifact_sha256: Hash
     coverage_policy: Explanation
     claims: tuple[ClaimCandidate, ...]
@@ -85,6 +114,7 @@ class QualityInputs(Contract):
     source_gate: SourceGate
     module_status: ModuleStatus
     references: tuple[Identifier, ...]
+    ceilings: tuple[EvidenceCeiling, ...]
     inherited_findings: tuple[QaFinding, ...] = ()
 
     @model_validator(mode="after")
@@ -97,6 +127,9 @@ class QualityInputs(Contract):
         ):
             if len(ids) != len(set(ids)):
                 raise ValueError("Duplicate QA input identity")
+        bounded = [c.evidence_id for c in self.ceilings]
+        if len(bounded) != len(set(bounded)) or set(bounded) != set(self.references):
+            raise ValueError("QA lineage ceilings must cover every reference exactly once")
         for claim in self.claims:
             if len(claim.evidence_ids) != len(set(claim.evidence_ids)):
                 raise ValueError("Duplicate claim evidence")
@@ -231,6 +264,7 @@ def validate_quality_review(inputs: QualityInputs, review: QualityReview) -> tup
     if review.inputs_sha256 != inputs.content_hash():
         issues.append("QA review does not bind current inputs")
     candidates = {c.claim_id: c for c in inputs.claims}
+    ceilings = {c.evidence_id: c.ceiling for c in inputs.ceilings}
     supplied = [c.claim_id for c in review.claims]
     if len(supplied) != len(set(supplied)) or set(supplied) != set(candidates):
         issues.append("QA review must assess every candidate claim exactly once")
@@ -241,6 +275,14 @@ def validate_quality_review(inputs: QualityInputs, review: QualityReview) -> tup
             issues.append(
                 f"QA lineage must assess every bound evidence reference: {claim.claim_id}"
             )
+        for e in claim.evidence:
+            # Evidence outside the input scope has no ceiling and is already an issue above.
+            ceiling = ceilings.get(e.evidence_id)
+            if ceiling is not None and WEIGHTS[e.lineage_class] > WEIGHTS[ceiling]:
+                issues.append(
+                    f"QA lineage upgrade rejected: {e.evidence_id} {e.lineage_class} "
+                    f"above ceiling {ceiling}"
+                )
     inherited = {f.finding_id for f in inputs.inherited_findings}
     ids = [f.finding_id for f in review.findings]
     if len(ids) != len(set(ids)) or set(ids) & inherited:
@@ -264,10 +306,11 @@ def assess_quality(inputs: QualityInputs, review: QualityReview) -> QualityRepor
         confidence=_compute_confidence(inputs, review, findings),
         findings=findings,
         limitations=(
-            "The producer owns required-field inventory, source gate and inherited findings. "
-            "Input shape validation does not authenticate an arbitrary report.",
-            "Materiality, lineage, severity and resolution are supplied judgments requiring "
-            "semantic review; deterministic score arithmetic does not qualify those judgments.",
+            "The producer owns required-field inventory, source gate, inherited findings and "
+            "lineage ceilings. Input shape validation does not authenticate an arbitrary report.",
+            "Materiality, lineage within its ceiling, severity and resolution are supplied "
+            "judgments requiring semantic review; deterministic score arithmetic does not "
+            "qualify those judgments.",
             "Passed QA is distinct from committee readiness, Module acceptance, "
             "analytical qualification and native-host qualification.",
         ),

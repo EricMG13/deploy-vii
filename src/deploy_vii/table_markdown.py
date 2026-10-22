@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from html import escape, unescape
 
-from deploy_vii.contracts import Module, ReportTable
+from deploy_vii.contracts import Fact, Module, ReportTable
 from deploy_vii.render import markdown_display
 
 
@@ -28,6 +28,24 @@ def markdown_cell(value: str) -> str:
     )
 
 
+def null_confusable(fact: Fact, interface_id: str | None) -> bool:
+    """Known interface text a table reader would confuse with a null marker.
+
+    The controlled ``NONE`` reference rate of the debt-facility interface is a value.
+    """
+    return (
+        interface_id is not None
+        and fact.status == "known"
+        and fact.text is not None
+        and fact.text.strip().casefold() in {"", "null", "n/a", "none", "\u2014", "\u2013"}
+        and not (
+            interface_id == "cp1.debt_facility_register"
+            and fact.field == "reference_rate"
+            and fact.text == "NONE"
+        )
+    )
+
+
 def table_markdown(module: Module, table_id: str) -> str:
     module = Module.model_validate_json(module.model_dump_json())
     table: ReportTable = next(t for t in module.tables if t.table_id == table_id)
@@ -38,17 +56,7 @@ def table_markdown(module: Module, table_id: str) -> str:
     lines = ["| " + " | ".join(markdown_cell(h) for h in headings) + " |"]
     lines.append("|" + "|".join("---" for _ in headings) + "|")
     for row in table.rows:
-        if table.interface_id and any(
-            fact.status == "known"
-            and fact.text is not None
-            and fact.text.strip().casefold() in {"", "null", "n/a", "none", "—", "\u2013"}
-            and not (
-                table.interface_id == "cp1.debt_facility_register"
-                and fact.field == "reference_rate"
-                and fact.text == "NONE"
-            )
-            for fact in (facts[identity] for identity in row.fact_ids)
-        ):
+        if any(null_confusable(facts[identity], table.interface_id) for identity in row.fact_ids):
             raise ValueError("Known interface text would be confused with a null marker")
         values = [markdown_display(facts[identity]) for identity in row.fact_ids]
         if table.row_header:

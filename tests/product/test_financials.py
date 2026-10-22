@@ -160,6 +160,9 @@ def freeze(value: FinancialBook) -> tuple[PreparedPack, FinancialReview]:
         issuer_name="Synthetic",
         as_of=date(2025, 7, 10),
         case_kind="synthetic",
+        # The Credit Snapshot set before decision 0009 added CP-MODEL (task 6.5): the pack hash
+        # the synthetic replay corpus records stays as recorded.
+        requested_modules=("CP-0", "CP-1", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
     )
     review = FinancialReview(
         pack_sha256="0" * 64,

@@ -24,9 +24,9 @@ Known interface text matching null markers is rejected, except the controlled
 are entity-escaped; newlines become generated `<br>` (CRLF/CR normalize to LF).
 The raw JSON remains authoritative for this internal preview. The new
 [canonical table codec](model-interface.md) decodes generated entities once and
-checks exact table parity against a trusted Module. Full-envelope parsing and the
-typed downstream adapter remain pending before claiming complete Markdown
-interoperability. No legacy parser was adopted.
+checks exact table parity against a trusted Module. The full-envelope reader (task 6.4)
+and its journal-bound consumer, `read_cp1_envelope` (task 6.5), are separate from this
+per-table check. No legacy parser was adopted.
 
 ## Statement preview
 
@@ -56,8 +56,10 @@ books have empty flow tables, not invented flow periods.
 
 This command does not settle the ticket, accept CP-1, create an accepted report,
 or call a model. The separate [canonical register preview](canonical-tables.md)
-adds the other CP-1 tables. Canonical Markdown envelope/QA, complete Model presentation and final module promotion
-remain pending. Charts are not applicable to these statement matrices;
+adds the other CP-1 tables. The canonical Markdown envelope, QA and promotion (task 6.4)
+and the Front Page rendered from the accepted envelope (task 6.5) are separate; the
+calculation JSON of CP-MODEL remains pending (M8). Charts are not applicable to these
+statement matrices;
 Model chart/table parity remains a later check. Synthetic fixture rendering does
 not qualify analytical judgments or a completed Module.
 

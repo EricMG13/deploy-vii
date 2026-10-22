@@ -7,7 +7,7 @@ from typing import Literal
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from deploy_vii.contracts import Citation, Claim, Fact, Input, Module
+from deploy_vii.contracts import PATHWAY_MODULES, Citation, Claim, Fact, Input, Module, PathwayId
 from deploy_vii.execution import (
     Attempt,
     Command,
@@ -21,6 +21,7 @@ from deploy_vii.execution import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
+from deploy_vii.registry import plan
 from deploy_vii.render import render
 from tests.product.test_readiness import readiness_fixture
 
@@ -519,6 +520,70 @@ def test_blocked_required_producer_under_restricted_rule_runs_limited(tmp_path: 
     )
     assert cp2.status == "restricted"
     assert any("Upstream CP-1A blocked" in text for text in cp2.inherited_limitations)
+
+
+def cp_model_store(
+    tmp_path: Path, scope: tuple[str, ...] = ("CP-0", "CP-1", "CP-MODEL", "CP-5")
+) -> Execution:
+    """A run that requests CP-MODEL and CP-5, with CP-0 readiness accepted for that scope."""
+    pack, review = readiness_fixture()
+    pack = pack.model_copy(update={"run": pack.run.model_copy(update={"requested_modules": scope})})
+    consumers = tuple(
+        review.consumers[0].model_copy(update={"module_id": module_id})
+        for module_id in plan(scope)
+        if module_id not in {"CP-0", "CP-MODEL"}  # CP-MODEL needs no CP-0 consumer readiness
+    )
+    gap = review.gaps[0].model_copy(
+        update={"affected_modules": tuple(item.module_id for item in consumers)}
+    )
+    review = review.model_copy(
+        update={"pack_sha256": pack.content_hash(), "consumers": consumers, "gaps": (gap,)}
+    )
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-PARSE")
+    candidate = build_readiness(store.pack(), review)
+    result = store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+    assert settled(store, result).status == "restricted"
+    return store
+
+
+def test_blocked_cp1_blocks_cp_model(tmp_path: Path) -> None:
+    """Decision 0006 DC-5: CP-MODEL requires accepted CP-1 and the edge blocks."""
+    store = cp_model_store(tmp_path)
+    block_module(store, "CP-1")
+    with pytest.raises(ValueError, match="upstream"):
+        store.begin("CP-MODEL")
+
+
+def test_blocked_cp_model_restricts_cp5(tmp_path: Path) -> None:
+    store = cp_model_store(tmp_path)
+    settle_module(store, "CP-1")
+    blocked = block_module(store, "CP-MODEL")
+    cp5 = settle_module(store, "CP-5")
+    assert bound(cp5, "CP-MODEL") == Input(
+        input_id="CP-MODEL", sha256=blocked.content_hash(), status="blocked"
+    )
+    assert cp5.status == "restricted"
+
+
+@pytest.mark.parametrize(
+    "pathway",
+    [pid for pid, requested in PATHWAY_MODULES.items() if "CP-MODEL" in requested],
+)
+def test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run(
+    tmp_path: Path, pathway: PathwayId
+) -> None:
+    """Decision 0009 (task 6.5): in a preset that requests CP-MODEL it is a CP-5 input."""
+    scope = PATHWAY_MODULES[pathway]
+    store = cp_model_store(tmp_path, scope)
+    # Every other analyst CP-5 follows has settled; only CP-MODEL has never run.
+    analysts = [m for m in plan(scope) if m not in {"CP-0", "CP-MODEL", "CP-5", "CP-6", "CP-8"}]
+    for module_id in analysts:
+        settle_module(store, module_id)
+    with pytest.raises(ValueError, match="upstream is unrun"):
+        store.begin("CP-5")
+    settle_module(store, "CP-MODEL")
+    assert store.begin("CP-5").module_id == "CP-5"
 
 
 def test_unrun_stale_or_rejected_producer_never_degrades(tmp_path: Path) -> None:
@@ -1271,7 +1336,6 @@ def test_transition_meter_counts_new_and_changed_files_once(tmp_path: Path) -> N
 
 
 def test_every_view_entry_point_applies_the_pathway_scope(tmp_path: Path) -> None:
-    from deploy_vii.contracts import PATHWAY_MODULES
     from deploy_vii.delivery import cp0_view
     from deploy_vii.registry import dependencies, modules
     from deploy_vii.render import empty_view
@@ -1304,3 +1368,34 @@ def test_every_view_entry_point_applies_the_pathway_scope(tmp_path: Path) -> Non
                 name,
                 module_id,
             )
+
+
+def test_head_statuses_are_omitted_until_a_promotion_records_them() -> None:
+    from deploy_vii.execution import Qualification, head_of
+
+    head = Head(module_id="CP-0", status="accepted", result_sha256="a" * 64, inputs=())
+    raw = head.model_dump_json()
+    assert "qualification" not in raw  # heads written before task 6.4 keep their bytes
+    assert Head.model_validate_json(raw) == head
+    promoted = Qualification(implementation="implemented")
+    recorded = head.model_copy(update={"qualification": promoted})
+    assert json.loads(recorded.model_dump_json())["qualification"] == {
+        "implementation": "implemented",
+        "analytical_qualification": "unrun",
+        "rendering_acceptance": "unrun",
+        "native_host_qualification": "unrun",
+    }
+    assert Head.model_validate_json(recorded.model_dump_json()) == recorded
+    blocked = Module.model_validate_json(
+        json.dumps(
+            {
+                "run_id": "r",
+                "issuer_id": "i",
+                "as_of": "2026-01-01",
+                "module_id": "CP-1",
+                "status": "blocked",
+                "limitations": ["Repair failed"],
+            }
+        )
+    )
+    assert head_of(blocked, promoted).qualification is None

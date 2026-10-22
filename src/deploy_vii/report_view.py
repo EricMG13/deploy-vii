@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import model_validator
 
+from deploy_vii import prose
 from deploy_vii.contracts import (
     PATHWAY_MODULES,
     Contract,
@@ -637,6 +638,7 @@ class Unplaced(Contract):
 
     module_id: Identifier
     block_id: Identifier
+    title: Text  # the block's head, so the Limitations page names it as the Front Page does
     state: Literal["absent"] = "absent"
     note: Text
 
@@ -938,6 +940,111 @@ def scale_label(unit: str, currency: str | None) -> str | None:
     return label or None
 
 
+# --- Claim run text (decision 0005 MC-2, M6 task 6.2) -------------------------------------------
+
+
+def figure_unit(fact: Fact) -> str | None:
+    """The unit a figure in prose shows with its number, from the fact alone.
+
+    An amount shows its scale label after the number (prose has no block head to state it);
+    a percent, multiple or exact-text spelling already ends in its unit, which this returns.
+    ``None`` for a text fact or an amount whose unit has no label.
+    """
+    if fact.amount is None:
+        return None
+    unit_class = _unit_class(fact.unit)
+    if unit_class is None or abs(fact.amount.adjusted()) > _EXACT_TEXT_ADJUSTED:
+        return _UNIT_SUFFIX.get(fact.unit or "", f" {fact.unit}").strip() or None
+    if unit_class == "percent":
+        return "%"
+    if unit_class == "multiple":
+        return "x"
+    if fact.unit == "currency":
+        return _CURRENCY_LABEL.get(fact.currency or "", fact.currency or "") or None
+    return scale_label(str(fact.unit), fact.currency)
+
+
+class ClaimRun(Contract):
+    """One span of a resolved claim: literal text (spacing kept), a figure or chip, or a gap.
+
+    ``prov`` is the DOM provenance token, as ``block.state`` is for blocks. A chip whose fact has
+    neither a citation nor a calculation is literal text: Python's own spelling, no passport.
+    """
+
+    text: Text
+    kind: Literal["text", "fig", "gap"]
+    ref_id: Identifier | None = None
+    prov: Provenance | Literal["none"] = "none"
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        if self.kind == "text":
+            if self.ref_id is not None or self.prov != "none":
+                raise ValueError("A literal claim run carries no reference")
+            return self
+        _shown(self.text)
+        if self.kind == "gap" and not (
+            self.prov == "gap" and self.ref_id and _GAP_REF.fullmatch(self.ref_id)
+        ):
+            raise ValueError("A gap claim run needs gap provenance and a G# reference")
+        if self.kind == "fig" and not (
+            self.prov in {"cited", "calculated", "synthetic"}
+            and self.ref_id
+            and _REF_OF_PROV[self.prov].fullmatch(self.ref_id)
+        ):
+            raise ValueError("A figure claim run needs a C#, K# or S# reference of its kind")
+        return self
+
+
+def module_refs(index: ReportIndex, module_id: str) -> dict[str, tuple[str, ...]]:
+    """Report-wide ids of one module's facts, keyed by fact id."""
+    return {
+        fact_id: ids for (owner, fact_id), ids in _refs_by_fact(index).items() if owner == module_id
+    }
+
+
+def resolve(
+    text: str,
+    bound: Mapping[str, Fact],
+    refs: Mapping[str, tuple[str, ...]],
+    *,
+    names: Iterable[str] = (),
+) -> tuple[ClaimRun, ...]:
+    """Resolve run text against one module's bound facts (``prose.bind``) and their
+    report-wide ids (``module_refs``).
+
+    Every figure is spelled by ``fact_spelling`` (the cell's number rule, exact text past
+    the 100-exponent bound) with the unit of ``figure_unit``; the model's unit token is only
+    checked. Fails closed on any ``prose.issues`` finding and on a figure with no report id.
+    """
+    names = tuple(names)
+    found = prose.issues(text, bound, names=names)
+    if found:
+        raise ValueError("Claim run text does not resolve: " + "; ".join(found))
+    gaps = {ref for ref, fact in bound.items() if fact.status != "known"}
+    runs: list[ClaimRun] = []
+    for run in prose.tokenize(text, gaps=gaps):
+        if run.kind == "text":
+            runs.append(ClaimRun(text=run.text, kind="text"))
+            continue
+        fact = bound[run.text]
+        item = _cell(fact, refs.get(fact.fact_id, ()))
+        if run.kind == "gap":
+            runs.append(ClaimRun(text=item.text, kind="gap", ref_id=item.gap_ref, prov="gap"))
+            continue
+        shown = item.text
+        unit = figure_unit(fact) if run.figure and item.unit_class == "amount" else None
+        if unit:
+            shown = f"{shown} {unit}"
+        if item.ref_id is None and run.figure:
+            raise ValueError(f"Figure {run.text} has no report reference")
+        if item.ref_id is None:
+            runs.append(ClaimRun(text=shown, kind="text"))
+        else:
+            runs.append(ClaimRun(text=shown, kind="fig", ref_id=item.ref_id, prov=item.prov))
+    return tuple(runs)
+
+
 @dataclass(frozen=True)
 class _Spec:
     """A Front Page block's heading, producer modules and layout."""
@@ -992,6 +1099,16 @@ _CREDIT_SNAPSHOT: Mapping[str, _Spec] = MappingProxyType(
         "what-changed": _Spec("What changed since the last Report", "CP-8", "prose", ("CP-8",)),
     }
 )
+# Heads and owner codes as FP 02 prints them (``rbot-fp-02-earnings-update.dc.html``): the two
+# Model-owned blocks the Earnings Update composition adds for CP-1's registers.
+_EARNINGS_UPDATE: Mapping[str, _Spec] = MappingProxyType(
+    {
+        "ebitda-adjustments": _Spec(
+            "EBITDA adjustments", "MODEL", "dense", ("CP-1",), route_label="Open in Model"
+        ),
+        "metric-strip": _Spec("Metric strip", "MODEL", "chart", ("CP-1",)),
+    }
+)
 _NO_PRODUCER = "No module produces this block yet."
 _UNBOUND_OWNER = "Unbound"
 _PERIOD_CLASSES = (
@@ -1001,27 +1118,51 @@ _PERIOD_CLASSES = (
     (re.compile(r"PF"), "Pro forma"),
     (re.compile(r"OPEN\b"), "Opening"),
 )
-# FP 01's Model chart strip: the series a producer must supply before a chart can be drawn.
-_STRIP_FIGURES = (
-    ("S.1", "Leverage", "x"),
-    ("S.2", "Interest cover", "x"),
-    ("S.3", "Liquidity", None),
-    ("S.4", "Maturity wall", None),
+# The Model chart strip of FP 01 (S.1 to S.4) and the metric strip of FP 02 (S.1 to S.3): the
+# series a producer must supply before a chart can be drawn.
+_STRIP_FIGURES: Mapping[str, tuple[tuple[str, str, str | None], ...]] = MappingProxyType(
+    {
+        "model-chart-strip": (
+            ("S.1", "Leverage", "x"),
+            ("S.2", "Interest cover", "x"),
+            ("S.3", "Liquidity", None),
+            ("S.4", "Maturity wall", None),
+        ),
+        "metric-strip": (
+            ("S.1", "Leverage", "x"),
+            ("S.2", "Interest cover", "x"),
+            ("S.3", "Liquidity", None),
+        ),
+    }
 )
-_STRIP_NOTE = "Charts need S.1\u2013S.4 series; KPI register shown as a table"
+
+
+def _strip_note(block_id: str) -> str:
+    figures = _STRIP_FIGURES[block_id]
+    return (
+        f"Charts need {figures[0][0]}\u2013{figures[-1][0]} series; KPI register shown as a table"
+    )
 
 
 def _spec_of(block_id: str) -> _Spec:
-    if block_id in _CREDIT_SNAPSHOT:
-        return _CREDIT_SNAPSHOT[block_id]
+    for composition in (_CREDIT_SNAPSHOT, _EARNINGS_UPDATE):
+        if block_id in composition:
+            return composition[block_id]
     # Blocks only another Pathway lists are not produced yet: they keep the idle view's wording.
     return _Spec(block_id.replace("-", " ").capitalize(), _UNBOUND_OWNER, "prose", ())
 
 
 def _honest_state(
-    spec: _Spec, statuses: Mapping[str, Status], pathway: Pathway
+    spec: _Spec,
+    statuses: Mapping[str, Status],
+    pathway: Pathway,
+    blocked_because: Mapping[str, str] = MappingProxyType({}),
 ) -> tuple[BlockState, str]:
-    """State and words of a block no binding filled, from its producers' statuses."""
+    """State and words of a block no binding filled, from its producers' statuses.
+
+    A blocked producer's first limitation (``blocked_because``) is quoted, so the block says
+    why it is empty (a refused envelope names its verification failure).
+    """
     seen = {code: statuses.get(code) for code in spec.producers}
     codes = " · ".join(spec.producers)
     if not seen:
@@ -1031,7 +1172,16 @@ def _honest_state(
     if any(status in {"accepted", "restricted", "candidate"} for status in seen.values()):
         return "absent", f"Absent: {codes} produced no output bound to this block."
     if any(status == "blocked" for status in seen.values()):
-        return "blocked", f"Blocked: {codes} is blocked; the reasons are listed under Limitations."
+        why = "; ".join(
+            f"{code}: {blocked_because[code]}"
+            for code, status in seen.items()
+            if status == "blocked" and code in blocked_because
+        )
+        quoted = f" ({why})" if why else ""
+        return (
+            "blocked",
+            f"Blocked: {codes} is blocked{quoted}; the reasons are listed under Limitations.",
+        )
     outside = [code for code, status in seen.items() if status == "not_in_pathway"]
     if len(outside) == len(seen):
         return "not_in_pathway", f"Not in this Pathway: {codes} is not part of {pathway.title}."
@@ -1269,9 +1419,9 @@ def _meta(spec: _Spec, scale: str | None, as_of: date) -> str | None:
 
 
 def _na_strip(block_id: str, owner: str, scale: str | None) -> tuple[Figure, ...]:
-    """The four chart frames of the strip when no producer supplies their series."""
+    """The chart frames of the strip when no producer supplies their series."""
     figures = []
-    for fig_id, title, unit in _STRIP_FIGURES:
+    for fig_id, title, unit in _STRIP_FIGURES[block_id]:
         reason = "The KPI register carries no series for this chart"
         twin = Block(
             block_id=f"{block_id}-{fig_id.replace('.', '').lower()}-twin",
@@ -1369,9 +1519,14 @@ def _block(
                 base_column=base,
                 absent_columns=absent,
                 figures=_na_strip(block_id, spec.owner, primary.scale) if degraded else (),
-                note=_STRIP_NOTE if degraded else None,
+                note=_strip_note(block_id) if degraded else None,
             )
-    words_state, note = _honest_state(spec, statuses, pathway)
+    blocked_because = {
+        code: module.limitations[0]
+        for code, module in modules.items()
+        if module.status == "blocked" and module.limitations
+    }
+    words_state, note = _honest_state(spec, statuses, pathway, blocked_because)
     if shown:
         words_state = "absent"
         note = f"Absent: {' · '.join(spec.producers)} supplied no rows for this block."
@@ -1399,6 +1554,14 @@ def _call(statuses: Mapping[str, Status]) -> tuple[tuple[CallItem, ...], CallWit
     return pending, None
 
 
+def pathway_has_model_block(pathway: Pathway) -> bool:
+    """Whether the composition holds a block the Model destination owns (owner ``MODEL``).
+
+    Such a Pathway requests CP-MODEL after CP-1 (decision 0009); ``contracts`` lists it.
+    """
+    return any(_spec_of(block_id).owner == "MODEL" for block_id in pathway.blocks)
+
+
 def _unplaced(view: View, pathway: Pathway, maps: tuple["BindingMap", ...]) -> tuple[Unplaced, ...]:
     """One entry per shown module and block it binds to that is neither composed nor a rail page.
 
@@ -1418,9 +1581,14 @@ def _unplaced(view: View, pathway: Pathway, maps: tuple["BindingMap", ...]) -> t
         module = shown.get(module_map.module_id)
         if module is None:
             continue
+        composed = {
+            entry.fact_coord for entry in module_map.entries if entry.block_id in pathway.blocks
+        }
         for entry in module_map.entries:
             if entry.block_id in pathway.blocks or entry.block_id in RAIL_DESTINATIONS:
                 continue
+            if entry.fact_coord in composed:
+                continue  # a second placement of a register this Pathway shows in another block
             table_id = entry.fact_coord.table_id
             if table_id is None or table_id in carried[module.module_id]:
                 listed[(module.module_id, entry.block_id)] = None
@@ -1428,6 +1596,7 @@ def _unplaced(view: View, pathway: Pathway, maps: tuple["BindingMap", ...]) -> t
         Unplaced(
             module_id=module_id,
             block_id=block_id,
+            title=_spec_of(block_id).title,
             note=f"{module_id} output bound to {block_id}, not in this Pathway.",
         )
         for module_id, block_id in listed

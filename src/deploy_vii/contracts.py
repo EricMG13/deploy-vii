@@ -7,11 +7,16 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+from deploy_vii.prose import valid_syntax
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=160)]
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Text = Annotated[str, Field(min_length=1)]
+# Model prose: literal text plus {ref|unit} figure and [ref] chip references (decision 0005
+# MC-2). The syntax is checked here; references resolve where the facts are (prose_issues).
+RunText = Annotated[Text, AfterValidator(valid_syntax)]
 Status = Literal[
     "unrun",
     "candidate",
@@ -33,15 +38,21 @@ PathwayId = Literal[
 ]
 # Requested module set per Pathway (decision 0009). Required producers are added when a view
 # or plan is built (registry.dependencies), so these list the modules the Front Page asks for.
+# A Pathway whose composition holds a Model-owned block lists CP-MODEL right after CP-1
+# (``report_view.pathway_has_model_block`` is the rule; a test keeps this table to it).
 _PRESETS: dict[PathwayId, tuple[str, ...]] = {
-    "credit_snapshot": ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
-    "earnings_update": ("CP-0", "CP-1", "CP-1B", "CP-1D", "CP-5"),
-    "relative_value": ("CP-0", "CP-1", "CP-1C", "CP-2", "CP-2D", "CP-3", "CP-3C", "CP-3D", "CP-5"),
+    "credit_snapshot": (
+        *("CP-0", "CP-1", "CP-MODEL", "CP-1A", "CP-2", "CP-4", "CP-3", "CP-5", "CP-6"),
+    ),
+    "earnings_update": ("CP-0", "CP-1", "CP-MODEL", "CP-1B", "CP-1D", "CP-5"),
+    "relative_value": (
+        *("CP-0", "CP-1", "CP-MODEL", "CP-1C", "CP-2", "CP-2D", "CP-3", "CP-3C", "CP-3D", "CP-5"),
+    ),
     "covenant_refinancing": ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-2D", "CP-4", "CP-3C", "CP-5"),
     "distressed_restructuring": (
         *("CP-0", "CP-1", "CP-1A", "CP-2", "CP-2A", "CP-2G", "CP-2H", "CP-4", "CP-4C", "CP-5"),
     ),
-    "portfolio_decision": ("CP-0", "CP-1", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
+    "portfolio_decision": ("CP-0", "CP-1", "CP-MODEL", "CP-2", "CP-3", "CP-5", "CP-6", "CP-8"),
 }
 PATHWAY_MODULES: Mapping[PathwayId, tuple[str, ...]] = MappingProxyType(_PRESETS)
 
@@ -184,7 +195,7 @@ class Fact(Contract):
 
 class Claim(Contract):
     claim_id: Identifier
-    text: Text
+    text: RunText
     citations: tuple[Citation, ...]
     limitation: str | None = None
 

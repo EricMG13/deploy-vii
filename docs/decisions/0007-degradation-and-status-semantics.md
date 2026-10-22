@@ -34,7 +34,8 @@ removed CP-3, CP-5 and CP-6 from the report. Any inherited limitation also force
    `"Upstream <producer> blocked: <producer limitation>"`. Under a `block` edge the
    consumer is not runnable ("Required upstream is unrun, stale or blocked").
 3. **Unrun, stale and rejected producers** block every consumer regardless of rule: only a
-   settled `blocked` head degrades.
+   settled `blocked` head degrades. A requested but unrun CP-MODEL therefore holds CP-5
+   (CP-MODEL is a selected analyst in CP-5's fan-in).
 4. **Own status versus inherited limitations.** `Module.limitations` holds the module's own
    findings; `Module.inherited_limitations` holds limitations carried from inputs,
    de-duplicated by text. `own_status` derives from own findings only. The settled status
@@ -53,7 +54,11 @@ removed CP-3, CP-5 and CP-6 from the report. Any inherited limitation also force
 ## Recorded, not adopted
 
 - r14 lists upstreams for CP-MODEL (CP-1, CP-1A, CP-1B, CP-2, CP-2A required; CP-2G
-  optional) that `methodology.json` omits; M6.1 (decision 0006 DC-5) resolves CP-MODEL.
+  optional) that `methodology.json` omits. M6 task 6.1 (decision 0006 DC-5) resolved it: the
+  CP-MODEL artifact is the HTML Model destination plus the calculation JSON of the accepted
+  CP-1 financial model, so its one upstream edge is `CP-1 -> CP-MODEL` (required, rule
+  `block`); CP-0 is reached through CP-1, and the other r14 upstreams stay unencoded while the
+  r14 workbook export is deferred.
 - CP-L10 and CP-DR (standalone mode) need no CP-0 per their texts; both are outside the
   core scope and keep `block` until their milestones.
 - Twelve optional edges have no missing-input text in r14 and take the default

@@ -368,6 +368,7 @@ live candidate.
   readiness populates the header, Evidence and Limitations. It also closes C's CP-1
   condition: tables, capital structure and the Model grid reconcile to accepted
   artifacts.
+- [ ] **7.1a `dv-feature`: CP-MODEL deterministic publication.** Give CP-MODEL a head when CP-1 is promoted: publish the promoted envelope as the Model destination plus the calculation JSON (DC-5), Python only, no model call; required before M8's CP-5 case under any preset that requests CP-MODEL (decision 0009 amendment).
 - [ ] **7.2 CP-1A** business and transaction context: contract over prose runs,
   validator, Company profile bindings, then E1.
 - [ ] **7.3 E2 for the milestone:** matched three-model comparison over CP-0, CP-1 and
@@ -378,7 +379,8 @@ recorded and E2 reported.
 
 ## M8. Core slice D: CP-2 → CP-4 → CP-3 → CP-5 → CP-6 (MC-6)
 
-Keep each module thin: a minimal contract over prose runs plus Python facts, bindings to
+M8's CP-5 case depends on task 7.1a: under the presets that request CP-MODEL, CP-5 cannot
+begin until CP-MODEL has a head. Keep each module thin: a minimal contract over prose runs plus Python facts, bindings to
 its Front Page blocks, and one E1 case. CP-5's mechanical checks run in Python: citation
 existence and quote match, cross-module figure identity, stale inputs, gap propagation.
 The model judges material support and contradictions only (MC-6). Final integrity

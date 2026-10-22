@@ -195,3 +195,20 @@ def test_preview_rejects_changed_upstream_identity_before_writing(
     with pytest.raises(ValueError, match="inputs are stale"):
         cp1_register_preview(store, done.ticket_id, tmp_path / "stale")
     assert not (tmp_path / "stale").exists()
+
+
+def test_register_preview_prints_resolved_claim_text(tmp_path: Path) -> None:
+    from deploy_vii.envelope import resolved_claims
+    from deploy_vii.report_view import build_index
+    from tests.product.test_cp1_workflow import staged
+
+    store, done = staged(tmp_path)
+    path = cp1_register_preview(store, done.ticket_id, tmp_path / "preview")
+    view = View.model_validate_json((path.parent / "view.json").read_bytes())
+    module = next(m for m in view.modules if m.module_id == "CP-1")
+    text = (path.parent / "tables.md").read_text()
+    analysis = text.split("## Analysis\n\n", 1)[1].split("\n\n## ", 1)[0]
+    (expected, _), *_ = resolved_claims(module, build_index(view)[1], (view.run.issuer_name,))
+    assert analysis == expected
+    assert "interface-fact:" not in analysis and "{" not in analysis
+    assert "[interface-fact:" in module.claims[0].text  # the stored run text keeps its refs

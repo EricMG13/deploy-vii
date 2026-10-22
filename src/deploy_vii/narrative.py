@@ -4,6 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, Field
 
+from deploy_vii import prose
 from deploy_vii.canonical_audit import DefinitionReview
 from deploy_vii.canonical_gaps import CanonicalGapReport, GapDetail, LedgerGap, canonical_gaps
 from deploy_vii.context_binding import FinancialContextBinding
@@ -38,8 +39,17 @@ _FINANCIAL = {"leverage", "coverage", "cash_flow_quality", "liquidity"}
 
 
 def _prose(value: str) -> str:
-    if not value.strip() or any(c.isnumeric() for c in value):
-        raise ValueError("Narrative prose must be nonblank and use evidence references for numbers")
+    """Labels (periods, filings, instruments, sections, versions) pass; a bare figure fails.
+
+    The shared run-text rule (``prose.check``, decision 0005 MC-2) with no resolvable ids:
+    numbers and gaps enter CP-1 prose only as evidence parts, so any run reference fails too.
+    """
+    issues = prose.check(value, refs=(), gaps=())
+    if not value.strip() or issues:
+        raise ValueError(
+            "Narrative prose must be nonblank and use evidence references for numbers"
+            + "".join(f"; {issue}" for issue in issues)
+        )
     return value
 
 

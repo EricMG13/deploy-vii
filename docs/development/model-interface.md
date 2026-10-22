@@ -71,8 +71,8 @@ criteria. The reader returns strings, including literal `null`.
 projection of a caller-supplied trusted Module, including decimal precision and
 identity. It cannot authenticate an arbitrary supplied Module. No Deploy VI
 parser was copied. `tables.md` is explicitly a preview: the 17-section canonical
-envelope, remaining registers, full QA, typed downstream reader/adapter, complete
-Model presentation and final Module promotion remain pending. JSON files provide
+envelope, full QA, the typed reader and promotion are separate (tasks 6.4 and 6.5), and
+the calculation JSON of CP-MODEL remains pending (M8). JSON files provide
 internal provenance; they are not an alternative final analytical handoff.
 
 The coupon unit correction advances the source audit to `canonical-audit/4`.

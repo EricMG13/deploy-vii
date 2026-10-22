@@ -6,7 +6,7 @@ import re
 from importlib.resources import files
 from pathlib import Path
 
-from deploy_vii import charts
+from deploy_vii import charts, prose
 from deploy_vii.bindings.shipped import SHIPPED_MAPS
 from deploy_vii.contracts import Fact, ModuleView, Run, View
 from deploy_vii.display import format_date, format_value
@@ -19,8 +19,10 @@ from deploy_vii.report_view import (
     exact_text,
     fact_spelling,
     gap_refs,
+    module_refs,
     navigator,
     pathways,
+    resolve,
     status_display,
 )
 
@@ -159,6 +161,12 @@ def render(view: View, report: ReportView | None = None) -> str:
             fact_payload["table_display"] = table_display(
                 fact, gap_ids.get((module.module_id, fact.fact_id))
             )
+        # Decision 0005 MC-2: the page draws claim runs, never the raw run text.
+        refs, bound = module_refs(report.index, module.module_id), prose.bind(module.facts)
+        for claim_payload, claim in zip(module_payload["claims"], module.claims, strict=True):
+            runs = resolve(claim.text, bound, refs, names=(view.run.issuer_name,))
+            claim_payload["runs"] = [run.model_dump(mode="json") for run in runs]
+            claim_payload["plain"] = "".join(run.text for run in runs)
         # Status is shown as glyph and word; the internal token never reaches the HTML.
         module_payload["status_glyph"], module_payload["status_word"] = status_display(
             module.status

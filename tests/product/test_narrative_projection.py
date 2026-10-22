@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-from html import unescape
 from pathlib import Path
 
 import pytest
@@ -24,6 +23,8 @@ from deploy_vii.narrative import (
     narrative_inputs,
 )
 from deploy_vii.narrative_projection import _fields, project_narrative
+from deploy_vii.prose import bind
+from deploy_vii.report_view import resolve
 from tests.product.oracle import expected_by_fact
 from tests.product.test_canonical_gaps import case
 from tests.product.test_canonical_tables import cells
@@ -50,7 +51,8 @@ def supplied(inputs: NarrativeInputs) -> NarrativeReview:
             "risk_mechanic": (
                 ProsePart(
                     text="Source labels <script>window.injected=true</script> "
-                    "and [external](https://example.invalid) remain quoted evidence. " * 12
+                    "and <img src=https://example.invalid onerror=window.injected=true> "
+                    "remain quoted evidence. " * 12
                 ),
                 EvidencePart(evidence_id=entry.evidence_id),
             ),
@@ -96,7 +98,10 @@ def test_findings_preserve_order_issuer_binding_and_exact_evidence_trace(
     )
     trace = cells(report, "evidence-trace")
     row = next(r for r in trace if r["Evidence ID"].text == record.evidence_id)
-    assert f"[{row['Evidence'].text}]" in claim.text
+    # Claim text references the trace row's Evidence cell; Python resolves it to its E# label.
+    assert f"[{row['Evidence'].fact_id}]" in claim.text
+    plain = "".join(run.text for run in resolve(claim.text, bind(report.module.facts), {}))
+    assert f"is retained in {row['Evidence'].text}" in plain
     assert "Evidence\nThe cited position for Synthetic is retained" in claim.text
     assert (
         claim.text.index("Evidence\n")
@@ -242,8 +247,14 @@ def test_narrative_preview_offline_exact_claims_and_provenance(
     module = next(m for m in view.modules if m.module_id == "CP-1")
     claim = module.claims[0]
     markdown = (path.parent / "tables.md").read_text()
-    assert claim.text in unescape(markdown.replace("<br>", "\n"))
-    assert "<script>window.injected" not in markdown and "[external](" not in markdown
+    # The preview prints resolved run text (task 6.4), never the raw [<fact id>] chips.
+    from deploy_vii.envelope import resolved_claims
+    from deploy_vii.report_view import build_index
+
+    ((line, _),) = resolved_claims(module, build_index(view)[1], (view.run.issuer_name,))
+    assert line in markdown.split("\n") and "interface-fact:" not in line
+    assert claim.claim_id in line
+    assert "<script>window.injected" not in markdown and "<img src" not in markdown
     evidence = (
         Path("artifacts/rendering/narrative-projection") / tmp_path.parent.name / tmp_path.name
     )
@@ -258,7 +269,13 @@ def test_narrative_preview_offline_exact_claims_and_provenance(
         page.on("request", lambda r: requests.append(r.url))
         page.goto(path.as_uri() + "#CP-1")
         block = page.locator(f'[data-claim-id="{claim.claim_id}"]')
-        assert block.locator("p").text_content() == claim.text
+        # The claim is drawn from its resolved runs; provenance glyph titles are not text.
+        shown = block.locator("p").evaluate(
+            "n => { const c = n.cloneNode(true);"
+            " c.querySelectorAll('svg').forEach(s => s.remove()); return c.textContent; }"
+        )
+        assert shown == "".join(run.text for run in resolve(claim.text, bind(module.facts), {}))
+        assert "[" not in shown and "{" not in shown
         assert page.evaluate("window.injected === undefined")
         oracle = expected_by_fact(view)
         assert dict(

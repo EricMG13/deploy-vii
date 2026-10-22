@@ -248,16 +248,19 @@
     const panel = node("div"); panel.append(node("p", `Table twin · ${block.title}`, "twin-title"), dataTable(block, false, block));
     return panel;
   };
-  const lineNodes = (line, block) => {
+  // Runs renderer: Front Page lines join their runs with a space; claim runs (MC-2) keep the
+  // spacing Python resolved, so they join with nothing.
+  const runNodes = (runs, block, separator) => {
     const out = [];
-    line.runs.forEach((run, index) => {
-      if (index) out.push(document.createTextNode(" "));
+    runs.forEach((run, index) => {
+      if (index && separator) out.push(document.createTextNode(separator));
       if (run.kind === "text") out.push(document.createTextNode(run.text));
       else if (run.kind === "pen") { const pen = node("span", null, "pen-tag"); pen.append(icon("pen", 10), document.createTextNode(run.text)); out.push(pen); }
       else out.push(cellNode({text: run.text, prov: run.kind === "gap" ? "gap" : provOfRef(run.ref_id), ref_id: run.kind === "gap" ? null : run.ref_id, gap_ref: run.kind === "gap" ? run.ref_id : null}, block, block.title, true));
     });
     return out;
   };
+  const lineNodes = (line, block) => runNodes(line.runs, block, " ");
   const sectionColumn = (block, name, lines, kind) => {
     const column = node("div", null, "sw-col " + kind);
     const head = node("div", null, "sw-head"); head.append(icon(kind === "strengths" ? "tick" : "close", 12), document.createTextNode(name));
@@ -552,9 +555,10 @@
       content.append(panel("Analysis", node("p", message, "empty-state")));
     }
     module.claims.forEach(claim => {
-      const body = node("div"); body.append(node("p", claim.text, "text-content")); body.dataset.claimId = claim.claim_id;
+      const body = node("div"), text = node("p", null, "text-content");
+      text.append(...runNodes(claim.runs, {title: "Finding", rows: []}, "")); body.append(text); body.dataset.claimId = claim.claim_id;
       const evidence = node("button", "Inspect supporting evidence", "source-button"); evidence.type = "button";
-      evidence.addEventListener("click", () => openInspector(() => passportCard(report.run.case_kind === "synthetic" ? "synthetic" : "cited", claim.claim_id, claim.text, [
+      evidence.addEventListener("click", () => openInspector(() => passportCard(report.run.case_kind === "synthetic" ? "synthetic" : "cited", claim.claim_id, claim.plain, [
         ["Claim", claim.claim_id], ["Evidence", sourceText(claim.citations) || "No citation supplied"], ["Limitation", claim.limitation], ["Artifact SHA-256", module.artifact_sha256]]), null, evidence));
       body.append(evidence); content.append(panel("Finding", body));
     });
@@ -585,6 +589,21 @@
     ]), id + " · artifact values"))));
     module.limitations.slice(1).forEach(text => content.append(panel("Limitation", node("p", text, "text-content"))));
     return content;
+  };
+  // The Model destination (decision 0006 DC-5): the CP-MODEL artifact above the CP-1 register detail.
+  // CP-MODEL emits no calculation JSON yet (M8), so a module that has not run says so and offers none.
+  const renderModelArtifact = () => {
+    const model = report.modules.find(item => item.module_id === "CP-MODEL");
+    const body = node("div");
+    if (model) body.append(chip(model.status_glyph, model.status_word));
+    let words;
+    if (!model || model.status_glyph === "unrun") words = "Model not run: CP-MODEL has not published the Model destination, so no calculation JSON has been emitted.";
+    else if (model.status_glyph === "na") words = `Model is not part of the ${front.pathway.title} Pathway, so it is not run.`;
+    else words = "Its status and limitations are on the CP-MODEL page.";
+    const text = node("p", words, "text-content");
+    if (model && model.status_glyph !== "unrun" && model.status_glyph !== "na") { const link = node("a", "CP-MODEL"); link.href = "#CP-MODEL"; text.append(" ", link); }
+    body.append(text);
+    return panel("Model", body);
   };
   const TABLE_KINDS = new Set(["dense", "keyvalue", "period_grid"]);
   const renderFront = () => {
@@ -631,7 +650,7 @@
     }
     if (front.unplaced.length) {
       const list = node("ul", null, "text-content");
-      front.unplaced.forEach(entry => { const item = node("li"); item.textContent = `${entry.block_id} (${report.block_states[entry.state].word}): ${entry.note}`; list.append(item); });
+      front.unplaced.forEach(entry => { const item = node("li"); item.textContent = `${entry.title} · ${entry.block_id} (${report.block_states[entry.state].word}): ${entry.note}`; list.append(item); });
       root.append(panel("Bound outside this Pathway", list));
     }
     report.modules.forEach(item => item.limitations.forEach(text => root.append(panel(item.module_id, node("p", text, "text-content")))));
@@ -648,7 +667,8 @@
     if (module) return module.module_id === "CP-1" ? "model" : "analysis";
     return {front: "front", analysis: "analysis", FIT: "fit", evidence: "evidence", limitations: "limits"}[route] || null;
   };
-  const hasLimitations = report.modules.some(item => item.limitations.length);
+  // Bindings outside this Pathway are listed under Limitations too, so they light the rail.
+  const hasLimitations = report.modules.some(item => item.limitations.length) || front.unplaced.length > 0;
   const showNavigator = (open) => {
     $("navigator").classList.toggle("open", open); $("toggle-nav").setAttribute("aria-expanded", String(open));
   };
@@ -768,7 +788,7 @@
     if (report.mode === "candidate") head.append(node("span", "CANDIDATE PREVIEW · NOT ACCEPTED", "candidate-label"));
     if (route === "front") $("call-root").append(callBand());
     root.append(head);
-    if (module) root.append(renderModule(module));
+    if (module) { if (module.module_id === "CP-1") root.append(renderModelArtifact()); root.append(renderModule(module)); }
     else if (route === "front") root.append(renderFront());
     else if (route === "analysis") root.append(renderAnalysis());
     else if (route === "evidence") root.append(renderSources());

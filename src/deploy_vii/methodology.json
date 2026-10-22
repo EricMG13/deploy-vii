@@ -618,13 +618,13 @@
   },
   {
     "module_id": "CP-MODEL",
-    "title": "Model workbook export",
+    "title": "Model (HTML destination and calculation JSON)",
     "aliases": [],
     "required": [
-      "CP-0"
+      "CP-1"
     ],
     "optional": [],
-    "purpose": "Builds the validated credit snapshot model workbook from accepted upstream handoffs.",
+    "purpose": "Publishes the accepted CP-1 financial model as the Model destination of the design system and its calculation JSON; no workbook.",
     "table_ids": []
   },
   {

@@ -476,6 +476,8 @@ CREDIT_SNAPSHOT_MAPS: tuple[BindingMap, ...] = (
 
 def credit_snapshot_view() -> View:
     """A SYNTHETIC candidate view: five producers ran, the rest of the registry did not."""
+    # Inherits the pre-6.5 `requested_modules` pinned in `synthetic_view` (no CP-MODEL), so the
+    # synthetic pack hashes the replay corpus records stay as recorded.
     base = synthetic_view()
     cp1_tables, cp1_facts = _cp1()
 
