@@ -273,7 +273,11 @@ provider answered `ok` or `truncated`, so it took the schema; `http_error`; `oth
 fallback or credit refusal; `ineligible`; `refused`), class, HTTP status, USD, attempt, the sent
 schema hash, the relaxations, `Keywords` (every JSON-Schema keyword the sent schema uses,
 `title`/`description` left out, so accepted and rejected schemas can be compared by eye; also
-`schema_keywords` in the manifest), `Blocks later runs` and the provider detail. The detail is
+`schema_keywords` in the manifest; then `schema.schema_shape`, for example `depth 12 (7 objects),
+232 properties`: the longest chain of schema nodes from the root with every `$ref` resolved, the
+object nodes on the deepest chain of objects, and the properties written in the root and every
+definition, each once; also `schema_shape` in the manifest), `Blocks later runs` and the provider
+detail. The detail is
 the client's `error_detail`, which since task 2.11 carries the upstream provider's own message
 from OpenRouter's `error.metadata.raw` (prefixed with `provider_name` and `provider_error_code`,
 key scrubbed, capped at 500 characters with `[truncated from N chars]`), for example `HTTP 400:
@@ -285,7 +289,8 @@ Runner use. `probe`, `module`, `regression` and `canary` read every `schema-chec
 manifest under their artifact root before the first cell (an unreadable one fails the batch
 before any spend). Only verdicts on the schema count: an `accepted` row, or an HTTP 400 that is
 schema-shaped (`runner.schema_shaped`: provider error code `invalid_json_schema`, or a detail
-naming `schema` or `response_format`), recorded as `schema_rejection: true` with
+saying "invalid schema" (or `invalid_json_schema`) or naming `response_format`; a bare
+`json_schema` can name the request feature and does not count), recorded as `schema_rejection: true` with
 `provider_error_code` in the manifest. The latest such verdict per (model, step, sent schema
 sha256) wins, by `finished_at` then batch id. A cell whose step has a standing rejection is
 sealed `ineligible: schema rejected by provider (<batch>)` before anything is reserved or sent,
@@ -308,16 +313,28 @@ whose `additionalProperties` is present and not false is reported as an open obj
 never sent: closing it would change the contract; no step schema has one),
 `any-of-null-to-type-union` (`anyOf: [X, {"type": "null"}]` to X with `type: [T, "null"]` where
 X has one string type; a bare `$ref` X is inlined one level), `split-mixed-types` (a mixed-type
-enum, or a `type` array of more than two types, to one `anyOf` branch per type), and `all`
-(every rewrite at once). A variant that leaves the schema unchanged is `not applicable` and not
-sent. Each sent variant is one call like the plain check (same request otherwise, same ledger and
+enum, or a `type` array of more than two types, to one `anyOf` branch per type), then (fix
+round 2, after the first live bisect left OpenAI `source_context`, `financials`, `readiness` and
+Google `financials` with none accepted) `nullable-array-to-anyof` (`type: [X, "null"]` with
+`items` to `anyOf: [{type: X, items, minItems/maxItems}, {"type": "null"}]`),
+`nullable-array-required` (drops `"null"` from those array types; the Bisect table's `Touches`
+column lists the `Owner.field` paths it changes, because a reply could then no longer say null),
+`anyof-enum-null-to-type-union` (`anyOf: [{enum, type: T}, {"type": "null"}]` to `type: [T,
+"null"]` with the enum), `strip-titles`, `inline-refs` (every `#/$defs/` reference replaced by
+its definition, `$defs` removed; a cyclic or unresolved reference makes the variant `not
+sendable`, with the reason, and nothing is sent), and `all` (every rewrite at once except
+`nullable-array-required`). A variant that leaves the schema unchanged is `not applicable` and
+not sent. Each sent variant is one call like the plain check (same request otherwise, same ledger and
 cap), with evidence under `<artifact-root>/<batch>/schema-bisect/<model>/<attempt>/` and manifest
-schema `schema-bisect-attempt/1` with `variant`; `schema_rejections` reads `schema-check` only,
+schema `schema-bisect-attempt/1` with `variant` and `variant_base_schema_sha256` (the
+relaxations named are that base schema's: `schema_relaxations_of`); `schema_rejections` reads `schema-check` only,
 so a variant's verdict never blocks or lifts a real run, and no real run ever sends a variant.
 The report adds a `## Bisect` table (model, step, variant, outcome, class, HTTP, USD, attempt,
-the variant's schema hash, provider detail) and `## First accepted variant`, one line per
+the variant's schema hash, provider detail, touches) and `## First accepted variant`, one line per
 bisected (model, step): `first accepted variant: <name>`, `none accepted`, or `not finished
-(cap)` when a variant's reservation is refused (the batch stops, exit 3). Numeric bounds
+(cap)` when a variant's reservation is refused (the batch stops, exit 3), or `not finished
+(aborted)` when the batch stops on anything else (for example a 402; the report is still
+written). Numeric bounds
 (`minimum`, `maximum`, `exclusive*`, in `financials`) are not one of the classes.
 
 ## Replay corpus (Task C, tier I2)

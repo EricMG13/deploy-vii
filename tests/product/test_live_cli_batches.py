@@ -18,7 +18,13 @@ from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import Ledger
 from deploy_vii.live.prompts import schema_text
-from deploy_vii.live.schema import bisect_variant, strict_schema
+from deploy_vii.live.schema import (
+    VariantRefused,
+    bisect_variant,
+    nullable_array_fields,
+    schema_shape,
+    strict_schema,
+)
 from deploy_vii.registry import modules
 from tests.product.live_support import (
     FAKE_KEY,
@@ -938,7 +944,7 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     # The Keywords column: every JSON-Schema keyword of the sent schema, annotations left out.
     assert readiness[9] == (
         "$defs, $ref, additionalProperties, anyOf, enum, items, minItems, "
-        "properties, required, type"
+        "properties, required, type; depth 6 (3 objects), 37 properties"
     )
     digest = hashlib.sha256(schema_text(cli.STEPS["source_context"].schema).encode()).hexdigest()
     assert refused[7] == digest
@@ -1081,6 +1087,12 @@ def test_bisect_stops_at_the_first_accepted_variant_and_never_feeds_a_real_run(r
     (variant_manifest,) = (root / "s1" / "schema-bisect").rglob("manifest.json")
     record = json.loads(variant_manifest.read_text())
     assert record["schema"] == "schema-bisect-attempt/1" and record["variant"] == "one-of-to-any-of"
+    # Round-1 re-review: the relaxations named are the base schema's, and the record says so.
+    plain_digest = hashlib.sha256(schema_text(cli.STEPS["narrative"].schema).encode()).hexdigest()
+    assert record["variant_base_schema_sha256"] == plain_digest
+    assert record["hashes"]["schema_sha256"] == digest
+    assert record["schema_relaxations_of"] == "variant_base_schema_sha256"
+    assert record["schema_shape"] == schema_shape(sent[1])
     # The variant's acceptance neither lifts nor adds a block: only the plain verdict counts.
     plain_digest = hashlib.sha256(schema_text(cli.STEPS["narrative"].schema).encode()).hexdigest()
     assert cli.schema_rejections(root) == {(LUNA, "narrative", plain_digest): "s1"}
@@ -1100,10 +1112,21 @@ def test_bisect_reports_none_accepted_and_skips_variants_that_change_nothing(rig
         ("open-object", "not applicable"),
         ("any-of-null-to-type-union", "http_error"),
         ("split-mixed-types", "not applicable"),
+        ("nullable-array-to-anyof", "http_error"),
+        ("nullable-array-required", "http_error"),
+        ("anyof-enum-null-to-type-union", "http_error"),
+        ("strip-titles", "http_error"),
+        ("inline-refs", "http_error"),
         ("all", "http_error"),
     ]
-    assert len(responder.requests) == 6  # the plain check and five variants
+    assert len(responder.requests) == 11  # the plain check and ten variants
     assert f"- {LUNA} source_context: none accepted" in text
+    # The last column names the fields a variant that changes the reply's meaning touches.
+    touches = {r[2]: r[10] for r in bisect_rows(text)}
+    fields = nullable_array_fields(strict_schema(cli.STEPS["source_context"].schema))
+    assert "SourceContext.event_scan_citations" in fields
+    assert touches["nullable-array-required"] == ", ".join(fields)
+    assert {value for name, value in touches.items() if name != "nullable-array-required"} == {"-"}
 
 
 def test_a_cap_refusal_mid_bisect_stops_the_batch_and_says_the_bisect_did_not_finish(
@@ -1126,3 +1149,46 @@ def test_a_cap_refusal_mid_bisect_stops_the_batch_and_says_the_bisect_did_not_fi
     assert "- Stopped: cap: " in text
     assert f"- {LUNA} source_context: not finished (cap)" in text
     assert cli.HELD_FOOTNOTE in text  # the timed-out variant's reservation is held
+
+
+def test_a_402_mid_bisect_stops_the_batch_and_still_writes_the_report(rig: Rig) -> None:
+    """Round-1 re-review: credit exhaustion on a variant leaves the cell "not finished
+    (aborted)" and the report is written (DC-8 exit)."""
+    responder = SchemaResponder({(LUNA, "source_context")})
+
+    def no_credit_after_the_plain_check(request: Request) -> Response:
+        if request.url != KEY_URL and responder.requests:
+            responder.requests.append(request)
+            return Response(402, b'{"error":{"message":"no credit","code":402}}')
+        return responder(request)
+
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context", "--bisect")
+    assert rig.run(argv, no_credit_after_the_plain_check) == cli.EXIT_CREDIT
+    assert len(responder.requests) == 2  # the plain check and drop-format, nothing after
+    text = rig.report("s1")
+    assert "- Stopped: aborted: CreditExhausted" in text
+    assert f"- {LUNA} source_context: not finished (aborted)" in text
+
+
+def test_a_variant_that_cannot_be_built_is_reported_and_not_sent(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cyclic `$ref` refuses `inline-refs` (and so `all`): the row says why, nothing is sent,
+    and the bisect carries on."""
+    real = cli.bisect_variant
+
+    def cyclic(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+        if name in {"inline-refs", "all"}:
+            raise VariantRefused("cyclic $ref: A -> B -> A")
+        return real(name, schema)
+
+    monkeypatch.setattr(cli, "bisect_variant", cyclic)
+    responder = SchemaResponder({(LUNA, "readiness")})
+    argv = check_argv(rig, "--models", LUNA, "--steps", "readiness", "--bisect")
+    assert rig.run(argv, responder) == 0
+    text = rig.report("s1")
+    rows = {r[2]: (r[3], r[4]) for r in bisect_rows(text)}
+    assert rows["inline-refs"] == rows["all"] == ("not sendable", "cyclic $ref: A -> B -> A")
+    sent = [schema for _, _, schema in responder.schemas()]
+    assert all('"$ref"' in json.dumps(schema) for schema in sent)  # no inlined variant went out
+    assert f"- {LUNA} readiness: none accepted" in text

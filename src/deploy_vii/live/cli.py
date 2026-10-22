@@ -63,11 +63,15 @@ from deploy_vii.live.runner import (
 )
 from deploy_vii.live.schema import (
     BISECT_VARIANTS,
+    NULLABLE_ARRAY_REQUIRED,
     OPEN_OBJECT,
+    VariantRefused,
     bisect_variant,
+    nullable_array_fields,
     open_objects,
     schema_keywords,
     schema_relaxations,
+    schema_shape,
     strict_schema,
 )
 from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsError, load_settings
@@ -1038,6 +1042,11 @@ def _usd(check: SchemaCheck) -> str:
     )
 
 
+def _keywords(sent: dict[str, Any]) -> str:
+    """The Keywords cell: the sent schema's keywords, then its resolved depth and size."""
+    return f"{', '.join(schema_keywords(sent))}; {schema_shape(sent)}"
+
+
 def _check_cells(check: SchemaCheck) -> tuple[object, ...]:
     return (
         check.model,
@@ -1049,7 +1058,7 @@ def _check_cells(check: SchemaCheck) -> tuple[object, ...]:
         check.attempt_id,
         check.schema_sha256,
         ", ".join(check.relaxations) or "none",
-        ", ".join(check.keywords),
+        _keywords(strict_schema(STEPS[check.step_id].schema)),
         _blocks(check),
         check.detail or "-",
     )
@@ -1068,13 +1077,13 @@ def _ineligible_check(candidate: PinnedCandidate, step_id: str) -> tuple[object,
         "none",
         hashlib.sha256(schema_text(schema).encode()).hexdigest(),
         ", ".join(schema_relaxations(schema)) or "none",
-        ", ".join(schema_keywords(strict_schema(schema))),
+        _keywords(strict_schema(schema)),
         "-",
         "-",
     )
 
 
-def _variant_cells(check: SchemaCheck) -> tuple[object, ...]:
+def _variant_cells(check: SchemaCheck, touches: str) -> tuple[object, ...]:
     return (
         check.model,
         check.step_id,
@@ -1086,14 +1095,16 @@ def _variant_cells(check: SchemaCheck) -> tuple[object, ...]:
         check.attempt_id,
         check.schema_sha256,
         check.detail or "-",
+        touches,
     )
 
 
 def _unsent_variant(
     model: str, step_id: str, variant: str, outcome: str, why: str
 ) -> tuple[object, ...]:
-    """A variant that is not sent: it changes nothing, or it is an open object (reported)."""
-    return (model, step_id, variant, outcome, why, "-", "0", "none", "-", "-")
+    """A variant that is not sent: it changes nothing, it is an open object (reported), or it
+    cannot be built (a cyclic or unresolved `$ref`)."""
+    return (model, step_id, variant, outcome, why, "-", "0", "none", "-", "-", "-")
 
 
 @dataclass
@@ -1175,6 +1186,7 @@ def render_schema_report(
             "Attempt",
             "Variant schema sha256",
             "Provider detail",
+            "Touches",
         )
         lines += [
             "## Bisect",
@@ -1216,13 +1228,20 @@ def _bisect(
             )
             bisection.rows.append(_unsent_variant(check.model, check.step_id, name, outcome, why))
             continue
-        variant = bisect_variant(name, sent)
+        try:
+            variant = bisect_variant(name, sent)
+        except VariantRefused as refused:  # reported in the row; nothing is sent for it
+            row = _unsent_variant(check.model, check.step_id, name, "not sendable", str(refused))
+            bisection.rows.append(row)
+            continue
         if variant == sent:
             row = _unsent_variant(check.model, check.step_id, name, "not applicable", "not sent")
             bisection.rows.append(row)
             continue
         result = send((name, variant))
-        bisection.rows.append(_variant_cells(result))
+        # The one variant that changes what a reply may say names the fields it changes.
+        touched = nullable_array_fields(sent) if name == NULLABLE_ARRAY_REQUIRED else []
+        bisection.rows.append(_variant_cells(result, ", ".join(touched) or "-"))
         if result.outcome == "refused":
             bisection.verdicts[key] = "not finished (cap)"
             return f"cap: {result.detail}"

@@ -227,6 +227,11 @@ def test_bisect_variants_run_in_the_coordinators_order() -> None:
         "open-object",
         "any-of-null-to-type-union",
         "split-mixed-types",
+        "nullable-array-to-anyof",
+        "nullable-array-required",
+        "anyof-enum-null-to-type-union",
+        "strip-titles",
+        "inline-refs",
         "all",
     )
 
@@ -331,13 +336,150 @@ def test_the_all_variant_is_every_rewrite_at_once(step: str) -> None:
     sent = strict.strict_schema(SCHEMAS[step])
     composed = sent
     for name in strict.BISECT_VARIANTS:
-        if name not in {"open-object", "all"}:
+        if name not in {"open-object", "nullable-array-required", "all"}:
             composed = strict.bisect_variant(name, composed)
     every = strict.bisect_variant("all", sent)
     assert every == composed
-    assert not {"oneOf", "discriminator", "format", "pattern", "minItems", "maxItems"} & sent_keys(
-        every
+    gone = {"oneOf", "discriminator", "format", "pattern", "minItems", "maxItems", "title", "$ref"}
+    assert not (gone | {"$defs"}) & set(every) and not gone & sent_keys(every)
+    # "all" never drops null from an array (that variant changes what a reply may say): every
+    # nullable array is an `anyOf` with a null branch instead.
+    assert not [n for n in nodes(every) if isinstance(n.get("type"), list) and "array" in n["type"]]
+    nullable = [
+        n
+        for n in nodes(every)
+        if {"type": "null"} in n.get("anyOf", ())
+        and any(b.get("type") == "array" for b in n["anyOf"])
+    ]
+    assert len(nullable) >= len(strict.nullable_array_fields(sent))
+
+
+# --- fix round 2: the classes the first live bisect left open --------------------------------
+
+
+def nullable_arrays() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "a": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "maxItems": 3,
+                "title": "A",
+            },
+            "s": {"type": ["string", "null"], "title": "S"},
+            "b": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def test_the_nullable_array_variant_sends_an_any_of_with_the_array_bounds_inside() -> None:
+    out = strict.bisect_variant("nullable-array-to-anyof", nullable_arrays())["properties"]
+    assert out["a"] == {
+        "title": "A",
+        "anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 3}, {"type": "null"}],
+    }
+    assert out["s"] == nullable_arrays()["properties"]["s"]  # not an array
+    assert out["b"] == nullable_arrays()["properties"]["b"]  # not nullable
+    sent = strict.bisect_variant(
+        "nullable-array-to-anyof", strict.strict_schema(SCHEMAS["source_context"])
     )
+    assert not [n for n in nodes(sent) if isinstance(n.get("type"), list) and "array" in n["type"]]
+
+
+def test_the_required_array_variant_drops_null_and_names_the_fields_it_touches() -> None:
+    out = strict.bisect_variant("nullable-array-required", nullable_arrays())["properties"]
+    assert out["a"] == {"type": "array", "items": {"type": "string"}, "maxItems": 3, "title": "A"}
+    assert out["s"] == nullable_arrays()["properties"]["s"]
+    assert strict.nullable_array_fields(nullable_arrays()) == ["(root).a"]
+    readiness = strict.strict_schema(SCHEMAS["readiness"])
+    assert set(strict.nullable_array_fields(readiness)) == {
+        "(root).consumers",
+        "ConsumerAssessment.requirements",
+        "ConsumerAssessment.gaps",
+        "RequirementAssessment.actions",
+    }
+    assert (
+        strict.nullable_array_fields(strict.bisect_variant("nullable-array-required", readiness))
+        == []
+    )
+
+
+def test_the_enum_null_variant_merges_only_enum_branches() -> None:
+    schema: dict[str, Any] = {
+        "properties": {
+            "e": {"anyOf": [{"enum": ["a"], "type": "string"}, {"type": "null"}], "title": "E"},
+            "d": {"anyOf": [{"format": "date", "type": "string"}, {"type": "null"}]},
+            "r": {"anyOf": [{"$ref": "#/$defs/D"}, {"type": "null"}]},
+            "two": {"anyOf": [{"enum": ["a"], "type": "string"}, {"type": "integer"}]},
+        }
+    }
+    out = strict.bisect_variant("anyof-enum-null-to-type-union", schema)["properties"]
+    assert out["e"] == {"title": "E", "type": ["string", "null"], "enum": ["a"]}
+    for name in ("d", "r", "two"):
+        assert out[name] == schema["properties"][name]
+
+
+def test_strip_titles_keeps_a_property_named_title() -> None:
+    schema = {"title": "Root", "properties": {"title": {"type": "string", "title": "Title"}}}
+    assert strict.bisect_variant("strip-titles", schema) == {
+        "properties": {"title": {"type": "string"}}
+    }
+    sent = strict.strict_schema(SCHEMAS["financials"])
+    assert "title" in sent_keys(sent)
+    assert "title" not in sent_keys(strict.bisect_variant("strip-titles", sent))
+
+
+def test_inline_refs_resolves_definition_chains_and_refuses_a_cycle() -> None:
+    schema: dict[str, Any] = {
+        "$defs": {
+            "A": {"type": "object", "properties": {"b": {"$ref": "#/$defs/B"}}},
+            "B": {"type": "string", "title": "B"},
+        },
+        "type": "object",
+        "properties": {"x": {"$ref": "#/$defs/A", "description": "d"}},
+    }
+    assert strict.bisect_variant("inline-refs", schema) == {
+        "type": "object",
+        "properties": {
+            "x": {
+                "type": "object",
+                "properties": {"b": {"type": "string", "title": "B"}},
+                "description": "d",
+            }
+        },
+    }
+    cyclic = {
+        "$defs": {
+            "A": {"properties": {"b": {"$ref": "#/$defs/B"}}},
+            "B": {"properties": {"a": {"$ref": "#/$defs/A"}}},
+        },
+        "properties": {"x": {"$ref": "#/$defs/A"}},
+    }
+    with pytest.raises(strict.VariantRefused, match=r"cyclic \$ref: A -> B -> A"):
+        strict.bisect_variant("inline-refs", cyclic)
+    with pytest.raises(strict.VariantRefused, match="unresolved"):
+        strict.bisect_variant("inline-refs", {"properties": {"x": {"$ref": "#/$defs/Z"}}})
+    for model in SCHEMAS.values():
+        inlined = strict.bisect_variant("inline-refs", strict.strict_schema(model))
+        assert "$defs" not in inlined and "$ref" not in sent_keys(inlined)
+
+
+def test_the_schema_shape_counts_resolved_depth_objects_and_properties() -> None:
+    schema: dict[str, Any] = {
+        "$defs": {
+            "D": {
+                "type": "object",
+                "properties": {"c": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+            }
+        },
+        "type": "object",
+        "properties": {"a": {"type": "array", "items": {"$ref": "#/$defs/D"}}, "b": {}},
+    }
+    # root > a > items (D) > c > anyOf branch: five nodes deep, two of them objects.
+    assert strict.schema_shape(schema) == "depth 5 (2 objects), 3 properties"
+    cyclic = {"$defs": {"A": {"properties": {"a": {"$ref": "#/$defs/A"}}}}, "$ref": "#/$defs/A"}
+    assert strict.schema_shape(cyclic) == "depth cyclic, 1 properties"
 
 
 def test_an_unknown_variant_is_refused() -> None:

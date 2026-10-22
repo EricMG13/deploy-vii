@@ -211,7 +211,15 @@ not permitted"; the others with no keyword named); Google `source_readiness` and
 ("Request contains an invalid argument" for the rest). `schema-check --bisect` therefore sends,
 for each rejected cell, schema variants that each remove or rewrite one suspect class, report
 only ([live-schema-2026-10-22.md](../development/tasks/implementation/live-schema-2026-10-22.md)).
-Every pool change is to be
+The first bisect (schema-2026-10-22-bisect, US$0.016,
+[live-schema-2026-10-22-bisect.md](../development/tasks/implementation/live-schema-2026-10-22-bisect.md))
+found OpenAI `narrative` accepted once `oneOf` became `anyOf`, Google `source_context` and
+`narrative` once `minItems`/`maxItems` were dropped, and no variant accepted for OpenAI
+`source_context`, `financials`, `readiness` or Google `financials`; fix round 2 adds variants for
+nullable arrays (as an `anyOf`, or required), enum-or-null unions, titles and inlined references,
+and reports each schema's resolved depth (`financials` 12 nodes, 7 objects) and property count.
+Under the user's 22 October 2026 instruction, the relaxation finally chosen must be accepted by
+OpenAI (GPT-6.1 Sol); the Grok and Google rows are information only. Every pool change is to be
 checked this way before a CP-0 call. M7 backlog from the analysis (§6): a page-boundary hint for
 a quote that continues on the next page; the 60-character truncation in quote-mismatch text;
 the `hyphen-wrap` label printed only when the wrap is relevant; a check on free-text `period`
@@ -222,8 +230,8 @@ fields; a no-response column in the cohort tables. Records:
 [live-probe-5b-reconciled.md](../development/tasks/implementation/live-probe-5b-reconciled.md)
 and the analysis,
 [live-probe-5-analysis.md](../development/tasks/implementation/live-probe-5-analysis.md). Not
-verified: which construct OpenAI and Google refuse in the relaxed `source_context`,
-`financials` and (OpenAI) `readiness` schemas; the coordinator's `--bisect` run is to answer it.
+verified: which construct OpenAI refuses in the relaxed `source_context`, `financials` and
+`readiness` schemas; the coordinator's round-2 `--bisect` run is to answer it.
 
 ## Evidence
 

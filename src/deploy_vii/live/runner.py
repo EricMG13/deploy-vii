@@ -46,6 +46,7 @@ from deploy_vii.live.schema import (
     RELAXATIONS_BASIS,
     schema_keywords,
     schema_relaxations,
+    schema_shape,
     unverified_keywords,
 )
 from deploy_vii.live.submission import STEPS, StepDef, Submitted, submit_model_payload
@@ -866,13 +867,16 @@ SCHEMA_CHECK_TIMEOUT_SECONDS = 120.0
 SCHEMA_CHECK_PROMPT = "Reply with one JSON object that conforms to the response format."
 # A 400 is a verdict on the schema only when it says so (review fix, task 2.11): schema-check
 # sends what a real run does not (16 tokens, no reasoning, a one-line prompt), so a 400 about
-# those would otherwise block the paid path with nothing able to lift it.
-_SCHEMA_WORDS = re.compile(r"schema|response_format", re.IGNORECASE)
+# those would otherwise block the paid path with nothing able to lift it. Without OpenAI's code,
+# only "invalid schema" (or "invalid_json_schema") or `response_format` names the schema; a bare
+# "json_schema" can be the request feature ("max_tokens too small for json_schema output").
+_SCHEMA_WORDS = re.compile(r"invalid[ _](json[ _])?schema|response_format", re.IGNORECASE)
 
 
 def schema_shaped(result: ChatResult) -> bool:
-    """True for an HTTP 400 whose provider code is `invalid_json_schema` or whose detail names
-    the schema or `response_format`. Google's "Request contains an invalid argument" does not."""
+    """True for an HTTP 400 whose provider code is `invalid_json_schema` or whose detail says
+    "invalid schema" or names `response_format`. Google's "Request contains an invalid argument"
+    does not."""
     if result.classification != "http_error" or result.http_status != 400:
         return False
     if result.provider_error_code == "invalid_json_schema":
@@ -996,8 +1000,18 @@ def _check_manifest(check: _Check, cost: _Cost) -> dict[str, Any]:
             ).hexdigest(),
         },
         "schema_keywords": schema_keywords(sent),
+        "schema_shape": schema_shape(sent),
         "schema_keywords_unverified": unverified_keywords(sent),
+        # A variant is derived from the step's sent schema; its relaxations are that schema's.
+        "variant_base_schema_sha256": (
+            None
+            if check.variant is None
+            else hashlib.sha256(schema_text(check.schema).encode()).hexdigest()
+        ),
         "schema_relaxations": schema_relaxations(check.schema),
+        "schema_relaxations_of": (
+            "hashes.schema_sha256" if check.variant is None else "variant_base_schema_sha256"
+        ),
         "schema_relaxations_basis": RELAXATIONS_BASIS,
         "endpoint": CHAT_URL,
         "routing": {"allow_fallbacks": False, "require_parameters": True, "models": None},

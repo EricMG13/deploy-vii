@@ -262,9 +262,24 @@ BISECT_VARIANTS = (
     "open-object",
     "any-of-null-to-type-union",
     "split-mixed-types",
+    # Fix round 2: the classes the first live bisect (2026-10-22) left open.
+    "nullable-array-to-anyof",
+    "nullable-array-required",
+    "anyof-enum-null-to-type-union",
+    "strip-titles",
+    "inline-refs",
     "all",
 )
 OPEN_OBJECT = "open-object"  # detected and reported only: closing it would change the contract
+# Never part of "all": a reply could no longer say null where the contract allows it.
+NULLABLE_ARRAY_REQUIRED = "nullable-array-required"
+_ARRAY_BOUNDS = ("items", "minItems", "maxItems")
+
+
+class VariantRefused(ValueError):
+    """A variant that cannot be built for this schema (a cyclic or unresolved `$ref`)."""
+
+
 _NULL = {"type": "null"}
 _JSON_TYPES: dict[type, str] = {
     str: "string",
@@ -338,15 +353,95 @@ def _split_types(node: dict[str, Any]) -> dict[str, Any]:
     return node
 
 
+def _nullable_array(node: dict[str, Any]) -> str | None:
+    """The array type of a `type: [X, "null"]` node with `items`; None for any other node."""
+    kind = node.get("type")
+    if not (isinstance(kind, list) and len(kind) == 2 and "null" in kind and "items" in node):
+        return None
+    (other,) = [name for name in kind if name != "null"]
+    return str(other)
+
+
+def _array_to_any_of(node: dict[str, Any]) -> dict[str, Any]:
+    kind = _nullable_array(node)
+    if kind is None:
+        return node
+    inner = {"type": kind, **{key: node[key] for key in _ARRAY_BOUNDS if key in node}}
+    outer = {key: value for key, value in node.items() if key not in {"type", *_ARRAY_BOUNDS}}
+    return {**outer, "anyOf": [inner, _NULL]}
+
+
+def _array_required(node: dict[str, Any]) -> dict[str, Any]:
+    kind = _nullable_array(node)
+    return node if kind is None else {**node, "type": kind}
+
+
+def _enum_null_union(node: dict[str, Any]) -> dict[str, Any]:
+    """`anyOf: [{enum, type: T}, {"type": "null"}]` -> `type: [T, "null"]` with the enum; the
+    enum branch carries nothing else (`any-of-null-to-type-union` without its other cases)."""
+    branches = node.get("anyOf")
+    if not isinstance(branches, list) or len(branches) != 2 or _NULL not in branches:
+        return node
+    others = [branch for branch in branches if branch != _NULL]
+    other = others[0] if len(others) == 1 else None
+    if not (
+        isinstance(other, dict)
+        and set(other) == {"enum", "type"}
+        and isinstance(other["type"], str)
+    ):
+        return node
+    outer = {key: value for key, value in node.items() if key != "anyOf"}
+    return {**outer, "type": [other["type"], "null"], "enum": copy.deepcopy(other["enum"])}
+
+
+def _inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` with every `#/$defs/` reference replaced by its definition and `$defs` removed
+    (a reference's own keywords override the definition's). A cycle or an unresolved reference
+    raises VariantRefused: such a schema cannot be written without references."""
+    definitions: dict[str, Any] = schema.get("$defs", {})
+
+    def resolve(node: object, trail: tuple[str, ...]) -> object:
+        if isinstance(node, list):
+            return [resolve(item, trail) for item in node]
+        if not isinstance(node, dict):
+            return node
+        if "$ref" in node:
+            name = _ref_name(node)
+            if name is None or name not in definitions:
+                raise VariantRefused(f"unresolved $ref {node['$ref']!r}")
+            if name in trail:
+                raise VariantRefused(f"cyclic $ref: {' -> '.join((*trail, name))}")
+            body = resolve(definitions[name], (*trail, name))
+            rest = resolve({k: v for k, v in node.items() if k != "$ref"}, trail)
+            assert isinstance(body, dict) and isinstance(rest, dict)  # a dict resolves to a dict
+            return {**body, **rest}
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "$defs":
+                continue
+            if key == "properties" and isinstance(value, dict):
+                out[key] = {name: resolve(child, trail) for name, child in value.items()}
+            else:
+                out[key] = copy.deepcopy(value) if key in _DATA else resolve(value, trail)
+        return out
+
+    resolved = resolve(schema, ())
+    assert isinstance(resolved, dict)
+    return resolved
+
+
 def bisect_variant(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     """`schema` with the one suspect class `name` removed or rewritten (pure). "all" applies
-    every rewrite in order; "open-object" returns the schema unchanged (it is reported, not
-    sent). An unknown name raises ValueError."""
+    every rewrite in order except `nullable-array-required`; "open-object" returns the schema
+    unchanged (it is reported, not sent). An unknown name raises ValueError; "inline-refs" (and
+    so "all") raises VariantRefused for a cyclic or unresolved `$ref`."""
     if name == "all":
         for each in BISECT_VARIANTS:
-            if each not in {OPEN_OBJECT, "all"}:
+            if each not in {OPEN_OBJECT, NULLABLE_ARRAY_REQUIRED, "all"}:
                 schema = bisect_variant(each, schema)
         return schema
+    if name == "inline-refs":
+        return _inline_refs(schema)
     rules: dict[str, Rule] = {
         "one-of-to-any-of": _one_of_to_any_of,
         "drop-format": _without(frozenset({"format"})),
@@ -355,10 +450,66 @@ def bisect_variant(name: str, schema: dict[str, Any]) -> dict[str, Any]:
         OPEN_OBJECT: lambda node: node,
         "any-of-null-to-type-union": _null_union(schema.get("$defs", {})),
         "split-mixed-types": _split_types,
+        "nullable-array-to-anyof": _array_to_any_of,
+        NULLABLE_ARRAY_REQUIRED: _array_required,
+        "anyof-enum-null-to-type-union": _enum_null_union,
+        "strip-titles": _without(frozenset({"title"})),
     }
     if name not in rules:
         raise ValueError(f"unknown bisect variant {name!r}; known: {', '.join(BISECT_VARIANTS)}")
     return _map_schema(schema, rules[name])
+
+
+def _named_nodes(node: object, path: str) -> Iterator[tuple[str, dict[str, Any]]]:
+    """(owner.property path, node) for every schema node; `$defs` entries name their owner."""
+    if isinstance(node, dict):
+        yield path, node
+        for key, value in node.items():
+            if key in {"properties", "$defs"} and isinstance(value, dict):
+                for name, child in value.items():
+                    yield from _named_nodes(
+                        child, f"{path}.{name}" if key == "properties" else name
+                    )
+            elif key not in _DATA:
+                yield from _named_nodes(value, path)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _named_nodes(item, path)
+
+
+def nullable_array_fields(schema: dict[str, Any]) -> list[str]:
+    """The `Owner.field` paths whose node is a nullable array (what `nullable-array-required`
+    changes), in schema order; the root object is "(root)"."""
+    return [path for path, node in _named_nodes(schema, "(root)") if _nullable_array(node)]
+
+
+def schema_shape(schema: dict[str, Any]) -> str:
+    """The text "depth D (O objects), P properties": D is the longest chain of schema nodes from
+    the root with every `$ref` resolved, O the object nodes (with `properties`) on the deepest
+    chain of objects, P the properties written in the root and every definition, each counted
+    once. A cyclic or unresolved `$ref` gives "depth cyclic"."""
+    properties = sum(len(node.get("properties", {})) for node in _nodes(schema))
+    try:
+        resolved = _inline_refs(schema)
+    except VariantRefused:
+        return f"depth cyclic, {properties} properties"
+
+    def depth(node: object, objects: bool) -> int:
+        if isinstance(node, list):
+            return max((depth(item, objects) for item in node), default=0)
+        if not isinstance(node, dict):
+            return 0
+        children = [
+            depth(value, objects)
+            for key, value in node.items()
+            if key not in _DATA and key != "properties"
+        ] + [depth(child, objects) for child in node.get("properties", {}).values()]
+        own = 1 if not objects or "properties" in node else 0
+        return own + max(children, default=0)
+
+    return (
+        f"depth {depth(resolved, False)} ({depth(resolved, True)} objects), {properties} properties"
+    )
 
 
 RELAXATIONS_BASIS = (

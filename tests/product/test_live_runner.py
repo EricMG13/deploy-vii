@@ -23,6 +23,7 @@ from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import CapExceeded, Ledger
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import (
+    SCHEMA_BISECT_RECORD,
     SCHEMA_CHECK_RECORD,
     DispatchResult,
     SchemaCheck,
@@ -1588,11 +1589,12 @@ def check_record(
     *,
     sha: str = "a" * 64,
     schema_rejection: bool | None = None,
+    case: str = "schema-check",
 ) -> None:
-    directory = root / batch / "schema-check" / "openai__gpt-6-luna" / f"{batch}-1"
+    directory = root / batch / case / "openai__gpt-6-luna" / f"{batch}-1"
     directory.mkdir(parents=True)
     manifest: dict[str, object] = {
-        "schema": SCHEMA_CHECK_RECORD,
+        "schema": SCHEMA_CHECK_RECORD if case == "schema-check" else SCHEMA_BISECT_RECORD,
         "experiment_id": batch,
         "model": LUNA,
         "step_id": "source_context",
@@ -1637,6 +1639,25 @@ def test_only_the_latest_schema_shaped_400_for_the_exact_schema_blocks_a_cell(
     assert key not in schema_rejections(tmp_path)
 
 
+def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None:
+    """Round-1 re-review: `schema-bisect` evidence is never read as a verdict on a real schema,
+    even when it says `schema_rejection: true` for the same hash."""
+    key = (LUNA, "source_context", "a" * 64)
+    check_record(
+        tmp_path,
+        "b1",
+        "http_error",
+        400,
+        "2026-10-22T10:00:00Z",
+        schema_rejection=True,
+        case="schema-bisect",
+    )
+    assert schema_rejections(tmp_path) == {}
+    check_record(tmp_path, "s1", "http_error", 400, "2026-10-22T10:00:00Z", schema_rejection=True)
+    check_record(tmp_path, "b2", "accepted", 200, "2026-10-22T11:00:00Z", case="schema-bisect")
+    assert schema_rejections(tmp_path) == {key: "s1"}
+
+
 @pytest.mark.parametrize(
     "error, blocking",
     [
@@ -1645,6 +1666,8 @@ def test_only_the_latest_schema_shaped_400_for_the_exact_schema_blocks_a_cell(
         ({"code": 400, "message": "response_format: unsupported keyword"}, True),
         ({"code": 400, "message": "max_tokens is below the minimum of 32"}, False),
         ({"code": 400, "message": "Reasoning is mandatory for this endpoint"}, False),
+        # Round-1 re-review hardening: "json_schema" alone is not a schema verdict.
+        ({"code": 400, "message": "max_tokens too small for json_schema output"}, False),
         (  # Google's whole reason: it does not name the schema, so it never blocks
             {
                 "code": 400,
@@ -1664,6 +1687,7 @@ def test_only_the_latest_schema_shaped_400_for_the_exact_schema_blocks_a_cell(
         "names-response-format",
         "token-min",
         "reasoning",
+        "names-json-schema-only",
         "google",
     ],
 )
