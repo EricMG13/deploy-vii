@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Literal, Self
 
 from pydantic import ValidationError, model_validator
+from pydantic_core import ErrorDetails
 
 from deploy_vii.contracts import (
     Citation,
@@ -92,9 +93,21 @@ def shape_issues(error: ValidationError) -> tuple[str, ...]:
     No library URL and no `input_value` repr: the text is stable across library upgrades (replay
     compares it exactly) and small enough for a repair prompt. A whole-payload error (invalid
     JSON) has the path `(root)`."""
+    errors = error.errors(include_url=False, include_input=False, include_context=False)
     return tuple(
         f"{'.'.join(str(part) for part in item['loc']) or '(root)'}: {item['msg']}"
-        for item in error.errors(include_url=False, include_input=False, include_context=False)
+        for item in errors
+        if not _echoes_item_error(item, errors)
+    )
+
+
+def _echoes_item_error(item: ErrorDetails, errors: list[ErrorDetails]) -> bool:
+    """A container min-length error beside an error inside that container (the items failed)."""
+    return item["msg"].startswith(
+        ("Tuple should have at least", "List should have at least")
+    ) and any(
+        len(other["loc"]) > len(item["loc"]) and other["loc"][: len(item["loc"])] == item["loc"]
+        for other in errors
     )
 
 

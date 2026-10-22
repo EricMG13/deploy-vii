@@ -308,9 +308,15 @@ class StatementLine(Contract):
     @model_validator(mode="after")
     def sign_evidence(self) -> Self:
         if self.statement == "BS" and self.sign_convention == "outflow_magnitude":
-            raise ValueError("balance-sheet amounts are signed balances, not outflow magnitudes")
+            raise ValueError(
+                "balance-sheet amounts are signed balances, not outflow magnitudes: use "
+                "`sign_convention: signed`"
+            )
         if self.sign_convention == "outflow_magnitude" and not self.sign_citations:
-            raise ValueError("outflow magnitude normalization requires source evidence")
+            raise ValueError(
+                "outflow magnitude normalization requires source evidence: cite the span that "
+                "prints the magnitude in `sign_citations`, or use `sign_convention: signed`"
+            )
         return self
 
 

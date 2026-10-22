@@ -242,3 +242,23 @@ def test_the_account_rule_names_the_enum_and_where_other_figures_go() -> None:
         "metric_id"
     ]["enum"]
     assert json.dumps(enum, separators=(",", ":")) in composed("financials")
+
+
+# --- 7.0f: the statement-line sign convention reaches the model --------------------------------
+
+
+def test_the_financials_step_states_the_sign_rule_once_and_no_other_step_does() -> None:
+    """E1 batch 4: 14 lines were `outflow_magnitude` with no `sign_citations`; nothing said so."""
+    rule = prompts.SIGN_RULE
+    assert rule in prompts.STEP_CONTRACTS["financials"]
+    assert composed("financials").count(rule) == 1
+    for step_id in ("source_readiness", "source_context", "narrative", "readiness"):
+        assert rule not in composed(step_id), step_id
+
+
+def test_the_sign_rule_matches_what_the_validator_and_python_do_with_the_convention() -> None:
+    rule = prompts.SIGN_RULE
+    assert "`sign_convention`" in rule and "`signed`" in rule and "`outflow_magnitude`" in rule
+    assert "`sign_citations`" in rule and "at least one" in rule
+    assert "negative" in rule and "contradiction" in rule
+    assert "balance-sheet" in rule

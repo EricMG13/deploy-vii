@@ -83,6 +83,17 @@ ACCOUNT_METRIC_RULE = (
     "account metric belongs in `statement_lines` under its own `item_id` (issuer detail with the "
     "`other:` prefix), with its `statement` and `sign_convention`, not in `accounts`."
 )
+# Task 7.0f (E1 batch e1-cp1-4): `StatementLine.sign_evidence` and the consumers of
+# `sign_convention` (`statement_validation.account_outflow`, `financial_reconciliation`).
+SIGN_RULE = (
+    "A statement line's `sign_convention` is `signed` when its amount carries the arithmetic sign "
+    "the statement implies (an expense or outflow negative, a revenue or inflow positive); "
+    "balance-sheet lines are always `signed`. Use `outflow_magnitude` only when the source prints "
+    "an expense or outflow as a positive magnitude and you keep that presentation: then "
+    "`sign_citations` must hold at least one located span showing the printed presentation (the "
+    "value's own span qualifies), never empty. A negative amount under `outflow_magnitude` is a "
+    "contradiction: use `signed`."
+)
 CONTEXT_STEP_RULE = (
     "`context_step_sha256` must equal the sha256 shown on the step:source_context block."
 )
@@ -131,7 +142,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"a. {AMOUNT_RULE}\n"
         f"b. {ACCOUNT_METRIC_RULE}\n"
         f"c. {CONTEXT_STEP_RULE}\n"
-        f"d. {DECLARED_PERIOD_RULE}"
+        f"d. {DECLARED_PERIOD_RULE}\n"
+        f"e. {SIGN_RULE}"
     ),
     # The narrative and readiness hash bindings are not model-computable from the step hash
     # alone; Python pre-fills them in the contract-shape work (plan 2.7, MC-1).

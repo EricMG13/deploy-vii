@@ -198,3 +198,13 @@ the populated Model panel sits in `test_cp_model_workflow.py` beside its journal
 Not verified: publication on a real promoted CP-1 (none exists until E1); the XLSX workbook
 (deferred, decision 0006 DC-5); a CP-1 whose financial stage has no calculated Model (refused,
 untested end to end); analytical qualification of the Model figures.
+
+## 7.0f The sign-convention rule reaches the model
+
+The `financials` contract now states when `sign_convention` is `signed` or `outflow_magnitude`
+and that the latter needs a located `sign_citations` span, which no step text said before. The
+two `sign_evidence` messages name their remedy, and `shape_issues` drops a container `min_length`
+error that only echoes a failed item. No validator or arithmetic semantics changed. Evidence
+(E1 batch `e1-cp1-4`): 14 sign-evidence issues and 1 derivative `financial.books` issue.
+
+Not verified: live uptake (E1 batch 5).

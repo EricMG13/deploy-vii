@@ -533,7 +533,9 @@ A payload that fails the Pydantic parse (`cp0_workflow`, both `cp1_workflow` par
 `readiness.validate_review`) now yields one issue per error, `<field.path>: <message>`, with no
 library URL and no `input_value` repr (`readiness.shape_issues`); an unparseable payload is
 `(root): Invalid JSON: ...`. Replay compares text exactly, so this is stable across Pydantic
-upgrades, and the report's Issues column counts each error.
+upgrades, and the report's Issues column counts each error. Since task 7.0f a container
+`min_length` error ("Tuple/List should have at least ...") is dropped when another error's path
+extends its path, because it only echoes an item that failed; a genuinely empty container keeps it.
 
 Earlier note corrected: the synthetic CP-1 pack is hash-stable. The instability was
 `tests/product/test_model_readiness.py:31`, where `dict.fromkeys(ACCOUNT_IDS, ...)` iterated a
@@ -630,6 +632,13 @@ pass over the strict copy (`strict_schema = relax(strict_copy)`):
 | `oneof-anyof` (round 3) | `{"oneOf": [...], "discriminator": {...}}` | `{"anyOf": [...]}` (no discriminator) |
 | `decimal-number-only` (task 7.0d) | a `Number` amount: `{"anyOf": [{"type": "number", ...bounds}, {"type": "string"}], "x-deploy-vii-decimal": true}` (null joins when nullable) | `{"type": "number", ...bounds}`, or `{"anyOf": [{"type": "number", ...bounds}, {"type": "null"}]}` |
 | `prefixed-enum` (task 7.0d fix 1) | an id: `{"type": "string", "pattern": P, "x-deploy-vii-prefixed-enum": {"enum": [...], "pattern": "^other:..."}}` | `{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern": "^other:..."}]}` |
+
+Task 7.0f (E1 batch `e1-cp1-4`): the `financials` contract carries a fifth step rule
+(`prompts.SIGN_RULE`): `sign_convention` is `signed` when the amount carries the statement's
+arithmetic sign (balance-sheet lines always), and `outflow_magnitude` only with at least one
+located `sign_citations` span showing the printed positive magnitude; a negative amount under
+`outflow_magnitude` is a contradiction. The two `StatementLine.sign_evidence` messages now name
+their remedy; the validator's semantics are unchanged.
 
 Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
 `"(211)"`), which the stored contract refused, and the sent schema allowed them. The

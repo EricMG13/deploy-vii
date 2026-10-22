@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import BaseModel, Field, ValidationError
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from deploy_vii.contracts import Citation, Claim, Source, Span
 from deploy_vii.live.submission import (
@@ -23,6 +25,7 @@ from deploy_vii.readiness import (
     SourceAssessment,
     build_readiness,
     citation_issues,
+    shape_issues,
     validate_review,
 )
 from deploy_vii.registry import plan
@@ -556,3 +559,53 @@ def test_every_exact_substring_of_a_wrapped_span_still_matches(
     quote = text[start : start + length]
     if normalise(quote).strip():
         assert quoted(quote, text)
+
+
+# --- 7.0f: a container min-length error that only echoes an item error is dropped ---------------
+
+TUPLE_EMPTY = "Tuple should have at least 1 item after validation, not 0"
+LIST_EMPTY = "List should have at least 1 item after validation, not 0"
+
+
+class _Item(BaseModel):
+    name: str
+
+
+class _Holder(BaseModel):
+    books: tuple[_Item, ...] = Field(min_length=1)
+    notes: list[str] = Field(min_length=1)
+
+
+def _detail(message: str, loc: tuple[str | int, ...]) -> InitErrorDetails:
+    return InitErrorDetails(type=PydanticCustomError("custom", message), loc=loc, input=None)
+
+
+def test_a_min_length_error_that_only_echoes_an_item_error_is_dropped() -> None:
+    """E1 batch 4: `financial.books: Tuple should have at least 1 item ...` after its only item
+    failed. Pydantic reports the container too when a validator rejects every item."""
+    error = ValidationError.from_exception_data(
+        "_Holder",
+        [
+            _detail(TUPLE_EMPTY, ("financial", "books")),
+            _detail("sign evidence", ("financial", "books", 0)),
+            _detail(LIST_EMPTY, ("notes",)),
+            _detail("bad note", ("notes", 2)),
+        ],
+    )
+    assert shape_issues(error) == (
+        "financial.books.0: sign evidence",
+        "notes.2: bad note",
+    )
+
+
+def test_a_genuinely_empty_container_still_reports_its_min_length_error() -> None:
+    with pytest.raises(ValidationError) as caught:
+        _Holder.model_validate({"books": [], "notes": []})
+    assert shape_issues(caught.value) == (f"books: {TUPLE_EMPTY}", f"notes: {LIST_EMPTY}")
+
+
+def test_a_min_length_error_beside_an_unrelated_error_is_kept() -> None:
+    error = ValidationError.from_exception_data(
+        "_Holder", [_detail(TUPLE_EMPTY, ("books",)), _detail("bad note", ("notes", 0))]
+    )
+    assert shape_issues(error) == (f"books: {TUPLE_EMPTY}", "notes.0: bad note")
