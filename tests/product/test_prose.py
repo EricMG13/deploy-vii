@@ -52,6 +52,19 @@ ACCEPTED = (
     "debt is unknown [debt-missing].",
     "The calculated cover {K.12|x} rests on [interface-fact:" + "a" * 64 + "].",
     "No digits at all, only words.",
+    # Probe-3 (GLM readiness) label shapes: SEC file number, regulation, plural Items, pages
+    # and pack-coverage counts.
+    "Commission File No. 001-36629",
+    "Regulation 14A",
+    "Items 10-14",
+    "Items 7, 7A, 8",
+    "Items 7/7A",
+    "page 16",
+    "pages 16-18",
+    "195-page",
+    "all 195 pages located",
+    "195 of 195",
+    "195 located spans",
 )
 
 REJECTED = (
@@ -68,6 +81,10 @@ REJECTED = (
     "Cash of US$2,928m",
     "The 2032 notes total 750",
     "FY2025e revenue",
+    # The boundary of the coverage and page labels: a duration or a bare count stays a figure.
+    "195 located",
+    "The notice period is 120 days.",
+    "Items 7, 120 days",
 )
 
 
@@ -85,7 +102,7 @@ def test_prose_runs_reject_bare_figures(text: str) -> None:
 def test_prose_runs_allow_labels_reject_bare_figures() -> None:
     """The table-driven contract of MC-2: at least 12 accepted, 8 rejected, every label class."""
     assert len(ACCEPTED) >= 12 and len(REJECTED) >= 8
-    assert set(LABELS) == {"period", "filing", "instrument", "section", "ordinal"}
+    assert set(LABELS) == {"period", "filing", "instrument", "section", "coverage", "ordinal"}
     for name, pattern in LABELS.items():
         assert any(pattern.search(text) for text in ACCEPTED), name
     assert all(check(text, refs=REFS, gaps=GAPS) == () for text in ACCEPTED)
@@ -301,7 +318,9 @@ def test_a_claim_with_a_bare_figure_is_rejected_at_settlement(tmp_path: Path) ->
     labelled = candidate.model_copy(
         update={"claims": (claim.model_copy(update={"text": "Readable for FY2025 per the 10-K."}),)}
     )
-    numeric = claim.model_copy(update={"text": "Readable for FY2025 in 3 of 4 sources [nowhere]."})
+    numeric = claim.model_copy(
+        update={"text": "Readable for FY2025 at 3 sites over 4 years [nowhere]."}
+    )
     payload = candidate.model_copy(update={"claims": (numeric,)})
 
     def must_not_run(_: Module) -> tuple[str, ...]:
@@ -317,3 +336,28 @@ def test_a_claim_with_a_bare_figure_is_rejected_at_settlement(tmp_path: Path) ->
         "Claim readiness: Unresolved reference: nowhere",
     )
     assert settled(store, result).status == "rejected"
+
+
+# The four ``analysis[].text`` claims of probe-3's accepted GLM 5.3 Flash CP-0 readiness output
+# (artifacts/model-tests/probe-3/probe/z-ai__glm-5.3-flash/dccfe8f5-...-source_readiness-1).
+PROBE_3_READINESS_CLAIMS = (
+    "Issuer identity is confirmed: the pack's sole document is a Form 10-K whose cover page names "
+    "Caesars Entertainment, Inc., Commission File No. 001-36629, and the business section "
+    "confirms the CZR ticker, matching the run's issuer_id CZR.",
+    "The filing covers the fiscal year ended December 31, 2025, matching the requested FY2025 "
+    "reporting period, and carries an independent registered public accounting firm consent "
+    "dated February 17, 2026.",
+    "Extraction coverage reports all 195 pages located with no pages missing between the first "
+    "and last locator, but extraction status is degraded. Visible parse artifacts (e.g., the "
+    "merged table header text) corroborate lossy parsing of structured content, so numeric and "
+    "table spans require downstream verification even though no page is absent.",
+    "Part III content (Items 10-14) is incorporated by reference from a definitive proxy "
+    "statement that had not yet been filed as of the report date; that content is therefore not "
+    "present within this document family.",
+)
+
+
+@pytest.mark.parametrize("text", PROBE_3_READINESS_CLAIMS)
+def test_probe_3_readiness_claims_pass_the_label_rule(text: str) -> None:
+    assert check(text, refs=(), gaps=(), names=("Caesars Entertainment, Inc.",)) == ()
+    assert check(text, refs=(), gaps=()) == ()  # no claim leans on the issuer name's digits

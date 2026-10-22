@@ -175,3 +175,20 @@ grammar; the CP-0 method prompt (`methods/cp0.md`) does not yet teach run text, 
 it is a model-facing change that needs E1/E2 evidence; the Markdown register preview
 (`register_view`) still prints raw claim text, so CP-1 claims there show `[<fact id>]`
 tokens; text facts reached by a chip are Python-held fact text, not checked by this rule.
+
+Review fix round 1 (coordinator, real-text probe): three of the four `analysis[].text`
+claims in probe-3's accepted GLM 5.3 Flash readiness output (`artifacts/model-tests/probe-3/`)
+were rejected on label gaps. `LABELS` now also has SEC file numbers (`001-36629`) and
+`Regulation 14A` (filing), plural `Items` with ranges and lists and `page N` / `pages N-M`
+/ `N-page` (section), and a new `coverage` class for pack-coverage counts (`195 of 195`,
+`195 pages`, `195 located spans`), which describe the Source Pack's structure, not the
+issuer. Durations (`120 days`) and other bare counts (`195 located`, `1,200`) stay figures.
+`test_probe_3_readiness_claims_pass_the_label_rule` pins the four probe texts; the table
+rows add the probe shapes and the boundary rejects.
+
+Disclosures: (a) `deliver_cp0` raising at render is a deliberate backstop; the main path
+settles a bad claim `rejected` through `candidate_issues`. (b) A stored `[E1]`-style token
+parses as a chip and fails at render as unresolved, `[see note]` fails at parse as
+malformed, and a stored module whose claims carry free figures no longer renders.
+`N of N` admits any such pair ("2 of 3 covenants"), as page and section labels admit any
+number after their word.

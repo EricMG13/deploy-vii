@@ -77,11 +77,17 @@ references that Python resolves and spells. The model never writes a number.
 - Labels. Outside references a numeric character must sit inside a label
   (`prose.LABELS`): periods (`FY2025`, `FY25`, `FY2025/26`, `Q2`, `H1`, `30 June 2026`,
   `June 30, 2026`, `2026-06-30`, a year `19xx`/`20xx`), filings (`10-K`, `10-Q`, `8-K`,
-  `20-F`, `6-K`, `40-F`, `S-1`, `F-1`, with `/A`), instruments (a coupon followed by an
-  instrument noun, as in `6.50% senior secured notes due 2032`; `2032s`;
-  `Term Loan B-2`), sections (`Item 1A`, `Note 12`, `Section 4.03(a)`, `Exhibit 10.1`,
-  `Rule 144A`) and ordinals or versions (`2nd`, `r14`, `v2.1`, `CP-1A`). The run's
-  issuer name is also literal. Any other numeric token is a bare figure.
+  `20-F`, `6-K`, `40-F`, `S-1`, `F-1`, with `/A`; an SEC file number such as `001-36629`;
+  `Regulation 14A`), instruments (a coupon followed by an instrument noun, as in
+  `6.50% senior secured notes due 2032`; `2032s`; `Term Loan B-2`), sections (`Item 1A`,
+  `Note 12`, `Section 4.03(a)`, `Exhibit 10.1`, `Rule 144A`; plural `Items` with ranges
+  and lists, as in `Items 10-14`, `Items 7, 7A, 8`, `Items 7/7A`; page locators `page 16`,
+  `pages 16-18`, `195-page`), pack-coverage counts (`195 of 195`, `195 pages`,
+  `195 located spans`) and ordinals or versions (`2nd`, `r14`, `v2.1`, `CP-1A`). The
+  run's issuer name is also literal. Coverage counts are labels because they describe the
+  Source Pack's structure (how much of it was read), not the issuer; they are not analytic
+  figures. The boundary: a duration (`120 days`), a count in any other shape
+  (`195 located`, `1,200`) and every other numeric token are bare figures.
 - Validation. `candidate_issues` adds `prose_issues(candidate, names=(issuer_name,))`:
   an unresolved reference, a bare figure, a figure that names a gap, a text or unsettled
   fact, a figure with neither a citation nor a calculation, a numeric fact used as a chip,
@@ -91,11 +97,17 @@ references that Python resolves and spells. The model never writes a number.
 - Resolution. `report_view.resolve(text, prose.bind(facts), module_refs(index, module_id))`
   spells each figure with `fact_spelling` (the cell's number rule; exact text past the
   100-exponent bound) plus the amount's scale label, and marks provenance with the
-  fact's report-wide id (`K#` before `C#`/`S#`, `G#` for gaps). It raises on any issue,
-  so a stored module accepted before this rule cannot render a bare figure.
+  fact's report-wide id (`K#` before `C#`/`S#`, `G#` for gaps). It raises on any issue.
+  That raise is a deliberate backstop: the main path settles a bad claim `rejected` through
+  `candidate_issues` before it can be accepted, while the standalone `deliver_cp0` path,
+  which does not use the journal, stops at render instead. Stored modules: a module
+  accepted before this rule whose claims carry free figures no longer renders; a stored
+  `[E1]`-style token parses as a chip and fails at render as an unresolved reference; a
+  stored `[see note]` (not an identifier) fails when the module is parsed, as malformed.
 - Limits. The rule is lexical. A year label also admits a four-digit count in the year
-  range ("2000 employees"), a section label admits any number after its word
-  ("Note 750"), and spelled-out numbers ("twelve") are words. Semantic review of the
+  range ("2000 employees"), a section or page label admits any number after its word
+  ("Note 750", "page 750"), an `N of N` count admits any such pair ("2 of 3"), and
+  spelled-out numbers ("twelve") are words. Semantic review of the
   prose remains required.
 - CP-1 narrative prose uses the same label rule with no references (`narrative._prose`):
   its numbers and gaps are evidence parts. The projection writes each evidence part into

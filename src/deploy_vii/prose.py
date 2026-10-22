@@ -44,6 +44,8 @@ _INSTRUMENT_WORD = (
     r"lien|priority|guaranteed|convertible|exchangeable|fixed-rate|floating-rate|PIK|toggle)"
 )
 _INSTRUMENT_NOUN = rf"(?:(?i:notes?|bonds?|debentures?)|{_YEAR}s)"
+_ITEM = r"[0-9]{1,2}[A-Z]?"
+_ITEM_JOIN = r"(?:-|\u2013|/|, and |, | and )"
 
 # The allowed labels. Everything numeric that none of these covers is a figure.
 LABELS: Mapping[str, re.Pattern[str]] = MappingProxyType(
@@ -62,8 +64,17 @@ LABELS: Mapping[str, re.Pattern[str]] = MappingProxyType(
                 )
             )
         ),
-        # 10-K, 10-Q, 8-K, 20-F (and 6-K, 40-F, S-1, F-1), with an /A amendment or plural.
-        "filing": re.compile(rf"{_B}(?:10-K|10-Q|8-K|20-F|6-K|40-F|S-[1348]|F-[1-4])(?:/A|s)?{_E}"),
+        # Filing labels: 10-K, 10-Q, 8-K, 20-F (and 6-K, 40-F, S-1, F-1), with an /A amendment
+        # or plural; an SEC file number (001-36629); a regulation (Regulation 14A).
+        "filing": re.compile(
+            "|".join(
+                (
+                    rf"{_B}(?:10-K|10-Q|8-K|20-F|6-K|40-F|S-[1348]|F-[1-4])(?:/A|s)?{_E}",
+                    rf"{_B}[0-9]{{3}}-[0-9]{{5}}{_E}",
+                    rf"{_B}Regulation [0-9]{{1,3}}[A-Z]?{_E}",
+                )
+            )
+        ),
         # A coupon with an instrument noun (6.50% notes due 2032, 7.125% senior secured 2032s),
         # a maturity shorthand (2032s) and a tranche (Term Loan B-2, Tranche B-1).
         "instrument": re.compile(
@@ -76,10 +87,31 @@ LABELS: Mapping[str, re.Pattern[str]] = MappingProxyType(
                 )
             )
         ),
-        # Item 1A, Note 12, Section 4.03(a), Exhibit 10.1, Rule 144A.
+        # Section labels: Item 1A, Note 12, Section 4.03(a), Exhibit 10.1, Rule 144A; plural
+        # Items with ranges and lists (Items 10-14, Items 7, 7A, 8, Items 7/7A); page locators
+        # (page 16, pages 16-18, a 195-page filing).
         "section": re.compile(
-            rf"{_B}(?:Item|Note|Section|Article|Schedule|Exhibit|Rule|Part|Chapter|Clause) "
-            rf"[0-9]{{1,4}}[A-Z]?(?:\.[0-9]{{1,3}})*(?:\([a-z0-9]{{1,4}}\))*(?![0-9A-Za-z(])"
+            "|".join(
+                (
+                    rf"{_B}(?:Item|Note|Section|Article|Schedule|Exhibit|Rule|Part|Chapter|Clause) "
+                    rf"[0-9]{{1,4}}[A-Z]?(?:\.[0-9]{{1,3}})*(?:\([a-z0-9]{{1,4}}\))*(?![0-9A-Za-z(])",
+                    rf"{_B}Items {_ITEM}(?:{_ITEM_JOIN}{_ITEM})*{_E}",
+                    rf"{_B}[Pp]ages? [0-9]{{1,4}}(?:(?:-|\u2013)[0-9]{{1,4}})?{_E}",
+                    rf"{_B}[0-9]{{1,4}}-page{_E}",
+                )
+            )
+        ),
+        # Pack-coverage counts: how much of the Source Pack was read (195 of 195, 195 pages,
+        # 195 located spans). They describe pack structure, not the issuer, so they are labels.
+        # A duration (120 days) or any other bare count stays a figure.
+        "coverage": re.compile(
+            "|".join(
+                (
+                    rf"{_B}[0-9]{{1,5}} of [0-9]{{1,5}}{_E}",
+                    rf"{_B}[0-9]{{1,5}} pages?{_E}",
+                    rf"{_B}[0-9]{{1,6}} located spans?{_E}",
+                )
+            )
         ),
         # 2nd, r14, v2.1, CP-1, CP-1A.
         "ordinal": re.compile(
@@ -159,8 +191,9 @@ def bare_figures(text: str, *, names: Collection[str] = ()) -> tuple[str, ...]:
         covered[start:end] = [True] * (end - start)
     found: list[str] = []
     for word in _WORD.finditer(text):
-        if any(c.isnumeric() and not covered[word.start() + i] for i, c in enumerate(word[0])):
-            found.append(word[0].strip(_PUNCTUATION) or word[0])
+        start, token = word.start(), word.group()
+        if any(char.isnumeric() and not covered[start + at] for at, char in enumerate(token)):
+            found.append(token.strip(_PUNCTUATION) or token)
     return tuple(dict.fromkeys(found))
 
 
