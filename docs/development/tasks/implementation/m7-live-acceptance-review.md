@@ -208,3 +208,25 @@ error that only echoes a failed item. No validator or arithmetic semantics chang
 (E1 batch `e1-cp1-4`): 14 sign-evidence issues and 1 derivative `financial.books` issue.
 
 Not verified: live uptake (E1 batch 5).
+
+## 7.0g Per-step repair within the attempt
+
+Decision 0008 MC-7 item 2 is adopted (amendment "22 Oct 2026 (task 7.0g)"). Each of CP-1's four
+model steps may be repaired once within its attempt: the journal keeps the step's rejected first
+try in `Attempt.step_repairs`, the attempt stays pending, and the `module` driver re-sends only
+that step with its own issues in the REPAIR block. A second rejection finishes the attempt and
+the 7.0e module repair follows. Bound: two tries per step per attempt, two attempts per input
+set. The `Repair` column shows `step` (`1+step` inside the repair attempt) and `Repairs
+dispatched` counts both kinds. The manifest gains `retries.step_try` and
+`links.step_repair_of_attempt_id`. `cp1_workflow.py`, `envelope.py` and the `execution/5`
+schema are unchanged: an empty `step_repairs` is omitted from the JSON. CP-0 and the `quality`
+promotion step keep the attempt-level repair only.
+
+Evidence: E1 batch `e1-cp1-4` (22 October 2026, Sol) spent its one module repair on a
+`source_context` quote slip; the repair's `financials` (62,980 tokens, 805 s, US$1.11) was then
+rejected and the cell ended.
+
+No `methodology-adaptation.md` row: validators, issues and acceptance are unchanged; this is an
+execution-boundary change (decision 0005).
+
+Not verified: a live within-attempt repair (E1 batch 5).

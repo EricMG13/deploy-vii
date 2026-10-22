@@ -285,6 +285,29 @@ message. Item 3 (`FinancialSubmission` split) stays deferred. Its measured basis
 draw: about 61k output tokens, 12.5 minutes and about US$1.1. Its trigger is first-pass validity
 below 2 of 3 draws *after* the sent schema enforces the Python vocabularies.
 
+## Amendment, 22 Oct 2026 (task 7.0g)
+
+Item 2's trigger was met. E1 batch `e1-cp1-4` (Sol) exhausted the module-wide budget:
+`source_context` was rejected on one case-variant quote, the module's one repair re-ran it
+(accepted, US$0.47), then `financials` (62,980 tokens, 805 s, US$1.11) was rejected on a rule
+its prompt had not stated, and with no repair left the cell ended. Item 2's per-step budget is
+adopted as an execution-boundary change (decision 0005): each of CP-1's four model steps
+(`source_context`, `financials`, `narrative`, `readiness`) may be repaired once within its
+attempt, re-sending only that step with its own issues in the REPAIR block (scope
+`failing-step`); the module-wide repair attempt is kept as the second line. Bound: at most two
+tries per step per attempt and two attempts per input set. The journal keeps the rejected first
+try in a new `Attempt.step_repairs` (the invalid submission with its payload hash and issues),
+outside the positional `steps`, so the CP-1 workflow and envelope readers and the module's
+content hash are unchanged: the same final payloads give the same `result_sha256` with or
+without a repaired step. An empty `step_repairs` is omitted from the JSON, so stored
+`execution/5` snapshots keep their bytes and the schema is not bumped. Analytical meaning is
+unchanged: the same validators decide, the same issues are carried and acceptance semantics are
+untouched. A REPAIR block comes from the step's own prior try (within the attempt, first) or from
+the previous attempt, never both. CP-0's single review and CP-1's `quality` promotion step keep
+the attempt-level repair only. The runner records `step_try` (1 or 2) and
+`links.step_repair_of_attempt_id`; `repair_count` stays the attempt number. Not verified: a live
+within-attempt repair (E1 batch 5).
+
 ## Evidence
 
 - [live-probe-2.md](../development/tasks/implementation/live-probe-2.md): batch report and

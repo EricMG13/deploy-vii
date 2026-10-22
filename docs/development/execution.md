@@ -221,8 +221,22 @@ implementation arguments, never model-controlled choices. It retains raw UTF-8
 response text before invoking validation. Every step binds the current pack and
 upstream heads, plus every prior completed submission hash (including its retained
 output). Runtime exceptions leave the same response pending. A changed response
-requires explicit interruption, consuming the attempt. Invalid submissions consume
-the module's existing one-repair allowance; stages do not get separate budgets.
+requires explicit interruption, consuming the attempt. Each of CP-1's four model
+steps (`WITHIN_ATTEMPT_REPAIR`: `source_context`, `financials`, `narrative`,
+`readiness`) may be repaired once within its attempt (task 7.0g, decision 0008 MC-7
+item 2): its first invalid submission moves to `Attempt.step_repairs` (the retained
+invalid try, payload hash and issues, in order) and the attempt stays pending, with
+no settlement and no head; the next submission of the same step is its repair, and
+no later step may be submitted before it. `steps` keeps meaning the retained steps in
+module order, so positional readers and the module's content hash never see the
+repaired try, and an empty `step_repairs` is omitted from the JSON (stored
+`execution/5` snapshots keep their bytes; no schema change). A second invalid
+submission of the step, an invalid submission of any other step (CP-0, the `quality`
+promotion step) or an interruption finishes the attempt and consumes the module's
+one-repair allowance as before. Bound: two tries per step per attempt, two attempts
+per input set; a third try of a step is refused before any write, and the contract
+refuses a `step_repairs` entry that is not an invalid try with issues, or a second
+entry for one step.
 A blocked stage may retain a diagnostic report. On failure, the module payload
 is a Python-built empty candidate; the actual raw response remains in its step.
 Finishing a module while a stage response awaits validation is disallowed;

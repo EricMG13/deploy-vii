@@ -83,7 +83,8 @@ from a pinned pool:
   calls `Execution.interrupt` on the ticket. **That consumes the input set's one repair**: the
   next `begin` is the repair attempt, and if the exhausted ticket was already the repair, the
   module is blocked for those inputs. The manifest `retries` block (`attempt_number`,
-  `max_retries`, `exhausted`, `ticket_interrupted`, `journal_consequence`) records it, and a
+  `step_try`, `max_retries`, `exhausted`, `ticket_interrupted`, `journal_consequence`) records
+  it, and a
   dispatch beyond the bound raises before any spending. If the last allowed attempt dies with a
   non-transport exception (for example a validator bug), the ticket stays pending: the caller
   must call `Execution.interrupt` before dispatching again, and the next dispatch raises naming
@@ -93,11 +94,28 @@ from a pinned pool:
   0008) the block carries only the issues of the previous attempt's failing step, and only on that
   step's prompt; where no step failed validation (an interruption, a module-level refusal) the module issues are carried
   as before. A `repair_prompt` event records the scope (`failing-step`, `module` or `none`), the
-  failing step and the issue count. The repair budget stays module-wide.
+  failing step and the issue count. The module-wide repair stays as the second line.
+- **Per-step repair within the attempt (task 7.0g, decision 0008 MC-7 item 2).** When the journal
+  rejects one of CP-1's four model steps (`source_context`, `financials`, `narrative`,
+  `readiness`) for the first time in its attempt, the attempt stays pending (`DispatchResult`
+  `attempt_pending`) and `expected_step` returns the same step again. Its next dispatch is the
+  step's one repair try (`step_try: 2`): its REPAIR block carries that step's own first-try
+  issues (`Attempt.step_repairs`), scope `failing-step`, and nothing from a previous attempt.
+  Precedence is within-attempt first, so a step sees its own prior try's issues or the previous
+  attempt's, never both. The repair try has its own attempt ids (`<ticket>-<step>-repair-<n>`)
+  and so its own retry budget (`max_retries`; `retry_of_attempt_id` links its retries, not the
+  rejected try), and its manifest `links.step_repair_of_attempt_id` names the rejected try's
+  attempt id (null on a first try). `repair_count` keeps its meaning (the attempt number). Each
+  dispatch reserves and settles on its own. A second rejection of the step finishes the attempt
+  as one rejection did before; the module-wide repair (`Execution.begin`) is then the next
+  line. Bound: two tries per step per attempt, two attempts per input set. CP-0's single
+  review and CP-1's `quality` promotion step keep the attempt-level repair only.
 - **The `module` driver's repair loop (task 7.0e).** In `deploy-vii live module` (and only
   there; `probe`, `regression` and `canary` stay single-attempt) a step whose status is
-  `rejected`, a journal verdict on a submitted payload, is followed by one `Execution.begin` on
-  the same module: the repair attempt. It restarts the module at its first step
+  `rejected` with the attempt still pending is re-sent once, as the step's repair within the
+  attempt (task 7.0g); if that try is accepted the cell goes on to the next step. A step whose
+  status is `rejected` with the attempt finished (a journal verdict on a submitted payload) is
+  followed by one `Execution.begin` on the same module: the repair attempt. It restarts the module at its first step
   (`expected_step`: `source_readiness` for CP-0, `source_context` for CP-1) and runs the steps
   in order again, each with its own cap reservation; a CP-1 repair therefore re-sends
   `source_context` and costs one extra context call. At most one repair per module per cell: the
@@ -107,9 +125,12 @@ from a pinned pool:
   for the repair's reservation raises `CapExceeded`, ends the batch with `Stopped: cap` and
   leaves no row for the unsent step. A journal refusal of the repair ("...one repair has been
   consumed") is not caught and fails the batch. A CP-0 accepted on repair authorizes the CP-1
-  steps that follow. The report's Steps table has a `Repair` column (`-` first attempt, `1`
-  the repair, the journal's attempt number) and the header counts `Repairs dispatched` (repairs
-  that sent at least one step: a step sealed `ineligible` was not sent). A repair that is accepted counts as accepted in the Cohorts
+  steps that follow. The report's Steps table has a `Repair` column (`-` a first try in the
+  first attempt, `step` the step's repair within that attempt, `1` the repair attempt, the
+  journal's attempt number, and `1+step` a step's repair within the repair attempt) and the
+  header counts `Repairs dispatched` of both kinds, `N (module repair attempts M, within-attempt
+  step repairs S)` (repairs that sent at least one step: a step sealed `ineligible` was not
+  sent). A repair that is accepted counts as accepted in the Cohorts
   table, so first-pass validity is read from the `Repair` column, not from the cohort totals.
 - **Scrubbing.** Evidence and model output are only ever changed by the exact key and key-shaped
   tokens (`scrub_key`); text such as "Authorization: the board..." stays verbatim. The wider
@@ -273,9 +294,10 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   below `max_tokens`, is recorded `ineligible: context <n> < bound <m>` (m = bound + max_tokens):
   the attempt is sealed with status `ineligible`, nothing is sent or reserved, the ticket is
   untouched and the cell stops. It applies to every pool, since the check needs the step's prompt.
-  A repair attempt can hit it too: the repair prompt carries a REPAIR block, so its bound is
-  larger than the first attempt's, and a model that fitted the first attempt can be
-  `ineligible` for the repair (sealed the same way; the repair ticket stays pending).
+  A repair attempt, or a step's repair try within its attempt, can hit it too: the repair
+  prompt carries a REPAIR block, so its bound is larger than the first try's, and a model that
+  fitted the first try can be `ineligible` for the repair (sealed the same way; the ticket stays
+  pending).
 - For `probe`, `canary` and `regression` the seed of each cell is the first seed at or after the
   base seed whose recorded draw selects the intended model, so coverage is guaranteed and the draw
   record stays honest. A cell stops at its first step that is not accepted (no automatic repair).
@@ -849,6 +871,7 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
 ## Not covered here
 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep
-their stored contracts until their own MC-1 skeletons); a per-step repair budget and a
-`FinancialSubmission` split (deferred by decision 0008); provider acceptance of the
+their stored contracts until their own MC-1 skeletons); a `FinancialSubmission` split
+(deferred by decision 0008); a per-step repair of CP-0 or of CP-1's `quality` step (task 7.0g
+covers CP-1's four model steps); provider acceptance of the
 `ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun).
