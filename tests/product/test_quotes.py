@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 from deploy_vii.contracts import Citation, Source, Span
 from deploy_vii.execution import bounded_issues
 from deploy_vii.quotes import (
+    INTERLEAVE_GAP_CHARS,
     NORMALISATION,
     PAGE_EDGE_CHARS,
     PREFIX_CHARS,
@@ -104,6 +105,23 @@ def test_the_right_column_reassembled_across_the_left_one_names_the_interleave()
         f"(columns or table cells) at offset {len(first)}; quote one contiguous run or choose "
         "another locator",
     )
+
+
+def test_runs_far_apart_are_two_separate_runs_not_a_column_interleave() -> None:
+    near = "Alpha beta gamma " + "x " * 190 + "delta epsilon zeta"  # gap of 380 characters
+    far = "Alpha beta gamma " + "x " * 210 + "delta epsilon zeta"  # gap of 420 characters
+    quote = "Alpha beta gamma delta epsilon zeta"
+    (close,) = issues(source((9, near)), "page:9", quote)
+    assert close.endswith(
+        ": the quote matches the span as two runs separated by interleaved text (columns or "
+        "table cells) at offset 16; quote one contiguous run or choose another locator"
+    )
+    (apart,) = issues(source((9, far)), "page:9", quote)
+    assert apart.endswith(
+        ": the quote matches the span as two separate runs on this page at offset 16; quote one "
+        "contiguous run or choose another locator"
+    )
+    assert INTERLEAVE_GAP_CHARS == 400
 
 
 def test_a_quote_that_runs_onto_the_next_page_names_that_page() -> None:
@@ -235,18 +253,51 @@ _TEXT = st.text(alphabet=_ALPHABET, max_size=40)
 _QUOTE = st.text(alphabet=_ALPHABET, min_size=1, max_size=40)  # Citation.quote is Text
 
 
-@given(_QUOTE, _TEXT, st.one_of(st.none(), _TEXT), st.one_of(st.none(), _TEXT))
-def test_no_classification_ever_turns_a_non_substring_into_an_acceptance(
-    quote: str, text: str, following: str | None, preceding: str | None
-) -> None:
-    """The cited span has random neighbours on either side; acceptance is `quoted` alone."""
-    pages = source(
+def contained(quote: str, text: str) -> bool:
+    """Independent oracle: the acceptance predicate written out from its definition (a
+    contiguous substring of the normalised span, or of it with hyphen wraps joined)."""
+    needle = normalise(quote)
+    joined = normalise(re.sub(r"-\n *", "-", text))
+    return bool(needle) and (needle in normalise(text) or needle in joined)
+
+
+# (quote, cited span, next span, previous span, the clause each class appends)
+CLASS_EXAMPLES = (
+    ("ab cd ef", "Ab cd ef x", None, None, "only ignoring case and character variants"),
+    ("ab cd ef gh", "ab cd zz ef gh", None, None, "two runs separated by interleaved text"),
+    ("ab cd ef gh", "x ab cd", "ef gh y", None, "continues on page:3"),
+    ("ab cd ef gh", "ef gh y", None, "x ab cd", "begins on page:1"),
+)
+
+
+def paged(text: str, following: str | None, preceding: str | None) -> Source:
+    return source(
         *(() if preceding is None else ((1, preceding),)),
         (2, text),
         *(() if following is None else ((3, following),)),
     )
-    found = issues(pages, "page:2", quote)
-    if quoted(quote, text):
+
+
+@pytest.mark.parametrize(("quote", "text", "following", "preceding", "clause"), CLASS_EXAMPLES)
+def test_each_class_example_is_classified(
+    quote: str, text: str, following: str | None, preceding: str | None, clause: str
+) -> None:
+    (issue,) = issues(paged(text, following, preceding), "page:2", quote)
+    assert clause in issue
+
+
+@given(_QUOTE, _TEXT, st.one_of(st.none(), _TEXT), st.one_of(st.none(), _TEXT))
+@example(*CLASS_EXAMPLES[0][:4])
+@example(*CLASS_EXAMPLES[1][:4])
+@example(*CLASS_EXAMPLES[2][:4])
+@example(*CLASS_EXAMPLES[3][:4])
+def test_no_classification_ever_turns_a_non_substring_into_an_acceptance(
+    quote: str, text: str, following: str | None, preceding: str | None
+) -> None:
+    """The cited span has random neighbours on either side; a citation passes exactly when the
+    independent oracle holds, whatever the classifier says."""
+    found = issues(paged(text, following, preceding), "page:2", quote)
+    if contained(quote, text):
         assert found == ()
         with pytest.raises(ValueError, match="matches"):
             explain(quote, text)

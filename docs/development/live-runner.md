@@ -163,7 +163,9 @@ from a pinned pool:
   50115c10 p44), `: the quote begins on <previous locator>; quote within one page`; a column
   interleave (the quote is two runs of the span, in order, with other span text between them)
   `: the quote matches the span as two runs separated by interleaved text (columns or table
-  cells) at offset N; quote one contiguous run or choose another locator`. Offsets count
+  cells) at offset N; quote one contiguous run or choose another locator` when at most 400
+  normalised characters separate the runs (`quotes.INTERLEAVE_GAP_CHARS`), else `as two separate
+  runs on this page` with the same advice. Offsets count
   characters of the normalised quote (for the interleave, the first run is its first N
   characters); every run has at least two words. Otherwise the issue is unchanged. Against the
   main checkout's pack this names Sol p104 (probe-4 and probe-6) and Grok p102 as interleaves,
@@ -493,7 +495,9 @@ artifacts).
   `artifacts/public-case/caesars-fy2025-preparation-1`, `run/1`, which the `run/2` loader rejects).
   A re-prepared case pack is placed as its own `artifacts/public-case/<case-dir>/` (here
   `czr-fy2025-v2`, whose `complete.json` records the new hash), so `find_case_pack` finds it by
-  `pack_sha256` with no code change. Only `pack_sha256`, `pack_source` and
+  `pack_sha256` with no code change. Since task 7.0 `find_case_pack` returns the first directory
+  (in name order) whose marker matches and whose pack loads under the current contract; one that
+  cannot be read or loaded is skipped with a logged warning naming it and the reason. Only `pack_sha256`, `pack_source` and
   `input_hashes.prepared-pack` changed; each entry was revalidated on the new pack first and its
   outcome and issues were identical, so `expected`, `live`, `expected_basis` and
   `outcome_changed_by` are as before. `live corpus` cannot re-key (it reads the run/1 hash from
@@ -776,8 +780,15 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   to look up; <reason>`. `live reconcile` looks up attempts with a generation id first
   (`reconcile.lookup_order`), so a hold that becomes the only one after those lookups is
   attributed in the same run whatever order the attempt directories sort in. Fail closed on the
-  safe side of the cap: the figure never exceeds the hold it replaces. Not covered: the usage
-  counter updating late (an after-check that misses the attempt's own cost would understate it).
+  safe side of the cap: the figure never exceeds the hold it replaces. The provider may bill a
+  given-up call after the after-batch check, which the delta would then omit, so the adjust also
+  needs a fresh `GET /api/v1/key` reading at reconcile time equal to the recorded after-figure
+  within US$0.000001 and read through the same key-file token (`reconcile.usage_unmoved`; the
+  evidence adds `usage_now_usd` and `usage_now_checked_at`). Otherwise the attempt stays held
+  with `usage moved since the after-check (<after> then, <now> now); not attributed; a later
+  reconcile may retry` (or that the usage now is not reported, or is read through another key
+  token). The `generation-404+usage-delta` rule keeps that exposure (decision 0008, task 7.0
+  amendment).
 
 ## Not covered here
 

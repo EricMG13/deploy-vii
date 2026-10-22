@@ -17,7 +17,8 @@ What changed:
   (first differing character and its offset), a page straddle (`continues on <next
   locator>`, or `begins on <previous locator>` when cited where it ends), a column
   interleave (`two runs separated by interleaved text (columns or table cells) at offset
-  N`). Otherwise the text is as before. Quoted fragments show up to 200 characters cut on a
+  N` when at most 400 normalised characters lie between the runs, else `two separate runs on
+  this page`). Otherwise the text is as before. Quoted fragments show up to 200 characters cut on a
   word boundary (was 60). `hyphen-wrap` is named only when a wrap lies inside the region the
   failed quote occupies. Against the main checkout's pack the classes name Sol p104 (probe-4
   and probe-6) and Grok p102 (interleave), Sol p13 (case), Gemini p76 and p44 (straddle).
@@ -32,17 +33,32 @@ What changed:
 - Ledger and reconcile: `account-usage-delta` adjust for a held attempt with no generation
   id that is the batch's only held attempt, every other charge measured; residual at most
   the reservation (rules in live-runner.md, Charge reconciliation). Holds with a generation
-  id are looked up first.
+  id are looked up first. The adjust also needs a fresh `GET /api/v1/key` reading at
+  reconcile time equal to the recorded after-figure within US$0.000001; otherwise the hold
+  stands with `usage moved since the after-check` and a later reconcile may retry (decision
+  0008, task 7.0 amendment, which also records the 200-character quote bound).
+- Corpus: `find_case_pack` skips a case directory whose pack does not load under the current
+  contract (a `run/1` preparation) with a logged warning, and returns the first that loads.
 - Makefile: `live-module` passes `MODELS=`, `MAX_TOKENS=`, `BATCH_ID=`, `SEED=` through.
 - `test_execution.py` CP-5 preset test reads `registry._NOT_CP5_FAN_IN`; decision 0007
   records the QA-Blocked attempt consumption as a decision candidate.
 
 Not done, with the reason:
 
-- `period` grammar check (step 3): stopped. The stored corpus entry
+- `period` grammar check (step 3): stopped twice. First pass: the stored corpus entry
   `tests/product/replay/source_context/synthetic-cp1-source-context-accepted.json` carries
   `period_label` values `OPEN`, `Q1`, `Q2`, `Q3`, `Q4` and `FY`, which the brief's grammar
-  rejects; the grammar was not widened. `fiscal_year_end` ("31 December") is not a period.
+  rejects. Under the coordinator's rescoping (identity periods get the grammar,
+  `period_label` the closed set of `report_view._PERIOD_CLASSES`): the identity fields are
+  `ReadinessSubmission.reporting_period` and `SourceJudgment.period` (no `SourceContext` or
+  `ReportingScope` field names a reporting period; `EntityContext.fiscal_year_end` is a date,
+  not a period), and stored accepted real entries carry prose there (GLM 76fc5c95 "FY2025 —
+  fiscal year ended December 31, 2025", dccfe8f5, Luna f136b227), so the grammar would flip
+  them. The `period_label` set passes both stored synthetic entries but rejects `H1` and `9M`,
+  the year-to-date periods of the period-engine fixture (`test_financial_periods.periods_case`,
+  scopes labelled by period id, used by canonical gaps, period reconciliation and statement
+  history tests); `report_view` already leaves a grid with an unclassified label ungrouped.
+  Neither set was widened and neither check landed.
 - Rename `normalisation` to `quote_normalisation` (step 4d): no manifest field or stored
   record field has that name; the only uses are the issue label text and the function in
   `quotes.py`, which task 7.0 replaced by `explain`. Nothing renamed.
@@ -52,4 +68,5 @@ unchanged; the new text explains a rejection, the prompt states rules the valida
 enforced, and the ledger rule is reconciliation of spend, not analysis.
 
 Not verified: live model uptake of the new prompt rules and mismatch text (E1 answers it);
-the account-usage counter's timing relative to the after-batch check.
+how long the account-usage counter takes to settle (the reconcile-time recheck refuses, it
+does not wait).

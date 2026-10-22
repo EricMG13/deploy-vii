@@ -28,7 +28,10 @@ A residual below zero by more than US$0.000001, or above the attempt's reservati
 on the account, which the delta cannot tell apart), leaves it held with the reason; so do two or
 more held attempts, any charge that is not measured and a missing usage record. Attempts with a
 generation id are looked up first (`lookup_order`), so the outcome does not depend on the order
-the attempt directories sort in.
+the attempt directories sort in. A deadline hold is a client-side give-up, so the provider may
+bill it after the after-batch check: the adjust also needs a fresh `GET /api/v1/key` reading at
+reconcile time equal to the recorded after-figure within the tolerance (`usage_unmoved`), else
+the attempt stays held ("usage moved since the after-check") and a later reconcile may retry.
 
 `metrics.json` is the one retained file this rewrites (atomically, temp file then rename). The
 values it replaces are kept under `ledger.reconciliation.previous`, and the ledger line is the
@@ -45,6 +48,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from deploy_vii.live.client import GENERATION_ID, ChatClient, Response
+from deploy_vii.live.credit import from_key_response
 from deploy_vii.live.ledger import (
     ADJUST_404_SOURCE,
     ADJUST_SOURCE,
@@ -172,6 +176,7 @@ class UsageWindow:
     before_at: object
     after_at: object
     recorded_by: tuple[object, object]
+    key_file: object = None  # the key-file token counts both checks recorded (equal)
 
     @property
     def delta(self) -> Decimal:
@@ -208,7 +213,10 @@ def read_usage(artifact_root: Path, batch_id: str) -> tuple[UsageWindow | None, 
     before, after = found["before"], found["after"]
     if before[2] != after[2]:
         return None, "the two account usage checks read different key tokens"
-    return UsageWindow(before[0], after[0], before[1], after[1], (before[3], after[3])), ""
+    return (
+        UsageWindow(before[0], after[0], before[1], after[1], (before[3], after[3]), after[2]),
+        "",
+    )
 
 
 def corroborate_404(
@@ -352,6 +360,37 @@ def attribute_usage(
     )
 
 
+def usage_unmoved(
+    client: ChatClient, clock: Callable[[], str], window: UsageWindow
+) -> tuple[dict[str, Any] | None, str]:
+    """A fresh `GET /api/v1/key` reading at reconcile time, as evidence that the account usage
+    has not moved since the after-batch check, or None with why.
+
+    A deadline hold is a client-side give-up: the provider may bill the call after the
+    after-batch check, which the delta would then omit. The attribution therefore stands only
+    when the usage now equals the recorded after-figure within the tolerance (decision 0008
+    amendment, task 7.0); otherwise the attempt stays held and a later reconcile may retry.
+    A connection failure propagates (it stops the reconcile, as for every lookup)."""
+    fetched = client.fetch_key_status()
+    state = from_key_response(fetched.response, clock())
+    key_file = dict(fetched.key_note) if fetched.key_note else None
+    retry = "not attributed; a later reconcile may retry"
+    if state.usage is None:
+        return None, f"the account usage now is not reported; {retry}"
+    if key_file != window.key_file:
+        return None, f"the usage check now reads another key token than the after-check; {retry}"
+    moved = state.usage - window.after
+    if abs(moved) > USAGE_TOLERANCE_USD:
+        return None, (
+            f"usage moved since the after-check ({format(window.after, 'f')} then, "
+            f"{format(state.usage, 'f')} now); {retry}"
+        )
+    return {
+        "usage_now_usd": format(state.usage, "f"),
+        "usage_now_checked_at": state.checked_at,
+    }, ""
+
+
 def lookup_order(attempts: Sequence[RetainedAttempt]) -> list[RetainedAttempt]:
     """Attempts with a recorded generation id first (stable), so a hold without one is
     attributed after every lookup that could settle another hold."""
@@ -451,7 +490,7 @@ def reconcile_attempt(
         return Outcome(attempt.attempt_id, generation, source, "unresolved", None, None, reason)
     previous = record.charged_usd
     if generation is None:
-        return _attribute(attempt, ledger, clock, records, batch, usage, source)
+        return _attribute(attempt, ledger, client, clock, records, batch, usage, source)
     if not GENERATION_ID.fullmatch(generation):
         reason = "the recorded id is not a generation id; not looked up"
         _record_unresolved(attempt, generation, source, reason, clock())
@@ -489,6 +528,7 @@ def reconcile_attempt(
 def _attribute(
     attempt: RetainedAttempt,
     ledger: Ledger,
+    client: ChatClient,
     clock: Callable[[], str],
     records: dict[str, AttemptRecord],
     batch: Sequence[RetainedAttempt],
@@ -499,17 +539,25 @@ def _attribute(
     previous = records[attempt.attempt_id].charged_usd
     checked_at = clock()
     found = attribute_usage(attempt, tuple(records.values()), batch, usage)
-    if found.amount is None or found.evidence is None:
-        reason = f"no provider_request_id recorded; nothing to look up; {found.reason}"
+
+    def unresolved(why: str) -> Outcome:
+        reason = f"no provider_request_id recorded; nothing to look up; {why}"
         _record_unresolved(attempt, None, source, reason, checked_at)
         return Outcome(attempt.attempt_id, None, source, "unresolved", previous, None, reason)
+
+    window = usage[0]
+    if found.amount is None or found.evidence is None or window is None:
+        return unresolved(found.reason)
+    now, why = usage_unmoved(client, clock, window)  # only once the delta attributes it
+    if now is None:
+        return unresolved(why)
     ledger.adjust(
         attempt.attempt_id,
         found.amount,
         generation_id=None,
         checked_at=checked_at,
         source=ADJUST_USAGE_SOURCE,
-        evidence=found.evidence,
+        evidence={**found.evidence, **now},
     )
     adjusted = {item.attempt_id: item for item in ledger.state().attempts}[attempt.attempt_id]
     _record_reconciled(attempt, adjusted, source, found.reason)

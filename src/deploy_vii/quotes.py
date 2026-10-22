@@ -29,9 +29,11 @@ quote marks and dashes, `_VARIANTS`, are folded; the first difference is named),
 the rest starts the next span of the same source, at most `PAGE_EDGE_CHARS` of running header
 before it; or, cited where it ends, the first run ends the previous span and the rest starts the
 cited one), a column interleave (the quote is two runs of the span, in order, with other span
-text between them). Every run has at least `MIN_RUN_WORDS` words. Offsets count characters of
-the normalised quote. The `hyphen-wrap` label is printed only when a wrap lies inside the span
-region the classification (or, unclassified, the quote's longest matching prefix) occupies.
+text between them; named as columns or table cells only when at most `INTERLEAVE_GAP_CHARS` lie
+between the runs, else as two separate runs). Every run has at least `MIN_RUN_WORDS` words.
+Offsets count characters of the normalised quote. The `hyphen-wrap` label is printed only when
+a wrap lies inside the span region the classification (or, unclassified, the quote's longest
+matching prefix) occupies.
 """
 
 import re
@@ -45,6 +47,7 @@ PREFIX_CHARS = 200
 ELLIPSIS = chr(0x2026)
 MIN_RUN_WORDS = 2
 PAGE_EDGE_CHARS = 200
+INTERLEAVE_GAP_CHARS = 400
 
 # Code points, not literals: the characters are easy to misread in source.
 _SINGLE = (0x2018, 0x2019, 0x201A, 0x201B)  # curly and low-9 single quotes, apostrophe
@@ -204,13 +207,18 @@ def _interleave(needle: str, span: Reading) -> _Found | None:
         # Not adjacent: a second run straight after the first is a spacing difference.
         later = span.text.find(second, after + 1)
         if later >= 0 and span.text[after:later].strip():
+            # Columns interleave within a few lines; runs further apart are not called that.
+            apart = (
+                "two runs separated by interleaved text (columns or table cells)"
+                if later - after <= INTERLEAVE_GAP_CHARS
+                else "two separate runs on this page"
+            )
             return _Found(
                 span,
                 start,
                 later + len(second),
-                ": the quote matches the span as two runs separated by interleaved text (columns "
-                f"or table cells) at offset {len(first)}; quote one contiguous run or choose "
-                "another locator",
+                f": the quote matches the span as {apart} at offset {len(first)}; quote one "
+                "contiguous run or choose another locator",
             )
     return None
 

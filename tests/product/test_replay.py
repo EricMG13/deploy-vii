@@ -583,6 +583,41 @@ def test_an_absent_pack_skips_with_the_reason_and_is_never_a_pass(tmp_path: Path
     assert "artifacts/public-case/case-x is not present" in verdict.reason
 
 
+def unloadable_pack(repository: Path, name: str, pack_sha256: str) -> None:
+    """A case directory whose marker records `pack_sha256` but whose pack.json does not load
+    under the current contract (an earlier `run/1` preparation)."""
+    directory = repository / "artifacts" / "public-case" / name
+    directory.mkdir(parents=True)
+    (directory / "pack.json").write_text('{"run": {"schema": "run/1"}}\n', encoding="utf-8")
+    (directory / "complete.json").write_text(
+        json.dumps({"pack_sha256": pack_sha256}), encoding="utf-8"
+    )
+
+
+def test_find_case_pack_skips_an_unloadable_pack_with_the_reason_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    repository = tmp_path / "repository"
+    pack = case_pack(repository)
+    unloadable_pack(repository, "a-earlier-preparation", pack.content_hash())  # sorts first
+    with caplog.at_level("WARNING", logger="deploy_vii.live.corpus"):
+        found = corpus.find_case_pack(pack.content_hash(), repository)
+    assert found == "artifacts/public-case/case-x"
+    (skipped,) = caplog.messages
+    assert "artifacts/public-case/a-earlier-preparation" in skipped
+    assert "does not load under the current pack contract" in skipped
+
+
+def test_find_case_pack_finds_nothing_when_no_candidate_loads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    repository = tmp_path / "repository"
+    unloadable_pack(repository, "a-earlier-preparation", "2" * 64)
+    with caplog.at_level("WARNING", logger="deploy_vii.live.corpus"):
+        assert corpus.find_case_pack("2" * 64, repository) is None
+    assert len(caplog.messages) == 1 and "a-earlier-preparation" in caplog.messages[0]
+
+
 def test_a_present_pack_that_hashes_differently_is_stale_inputs(tmp_path: Path) -> None:
     target, repository, _ = real_entry(tmp_path)
     marker = repository / "artifacts" / "public-case" / "case-x" / "complete.json"

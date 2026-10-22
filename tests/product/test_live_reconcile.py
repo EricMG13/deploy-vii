@@ -546,6 +546,9 @@ def test_a_lone_deadline_hold_takes_the_account_usage_residual(
     )
     assert Decimal(evidence["reserved_usd"]) == held.reserved_usd
     assert evidence["tolerance_usd"] == "0.000001"
+    # The fresh reconcile-time reading equals the after-check: the call was not billed late.
+    assert evidence["usage_now_usd"] == evidence["usage_after_usd"]
+    assert evidence["usage_now_checked_at"]
     assert after.spent == before.spent - held.reserved_usd + Decimal(expected)
     block = load(deepseek_dir(rig) / "metrics.json")["ledger"]
     assert block["cost_basis"] == "account-usage-delta" and block["unreconciled"] is False
@@ -576,6 +579,14 @@ def _plain(rig: Rig, held_cost: str = "0.0123", unexplained: str = "0") -> Deadl
     return responder
 
 
+def _billed_after_the_check(rig: Rig) -> DeadlineResponder:
+    """The provider bills the given-up call after the after-batch check: the fresh reading at
+    reconcile time is above the recorded after-figure, so the delta would omit that charge."""
+    responder = _plain(rig)
+    responder.usage += Decimal("0.004")
+    return responder
+
+
 def _no_usage_after(rig: Rig) -> DeadlineResponder:
     responder = _plain(rig)
     (rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-after.json").unlink()
@@ -593,6 +604,7 @@ def _no_usage_after(rig: Rig) -> DeadlineResponder:
         ),
         (_estimate_elsewhere, "is not a measured cost"),
         (_no_usage_after, "no account usage was recorded after the batch"),
+        (_billed_after_the_check, "usage moved since the after-check"),
     ],
 )
 def test_a_deadline_hold_the_usage_delta_cannot_attribute_stays_held_with_the_reason(

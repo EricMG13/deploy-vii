@@ -26,6 +26,7 @@ there as `skipped-pack-absent`.
 """
 
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -46,6 +47,7 @@ SYNTHETIC_PACKS = {
     "synthetic-cp0": "fdd5a1eee9773517b2285cb211067edffa5636351f3d6825cc20cc3babd0a164",
     "synthetic-cp1": "4e9b00f5c670fedcd5c22bfc34190ff9df351bbdeab26c3c3eb93dae7bb311b0",
 }
+_LOG = logging.getLogger(__name__)
 _CASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 PACK_SOURCE = re.compile(r"artifacts/public-case/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 
@@ -89,14 +91,35 @@ def _live_verdict(directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def find_case_pack(pack_sha256: str, repository: Path = REPOSITORY_ROOT) -> str | None:
-    """The `artifacts/public-case/<dir>` whose completion marker records `pack_sha256`."""
+    """The first `artifacts/public-case/<dir>` (in name order) whose completion marker records
+    `pack_sha256` and whose pack loads under the current contract, or None.
+
+    A directory that cannot be read or loaded (an earlier `run/1` preparation) is skipped with
+    a logged warning naming it and the reason (task 7.0), never silently; load_case_pack still
+    verifies the returned pack's hash."""
     for marker in sorted((repository / CASE_PACKS).glob("*/complete.json")):
+        source = f"{CASE_PACKS}/{marker.parent.name}"
         try:
             recorded = json.loads(marker.read_text(encoding="utf-8")).get("pack_sha256")
-        except (OSError, ValueError, AttributeError):
-            continue  # an unreadable marker is not this pack; load_case_pack verifies a match
-        if recorded == pack_sha256:
-            return f"{CASE_PACKS}/{marker.parent.name}"
+        except (OSError, ValueError, AttributeError) as error:
+            _LOG.warning("%s skipped: its complete.json is unreadable (%s)", source, error)
+            continue
+        if recorded != pack_sha256:
+            continue
+        try:
+            load_pack(marker.parent)
+        except (OSError, ValueError) as error:
+            first = (str(error).splitlines() or [""])[0]
+            _LOG.warning(
+                "%s skipped: it records pack_sha256 %s but does not load under the current "
+                "pack contract (%s: %s)",
+                source,
+                pack_sha256,
+                type(error).__name__,
+                first,
+            )
+            continue
+        return source
     return None
 
 

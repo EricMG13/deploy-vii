@@ -130,8 +130,8 @@ applied three execution-boundary fixes. (1) One quote matcher for every citation
 (`deploy_vii.quotes`): both sides are compared after removing soft hyphens, mapping curly quotes,
 dashes and the minus sign to ASCII and collapsing whitespace runs; the quote must still be one
 contiguous substring of the span its locator names (no fuzzy match, no other span searched), and
-the issue names the locator, the normalisation and the quote's first 60 characters, one per
-failing citation. It applies to the journal, financial and definition citation checks too,
+the issue names the locator, the normalisation and the normalised quote cut at a whole word
+within 200 characters (task 7.0; 60 characters before), one per failing citation. It applies to the journal, financial and definition citation checks too,
 because the journal re-checks the CP-0 candidate's citations with the same function. (2) A
 negator followed by at most four words from a closed list and the absence word, or the coverage
 field restated as empty, is not an absence word; positive claims still fail. (3) `source_context`
@@ -246,6 +246,18 @@ and the analysis,
 [live-probe-5-analysis.md](../development/tasks/implementation/live-probe-5-analysis.md). Not
 verified: acceptance beyond the 16-token schema check (probe-6 is to show Sol's replies under
 the round-3 schemas).
+
+## Amendment, 22 Oct 2026 (task 7.0)
+
+Task 7.0 widened the quote shown in a citation issue from the first 60 characters to at most
+200, cut at a whole word, so the REPAIR prompt carries the clause the model must correct. It also
+adds the `account-usage-delta` adjust for a lone deadline hold that has no generation id. That
+rule and the `generation-404+usage-delta` rule above share one exposure: the provider may bill
+the call after the after-batch usage check, so the delta would omit its cost. For
+`account-usage-delta` the exposure is now closed: `live reconcile` takes a fresh
+`GET /api/v1/key` reading and adjusts only when it equals the recorded after-figure within
+US$0.000001; otherwise the attempt stays held with "usage moved since the after-check" and a
+later reconcile may retry. The 404 rule is unchanged by task 7.0.
 
 ## Evidence
 

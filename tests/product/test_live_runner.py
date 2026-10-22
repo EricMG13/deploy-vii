@@ -35,6 +35,7 @@ from deploy_vii.live.runner import (
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
+from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source
 from deploy_vii.readiness import ReadinessReview, extraction_coverage, live_consumers
 from tests.product.live_support import (
     FAKE_KEY,
@@ -748,6 +749,49 @@ def test_repair_attempt_links_to_its_predecessor_and_prompts_the_issues(tmp_path
     user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
     assert "<<<REPAIR id=prior-validation-issues" in user and "- (root): Invalid JSON" in user
     assert load(attempt_dir(second) / "metrics.json")["repair_count"] == 1
+
+
+def test_a_classified_quote_issue_reaches_the_repair_block_whole(tmp_path: Path) -> None:
+    """Task 7.0, end to end: a quote stitched across interleaved text (the Sol p104 shape) is
+    rejected with the classified clause, and the repair prompt carries that issue in full."""
+    sentence = (
+        "Net revenues increased primarily due to the full-year contribution of the regional "
+        "properties acquired in the prior year and higher hold on table games across the "
+        "Las Vegas segment"
+    )
+    cut = sentence.index(" in the prior")  # a column break after "acquired"
+    first_run, second_run = sentence[:cut], sentence[cut + 1 :]
+    cells = "Casino 5,321 5,102 4,870 Food and beverage 1,934 1,876 1,702 Hotel 2,207 2,118"
+    row = f"{first_run} {cells} {second_run}"
+    fixture, _ = readiness_fixture()
+    source = prepare_source(
+        SourceRequest(source_id="filing", path="filing.txt", media_type="text/plain"),
+        f"Synthetic issuer FY2025 cash USD million 0\n{row}\n".encode(),
+    )
+    store = Execution.create(
+        tmp_path / "execution", PreparedPack(run=fixture.run, sources=(source,))
+    )
+    rig = make_rig(tmp_path / "rig")
+    rig.store, rig.ticket_id = store, store.begin("CP-0").ticket_id
+    stitched = json.loads(rig.submission)
+    stitched["analysis"][0]["citations"].append(
+        {"source_id": "filing", "locator": "line:2", "quote": sentence}
+    )
+    rig.submission = json.dumps(stitched)
+    first = rig.run(ChatClient(FakeTransport(reply(rig))))
+    assert first.status == "rejected"
+    clause = f"two runs separated by interleaved text (columns or table cells) at offset {cut}"
+    (classified,) = [issue for issue in first.issues if clause in issue]
+    assert classified.endswith("quote one contiguous run or choose another locator")
+    assert len(classified) > 300  # beyond the journal's bound before task 7.0
+    rig.submission = as_submission(rig.review).model_dump_json()
+    repair = rig.store.begin("CP-0")
+    rig.ticket_id = repair.ticket_id
+    transport = FakeTransport(reply(rig))
+    rig.run(ChatClient(transport))
+    user = json.loads(transport.requests[0].body or b"{}")["messages"][1]["content"]
+    block = user.split("<<<REPAIR id=prior-validation-issues", 1)[1].split("<<<END>>>", 1)[0]
+    assert f"- {classified}\n" in block
 
 
 def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
