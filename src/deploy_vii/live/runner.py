@@ -1043,6 +1043,9 @@ def check_schema(
     CreditExhausted after the attempt is sealed (DC-8)."""
     chat = schema_check_request(candidate, step_id)
     tokens = prompt_token_bound(chat.body(), bytes_per_token)
+    # As in `dispatch`: a key that cannot be read stops the check before anything is written
+    # or reserved, so no reservation is left open.
+    loaded = load_key_with_note(key_path, key_index)
     prefix = f"{candidate.slug.replace('/', '__')}-{step_id}"
     base = AttemptLocator(batch_id, SCHEMA_CHECK_CASE, candidate.slug, prefix)
     attempt_id, _ = next_attempt_id(ledger, writer, base, prefix)
@@ -1082,7 +1085,6 @@ def check_schema(
         _unsent_check(check, writer, "refused", str(error))
         return _result(check)  # the caller stops the batch: nothing further fits the cap
     check.event("reserved", usd=check.reserve_usd, prompt_tokens_upper_bound=tokens)
-    loaded = load_key_with_note(key_path, key_index)
     if loaded.tokens_found > 1:
         check.key_note = loaded.note()
     try:

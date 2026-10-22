@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import re
 import socket
 import stat
 from decimal import Decimal
@@ -947,7 +946,11 @@ def test_schema_check_cap_refusal_sends_nothing_and_stops_the_batch(rig: Rig) ->
     assert Ledger(path, Decimal("0.0000001")).state().attempts == ()  # nothing was reserved
 
 
-def test_schema_check_defaults_and_refusals(rig: Rig, capsys: pytest.CaptureFixture[str]) -> None:
+def test_schema_check_defaults_and_refusals(
+    rig: Rig, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fixed clock, so the two default-batch runs below cannot straddle a UTC midnight.
+    monkeypatch.setattr(cli, "utc_stamp", lambda: "2026-10-22T23:59:59Z")
     parser = argparse.ArgumentParser()
     cli.configure(parser)
     args = parser.parse_args(["schema-check", "--models", LUNA])
@@ -963,7 +966,7 @@ def test_schema_check_defaults_and_refusals(rig: Rig, capsys: pytest.CaptureFixt
     argv = check_argv(rig, "--models", LUNA, "--steps", "financials", batch=None)
     assert rig.run(argv, responder) == 0
     (report,) = rig.reports.glob("live-schema-*.md")
-    assert re.fullmatch(r"live-schema-\d{8}\.md", report.name)
+    assert report.name == "live-schema-20261022.md"
     assert rig.run(argv, responder) == cli.EXIT_FAILED  # the day's batch exists: choose another
 
 

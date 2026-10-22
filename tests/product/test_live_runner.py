@@ -1608,7 +1608,12 @@ def test_only_the_latest_400_verdict_for_the_exact_schema_blocks_a_cell(tmp_path
 
 
 def run_check(
-    tmp_path: Path, transport: FakeTransport, *, context: int = 1_048_576, key: str = FAKE_KEY
+    tmp_path: Path,
+    transport: FakeTransport,
+    *,
+    context: int = 1_048_576,
+    key: str = FAKE_KEY,
+    key_index: int = 1,
 ) -> tuple[SchemaCheck, Ledger, Path]:
     catalog = catalog_of(catalog_row(LUNA, context=context))
     (candidate,) = catalog.pin_selected("s1", (ModelSelection(LUNA, None),)).candidates
@@ -1623,12 +1628,23 @@ def run_check(
         client=ChatClient(transport),
         writer=AttemptWriter(tmp_path / "artifacts"),
         key_path=make_rtf_key(keys, key),
-        key_index=1,
+        key_index=key_index,
         bytes_per_token=BYTES_PER_TOKEN,
         clock=lambda: NOW,
     )
     (manifest,) = (tmp_path / "artifacts" / "s1" / "schema-check").rglob("manifest.json")
     return check, ledger, manifest.parent
+
+
+def test_a_check_whose_key_cannot_be_read_reserves_and_writes_nothing(tmp_path: Path) -> None:
+    """The key is read before the reservation, as in `dispatch`: a refused credential leaves no
+    open reservation in the ledger and no half-written attempt."""
+    transport = FakeTransport()
+    with pytest.raises(CredentialError, match="credential_token_index 2"):
+        run_check(tmp_path, transport, key_index=2)
+    assert transport.requests == []
+    assert Ledger(tmp_path / "ledger" / "s1.jsonl", Decimal("0.05")).state().attempts == ()
+    assert not (tmp_path / "artifacts").exists()
 
 
 def test_a_check_whose_prompt_cannot_fit_is_sealed_ineligible_unsent(tmp_path: Path) -> None:
