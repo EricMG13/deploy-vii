@@ -140,7 +140,13 @@ the live probe (2.6) and decision 0008 (2.7) are the coordinator's and have not 
   mid-bisect; variant manifests label their relaxations' base) and the `invalid schema`
   hardening. Then, by user decision (22 Oct 2026, decision 0005 amendment), the catalog-rule
   pool is GPT-6.1 Sol alone at high, and a one-model pool's draw is recorded as trivial.
-  Round-2 gates are in the task report.
+  Round-2 gates are in the task report. Fix round 3 (after `live-schema-2026-10-22-bisect2.md`,
+  where OpenAI accepted `source_context`, `financials` and `readiness` only as
+  `nullable-array-to-anyof`) makes the sent copy send every nullable array as `anyOf` with a null
+  branch (`nullable-array-anyof`) and `oneOf` + `discriminator` as `anyOf` (`oneof-anyof`). Both
+  are lossless: the 31 nullable arrays default to `[]`, and the stored contract validates the
+  reply. Confidence review found no defect; tournament on `relax`: incumbent holds. Round-3 gates
+  are in the task report.
 
 Not verified: account entitlement and funded credit; live acceptance of `xhigh` or of the
 strict JSON schemas; whether a native Luna agent is entitled when `codex` is on PATH.
