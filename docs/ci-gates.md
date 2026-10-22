@@ -27,7 +27,7 @@ pyproject and gate scripts plus locally recorded `origin/main` at
 | jscpd 3% incl tests | Detect copy/paste | Repeated test cases may be clearer than abstractions; adds Node setup | Advisory for product code when it exists; no research-phase dependency. |
 | Gitleaks | Keep secrets out of history | Long custom range/floor logic has maintenance cost | Pinned full reachable-history scan initially; no provider secret in CI. |
 | PR line cap | Keep changes reviewable | Historical policies used 800 and separately authorized 4000 | Advisory full-diff reporting, no arbitrary blocking cap; justify scope in the PR. |
-| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/15-minute limits; investigate timeouts. |
+| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/40/10-minute limits (Product checks 40 since the M2 PR: the suite outgrew 15); investigate timeouts. |
 
 The existing checks protect valuable invariants. The concern is overlapping
 execution and misleading proxies for quality, not the existence of validation.
@@ -49,6 +49,25 @@ rasterisation differs between operating systems, so baselines
 (`tests/product/baselines/<platform>/`) exist only for darwin, where they were reviewed.
 Structure, zoom, keyboard, parity and zero-network checks still run there. Generate and
 review Linux baselines before treating the pixel comparison as a CI gate.
+
+**Linux parity.** Hosted CI runs ubuntu-24.04 with no real case pack under
+`artifacts/public-case/`, no attempt evidence and no macOS `textutil`. Local runs must not
+rely on any of them for coverage or for a green result. Where `textutil` is absent
+`tests/product/conftest.py` puts a test double (`tests/product/fake_textutil.py`, itself tested
+and compared with the real tool on macOS) first on PATH, so the credential loader and the
+live-runner tests run on both platforms; real-pack replay entries stay counted skips
+(`skipped-pack-absent`) and are never a pass, while synthetic case packs cover the same code.
+To reproduce the hosted run, commit, write the committed tree to a tar under a directory the
+Docker VM can mount (with Colima, under `$HOME`), and run a clean container with no key file,
+no artifacts and no textutil: `git archive HEAD -o "$DIR/tree.tar"`, then
+`docker run --rm -v "$DIR":/lx:ro ubuntu:24.04 bash /lx/run.sh`, where `run.sh` does
+`apt-get update -qq && apt-get install -y -qq curl ca-certificates git make nodejs`,
+`mkdir /w && tar -x -C /w -f /lx/tree.tar && cd /w`, installs uv 0.12.5
+(`curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh`), then `uv sync --locked`,
+`uv run --locked playwright install --with-deps chromium` and `make product-check`. The
+memory-heavy bindings tests peak near 2.3 GiB, so a single pytest process was killed
+(exit 137) in a 3.8 GiB Docker VM; give the VM more memory or run one process per test
+file with `--cov-append`.
 
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and

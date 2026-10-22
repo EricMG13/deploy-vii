@@ -2,9 +2,9 @@
 
 `deploy_vii.execution.Execution` is the local execution substrate. The `execution`
 CLI provides trusted CP-0 review submission and ordered CP-1 stage submission.
-The standalone `cp0` delivery command remains separate. Live model invocation and
-CP-1 final module projection are pending; a model-supplied success flag is never
-a validator. Synthetic protocol tests do not qualify analytical judgments.
+The standalone `cp0` delivery command remains separate. Live model calls go through
+the runner (`deploy_vii.live`, [live-runner.md](live-runner.md)); CP-1 final module
+projection is pending. A model-supplied success flag is never a validator. Synthetic protocol tests do not qualify analytical judgments.
 
 - `Execution.create(directory, pack)` starts a new store for a validated frozen
   pack. Use `load_pack` first when reading an on-disk prepared pack. Run identity,
@@ -12,12 +12,22 @@ a validator. Synthetic protocol tests do not qualify analytical judgments.
 - `begin(module_id)` resolves aliases, checks current selected dependencies and
   CP-0's source-readiness command, then reserves one attempt. Only one may be
   pending. The returned ticket contains exact pack/upstream hashes and, for the
-  one permitted repair, the previous ticket and named validation issues.
+  one permitted repair, the previous ticket and named validation issues. When
+  CP-0's T8 `exact_command` for the consumer is not `Run <id>` it raises
+  `NotAuthorized` (task 2.10), a `ValueError` subclass carrying the module id and
+  the command texts found, so a caller can tell a CONDITIONAL or BLOCKED readiness
+  judgment from a journal fault; every other refusal is a plain `ValueError`.
 - `finish(ticket_id, module_json, validator)` retains the response before local
   validation. It checks identity, status, attempt, current input hashes and
   citations before calling the trusted Python validator. A validator exception
   leaves the response and ticket pending; resume with the same payload. A new
   response under the same ticket is rejected.
+- Citations are checked by `readiness.citation_issues` here and in every module
+  validator: exact source, hash and locator, and the quote as one contiguous
+  substring of that span after the layout normalisation of `deploy_vii.quotes`
+  (whitespace runs, curly quotes, dashes, soft hyphens; task 2.9; on the span side
+  also hyphenated line wraps joined, `hyphen-wrap`, task 2.10). One issue per
+  failing citation names the locator and the quote's first 60 characters.
 - `interrupt(ticket_id, reason)` records the caller's explicit interruption. It
   preserves an already retained response and consumes that attempt. It does not
   stop or inspect a host process, reconcile provider billing or make a second call.

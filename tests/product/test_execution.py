@@ -13,6 +13,7 @@ from deploy_vii.execution import (
     Command,
     Execution,
     Head,
+    NotAuthorized,
     StepSubmission,
     StepValidation,
     candidate_issues,
@@ -262,8 +263,45 @@ def test_missing_cp0_readiness_command_fails_closed(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
     ticket = store.begin("CP-0")
     store.finish(ticket.ticket_id, candidate_for(store, "CP-0").model_dump_json(), lambda _: ())
-    with pytest.raises(ValueError, match="source readiness"):
+    with pytest.raises(NotAuthorized, match="source readiness") as refused:
         store.begin("CP-1")
+    assert isinstance(refused.value, ValueError)  # every other caller still sees a ValueError
+    assert (refused.value.module_id, refused.value.commands) == ("CP-1", ())
+
+
+def test_a_conditional_consumer_is_refused_as_not_authorized_with_its_command(
+    tmp_path: Path,
+) -> None:
+    """Probe-4 (Sol 944e569a): CP-0 accepted with CP-1 CONDITIONAL, so T8 says DO NOT RUN."""
+    store = fixture_store(tmp_path)
+    _, review = readiness_fixture()
+    conditional = review.model_copy(
+        update={
+            "consumers": tuple(
+                item.model_copy(
+                    update={"readiness": "CONDITIONAL", "missing_source": "CP-1 module brief"}
+                )
+                if item.module_id == "CP-1"
+                else item
+                for item in review.consumers
+            )
+        }
+    )
+    ticket = store.begin("CP-0")
+    candidate = build_readiness(store.pack(), conditional)
+    store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+    with pytest.raises(NotAuthorized) as refused:
+        store.begin("CP-1")
+    assert (refused.value.module_id, refused.value.commands) == ("CP-1", ("DO NOT RUN",))
+    assert not any(item.module_id == "CP-1" for item in store.read().attempts)  # nothing begun
+
+
+def test_other_begin_refusals_are_not_mistaken_for_not_authorized(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    for module_id, needle in (("CP-1", "upstream"), ("CP-2G", "not selected")):
+        with pytest.raises(ValueError, match=needle) as refused:
+            store.begin(module_id)
+        assert not isinstance(refused.value, NotAuthorized)
 
 
 def test_two_writers_cannot_reserve_two_initial_attempts(tmp_path: Path) -> None:

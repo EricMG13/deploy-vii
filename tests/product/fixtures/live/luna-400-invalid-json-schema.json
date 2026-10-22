@@ -1,0 +1,7 @@
+{
+ "source": "probe-2 openai/gpt-6-luna 2d1d9f0f-c9de-41be-b326-6c890a572756-source_readiness-1 response.json",
+ "http_status": 400,
+ "body_sha256_before_redaction": "565edfcdaf4b8c0a9dc69baf0634648ecaad53fe876f27c92cebeadf507cad47",
+ "redaction": "user_id value replaced with user_REDACTED; nothing else changed",
+ "body_text": "{\"error\":{\"message\":\"Provider returned error\",\"code\":400,\"metadata\":{\"raw\":\"{\\n  \\\"error\\\": {\\n    \\\"message\\\": \\\"Invalid schema for response_format 'source_readiness': In context=(), 'required' is required to be supplied and to be an array including every key in properties. Missing 'limitation'.\\\",\\n    \\\"type\\\": \\\"invalid_request_error\\\",\\n    \\\"param\\\": \\\"text.format.schema\\\",\\n    \\\"code\\\": \\\"invalid_json_schema\\\"\\n  }\\n}\",\"provider_name\":\"OpenAI\",\"is_byok\":false,\"provider_error_code\":\"invalid_json_schema\"}},\"user_id\":\"user_REDACTED\"}"
+}

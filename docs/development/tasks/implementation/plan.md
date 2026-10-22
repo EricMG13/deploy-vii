@@ -432,7 +432,7 @@ report delivery. Keep external blockers visible.
 | 0005 | Methodology changes for performance and reliability (MC-1 to MC-10); regular internal and external testing | **Adopted** with this plan |
 | 0006 | Delegated choices: orchestration, PR session, DCF, CP-MODEL, caps, credential, no-credit proxy, design bytes | **Adopted** 21 October 2026 |
 | 0007 | Degradation and status semantics, with per-edge rules | M4 |
-| 0008 | Model-facing contract shape and repair budget, from probe evidence | M2.7 |
+| 0008 | Model-facing contract shape and repair budget, from probe evidence | **Adopted** 21 October 2026 (M2.7) |
 | 0009 | Pathway presets and the `not_in_pathway` status | M3.5 |
 
 ## Budget plan
@@ -482,3 +482,12 @@ Decision 0006 resolved the former open decisions on 21 October 2026: DCF (DC-4),
 CP-MODEL (DC-5), recurring caps and the ceiling (DC-6), the OpenRouter credential
 (DC-7), the no-credit proxy (DC-8) and the design reference bytes (DC-9). Record
 any new user-owned choice here and stop for the user's answer.
+
+[Decision 0008](../../../decisions/0008-model-facing-contract-shape.md) is a coordinator
+ruling on probe-2 evidence (plan 2.7, delegated to probe evidence; the user may override): MC-1
+for `source_readiness` (the model returns a `ReadinessSubmission`, Python composes the stored
+`ReadinessReview`), MC-7 issues-only repair prompts, and the prompt-token bound from a measured
+3.0 bytes per token. Two choices are deferred for lack of evidence: a per-step repair budget
+(revisit when the rerun shows a module-wide budget exhausted; the rerun reports `repair_count`
+per step) and a `FinancialSubmission` split (revisit when `financials` first-pass validity on
+the rerun is below 2 of 3 draws for any model).

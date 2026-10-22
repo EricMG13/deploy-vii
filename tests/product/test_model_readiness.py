@@ -28,7 +28,7 @@ from tests.product.test_statements import identity, line
 def ready_case() -> FinancialBook:
     value = model_case()
     # Explicitly synthetic values, including sourced zeroes; no production inference.
-    amounts = dict.fromkeys(ACCOUNT_IDS, "0.00")
+    amounts = dict.fromkeys(sorted(ACCOUNT_IDS), "0.00")
     amounts.update(
         revenue="100.00",
         cogs="-30.00",

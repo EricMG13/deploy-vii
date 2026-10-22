@@ -1,0 +1,127 @@
+{
+ "_fixture": "Subset of the 21 October 2026 public OpenRouter catalog (the three pool members, trimmed to the fields the runner reads) plus synthetic decoys. Not a catalog snapshot.",
+ "data": [
+  {
+   "id": "openai/gpt-6-luna",
+   "canonical_slug": "openai/gpt-6-luna-20260922",
+   "name": "OpenAI: GPT-6 Luna",
+   "created": 1790100786,
+   "context_length": 1050000,
+   "architecture": {"input_modalities": ["file", "image", "text"], "output_modalities": ["text"]},
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000005",
+    "web_search": "0.01",
+    "overrides": [{"min_prompt_tokens": 272000, "prompt": "0.0000002", "completion": "0.00000075"}]
+   },
+   "supported_parameters": ["include_reasoning", "max_completion_tokens", "max_tokens", "reasoning", "reasoning_effort", "response_format", "seed", "structured_outputs", "tool_choice", "tools", "verbosity"],
+   "reasoning": {"mandatory": false, "supported_efforts": ["max", "xhigh", "high", "medium", "low", "none"], "default_effort": "medium"}
+  },
+  {
+   "id": "z-ai/glm-5.3-flash",
+   "canonical_slug": "z-ai/glm-5.3-flash-20260826",
+   "name": "Z.ai: GLM 5.3 Flash",
+   "created": 1787752741,
+   "context_length": 1048576,
+   "architecture": {"input_modalities": ["text", "image", "video"], "output_modalities": ["text"]},
+   "pricing": {"prompt": "0.000000041191", "completion": "0.00000012"},
+   "supported_parameters": ["include_reasoning", "max_tokens", "reasoning", "reasoning_effort", "response_format", "seed", "structured_outputs", "temperature", "tool_choice", "tools"],
+   "reasoning": {"mandatory": true, "supported_efforts": ["max", "high", "low"], "default_effort": "max"}
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash-1017",
+   "canonical_slug": "deepseek/deepseek-v4.1-flash-20261017",
+   "name": "DeepSeek: DeepSeek V4.1 Flash 1017",
+   "created": 1792225624,
+   "context_length": 1048576,
+   "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "overrides": [
+     {"utc_days": ["saturday", "sunday"], "prompt": "0.00000015", "completion": "0.0000006"},
+     {"utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"], "utc_start": 100, "utc_end": 400, "prompt": "0.0000003", "completion": "0.0000012"}
+    ]
+   },
+   "supported_parameters": ["include_reasoning", "max_completion_tokens", "max_tokens", "reasoning", "reasoning_effort", "response_format", "seed", "structured_outputs", "temperature", "tool_choice", "tools"]
+  },
+  {
+   "id": "openai/gpt-6-luna-pro",
+   "canonical_slug": "openai/gpt-6-luna-pro",
+   "name": "SYNTHETIC DECOY: not a pool member",
+   "_fixture": "synthetic decoy",
+   "created": 1790100787,
+   "context_length": 1050000,
+   "architecture": {"output_modalities": ["text"]},
+   "pricing": {"prompt": "0.000001", "completion": "0.000005"},
+   "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "structured_outputs"]
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash",
+   "canonical_slug": "deepseek/deepseek-v4.1-flash",
+   "name": "SYNTHETIC DECOY: older suitable DeepSeek",
+   "_fixture": "synthetic decoy",
+   "created": 1789021285,
+   "context_length": 1048576,
+   "architecture": {"output_modalities": ["text"]},
+   "pricing": {"prompt": "0.0000001", "completion": "0.0000004"},
+   "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "structured_outputs"]
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash:batch",
+   "canonical_slug": "deepseek/deepseek-v4.1-flash",
+   "name": "SYNTHETIC DECOY: batch variant",
+   "_fixture": "synthetic decoy",
+   "created": 1789021285,
+   "context_length": 1048576,
+   "architecture": {"output_modalities": ["text"]},
+   "pricing": {"prompt": "0.00000005", "completion": "0.0000002"},
+   "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "structured_outputs"]
+  },
+  {
+   "id": "deepseek/deepseek-v9-exp",
+   "canonical_slug": "deepseek/deepseek-v9-exp",
+   "name": "SYNTHETIC DECOY: newer experimental",
+   "_fixture": "synthetic decoy",
+   "created": 1792400000,
+   "context_length": 1048576,
+   "architecture": {"output_modalities": ["text"]},
+   "pricing": {"prompt": "0.0000002", "completion": "0.0000008"},
+   "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "structured_outputs"]
+  },
+  {
+   "id": "deepseek/deepseek-v9:batch",
+   "canonical_slug": "deepseek/deepseek-v9",
+   "name": "SYNTHETIC DECOY: newer batch variant",
+   "_fixture": "synthetic decoy",
+   "created": 1792400001,
+   "context_length": 1048576,
+   "architecture": {"output_modalities": ["text"]},
+   "pricing": {"prompt": "0.0000002", "completion": "0.0000008"},
+   "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "structured_outputs"]
+  },
+  {
+   "id": "deepseek/deepseek-v9-chat",
+   "canonical_slug": "deepseek/deepseek-v9-chat",
+   "name": "SYNTHETIC DECOY: newer non-reasoning model",
+   "_fixture": "synthetic decoy",
+   "created": 1792400002,
+   "context_length": 1048576,
+   "architecture": {"output_modalities": ["text"]},
+   "pricing": {"prompt": "0.0000002", "completion": "0.0000008"},
+   "supported_parameters": ["max_tokens", "response_format", "structured_outputs"]
+  },
+  {
+   "id": "deepseek/deepseek-v9-image",
+   "canonical_slug": "deepseek/deepseek-v9-image",
+   "name": "SYNTHETIC DECOY: newer image-output model",
+   "_fixture": "synthetic decoy",
+   "created": 1792400003,
+   "context_length": 1048576,
+   "architecture": {"output_modalities": ["image"]},
+   "pricing": {"prompt": "0.0000002", "completion": "0.0000008"},
+   "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "structured_outputs"]
+  }
+ ],
+ "total_count": 10
+}

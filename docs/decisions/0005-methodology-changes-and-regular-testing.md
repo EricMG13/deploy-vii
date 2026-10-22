@@ -61,7 +61,8 @@ CI is available.
 
 **External.** OpenRouter, local only; CI keeps `model_calls = false`.
 
-- **Selection.** Draw uniformly at random among eligible `openai/gpt-6-luna` (Luna),
+- **Selection.** (Superseded 22 Oct 2026 by the amendment below: the pool is GPT-6.1 Sol
+  alone.) Draw uniformly at random among eligible `openai/gpt-6-luna` (Luna),
   `z-ai/glm-5.3-flash` (GLM 5.3 Flash) and the latest suitable DeepSeek (re-resolved
   and pinned per batch). Record the pool, exclusions, seed and draw before dispatch.
 - **Effort and retries.** Use high by default and xhigh for cases predefined as
@@ -71,8 +72,8 @@ CI is available.
 | Tier | When | What |
 | --- | --- | --- |
 | E1 | Each module completion | Qualification case on the frozen Caesars pack plus one adversarial synthetic fixture |
-| E2 | Each milestone | Regression over every implemented module, plus a matched comparison: the same frozen case on all three eligible models in randomized order. Compares payload validity, factual accuracy against Python facts, citation errors, repairs, refusals and limitations, tokens, cost and latency |
-| E3 | Weekly while development is active | Canary: CP-0 and the CP-1 steps on the frozen case, one draw per eligible model. Detects provider or model drift, including a new DeepSeek release. A validity drop against the last E2 opens a finding |
+| E2 | Each milestone | (amended 22 Oct 2026: Sol alone; see the amendment below) Regression over every implemented module, plus a matched comparison: the same frozen case on all three eligible models in randomized order. Compares payload validity, factual accuracy against Python facts, citation errors, repairs, refusals and limitations, tokens, cost and latency |
+| E3 | Weekly while development is active | (amended 22 Oct 2026: Sol alone; see the amendment below) Canary: CP-0 and the CP-1 steps on the frozen case, one draw per eligible model. Detects provider or model drift, including a new DeepSeek release. A validity drop against the last E2 opens a finding |
 
 - **Retention.** As in `docs/testing-and-telemetry.md`: requests without credentials,
   responses, extracted outputs, events, metrics, checks and renders, failures included.
@@ -96,6 +97,20 @@ CI is available.
 
 **Make targets (built in M2).** `make replay`, `make live-module MODULE=<id> CAP=<usd>`,
 `make live-regression CAP=<usd>`, `make live-canary CAP=<usd>`.
+
+**Amendment, 22 Oct 2026 (user decision).** The external-test pool is the user-named set,
+currently GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at high effort for every step (also for
+cases predefined as difficult). It is set in `settings/project.toml` (`[[model_tests.candidates]]`,
+`default_effort`, `complex_effort`). §Selection's random draw applies only when the pool holds
+more than one model. With one model, every seed selects it, and the draw is recorded as trivial
+(`trivial-single-model-pool`), with the pool, eligibility, exclusions and seed recorded as before.
+Eligibility checks are unchanged, so an ineligible Sol blocks the test. E2 becomes the milestone
+regression on Sol alone. The matched comparison is dormant until the user adds models. E3 becomes
+one Sol draw per week against the last E2, and still detects provider or model drift. The earlier
+pools are superseded: Luna / GLM 5.3 Flash / latest DeepSeek (this decision's §Selection) and the
+coordinator-selected Grok / Sol / Gemini probe pool (22 October 2026). Their stored outputs,
+reports and replay entries are retained. The relaxation of the sent schema (decision 0008) must
+be accepted by OpenAI; other providers' rows are information only.
 
 Not verified:
 - provider and model availability, effort support and pricing at batch time;
