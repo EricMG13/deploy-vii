@@ -10,8 +10,6 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-import pytest
-
 from deploy_vii.live.catalog import Catalog, PinnedPool
 from deploy_vii.live.client import Request, Response
 from deploy_vii.live.settings import CandidateSetting
@@ -40,10 +38,10 @@ def fixture_pool(batch_id: str = "batch-test") -> PinnedPool:
 
 
 def make_rtf_key(directory: Path, key: str = FAKE_KEY, *, name: str = "key.rtf") -> Path:
-    """Generate a fixture RTF credential file with macOS textutil (macOS-only tool)."""
+    """Generate a fixture RTF credential file with `textutil` (the real tool, or the suite's
+    test double on PATH where macOS is absent; see conftest.py)."""
     textutil = shutil.which("textutil")
-    if textutil is None:
-        pytest.skip("textutil is absent (macOS-only); credential conversion cannot be exercised")
+    assert textutil is not None, "conftest.py puts a textutil on PATH for every test"
     source = directory / (name + ".txt")
     source.write_text(key + "\n", encoding="utf-8")
     target = directory / name

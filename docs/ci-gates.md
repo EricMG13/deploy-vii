@@ -50,6 +50,17 @@ rasterisation differs between operating systems, so baselines
 Structure, zoom, keyboard, parity and zero-network checks still run there. Generate and
 review Linux baselines before treating the pixel comparison as a CI gate.
 
+**Linux parity.** Hosted CI runs ubuntu-24.04 with no real case pack under
+`artifacts/public-case/`, no attempt evidence and no macOS `textutil`. Local runs must not
+rely on any of them for coverage or for a green result. Where `textutil` is absent
+`tests/product/conftest.py` puts a test double (`tests/product/fake_textutil.py`, itself tested
+and compared with the real tool on macOS) first on PATH, so the credential loader and the
+live-runner tests run on both platforms; real-pack replay entries stay counted skips
+(`skipped-pack-absent`) and are never a pass, while synthetic case packs cover the same code.
+To reproduce the hosted run, commit and then, from the repository root, pipe the committed tree
+into a clean container (no key file, no artifacts, no textutil):
+`git archive HEAD | docker run --rm -i ubuntu:24.04 bash -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates git make nodejs >/dev/null && mkdir /w && tar -x -C /w && cd /w && curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh && . $HOME/.local/bin/env && git init -q && uv sync --locked && uv run --locked playwright install --with-deps chromium && make product-check'`.
+
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and
 provider credentials outside hosted CI. The old tool pins in decision 0001 are

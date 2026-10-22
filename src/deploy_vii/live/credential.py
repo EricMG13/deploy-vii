@@ -64,12 +64,12 @@ def load_key_with_note(path: Path, index: int = 1) -> LoadedKey:
     # bool is an int subclass, and 0 or -1 would silently select from the end of the list.
     if isinstance(index, bool) or not isinstance(index, int) or index < 1:
         raise CredentialError("credential_token_index must be an integer >= 1")
-    textutil = shutil.which("textutil")
-    if textutil is None:
-        raise CredentialError("textutil is unavailable; credential loading fails closed")
     source = path.expanduser()
     if not source.is_file():
         raise CredentialError("credential file does not exist")
+    textutil = shutil.which("textutil")
+    if textutil is None:
+        raise CredentialError("textutil is unavailable; credential loading fails closed")
     try:
         done = subprocess.run(
             [textutil, "-convert", "txt", "-stdout", str(source)],

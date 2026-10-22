@@ -1,7 +1,6 @@
 """DC-7 credential loading and redaction; fixture keys only, never the real key file."""
 
 import json
-import shutil
 import subprocess
 import tomllib
 from decimal import Decimal
@@ -21,18 +20,11 @@ from deploy_vii.live.credential import (
 from deploy_vii.live.settings import SettingsError, load_settings
 from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, make_rtf_key
 
-requires_textutil = pytest.mark.skipif(
-    shutil.which("textutil") is None,
-    reason="textutil is macOS-only; the loader fails closed without it (tested separately)",
-)
 
-
-@requires_textutil
 def test_rtf_key_is_converted_and_stripped(tmp_path: Path) -> None:
     assert load_key(make_rtf_key(tmp_path)) == FAKE_KEY
 
 
-@requires_textutil
 @pytest.mark.parametrize(
     "text",
     [
@@ -62,7 +54,6 @@ TEXTEDIT_RTF = (
 )
 
 
-@requires_textutil
 @pytest.mark.parametrize("line_end", ["\n", "\r\n"])
 def test_hand_written_textedit_rtf_with_label_and_smart_quotes(
     tmp_path: Path, line_end: str
@@ -91,7 +82,6 @@ def test_bom_and_windows_line_endings_are_tolerated(
     assert load_key(present) == FAKE_KEY
 
 
-@requires_textutil
 @pytest.mark.parametrize(
     "text, message",
     [
@@ -123,7 +113,6 @@ def _assert_note_is_clean(loaded: object, note: dict[str, int]) -> None:
     assert "sk-or-" not in text and "SECRETMARK" not in text
 
 
-@requires_textutil
 @pytest.mark.parametrize(
     "text, expected, found",
     [
@@ -148,7 +137,6 @@ def test_several_distinct_tokens_use_the_first_in_file_order(
     _assert_note_is_clean(loaded, loaded.note())
 
 
-@requires_textutil
 @pytest.mark.parametrize("index, expected", [(1, FIRST), (2, SECOND)])
 def test_the_settings_index_selects_the_token_in_file_order(
     tmp_path: Path, index: int, expected: str
@@ -163,7 +151,6 @@ def test_the_settings_index_selects_the_token_in_file_order(
     _assert_note_is_clean(loaded, loaded.note())
 
 
-@requires_textutil
 @pytest.mark.parametrize(
     "text, index, message",
     [
@@ -197,7 +184,6 @@ def test_a_non_positive_or_non_integer_index_is_refused_before_reading(
         load_key_with_note(present, index=cast(int, index))  # deliberately ill-typed
 
 
-@requires_textutil
 def test_one_token_written_twice_is_one_of_one(tmp_path: Path) -> None:
     loaded = load_key_with_note(make_rtf_key(tmp_path, f"{FAKE_KEY}\nagain: {FAKE_KEY}"))
     assert loaded.key == FAKE_KEY
@@ -222,7 +208,6 @@ def test_first_token_is_independent_of_line_endings(
     assert loaded.key == SECOND and loaded.note() == {"key_tokens_found": 2, "key_token_used": 1}
 
 
-@requires_textutil
 @pytest.mark.parametrize("line_end", ["\n", "\r\n"])
 def test_textedit_rtf_with_two_keys_uses_the_first_for_either_line_ending(
     tmp_path: Path, line_end: str
@@ -235,7 +220,6 @@ def test_textedit_rtf_with_two_keys_uses_the_first_for_either_line_ending(
     _assert_note_is_clean(loaded, loaded.note())
 
 
-@requires_textutil
 def test_empty_rtf_file_is_refused(tmp_path: Path) -> None:
     empty = tmp_path / "empty.rtf"
     empty.write_bytes(b"")
@@ -243,19 +227,28 @@ def test_empty_rtf_file_is_refused(tmp_path: Path) -> None:
         load_key(empty)
 
 
-def test_missing_file_and_missing_textutil_fail_closed(
+def test_missing_file_fails_closed_before_textutil_is_looked_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The file check comes first, so it is reported the same with or without textutil."""
+
+    def never(_name: str) -> None:
+        raise AssertionError("a missing file must fail before textutil is looked up")
+
+    monkeypatch.setattr(credential.shutil, "which", never)
     with pytest.raises(CredentialError, match="does not exist"):
         load_key(tmp_path / "absent.rtf")
+
+
+def test_missing_textutil_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(credential.shutil, "which", lambda _: None)
     present = tmp_path / "present.rtf"
     present.write_text(FAKE_KEY, encoding="utf-8")
-    with pytest.raises(CredentialError, match="fails closed"):
+    with pytest.raises(CredentialError, match="fails closed") as raised:
         load_key(present)
+    assert FAKE_KEY not in str(raised.value)
 
 
-@requires_textutil
 def test_conversion_failures_are_reported_without_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
