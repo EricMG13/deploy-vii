@@ -49,7 +49,7 @@ credential_token_index = 2
 # 3.0 keeps a 1.9x margin over that measurement.
 prompt_bytes_per_token_lower_bound = 3.0
 credential_handling = "read-at-dispatch-in-memory-never-logged"
-selection = "uniform-random-among-eligible"
+selection = "user-named-pool-uniform-random-only-when-more-than-one-model"
 record_selection_seed = true
 default_effort = "high"
 # Decision 0005 amendment (user decision, 22 Oct 2026): every run uses GPT-6.1 Sol at high.

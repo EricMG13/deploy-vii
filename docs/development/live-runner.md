@@ -15,7 +15,8 @@ step-scoped repair prompt, measured prompt bound), offline only.
 from a pinned pool:
 
 1. Validate the ticket against the journal (module, next step, nothing pending) before any
-   spending. Draw the model (`draw.draw`, seeded, uniform over eligible members). Resolve the
+   spending. Draw the model (`draw.draw`, seeded, uniform over eligible members; a one-model
+   pool is not drawn from, and the draw is recorded as trivial). Resolve the
    effort. Build the prompt. Bound the prompt tokens and compute the reservation.
 2. Load the key from the DC-7 file, then retain `request.json` (exact body, draw, effort).
 3. `ledger.reserve`. Refusal retains a `refused` attempt and raises `CapExceeded`; nothing is sent.
@@ -465,7 +466,10 @@ three hash seeds.
 
 ## No-credit backup cohort (decision 0006 DC-8)
 
-`live/cohort.py` and `live/credit.py`. The runner never switches on its own.
+`live/cohort.py` and `live/credit.py`. The runner never switches on its own. This no-credit
+route (native Luna, else a labelled proxy cohort; settings `no_credit_fallback`) is the user's
+standing DC-8 instruction, not the test pool, so the 22 October 2026 pool amendment (Sol only)
+leaves it unchanged.
 
 - `credit_state(client)` calls `GET /api/v1/key` through a `ChatClient(transport, key_path=...,
   key_index=...)`; the client reads the DC-7 file for that one call, so no key value reaches
@@ -552,8 +556,11 @@ Round 3 rests on two live bisects of the sent schema (`schema-check --bisect`, b
 `schema-2026-10-22-bisect` and `schema-2026-10-22-bisect2`). OpenAI (GPT-6.1 Sol) accepted
 `narrative` only once `oneOf` + `discriminator` became `anyOf` ("'oneOf' is not permitted"). It
 rejected `source_context`, `financials` and `readiness` under every first-round variant, `all`
-included. It accepted all three under `nullable-array-to-anyof` and rejected every other second-round
-variant. So OpenAI refuses a nullable array written as a `type` union inside a strict schema and
+included. In the second bisect it rejected every variant before `nullable-array-to-anyof` and
+accepted all three under it. The bisect stops at the first accepted variant, so the variants after
+it were not sent. A plain check on the round-3 sent schemas (batch `schema-2026-10-22-r3`,
+[live-schema-2026-10-22-r3.md](tasks/implementation/live-schema-2026-10-22-r3.md)) then had all
+five step schemas accepted by Sol. So OpenAI refuses a nullable array written as a `type` union inside a strict schema and
 accepts the same array as an `anyOf` with a null branch. Both rewrites are lossless. All 31
 nullable arrays in the CP-1 step schemas are fields whose stored default is `[]` (`normalise`
 turns a null back into `[]`). The reply is validated by the stored Pydantic contract, whose
@@ -574,8 +581,8 @@ computed on the sent schema (so it no longer names `const`, `minLength` or `maxL
 `schema_sha256` hashes the sent schema, which the prompt prints. Validation is unchanged:
 `normalise` walks the original schema and the Pydantic contracts enforce every length, constant
 and enum on the reply, so a dropped constraint is still a validator issue (and MC-7 repair input).
-The model no longer reads the length limits in the schema text. A plain `live schema-check` on
-Sol for every step (below) confirms whether the round-3 schema is accepted.
+The model no longer reads the length limits in the schema text. The plain `live schema-check`
+on Sol for every step (batch `schema-2026-10-22-r3`) accepted the round-3 schemas.
 
 ## Errors inside a 200 body (task 2.7a)
 

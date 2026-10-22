@@ -222,8 +222,12 @@ Under the user's 22 October 2026 instruction, the relaxation finally chosen must
 OpenAI (GPT-6.1 Sol); the Grok and Google rows are information only. The second bisect
 (schema-2026-10-22-bisect2, US$0.0175,
 [live-schema-2026-10-22-bisect2.md](../development/tasks/implementation/live-schema-2026-10-22-bisect2.md))
-found that OpenAI accepts `source_context`, `financials` and `readiness` only under
-`nullable-array-to-anyof`, and rejects every other variant. OpenAI refuses a nullable array
+found that OpenAI rejects `source_context`, `financials` and `readiness` under every variant
+before `nullable-array-to-anyof` and accepts all three under it. The bisect stopped there, so the
+variants after it were not sent. A plain check on the round-3 sent schemas
+(schema-2026-10-22-r3, US$0.0214,
+[live-schema-2026-10-22-r3.md](../development/tasks/implementation/live-schema-2026-10-22-r3.md)) then had all five step schemas accepted by
+Sol. OpenAI refuses a nullable array
 written as a `type` union (`type: ["array", "null"]`) inside a strict schema, and accepts the
 same array as `anyOf: [{type: "array", items, minItems/maxItems}, {type: "null"}]`. Round 3
 therefore adds two relaxations to the sent copy: `nullable-array-anyof` (that rewrite) and
@@ -240,8 +244,8 @@ fields; a no-response column in the cohort tables. Records:
 [live-probe-5b-reconciled.md](../development/tasks/implementation/live-probe-5b-reconciled.md)
 and the analysis,
 [live-probe-5-analysis.md](../development/tasks/implementation/live-probe-5-analysis.md). Not
-verified: OpenAI's acceptance of the round-3 sent schemas as a whole (the coordinator's plain
-`schema-check` on Sol for every step is to confirm it).
+verified: acceptance beyond the 16-token schema check (probe-6 is to show Sol's replies under
+the round-3 schemas).
 
 ## Evidence
 

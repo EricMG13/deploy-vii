@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import tomllib
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -362,6 +363,10 @@ def test_project_settings_declare_the_runner_contract() -> None:
         "explicit-version",
     )
     assert settings.default_effort == "high" and settings.complex_effort == "high"
+    raw = tomllib.loads(Path("settings/project.toml").read_text(encoding="utf-8"))
+    assert raw["model_tests"]["selection"] == (
+        "user-named-pool-uniform-random-only-when-more-than-one-model"
+    )
     assert str(settings.caps.cumulative_ceiling) == "200"
     assert str(settings.caps.e1_per_case) == "3"
     assert settings.artifact_root.name == "model-tests"

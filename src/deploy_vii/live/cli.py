@@ -292,8 +292,14 @@ def configure(parser: argparse.ArgumentParser) -> None:
     probe.add_argument("--draws-per-model", type=int, default=1)
     module = actions.add_parser("module", parents=[common], help="one draw of one module")
     module.add_argument("--module", required=True)
-    actions.add_parser("regression", parents=[common], help="matched three-model comparison")
-    actions.add_parser("canary", parents=[common], help="CP-0 and CP-1, one draw per model")
+    actions.add_parser(
+        "regression",
+        parents=[common],
+        help="CP-0 and CP-1 cases, each pool model once (one model: a regression on it alone)",
+    )
+    actions.add_parser(
+        "canary", parents=[common], help="CP-0 and CP-1, one cell per eligible pool model"
+    )
     corpus = actions.add_parser(
         "corpus", help="write a replay corpus entry from a retained attempt"
     )
