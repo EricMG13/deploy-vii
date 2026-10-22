@@ -4,11 +4,13 @@ One book is one entity perimeter/accounting basis/currency/unit. Multiple books
 preserve industrial/finance and other distinct perimeters without blending them.
 """
 
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
+from pydantic.config import JsonDict
 
 from deploy_vii.contracts import Citation, Claim, Contract, Hash, Identifier, Text
 from deploy_vii.model.dates import fiscal_year_number
@@ -28,6 +30,28 @@ Number = Annotated[
         json_schema_extra={DECIMAL_MARKER: True},
     ),
 ]
+# Task 7.0d fix 1: marks an id whose validator accepts a listed id or an `other:` id; the sent copy
+# states that as `anyOf` [enum, pattern] (`live.schema`, "prefixed-enum"). Python keeps deciding,
+# including the per-statement split the flat enum does not state.
+PREFIXED_ENUM_MARKER = "x-deploy-vii-prefixed-enum"
+# Exactly what `Identifier` (^[A-Za-z0-9][A-Za-z0-9_.:-]*$) accepts that `startswith("other:")`:
+# the leading "o" satisfies its first class and every later character its second.
+OTHER_ITEM_PATTERN = r"^other:[A-Za-z0-9_.:-]*$"
+
+
+def _statement_items(*statements: str) -> Callable[[JsonDict], None]:
+    """`json_schema_extra` naming the r14 statement item ids of `statements` (sorted, distinct)."""
+
+    def extra(schema: JsonDict) -> None:
+        # Imported here: `statement_validation`, where the item lists live, imports this module.
+        from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS
+
+        listed = {i for s in statements for i in (*REQUIRED_ITEMS[s], *OPTIONAL_ITEMS[s])}
+        schema[PREFIXED_ENUM_MARKER] = {"enum": [*sorted(listed)], "pattern": OTHER_ITEM_PATTERN}
+
+    return extra
+
+
 Currency = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
 Unit = Literal["UNITS", "THOUSANDS", "MILLIONS"]
 Located = Annotated[tuple[Citation, ...], Field(min_length=1)]
@@ -271,7 +295,8 @@ class StatementLine(Contract):
 
     line_id: Identifier
     statement: Literal["IS", "CFS", "BS"]
-    item_id: Identifier
+    # Sent as the three statements' ids or an `other:` id; `statement_issues` still decides.
+    item_id: Identifier = Field(json_schema_extra=_statement_items("IS", "CFS", "BS"))
     label: Text
     period_id: Identifier
     display_priority: int = Field(ge=1)
@@ -355,7 +380,8 @@ class BalanceMovementBridge(Contract):
 
     bridge_id: Identifier
     period_id: Identifier
-    balance_item_id: Identifier
+    # Sent as the BS ids or an `other:` id; `balance_movement_issues` still decides.
+    balance_item_id: Identifier = Field(json_schema_extra=_statement_items("BS"))
     movement_ids: Annotated[tuple[Identifier, ...], Field(max_length=20000)]
     disclosure: Disclosure
 

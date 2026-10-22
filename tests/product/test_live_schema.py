@@ -1,19 +1,24 @@
 """Strict response schemas: every property required, defaults nullable, nulls resolved back."""
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from hypothesis import given
+from hypothesis import strategies as st
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
+from deploy_vii.contracts import Identifier
 from deploy_vii.financial_contracts import Alternative, Observation
 from deploy_vii.live import schema as strict
 from deploy_vii.live.prompts import response_format, schema_text
 from deploy_vii.live.runner import STEPS
 from deploy_vii.readiness import ReadinessReview
+from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS
 from tests.product import replay_support
 from tests.product.test_readiness import readiness_fixture
 
@@ -216,6 +221,7 @@ def test_relaxations_name_the_nullable_array_and_one_of_rewrites() -> None:
         "nullable-array-anyof",
         "oneof-anyof",
         "decimal-number-only",
+        "prefixed-enum",
     )
     assert strict.schema_relaxations(SCHEMAS["narrative"]) == [
         "const-to-enum",
@@ -723,7 +729,7 @@ def test_a_genuine_number_or_string_union_is_not_rewritten() -> None:
 
 
 def test_relaxations_name_decimal_number_only_where_it_applied() -> None:
-    assert strict.RELAXATIONS[-1] == "decimal-number-only"
+    assert "decimal-number-only" in strict.RELAXATIONS
     assert "decimal-number-only" in strict.schema_relaxations(SCHEMAS["financials"])
     for step in sorted(set(SCHEMAS) - {"financials"}):
         assert "decimal-number-only" not in strict.schema_relaxations(SCHEMAS[step]), step
@@ -773,3 +779,80 @@ def test_a_stored_string_amount_still_validates_and_a_printed_one_is_still_refus
     for printed in ("3,624", "(211)"):
         with pytest.raises(ValidationError, match="Input should be a valid decimal"):
             Alternative.model_validate_json(json.dumps({**stored, "amount": printed}))
+
+
+# --- task 7.0d fix 1: statement item ids as a closed list or an `other:` id ("prefixed-enum") --
+
+IDENTIFIER = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"  # deploy_vii.contracts.Identifier, read there
+OTHER = r"^other:[A-Za-z0-9_.:-]*$"
+
+
+def items(*kinds: str) -> list[str]:
+    return sorted(
+        {item for kind in kinds for item in (*REQUIRED_ITEMS[kind], *OPTIONAL_ITEMS[kind])}
+    )
+
+
+def prefixed(enum: list[str], title: str) -> dict[str, Any]:
+    return {
+        "anyOf": [{"type": "string", "enum": enum}, {"type": "string", "pattern": OTHER}],
+        "title": title,
+    }
+
+
+def test_statement_and_balance_item_ids_are_sent_as_a_list_or_an_other_id() -> None:
+    sent = strict.strict_schema(SCHEMAS["financials"])["$defs"]
+    assert sent["StatementLine"]["properties"]["item_id"] == prefixed(
+        items("IS", "CFS", "BS"), "Item Id"
+    )
+    assert sent["BalanceMovementBridge"]["properties"]["balance_item_id"] == prefixed(
+        items("BS"), "Balance Item Id"
+    )
+    assert (len(items("IS", "CFS", "BS")), len(items("BS"))) == (78, 32)
+    # Deferred (6 ids plus `facility:<facility_id>`, a derived prefix): still a free Identifier.
+    assert "anyOf" not in sent["ProFormaObservation"]["properties"]["metric_id"]
+    assert strict.PREFIXED_ENUM_MARKER not in json.dumps(
+        strict.strict_schema(SCHEMAS["financials"])
+    )
+    assert strict.PREFIXED_ENUM_MARKER in json.dumps(SCHEMAS["financials"].model_json_schema())
+
+
+def test_every_listed_item_is_an_identifier_and_none_is_an_other_id() -> None:
+    for item in items("IS", "CFS", "BS"):
+        assert re.fullmatch(IDENTIFIER, item) and not re.fullmatch(OTHER, item), item
+    assert TypeAdapter(Identifier).json_schema()["pattern"] == IDENTIFIER  # the pattern read above
+
+
+@given(
+    st.one_of(
+        st.text(alphabet="other:Az9_.-/ é\n", max_size=12),
+        st.text(alphabet="Az9_.:-/ é\n", max_size=8).map(lambda tail: "other:" + tail),
+    )
+)
+def test_the_other_pattern_accepts_exactly_what_identifier_and_the_prefix_rule_accept(
+    text: str,
+) -> None:
+    """`statement_validation` and `balance_movement` accept a non-listed id when it is an
+    Identifier and `startswith("other:")`; the sent pattern is that intersection (lengths aside:
+    `maxLength` is dropped from every sent Identifier)."""
+    expected = bool(re.fullmatch(IDENTIFIER, text)) and text.startswith("other:")
+    assert bool(re.fullmatch(OTHER, text)) is expected
+
+
+def test_prefixed_enum_is_named_where_it_applied_and_marked_nodes_of_another_shape_fail() -> None:
+    assert strict.RELAXATIONS[-1] == "prefixed-enum"
+    assert "prefixed-enum" in strict.schema_relaxations(SCHEMAS["financials"])
+    for step in sorted(set(SCHEMAS) - {"financials"}):
+        assert "prefixed-enum" not in strict.schema_relaxations(SCHEMAS[step]), step
+    assert "prefixed-enum" in strict.RELAXATIONS_BASIS
+    marker = {strict.PREFIXED_ENUM_MARKER: {"enum": ["a"], "pattern": "^other:"}}
+    for node in (
+        {"type": ["string", "null"], **marker},  # nullable: not expressible as this anyOf
+        {"type": "string", "enum": ["b"], **marker},
+        {"anyOf": [{"type": "string"}], **marker},
+        {"type": "string", strict.PREFIXED_ENUM_MARKER: {"enum": [], "pattern": "^x"}},
+        {"type": "string", strict.PREFIXED_ENUM_MARKER: {"enum": ["a"]}},
+        {"type": "string", strict.PREFIXED_ENUM_MARKER: ["a"]},
+    ):
+        with pytest.raises(ValueError, match="cannot be relaxed"):
+            strict.relax({"properties": {"x": node}})

@@ -1331,13 +1331,14 @@ def test_manifest_records_the_relaxations_and_hashes_the_schema_actually_sent(
         "drop-length",
         "nullable-array-anyof",
         "decimal-number-only",  # task 7.0d: amounts sent as JSON numbers only
+        "prefixed-enum",  # task 7.0d fix 1: statement item ids
     ]
     unverified = manifest["schema_keywords_unverified"]
     assert unverified and not {"const", "minLength", "maxLength"} & set(unverified)
     sent = json.loads(transport.requests[0].body or b"{}")["response_format"]["json_schema"]
     text = json.dumps(sent["schema"], sort_keys=True, separators=(",", ":"))
     assert '"const"' not in text and "Length" not in text
-    assert "x-deploy-vii-decimal" not in text  # the marker never reaches the wire
+    assert "x-deploy-vii-" not in text  # no marker reaches the wire
     assert manifest["hashes"]["schema_sha256"] == hashlib.sha256(text.encode()).hexdigest()
 
 

@@ -268,7 +268,16 @@ were invented (12 issues "unknown CP-1 account metric"). The sent copy now says 
 new `decimal-number-only` relaxation keeps only the number branch, with its bounds and any null
 branch, of each `Number` amount (Pydantic's `anyOf` of number and string). It selects these nodes
 by a marker that `financial_contracts.Number` adds, never by shape. `AccountObservation.metric_id`
-is sent as an enum of the 36 `ACCOUNT_IDS`. The `financials` prompt states both rules, the
+is sent as an enum of the 36 `ACCOUNT_IDS`. The `prefixed-enum` relaxation sends
+`StatementLine.item_id` as `anyOf` of an enum of the 78 r14 statement item ids and the pattern
+`^other:[A-Za-z0-9_.:-]*$`, and `BalanceMovementBridge.balance_item_id` the same way with the 32
+BS ids. The pattern is exactly the `Identifier` ids the validators accept by their `other:`
+prefix rule. The flat list is a superset for any one statement: Python still enforces the
+per-statement split. `ProFormaObservation.metric_id` (6 ids or `facility:<facility_id>`, a
+derived prefix) is deferred. The `financials` prompt states these rules and the unit of each
+amount: money as printed in the book's `unit` and currency, or a facility's own currency, never
+arithmetic; `effective_tax_rate` a decimal fraction; spreads and floors in basis points;
+`fixed_rate` a percent; FX rates and KPIs in their own units. It also states the
 `statement_lines` home of a figure that has no account metric, and the declared-period rule.
 The stored contracts, their validators and the values they accept are unchanged: a stored
 string amount still validates, and `controlled_metric` still refuses an unknown id with the same

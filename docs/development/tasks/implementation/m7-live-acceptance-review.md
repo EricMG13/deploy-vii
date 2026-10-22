@@ -156,11 +156,23 @@ issues (19 of 22 `metric_id` values invented).
 
 `schema_shape` of the `financials` sent schema: before, depth 14 (7 objects), 232 properties, 32
 enum nodes with 100 members; after, depth 14 (7 objects), 232 properties, 33 enum nodes with 136
-members. The keyword set is unchanged. The sent schema grew from 28,899 to 29,555 bytes.
+members. The keyword set is unchanged. The sent schema grew from 28,899 to 29,555 bytes. The
+provider accepted that schema (cb4de52f…) on the coordinator's schema-check (US$0.0135).
 
 Only `AccountObservation.metric_id` gained an enum. Every other model or field validator in
 `financial_contracts`, `canonical_audit` and `context_binding` checks either a `Literal` (already
 an enum) or a set that is derived from the payload or open by an `other:` prefix.
+
+Fix round 1 (review): rule (a) now names the unit the system assigns to each amount. Money is
+written as printed, in the book's `unit` and currency (a facility's in its own currency), and is
+never arithmetic. `effective_tax_rate` is a decimal fraction (21.0% is 0.21), `spread_bps` and
+`floor_bps` are basis points (2.75% is 275), `fixed_rate` is a percent (5.25% is 5.25), and FX
+rates and KPIs carry their own units. The new `prefixed-enum` relaxation sends
+`StatementLine.item_id` as `anyOf` [enum of the 78 r14 statement items, pattern
+`^other:[A-Za-z0-9_.:-]*$`], and `BalanceMovementBridge.balance_item_id` the same way with the 32
+BS items. Python still enforces the per-statement split, with the same messages.
+`ProFormaObservation.metric_id` (6 ids or `facility:<id>`) is deferred. After the fix:
+depth 14 (7 objects), 232 properties, 35 enum nodes with 246 members, 31,728 bytes.
 
 No `methodology-adaptation.md` row: the accepted values and every analytical rule are unchanged.
 The schema now states rules the validators already enforced.

@@ -629,6 +629,7 @@ pass over the strict copy (`strict_schema = relax(strict_copy)`):
 | `nullable-array-anyof` (round 3) | `{"type": ["array", "null"], "items": X, "maxItems": n}` | `{"anyOf": [{"type": "array", "items": X, "maxItems": n}, {"type": "null"}]}` (annotations stay outside) |
 | `oneof-anyof` (round 3) | `{"oneOf": [...], "discriminator": {...}}` | `{"anyOf": [...]}` (no discriminator) |
 | `decimal-number-only` (task 7.0d) | a `Number` amount: `{"anyOf": [{"type": "number", ...bounds}, {"type": "string"}], "x-deploy-vii-decimal": true}` (null joins when nullable) | `{"type": "number", ...bounds}`, or `{"anyOf": [{"type": "number", ...bounds}, {"type": "null"}]}` |
+| `prefixed-enum` (task 7.0d fix 1) | an id: `{"type": "string", "pattern": P, "x-deploy-vii-prefixed-enum": {"enum": [...], "pattern": "^other:..."}}` | `{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern": "^other:..."}]}` |
 
 Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
 `"(211)"`), which the stored contract refused, and the sent schema allowed them. The
@@ -637,7 +638,14 @@ Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed st
 marked node that is not exactly one number branch, one string branch and at most one null branch
 raises `ValueError`. The stored contract still accepts a string amount, so a stored payload
 replays unchanged. The same task sends `AccountObservation.metric_id` as an enum of the 36
-`ACCOUNT_IDS` (a `json_schema_extra` on the field; `controlled_metric` still decides).
+`ACCOUNT_IDS` (a `json_schema_extra` on the field; `controlled_metric` still decides). Fix round 1
+adds `prefixed-enum` for an id that the validators accept as a listed value or an `other:` id
+(`PREFIXED_ENUM_MARKER`, whose value carries the list and the pattern). The node is sent whole as
+`{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern":
+"^other:[A-Za-z0-9_.:-]*$"}]}`, with annotations kept outside. `StatementLine.item_id` lists the 78
+r14 statement items and `BalanceMovementBridge.balance_item_id` the 32 BS items. Python still
+enforces the per-statement split. A marked node that is not a plain string, or a malformed marker,
+raises `ValueError`.
 
 Round 3 rests on two live bisects of the sent schema (`schema-check --bisect`, batches
 `schema-2026-10-22-bisect` and `schema-2026-10-22-bisect2`). OpenAI (GPT-6.1 Sol) accepted

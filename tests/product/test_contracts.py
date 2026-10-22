@@ -4,8 +4,12 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from deploy_vii.balance_movement import balance_movement_issues
 from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, Run, Source, Span, View
 from deploy_vii.registry import canonical, modules, plan
+from deploy_vii.statement_validation import statement_issues
+from tests.product.test_balance_movement import bridge_case
+from tests.product.test_statements import line, statements
 
 
 def test_all_r14_owners_and_aliases_resolve() -> None:
@@ -175,3 +179,36 @@ def test_module_outside_a_run_state_carries_no_outputs(status: str) -> None:
         with pytest.raises(ValidationError, match=f"{status} module cannot carry outputs"):
             Module(**base, status=status, **outputs)  # type: ignore[arg-type]
     assert Module(**base, status=status).status == status  # type: ignore[arg-type]
+
+
+# --- task 7.0d fix 1: the sent schema lists statement item ids; Python still splits them ----
+
+
+@pytest.mark.parametrize(
+    "item, statement", [("invented_item", "CFS"), ("goodwill", "IS")], ids=["unknown", "wrong-kind"]
+)
+def test_an_unknown_or_wrong_statement_item_id_is_still_refused(item: str, statement: str) -> None:
+    """The sent enum is the flat union of the three statements; the per-statement split and the
+    message are Python's, unchanged."""
+    book = statements()
+    assert not [issue for issue in statement_issues(book) if "Unknown statement item" in issue]
+    extra = line("x", item, "1", 9, statement=statement)
+    changed = book.model_copy(update={"statement_lines": (*book.statement_lines, extra)})
+    expected = f"Unknown statement item; issuer detail requires other: prefix: {item}"
+    assert expected in statement_issues(changed)
+
+
+def test_a_balance_bridge_on_a_non_bs_item_is_still_refused() -> None:
+    book = bridge_case()
+    assert not [issue for issue in balance_movement_issues(book) if "requires a BS item" in issue]
+    first, *rest = book.balance_movement_bridges
+    changed = book.model_copy(
+        update={
+            "balance_movement_bridges": (
+                first.model_copy(update={"balance_item_id": "revenue"}),
+                *rest,
+            )
+        }
+    )
+    expected = f"Balance movement requires a BS item: {first.bridge_id}"
+    assert expected in balance_movement_issues(changed)

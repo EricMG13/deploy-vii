@@ -221,6 +221,18 @@ def test_the_amount_rule_shows_the_two_printed_forms_e1_batch_3_sent_as_strings(
     assert "never arithmetic" in rule
 
 
+def test_the_amount_rule_names_the_unit_python_assigns_to_each_rate_and_facility_money() -> None:
+    """Fix 1: the units `canonical_audit._positions` assigns. A rate is not written as printed:
+    21.0% is a decimal fraction, 2.75% is basis points; facility money is in its own currency."""
+    rule = prompts.AMOUNT_RULE
+    assert "`effective_tax_rate` is a decimal fraction (21.0% is 0.21)" in rule
+    assert "`spread_bps` and `floor_bps` are basis points (2.75% is 275)" in rule
+    assert "`fixed_rate` is a percent (5.25% is 5.25)" in rule
+    assert "the facility's own `currency`" in rule
+    assert "KPI" in rule and "own `unit`" in rule
+    assert "Money amounts" in rule and "never arithmetic" in rule
+
+
 def test_the_account_rule_names_the_enum_and_where_other_figures_go() -> None:
     rule = prompts.ACCOUNT_METRIC_RULE
     assert "`metric_id`" in rule and "enum" in rule

@@ -26,6 +26,10 @@ the number branch with its bounds and any null branch and drops the string branc
 ("decimal-number-only"); the marker, not the shape, selects the node, so a genuine number-or-text
 union is never rewritten, and a marked node of any other shape raises ValueError. The stored
 contract still accepts a string amount (a stored payload replays unchanged).
+Fix round 1: an id node marked `PREFIXED_ENUM_MARKER` (`StatementLine.item_id`,
+`BalanceMovementBridge.balance_item_id`) is replaced whole by `anyOf` [{type: string, enum},
+{type: string, pattern}] from the marker's lists ("prefixed-enum"): a listed r14 statement item
+or an `other:` id. The flat list is a superset per statement; Python still enforces the split.
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
 widens what the provider is asked to enforce: the reply is still validated by the unchanged
 Pydantic contract, so every dropped constraint is still enforced on the way in.
@@ -48,6 +52,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from deploy_vii.financial_contracts import DECIMAL_MARKER as DECIMAL_MARKER
+from deploy_vii.financial_contracts import PREFIXED_ENUM_MARKER as PREFIXED_ENUM_MARKER
 
 ANNOTATIONS = ("title", "description")
 # Present in the step schemas; acceptance under strict mode is not stated in the fetched docs.
@@ -77,6 +82,7 @@ RELAXATIONS = (
     "nullable-array-anyof",
     "oneof-anyof",
     "decimal-number-only",
+    "prefixed-enum",
 )
 _LENGTH = frozenset({"minLength", "maxLength"})
 # The keywords a Decimal union's branches may carry (`_kind`); a later Pydantic may add a
@@ -85,8 +91,8 @@ _NUMBER_KEYS = frozenset(
     {"type", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"}
 )
 _STRING_KEYS = frozenset({"type", "pattern"})
-# Keys whose values are data (names, constants, defaults), never schema nodes.
-_DATA = frozenset({"enum", "const", "required", "default", "discriminator"})
+# Keys whose values are data (names, constants, defaults, marker lists), never schema nodes.
+_DATA = frozenset({"enum", "const", "required", "default", "discriminator", PREFIXED_ENUM_MARKER})
 
 
 def _nodes(node: object) -> Iterator[dict[str, Any]]:
@@ -209,7 +215,33 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"schema node cannot be relaxed (oneOf beside anyOf): {node}")
     # Round 3 (bisects schema-2026-10-22-bisect and -bisect2): OpenAI refuses a nullable array
     # written as a type union and accepts the `anyOf` form; it refuses `oneOf` ("narrative").
-    return _number_only(_array_to_any_of(_one_of_to_any_of(node)))
+    return _prefixed_enum(_number_only(_array_to_any_of(_one_of_to_any_of(node))))
+
+
+def _prefixed_enum(node: dict[str, Any]) -> dict[str, Any]:
+    """A `PREFIXED_ENUM_MARKER` node replaced whole by `anyOf` [{string, enum}, {string,
+    pattern}] from the marker's lists ("prefixed-enum"); annotations stay outside. Any other node
+    is returned as it is; a marked node that is not a plain string (its own `pattern` aside, which
+    the marker's two branches replace) or whose marker is not {enum: [str, ...], pattern: str}
+    raises ValueError."""
+    if PREFIXED_ENUM_MARKER not in node:
+        return node
+    marker = node[PREFIXED_ENUM_MARKER]
+    own = {key for key in node if key not in {*ANNOTATIONS, PREFIXED_ENUM_MARKER}}
+    if not (
+        node.get("type") == "string"
+        and own <= {"type", "pattern"}
+        and isinstance(marker, dict)
+        and set(marker) == {"enum", "pattern"}
+        and isinstance(marker["enum"], list)
+        and marker["enum"]
+        and all(isinstance(value, str) for value in marker["enum"])
+        and isinstance(marker["pattern"], str)
+    ):
+        raise ValueError(f"schema node cannot be relaxed (prefixed-enum marker): {node}")
+    outer = {key: node[key] for key in ANNOTATIONS if key in node}
+    listed = {"type": "string", "enum": list(marker["enum"])}
+    return {**outer, "anyOf": [listed, {"type": "string", "pattern": marker["pattern"]}]}
 
 
 def _kind(branch: object) -> str:
@@ -298,6 +330,8 @@ def relaxations(schema: dict[str, Any]) -> list[str]:
             found.add("oneof-anyof")
         if DECIMAL_MARKER in node:
             found.add("decimal-number-only")
+        if PREFIXED_ENUM_MARKER in node:
+            found.add("prefixed-enum")
     return [name for name in RELAXATIONS if name in found]
 
 
@@ -581,7 +615,8 @@ RELAXATIONS_BASIS = (
     "nullable-array-anyof and oneof-anyof are named where the strict copy had const, "
     "minLength or maxLength, a type: [array, null] node with items, or oneOf; "
     f"decimal-number-only where it had a {DECIMAL_MARKER} node (a Decimal amount, sent as a "
-    "JSON number only)"
+    f"JSON number only); prefixed-enum where it had a {PREFIXED_ENUM_MARKER} node (an id sent as "
+    "a listed value or a prefixed id, e.g. a statement item or other:<id>)"
 )
 
 
