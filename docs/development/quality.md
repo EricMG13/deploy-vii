@@ -30,8 +30,8 @@ field can carry a score, band or QA status; `Confidence` is computed, and
 
 Python, not the model, fixes each evidence ID's highest lineage class from the register that
 produced it (`EvidenceCeiling`: `evidence_id`, `ceiling`, `basis`). The basis table is
-`quality.CEILINGS`: `citation` caps at Directly Sourced, `calculation` at Calculated, and
-`gap`, `missing` and `coverage` at Insufficient Information. A ceiling that does not follow its
+`quality.CEILINGS`: `citation` caps at Directly Sourced, `calculation` at Calculated,
+`estimate` at Assumption-Based, and `gap`, `missing` and `coverage` at Insufficient Information. A ceiling that does not follow its
 basis is rejected, and `QualityInputs` must carry exactly one ceiling per reference, with no
 extras, duplicates or omissions.
 
@@ -112,6 +112,9 @@ divergence from r14 was found.
   - `calculation` for normalization, source-check, period-check, period-construction and
     model-basis records, and for historical values, canonical values, KPIs and computations
     with an amount; `missing` when one of those has no amount (Not Calculable, Not Available);
+  - `estimate` for a historical value, canonical value, KPI or computation whose amount is
+    `Estimated` or `Proxy` (its `calculation_status`): an estimated or proxied figure is
+    assumption-based by definition, so a supplied Calculated is an upgrade;
   - `gap` for gap-register records and narrative gap IDs, and `coverage` for coverage slots,
     which are finding targets, not evidence;
   - any other catalogue kind raises `No QA lineage ceiling for register kind: <kind>`, and an

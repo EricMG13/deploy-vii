@@ -49,6 +49,8 @@ _VALUED: dict[str, type[HistoricalValue | ModelValue | CanonicalKpi | Computatio
     "computation": Computation,
 }
 _SETTLED = frozenset({"known", "not_applicable"})
+# An estimated or proxied figure is assumption-based by definition (coordinator ruling, 6.3).
+_ESTIMATED = frozenset({"Estimated", "Proxy"})
 
 
 class CP1QualityReport(Contract):
@@ -71,7 +73,8 @@ def _lineage_basis(record: EvidenceRecord) -> LineageBasis:
 
     Citation registers cap at Directly Sourced only while they carry a citation and, for
     located values, a settled status; an unavailable source, a missing or conflicting value
-    (even one citing where it was sought) or an absent calculated amount is missing evidence.
+    (even one citing where it was sought) or an absent calculated amount is missing evidence,
+    and an Estimated or Proxy calculated amount caps at Assumption-Based.
     """
     kind, row = record.kind, record.record_json
     if kind == "gap":
@@ -91,7 +94,9 @@ def _lineage_basis(record: EvidenceRecord) -> LineageBasis:
         return "calculation"
     if kind in _VALUED:
         value = _VALUED[kind].model_validate_json(row).value
-        return "missing" if value.amount is None else "calculation"
+        if value.amount is None:
+            return "missing"
+        return "estimate" if value.calculation_status in _ESTIMATED else "calculation"
     raise ValueError(f"No QA lineage ceiling for register kind: {kind}")
 
 

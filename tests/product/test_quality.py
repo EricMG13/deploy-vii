@@ -724,6 +724,7 @@ def test_ceilings_follow_the_producer_basis_table() -> None:
     assert {b: EvidenceCeiling.of("e", b).ceiling for b in get_args(LineageBasis)} == {
         "citation": "Directly Sourced",
         "calculation": "Calculated",
+        "estimate": "Assumption-Based",
         "gap": "Insufficient Information",
         "missing": "Insufficient Information",
         "coverage": "Insufficient Information",
@@ -743,6 +744,18 @@ def test_model_cannot_upgrade_lineage() -> None:
         assess_quality(inputs, review)
     kept = supplied(review, "e0", "Calculated")
     assert validate_quality_review(inputs, kept) == ()
+
+
+def test_an_estimated_or_proxy_figure_cannot_be_rated_calculated() -> None:
+    inputs, review = fixture()
+    inputs, review = ceilinged(inputs, review, e0="estimate")
+    calculated = supplied(review, "e0", "Calculated")
+    issue = "QA lineage upgrade rejected: e0 Calculated above ceiling Assumption-Based"
+    assert validate_quality_review(inputs, calculated) == (issue,)
+    with pytest.raises(ValueError, match=f"^{issue}$"):
+        assess_quality(inputs, calculated)
+    assumed = supplied(review, "e0", "Assumption-Based")
+    assert validate_quality_review(inputs, assumed) == ()
 
 
 @pytest.mark.parametrize("basis", ["gap", "missing", "coverage"])

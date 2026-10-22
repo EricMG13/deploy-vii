@@ -39,10 +39,11 @@ WEIGHTS: dict[Lineage, int] = {
 }
 PENALTIES: dict[Severity, int] = {"CRITICAL": 40, "MATERIAL": 15, "MINOR": 3}
 # MC-5: the register that produced an evidence ID fixes its highest lineage class.
-LineageBasis = Literal["citation", "calculation", "gap", "missing", "coverage"]
+LineageBasis = Literal["citation", "calculation", "estimate", "gap", "missing", "coverage"]
 CEILINGS: dict[LineageBasis, Lineage] = {
     "citation": "Directly Sourced",
     "calculation": "Calculated",
+    "estimate": "Assumption-Based",
     "gap": "Insufficient Information",
     "missing": "Insufficient Information",
     "coverage": "Insufficient Information",

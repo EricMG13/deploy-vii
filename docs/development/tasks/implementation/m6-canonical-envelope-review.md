@@ -48,8 +48,8 @@ only keep or lower it.
 What changed:
 
 - `quality.py`: `EvidenceCeiling` (`evidence_id`, `ceiling`, `basis`) and the basis table
-  `CEILINGS` (citation Directly Sourced; calculation Calculated; gap, missing and coverage
-  Insufficient Information). A ceiling that disagrees with its basis is rejected.
+  `CEILINGS` (citation Directly Sourced; calculation Calculated; estimate
+  Assumption-Based; gap, missing and coverage Insufficient Information). A ceiling that disagrees with its basis is rejected.
   `QualityInputs` is now `quality-inputs/2` with a required `ceilings` field, exactly one
   per reference. Reviews bound to `quality-inputs/1` inputs no longer bind.
 - `validate_quality_review` rejects any supplied class whose weight exceeds its ceiling's
@@ -81,7 +81,17 @@ restatement over the raw rows, unavailable source, `test_unknown_register_kind_f
 conflicting registers, and a CP-1 upgrade rejected end to end). Rewrite tournament on
 `_lineage_basis`, `_ceilings` and the upgrade check: the incumbent held.
 
-Not verified: that a kind-level ceiling is semantically right for every record (for
-example historical values stated from source cap at Calculated, and Estimated or Proxy
-calculations cap at Calculated rather than Assumption-Based); any live model output against
-the ceilings.
+Review fix (coordinator ruling): an `Estimated` or `Proxy` calculated amount (historical
+value, canonical value, KPI or computation) caps at Assumption-Based through the `estimate`
+basis, so a supplied Calculated is an upgrade issue. Plain calculations still cap at
+Calculated. Pinned by `test_an_estimated_or_proxy_figure_cannot_be_rated_calculated` and
+`test_estimated_or_proxy_calculations_cap_at_assumption_based`. No producer in the
+repository emits Estimated or Proxy yet, so the CP-1 test marks a record directly.
+
+Accepted conservative ceilings (coordinator, recorded as accepted): historical values stated
+from source cap at Calculated; normalized statement cells and cited `not_applicable` values
+cap at Directly Sourced.
+
+Not verified: that each register-level ceiling is semantically right for every record beyond
+the fixture registers; an Estimated or Proxy record from a real producer; any live model
+output against the ceilings.

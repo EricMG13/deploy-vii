@@ -623,6 +623,7 @@ def test_module_status_derives_from_own_findings_only(
 CITED_KINDS = {"source", "entity", "subsequent_event", "source_period", "definition"}
 CITED_KINDS |= {"multi_figure_event"}
 SETTLED = {"known", "not_applicable"}
+ESTIMATED = {"Estimated", "Proxy"}
 
 
 def expected_basis(kind: str, row: dict[str, Any], cited: bool) -> LineageBasis:
@@ -638,7 +639,9 @@ def expected_basis(kind: str, row: dict[str, Any], cited: bool) -> LineageBasis:
     if kind in CITED_KINDS:
         return "citation" if cited else "missing"
     if kind in {"historical_value", "canonical_value", "kpi", "computation"}:
-        return "missing" if row["value"]["amount"] is None else "calculation"
+        if row["value"]["amount"] is None:
+            return "missing"
+        return "estimate" if row["value"]["calculation_status"] in ESTIMATED else "calculation"
     assert kind in {"normalization", "source_check", "period_check", "construction", "basis"}
     return "calculation"
 
@@ -692,6 +695,41 @@ def test_a_cited_record_of_an_unavailable_source_is_missing_evidence(
     scope = cp1_quality_inputs(with_narrative_report(registers, changed))
     ceiling = next(c for c in scope.ceilings if c.evidence_id == source.evidence_id)
     assert (ceiling.basis, ceiling.ceiling) == ("missing", "Insufficient Information")
+
+
+@pytest.mark.parametrize(
+    "status,basis,ceiling",
+    [
+        ("Estimated", "estimate", "Assumption-Based"),
+        ("Proxy", "estimate", "Assumption-Based"),
+        ("Calculated", "calculation", "Calculated"),
+        ("Verified", "calculation", "Calculated"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["kpi", "computation", "canonical_value", "historical_value"])
+def test_estimated_or_proxy_calculations_cap_at_assumption_based(
+    registers: CanonicalTables, kind: str, status: str, basis: str, ceiling: str
+) -> None:
+    narrative = registers.downstream.inputs.narrative
+    catalogue = narrative.inputs.catalogue
+    index, record = next(
+        (i, r)
+        for i, r in enumerate(catalogue)
+        if r.kind == kind and json.loads(r.record_json)["value"]["amount"] is not None
+    )
+    row = json.loads(record.record_json)
+    row["value"]["calculation_status"] = status
+    marked = record.model_copy(update={"record_json": json.dumps(row)})
+    changed = narrative.model_copy(
+        update={
+            "inputs": narrative.inputs.model_copy(
+                update={"catalogue": (*catalogue[:index], marked, *catalogue[index + 1 :])}
+            )
+        }
+    )
+    scope = cp1_quality_inputs(with_narrative_report(registers, changed))
+    found = next(c for c in scope.ceilings if c.evidence_id == record.evidence_id)
+    assert (found.basis, found.ceiling) == (basis, ceiling)
 
 
 def test_unknown_register_kind_fails_closed(registers: CanonicalTables) -> None:
