@@ -179,6 +179,7 @@ The schema now states rules the validators already enforced.
 
 Not verified: provider acceptance of the enum-bearing schema (the coordinator runs `live
 schema-check --steps financials`) and live uptake (E1 batch 4).
+
 ## 7.1a CP-MODEL deterministic publication
 
 `cp_model_workflow.publish_cp_model` (CLI `cp-model-publish`) gives CP-MODEL a head once CP-1
