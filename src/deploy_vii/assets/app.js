@@ -602,7 +602,7 @@
     if (model && model.artifact_sha256 && path && /^[A-Za-z0-9._-]+$/.test(path) && cp1 && pack) {
       const json = node("p", "Calculation JSON: ", "text-content"), link = node("a", path); link.href = path; json.append(link);
       const page = node("p", "Its status and limitations are on the ", "text-content"), anchor = node("a", "CP-MODEL page"); anchor.href = "#CP-MODEL"; page.append(anchor, ".");
-      body.append(json, node("p", `Published as head ${model.artifact_sha256.slice(0, 12)} from CP-1 head ${cp1.slice(0, 12)} · pack ${pack.slice(0, 12)}`, "muted"), page);
+      body.append(json, node("p", `Published as head ${model.artifact_sha256.slice(0, 12)} from CP-1 head ${cp1.slice(0, 12)} · pack ${pack.slice(0, 12)}`, "muted"), node("p", "This destination shows CP-1 and CP-MODEL only; other modules appear on the Front Page.", "muted"), page);
       return panel("Model", body);
     }
     let words;

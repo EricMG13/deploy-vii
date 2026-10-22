@@ -310,6 +310,9 @@ def test_the_model_panel_of_the_published_page_shows_the_json_link_and_provenanc
             f"{cp1.result_sha256[:12]} · pack {store.read().pack_sha256[:12]}"
         )
         expect(panel).to_contain_text(provenance)
+        expect(panel).to_contain_text(
+            "This destination shows CP-1 and CP-MODEL only; other modules appear on the Front Page."
+        )
         expect(page.locator("#view-root")).not_to_contain_text("Model not run")
         # The panel comes first, then CP-1's own register detail; no grid is invented.
         assert page.locator("#view-root section h2").first.text_content() == "Model"
@@ -367,25 +370,50 @@ def test_a_pending_attempt_is_a_refusal_the_cli_reports_with_exit_2(
     assert not (tmp_path / "out").exists()
 
 
-def test_inputs_changed_after_the_files_are_written_interrupts_the_ticket(
+def test_inputs_changed_after_the_files_are_written_leaves_the_ticket_pending(
+    promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real change of the bound pack between `begin` and `finish`.
+
+    The journal's `interrupt` re-checks the inputs through `finish`, so it fails the same way:
+    the honest outcome is a pending ticket, the files written, and a reason naming both.
+    """
+    store = fresh(promoted, tmp_path)
+    other = store.pack().model_copy(update={"sources": ()})
+    real_write = cp_model_workflow._write
+
+    def write_then_move_the_journal(output: Path, files: dict[str, str]) -> None:
+        real_write(output, files)
+        snapshot = store.read()  # a concurrent writer swaps the pack without staling anything
+        store._write(
+            snapshot.model_copy(update={"pack_sha256": store._store(other.model_dump_json())})
+        )
+
+    monkeypatch.setattr(cp_model_workflow, "_write", write_then_move_the_journal)
+    with pytest.raises(CpModelRefused) as refused:
+        publish_cp_model(store, output=tmp_path / "model")
+    assert "Ticket inputs have changed" in str(refused.value)
+    assert "could not be interrupted" in str(refused.value)
+    assert (tmp_path / "model" / "receipt.json").is_file()
+    assert "CP-MODEL" not in heads(store)
+    assert [a.status for a in store.read().attempts if a.module_id == "CP-MODEL"] == ["pending"]
+    monkeypatch.undo()
+    with pytest.raises(CpModelRefused, match="An attempt is pending"):
+        publish_cp_model(store, output=tmp_path / "again")
+
+
+def test_a_journal_write_error_during_the_interrupt_is_reported_not_raised_bare(
     promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = fresh(promoted, tmp_path)
-    real = Execution.finish
-    calls: list[str] = []
+    (tmp_path / "a-file").write_text("not a directory")
 
-    def finish_once_changed(self: Execution, ticket: str, *args: object, **kw: object) -> Attempt:
-        calls.append(ticket)
-        if len(calls) == 1:
-            raise ValueError("Ticket inputs have changed")
-        return real(self, ticket, *args, **kw)  # type: ignore[arg-type]
+    def interrupt_fails(self: Execution, ticket: str, reason: str) -> Attempt:
+        raise OSError("journal disk full")
 
-    monkeypatch.setattr(Execution, "finish", finish_once_changed)
-    with pytest.raises(CpModelRefused, match="Ticket inputs have changed"):
-        publish_cp_model(store, output=tmp_path / "model")
-    assert not any(a.status == "pending" for a in store.read().attempts)
-    assert "CP-MODEL" not in heads(store)
-    assert (tmp_path / "model" / "receipt.json").is_file()  # a receipt without a head: unpublished
+    monkeypatch.setattr(Execution, "interrupt", interrupt_fails)
+    with pytest.raises(CpModelRefused, match="could not be interrupted: journal disk full"):
+        publish_cp_model(store, output=tmp_path / "a-file" / "model")
 
 
 def tamper(store: Execution, change: Callable[[Attempt], Attempt]) -> None:
@@ -606,3 +634,71 @@ def test_the_verify_command_prints_ok_and_exits_2_with_the_issues(
         main()
     assert exit_.value.code == 2
     assert "calculation.json differs" in capsys.readouterr().err
+
+
+def rewritten(store: Execution, **update: object) -> None:
+    """Replace parts of the current snapshot (a test-only journal corruption)."""
+    store._write(store.read().model_copy(update=update))
+
+
+def test_verify_reports_a_cp1_head_that_changed_after_publication(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = published(promoted, tmp_path)
+    stale = tuple(
+        h.model_copy(update={"status": "stale"}) if h.module_id == "CP-1" else h
+        for h in store.read().heads
+    )
+    rewritten(store, heads=stale)
+    assert verify_cp_model_publication(store, output) == (
+        "CP-MODEL cannot be re-derived from the journal: CP-1 has no accepted or restricted head",
+    )
+
+
+def test_verify_reports_a_head_without_an_attempt(promoted: Execution, tmp_path: Path) -> None:
+    store, output = published(promoted, tmp_path)
+    head = heads(store)["CP-MODEL"]
+    kept = tuple(a for a in store.read().attempts if a.result_sha256 != head.result_sha256)
+    rewritten(store, attempts=kept)
+    assert verify_cp_model_publication(store, output) == (
+        "CP-MODEL head has no attempt in the journal",
+    )
+
+
+def test_verify_reports_a_head_that_differs_from_its_rederivation(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = published(promoted, tmp_path)
+    head = heads(store)["CP-MODEL"]
+    settled = store.result(head.result_sha256)
+    extra = settled.claims[0].model_copy(update={"claim_id": "extra"})
+    forged = settled.model_copy(update={"claims": (*settled.claims, extra)})
+    sha = store._store(forged.model_dump_json())
+    assert sha == forged.content_hash()
+    snapshot = store.read()
+    rewritten(
+        store,
+        heads=tuple(
+            h.model_copy(update={"result_sha256": sha}) if h.module_id == "CP-MODEL" else h
+            for h in snapshot.heads
+        ),
+        attempts=tuple(
+            a.model_copy(update={"result_sha256": sha})
+            if a.result_sha256 == head.result_sha256
+            else a
+            for a in snapshot.attempts
+        ),
+    )
+    issues = verify_cp_model_publication(store, output)
+    assert "CP-MODEL head differs from its re-derivation from the journal" in issues
+
+
+def test_verify_reports_a_head_blob_the_journal_cannot_read(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = published(promoted, tmp_path)
+    sha = heads(store)["CP-MODEL"].result_sha256
+    (store.directory / "blobs" / sha).unlink()
+    assert verify_cp_model_publication(store, output) == (
+        f"CP-MODEL cannot be re-derived from the journal: Execution blob {sha} is missing",
+    )

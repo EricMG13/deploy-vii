@@ -147,7 +147,8 @@ uv run --locked deploy-vii execution --directory runs/example/execution-1 cp-mod
 stderr unless the run requests CP-MODEL, CP-1 holds a promoted accepted or restricted head
 that retains a calculated Model, and the output directory does not exist; nothing is written
 or begun on a refusal. Otherwise it writes `model.html` (the CP-1 page with the Model panel
-populated), `calculation.json` and `receipt.json` into the new directory, settles the CP-MODEL
+populated; it shows CP-1 and CP-MODEL only, and says so, because other modules appear on the
+Front Page from `render`), `calculation.json` and `receipt.json` into the new directory, settles the CP-MODEL
 head only after all three are written, and prints the finished attempt. Every refusal,
 including a pending attempt or an unreadable journal blob, exits 2 with the reason. A write
 failure interrupts the attempt (exit 2) and leaves no head; that consumes the attempt, and a

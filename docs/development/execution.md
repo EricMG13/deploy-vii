@@ -325,19 +325,26 @@ re-derives the candidate from the journal and refuses any difference, so two run
 same inputs give the same `model.html`, `calculation.json`, module and head hash, byte for
 byte (tested); `receipt.json` differs between two runs by `ticket_id` only (tested). The page is
 a function of the CP-1 envelope and the CP-MODEL module alone (an idle base view), so it
-re-derives after later modules settle. A page cannot hold its own hash and the receipt names
-the head, so the manifest lists those two files with "Recorded in receipt.json" instead of a
-hash; the receipt holds the hashes of `model.html` and `calculation.json`.
+re-derives after later modules settle. By design (ruling R3) it shows CP-1 and CP-MODEL only,
+says so on the page ("This destination shows CP-1 and CP-MODEL only; other modules appear on
+the Front Page.") and leaves other modules to the Front Page route (`render`). A page cannot
+hold its own hash and the receipt names the head, so the manifest lists those two files with
+"Recorded in receipt.json" instead of a hash; the receipt holds the hashes of `model.html`
+and `calculation.json`.
 
-Failure. Any failure before or at `finish` (a file that cannot be written, a render error,
-a candidate the journal would not settle, "Ticket inputs have changed") interrupts the
-attempt and is raised as `CpModelRefused`, so the CLI exits 2 with the reason. A failure
-leaves no head from that attempt, but it consumes the attempt: the one repair may publish
-into a new directory, and a second consecutive failure leaves a `blocked` CP-MODEL head
-(decision 0007: the input set's repair is consumed; the journal's rule, not changed here),
-which degrades CP-5 to `restricted`; a third call is refused (`begin`). The receipt names the
-head the journal is to hold, so a directory whose head is not in the journal is not a
-publication.
+Failure. Any failure before `finish` (a file that cannot be written, a render error, a
+candidate the journal would not settle) interrupts the attempt and is raised as
+`CpModelRefused`, so the CLI exits 2 with the reason. That leaves no head from the attempt,
+but it consumes the attempt: the one repair may publish into a new directory, and a second
+consecutive failure leaves a `blocked` CP-MODEL head (decision 0007: the input set's repair
+is consumed; the journal's rule, not changed here), which degrades CP-5 to `restricted`; a
+third call is refused (`begin`). If `finish` itself raises (for example "Ticket inputs have
+changed" after the files are written), the interrupt cannot succeed either, because
+`interrupt` re-checks the inputs through `finish`: the ticket stays pending, the files stay on
+disk, `CpModelRefused` names both facts, and every later publication is refused while the
+ticket is pending. No CLI recovers a pending ticket whose inputs changed; concurrent writers
+are unsupported. The receipt names the head the journal is to hold, so a directory whose head
+is not in the journal is not a publication.
 
 `verify_cp_model_publication(store, output)` (CLI `cp-model-verify --output DIR`, exit 2 with
 the issues) re-derives from the journal alone: the CP-MODEL head must equal the candidate

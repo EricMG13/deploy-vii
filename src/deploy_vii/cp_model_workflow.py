@@ -241,7 +241,7 @@ def _interrupt(store: Execution, ticket: str, reason: str) -> str:
     """End a ticket without a head; if the journal refuses even that, say so in the reason."""
     try:
         store.interrupt(ticket, reason)
-    except ValueError as error:
+    except (ValueError, OSError) as error:  # a refused transition or a journal write error
         return f"{reason}; the attempt could not be interrupted: {error}"
     return reason
 
