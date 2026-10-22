@@ -30,7 +30,7 @@ relaxations applied (`schema_relaxations`).
 
 import copy
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
 
@@ -182,20 +182,33 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
     return node
 
 
-def _relax(node: object) -> object:
+Rule = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def _map(node: object, rule: Rule) -> object:
+    """A copy of `node` with `rule` applied to every schema node, children first; property
+    names and data values (`_DATA`) are copied, never treated as nodes."""
     if isinstance(node, list):
-        return [_relax(item) for item in node]
+        return [_map(item, rule) for item in node]
     if not isinstance(node, dict):
         return node
     out: dict[str, Any] = {}
     for key, value in node.items():
-        if key in _LENGTH:
-            continue
         if key in {"properties", "$defs"} and isinstance(value, dict):
-            out[key] = {name: _relax(child) for name, child in value.items()}
+            out[key] = {name: _map(child, rule) for name, child in value.items()}
         else:
-            out[key] = copy.deepcopy(value) if key in _DATA else _relax(value)
-    return _relaxed_node(out)
+            out[key] = copy.deepcopy(value) if key in _DATA else _map(value, rule)
+    return rule(out)
+
+
+def _map_schema(schema: dict[str, Any], rule: Rule) -> dict[str, Any]:
+    mapped = _map(schema, rule)
+    assert isinstance(mapped, dict)  # a dict maps to a dict
+    return mapped
+
+
+def _without(keys: frozenset[str]) -> Rule:
+    return lambda node: {key: value for key, value in node.items() if key not in keys}
 
 
 def relax(schema: dict[str, Any]) -> dict[str, Any]:
@@ -203,16 +216,17 @@ def relax(schema: dict[str, Any]) -> dict[str, Any]:
 
     A shape the relaxation cannot express (a null `const`, a null enum member whose type does
     not admit null, `const` beside `enum`) raises ValueError, so nothing is sent for it."""
-    relaxed = _relax(schema)
-    assert isinstance(relaxed, dict)  # a dict maps to a dict
-    return relaxed
+    drop = _without(_LENGTH)
+    return _map_schema(schema, lambda node: _relaxed_node(drop(node)))
 
 
 def relaxations(schema: dict[str, Any]) -> list[str]:
-    """The relaxations `relax` applies to `schema` (a strict copy), in `RELAXATIONS` order.
+    """The relaxations the sent copy of `schema` (a strict copy) carries, in `RELAXATIONS` order.
 
-    "nullable-enum" is named wherever the result relies on the documented nullable-enum reading
-    (an enum under a type that admits null), whether `_nullable` or `relax` produced it."""
+    "nullable-enum" is reported by shape, not by a rewrite: it is named wherever the result
+    relies on the documented nullable-enum reading (an enum under a type that admits null),
+    whether `_nullable` built it or `relax` removed a null member. Manifests carry this note as
+    `schema_relaxations_basis` (`RELAXATIONS_BASIS`)."""
     found = set()
     for node in _nodes(schema):
         if _nullable_enum(node):
@@ -232,6 +246,131 @@ def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
 def schema_relaxations(model: type[BaseModel]) -> list[str]:
     """The relaxations `strict_schema(model)` carries, for the attempt manifest."""
     return relaxations(strict_copy(model))
+
+
+# --- bisect variants (`live schema-check --bisect`, task 2.11 fix round 1) ---------------------
+#
+# Each variant removes or rewrites ONE suspect class of the sent schema, so a provider's verdict
+# on it says whether that class is what it refuses. They are only ever sent by the bisect and
+# never reach a real run (whose schema is always `strict_schema`).
+
+BISECT_VARIANTS = (
+    "one-of-to-any-of",
+    "drop-format",
+    "drop-pattern",
+    "drop-items-bounds",
+    "open-object",
+    "any-of-null-to-type-union",
+    "split-mixed-types",
+    "all",
+)
+OPEN_OBJECT = "open-object"  # detected and reported only: closing it would change the contract
+_NULL = {"type": "null"}
+_JSON_TYPES: dict[type, str] = {
+    str: "string",
+    bool: "boolean",
+    int: "integer",
+    float: "number",
+    type(None): "null",
+}
+
+
+def open_objects(schema: dict[str, Any]) -> int:
+    """Nodes whose `additionalProperties` is present and not false (dict-valued fields)."""
+    return sum(
+        1
+        for node in _nodes(schema)
+        if "additionalProperties" in node and node["additionalProperties"] is not False
+    )
+
+
+def _one_of_to_any_of(node: dict[str, Any]) -> dict[str, Any]:
+    if "oneOf" not in node or "anyOf" in node:
+        return node
+    return {("anyOf" if k == "oneOf" else k): v for k, v in node.items() if k != "discriminator"}
+
+
+def _null_union(definitions: dict[str, Any]) -> Rule:
+    """`anyOf: [X, {"type": "null"}]` -> X with `type: [T, "null"]` where X has one string type;
+    a bare `$ref` X is inlined (one level: the inlined body keeps its own nodes as they are)."""
+
+    def rule(node: dict[str, Any]) -> dict[str, Any]:
+        branches = node.get("anyOf")
+        if not isinstance(branches, list) or len(branches) != 2 or _NULL not in branches:
+            return node
+        others = [branch for branch in branches if branch != _NULL]
+        other = others[0] if len(others) == 1 and isinstance(others[0], dict) else None
+        if other is None:
+            return node
+        name = _ref_name(other)
+        base = copy.deepcopy(definitions.get(name)) if name and set(other) == {"$ref"} else other
+        if (
+            not isinstance(base, dict)
+            or not isinstance(base.get("type"), str)
+            or {"anyOf", "oneOf", "allOf", "$ref"} & set(base)
+        ):
+            return node
+        outer = {key: value for key, value in node.items() if key != "anyOf"}
+        return {**base, **outer, "type": [base["type"], "null"]}
+
+    return rule
+
+
+def _split_types(node: dict[str, Any]) -> dict[str, Any]:
+    """A mixed-type enum or a `type` array of more than two types -> `anyOf` of one branch per
+    type; the node's other keywords stay on the outer node."""
+    if "anyOf" in node:
+        return node
+    rest = {key: value for key, value in node.items() if key not in {"enum", "type"}}
+    enum, kind = node.get("enum"), node.get("type")
+    if isinstance(enum, list) and all(type(value) in _JSON_TYPES for value in enum):
+        groups: dict[str, list[object]] = {}
+        for value in enum:
+            groups.setdefault(_JSON_TYPES[type(value)], []).append(value)
+        if len(groups) > 1:
+            branches = [
+                _NULL if name == "null" else {"type": name, "enum": values}
+                for name, values in groups.items()
+            ]
+            return {**rest, "anyOf": branches}
+    if isinstance(kind, list) and len(kind) > 2 and "enum" not in node:
+        return {**rest, "anyOf": [{"type": name} for name in kind]}
+    return node
+
+
+def bisect_variant(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` with the one suspect class `name` removed or rewritten (pure). "all" applies
+    every rewrite in order; "open-object" returns the schema unchanged (it is reported, not
+    sent). An unknown name raises ValueError."""
+    if name == "all":
+        for each in BISECT_VARIANTS:
+            if each not in {OPEN_OBJECT, "all"}:
+                schema = bisect_variant(each, schema)
+        return schema
+    rules: dict[str, Rule] = {
+        "one-of-to-any-of": _one_of_to_any_of,
+        "drop-format": _without(frozenset({"format"})),
+        "drop-pattern": _without(frozenset({"pattern"})),
+        "drop-items-bounds": _without(frozenset({"minItems", "maxItems"})),
+        OPEN_OBJECT: lambda node: node,
+        "any-of-null-to-type-union": _null_union(schema.get("$defs", {})),
+        "split-mixed-types": _split_types,
+    }
+    if name not in rules:
+        raise ValueError(f"unknown bisect variant {name!r}; known: {', '.join(BISECT_VARIANTS)}")
+    return _map_schema(schema, rules[name])
+
+
+RELAXATIONS_BASIS = (
+    "nullable-enum is named by shape: wherever the sent schema has an enum under a type that "
+    "admits null (strict_copy already builds that shape); const-to-enum and drop-length are "
+    "named where the strict copy had const, minLength or maxLength"
+)
+
+
+def schema_keywords(schema: dict[str, Any]) -> list[str]:
+    """Every JSON-Schema keyword the schema's nodes use, sorted; annotations left out."""
+    return sorted({key for node in _nodes(schema) for key in node} - set(ANNOTATIONS))
 
 
 def unverified_keywords(schema: dict[str, Any]) -> list[str]:

@@ -1567,6 +1567,18 @@ def test_a_call_past_its_deadline_is_a_held_timeout_and_the_manifest_records_it(
 # --- 2.11: schema-check verdicts the runner honours -------------------------------------------
 
 
+def sol_400_body() -> str:
+    """The probe-5b Sol `source_context` 400 body (fixture; `user_id` redacted)."""
+    path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "live"
+        / "sol-400-invalid-json-schema-source-context.json"
+    )
+    body: str = json.loads(path.read_text(encoding="utf-8"))["body_text"]
+    return body
+
+
 def check_record(
     root: Path,
     batch: str,
@@ -1575,10 +1587,11 @@ def check_record(
     finished: str,
     *,
     sha: str = "a" * 64,
+    schema_rejection: bool | None = None,
 ) -> None:
     directory = root / batch / "schema-check" / "openai__gpt-6-luna" / f"{batch}-1"
     directory.mkdir(parents=True)
-    manifest = {
+    manifest: dict[str, object] = {
         "schema": SCHEMA_CHECK_RECORD,
         "experiment_id": batch,
         "model": LUNA,
@@ -1588,23 +1601,85 @@ def check_record(
         "finished_at": finished,
         "hashes": {"schema_sha256": sha},
     }
+    if schema_rejection is not None:
+        manifest["schema_rejection"] = schema_rejection
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def test_only_the_latest_400_verdict_for_the_exact_schema_blocks_a_cell(tmp_path: Path) -> None:
+def test_only_the_latest_schema_shaped_400_for_the_exact_schema_blocks_a_cell(
+    tmp_path: Path,
+) -> None:
     key = (LUNA, "source_context", "a" * 64)
     assert schema_rejections(tmp_path / "absent") == {}  # no artifact root yet: none recorded
-    check_record(tmp_path, "s1", "http_error", 400, "2026-10-22T10:00:00Z")
+    check_record(tmp_path, "s1", "http_error", 400, "2026-10-22T10:00:00Z", schema_rejection=True)
     assert schema_rejections(tmp_path) == {key: "s1"}
-    check_record(tmp_path, "s2", "http_error", 400, "2026-10-22T09:00:00Z", sha="b" * 64)
+    check_record(
+        tmp_path,
+        "s2",
+        "http_error",
+        400,
+        "2026-10-22T09:00:00Z",
+        sha="b" * 64,
+        schema_rejection=True,
+    )
     assert schema_rejections(tmp_path)[(LUNA, "source_context", "b" * 64)] == "s2"
-    # Not verdicts on the schema: a rate limit, a refused reservation, an interrupted call.
+    # Not verdicts on the schema: a rate limit, a refused reservation, an interrupted call, a
+    # 400 that does not name the schema (schema-check's own max_tokens 16 or missing reasoning
+    # can draw one; it would never lift), and a 400 recorded before the discriminator existed.
     check_record(tmp_path, "s3", "http_error", 429, "2026-10-22T11:00:00Z")
     check_record(tmp_path, "s4", "refused", None, "2026-10-22T11:00:00Z")
     check_record(tmp_path, "s5", "interrupted", None, "2026-10-22T11:00:00Z")
-    assert schema_rejections(tmp_path)[key] == "s1"
+    check_record(tmp_path, "s7", "http_error", 400, "2026-10-22T11:00:00Z", schema_rejection=False)
+    check_record(tmp_path, "s8", "http_error", 400, "2026-10-22T11:00:00Z", sha="c" * 64)
+    rejections = schema_rejections(tmp_path)
+    assert rejections[key] == "s1" and (LUNA, "source_context", "c" * 64) not in rejections
     check_record(tmp_path, "s6", "accepted", 200, "2026-10-22T12:00:00Z")  # a later acceptance
     assert key not in schema_rejections(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "error, blocking",
+    [
+        (json.loads(sol_400_body())["error"], True),  # provider_error_code invalid_json_schema
+        ({"code": 400, "message": "Invalid schema for response_format 'x'"}, True),
+        ({"code": 400, "message": "response_format: unsupported keyword"}, True),
+        ({"code": 400, "message": "max_tokens is below the minimum of 32"}, False),
+        ({"code": 400, "message": "Reasoning is mandatory for this endpoint"}, False),
+        (  # Google's whole reason: it does not name the schema, so it never blocks
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {
+                    "raw": '{"error": {"message": "Request contains an invalid argument."}}',
+                    "provider_name": "Google",
+                    "provider_error_code": "400",
+                },
+            },
+            False,
+        ),
+    ],
+    ids=[
+        "openai-code",
+        "names-schema",
+        "names-response-format",
+        "token-min",
+        "reasoning",
+        "google",
+    ],
+)
+def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
+    tmp_path: Path, error: dict[str, object], blocking: bool
+) -> None:
+    body = json.dumps({"error": error}).encode()
+    check, _, directory = run_check(tmp_path, FakeTransport(Response(400, body)))
+    assert check.outcome == "http_error" and check.schema_rejection is blocking
+    manifest = load(directory / "manifest.json")
+    assert manifest["schema_rejection"] is blocking
+    rejections = schema_rejections(tmp_path / "artifacts")
+    assert bool(rejections) is blocking
+    metadata = error.get("metadata")
+    code = metadata.get("provider_error_code") if isinstance(metadata, dict) else None
+    assert manifest["provider_error_code"] == code
 
 
 def run_check(
@@ -1681,6 +1756,8 @@ def test_a_check_402_is_sealed_then_stops_with_credit_exhausted(tmp_path: Path) 
         run_check(tmp_path, FakeTransport(Response(402, body)))
     (manifest_path,) = (tmp_path / "artifacts").rglob("manifest.json")
     assert load(manifest_path)["status"] == "other"
+    (record,) = Ledger(tmp_path / "ledger" / "s1.jsonl", Decimal("0.05")).state().attempts
+    assert record.status == "settled" and record.charged_usd == Decimal(0)  # known-zero 402
 
 
 def test_a_check_with_a_multi_token_key_file_records_the_counts_only(tmp_path: Path) -> None:

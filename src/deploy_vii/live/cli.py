@@ -17,7 +17,9 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 from deploy_vii.execution import Execution, NotAuthorized
 from deploy_vii.live.catalog import (
@@ -59,7 +61,15 @@ from deploy_vii.live.runner import (
     dispatch,
     schema_rejections,
 )
-from deploy_vii.live.schema import schema_relaxations
+from deploy_vii.live.schema import (
+    BISECT_VARIANTS,
+    OPEN_OBJECT,
+    bisect_variant,
+    open_objects,
+    schema_keywords,
+    schema_relaxations,
+    strict_schema,
+)
 from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsError, load_settings
 from deploy_vii.registry import canonical, modules
 
@@ -242,6 +252,12 @@ def _schema_check_parser(actions: "argparse._SubParsersAction[argparse.ArgumentP
     check.add_argument("--artifact-root", type=Path, help="default: settings artifact_root")
     check.add_argument("--catalog", type=Path, help="saved models JSON; else fetched")
     check.add_argument("--report-directory", type=Path, default=REPORT_DIRECTORY)
+    check.add_argument(
+        "--bisect",
+        action="store_true",
+        help="for each HTTP 400, send schema variants (one suspect class each) until one is "
+        "accepted; report only, no variant is ever used by a real run",
+    )
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
@@ -1006,6 +1022,22 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
     return 0
 
 
+NON_SCHEMA_400 = "no: the 400 does not name the schema"
+
+
+def _blocks(check: SchemaCheck) -> str:
+    """Whether this verdict makes the cell ineligible in later runs (`schema_rejections`)."""
+    if check.schema_rejection:
+        return "yes: schema rejection"
+    return NON_SCHEMA_400 if check.http_status == 400 else "-"
+
+
+def _usd(check: SchemaCheck) -> str:
+    return (
+        "not dispatched" if check.charged_usd is None else usd_cell(check.charged_usd, check.held)
+    )
+
+
 def _check_cells(check: SchemaCheck) -> tuple[object, ...]:
     return (
         check.model,
@@ -1013,10 +1045,12 @@ def _check_cells(check: SchemaCheck) -> tuple[object, ...]:
         check.outcome,
         check.classification,
         "-" if check.http_status is None else check.http_status,
-        "not dispatched" if check.charged_usd is None else usd_cell(check.charged_usd, check.held),
+        _usd(check),
         check.attempt_id,
         check.schema_sha256,
         ", ".join(check.relaxations) or "none",
+        ", ".join(check.keywords),
+        _blocks(check),
         check.detail or "-",
     )
 
@@ -1034,8 +1068,41 @@ def _ineligible_check(candidate: PinnedCandidate, step_id: str) -> tuple[object,
         "none",
         hashlib.sha256(schema_text(schema).encode()).hexdigest(),
         ", ".join(schema_relaxations(schema)) or "none",
+        ", ".join(schema_keywords(strict_schema(schema))),
+        "-",
         "-",
     )
+
+
+def _variant_cells(check: SchemaCheck) -> tuple[object, ...]:
+    return (
+        check.model,
+        check.step_id,
+        check.variant,
+        check.outcome,
+        check.classification,
+        "-" if check.http_status is None else check.http_status,
+        _usd(check),
+        check.attempt_id,
+        check.schema_sha256,
+        check.detail or "-",
+    )
+
+
+def _unsent_variant(
+    model: str, step_id: str, variant: str, outcome: str, why: str
+) -> tuple[object, ...]:
+    """A variant that is not sent: it changes nothing, or it is an open object (reported)."""
+    return (model, step_id, variant, outcome, why, "-", "0", "none", "-", "-")
+
+
+@dataclass
+class Bisection:
+    """`--bisect` results: variant rows and, per bisected (model, step), the first accepted
+    variant ("none accepted" or "not finished (...)" otherwise)."""
+
+    rows: list[tuple[object, ...]] = field(default_factory=list)
+    verdicts: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 def render_schema_report(
@@ -1045,8 +1112,10 @@ def render_schema_report(
     steps: Sequence[str],
     rows: Sequence[tuple[object, ...]],
     stopped: str | None,
+    bisection: Bisection | None = None,
 ) -> str:
-    """One row per (model, step): the provider's verdict on the sent schema. The provider's
+    """One row per (model, step): the provider's verdict on the sent schema, then (with
+    `--bisect`) the variant rows and each bisected cell's first accepted variant. The provider's
     error text is shown (key scrubbed); response bodies, prompts and content never are."""
     state = ledger.state()
     counts = {
@@ -1063,8 +1132,11 @@ def render_schema_report(
         "Attempt",
         "Sent schema sha256",
         "Relaxations",
+        "Keywords",
+        "Blocks later runs",
         "Provider detail",
     )
+    bisect_line = "yes (variants are reported only; no real run sends them)" if bisection else "no"
     lines = [
         f"# Live batch {batch_id} (schema-check)",
         "",
@@ -1077,6 +1149,7 @@ def render_schema_report(
         f"{pool.looked_up_at}",
         f"- Accepted: {counts['accepted']}; http_error: {counts['http_error']}; other: "
         f"{counts['other']}; ineligible: {counts['ineligible']}; refused: {counts['refused']}",
+        f"- Bisect: {bisect_line}",
         f"- Stopped: {stopped or 'no'}",
         "",
         "## Results",
@@ -1085,9 +1158,79 @@ def render_schema_report(
         _row(("---",) * len(header)),
         *(_row(row) for row in rows),
         "",
+        f"`Blocks later runs` `{NON_SCHEMA_400}`: the provider gave no schema reason (Google's "
+        'is only "Request contains an invalid argument"), so the cell stays eligible.',
+        "",
     ]
-    lines += [HELD_FOOTNOTE, ""] if any(str(row[5]).startswith(HELD) for row in rows) else []
+    held = any(str(row[5]).startswith(HELD) for row in rows)
+    if bisection is not None:
+        variant_header = (
+            "Model",
+            "Step",
+            "Variant",
+            "Outcome",
+            "Class",
+            "HTTP",
+            "USD",
+            "Attempt",
+            "Variant schema sha256",
+            "Provider detail",
+        )
+        lines += [
+            "## Bisect",
+            "",
+            _row(variant_header),
+            _row(("---",) * len(variant_header)),
+            *(_row(row) for row in bisection.rows),
+            "",
+            "## First accepted variant",
+            "",
+            *(
+                f"- {model} {step}: {verdict}"
+                for (model, step), verdict in bisection.verdicts.items()
+            ),
+            "",
+        ]
+        held = held or any(str(row[6]).startswith(HELD) for row in bisection.rows)
+    lines += [HELD_FOOTNOTE, ""] if held else []
     return "\n".join(lines)
+
+
+def _bisect(
+    check: SchemaCheck,
+    send: Callable[[tuple[str, dict[str, Any]] | None], SchemaCheck],
+    bisection: Bisection,
+) -> str | None:
+    """Send the variants of a rejected cell's schema in order until one is accepted; return
+    the stop reason when the cap refuses one. Variants are reported only, never applied."""
+    key = (check.model, check.step_id)
+    bisection.verdicts[key] = "not finished (aborted)"  # replaced unless something raises
+    sent = strict_schema(STEPS[check.step_id].schema)
+    for name in BISECT_VARIANTS:
+        if name == OPEN_OBJECT:
+            found = open_objects(sent)
+            outcome, why = (
+                ("open object", f"skipped: {found} node(s); closing them changes the contract")
+                if found
+                else ("not applicable", "not sent")
+            )
+            bisection.rows.append(_unsent_variant(check.model, check.step_id, name, outcome, why))
+            continue
+        variant = bisect_variant(name, sent)
+        if variant == sent:
+            row = _unsent_variant(check.model, check.step_id, name, "not applicable", "not sent")
+            bisection.rows.append(row)
+            continue
+        result = send((name, variant))
+        bisection.rows.append(_variant_cells(result))
+        if result.outcome == "refused":
+            bisection.verdicts[key] = "not finished (cap)"
+            return f"cap: {result.detail}"
+        if result.outcome == "accepted":
+            bisection.verdicts[key] = f"first accepted variant: {name}"
+            return None
+    bisection.verdicts[key] = "none accepted"
+    return None
 
 
 def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
@@ -1113,28 +1256,40 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
     rows: list[tuple[object, ...]] = []
     stopped: str | None = None
     writer, client = AttemptWriter(root), ChatClient(transport)
+    bisection = Bisection() if args.bisect else None
+
+    def send(
+        candidate: PinnedCandidate, step_id: str, variant: tuple[str, dict[str, Any]] | None
+    ) -> SchemaCheck:
+        return check_schema(
+            candidate,
+            step_id,
+            batch_id=batch_id,
+            ledger=ledger,
+            client=client,
+            writer=writer,
+            key_path=settings.credential_file,
+            key_index=settings.credential_token_index,
+            bytes_per_token=settings.prompt_bytes_per_token_lower_bound,
+            variant=variant,
+        )
 
     def checks() -> str | None:
-        """Run every (model, step) in order; the reason the batch stopped, if it did."""
+        """Run every (model, step) in order, bisecting a 400 when asked; the reason the batch
+        stopped, if it did."""
         for candidate in pool.candidates:
             for step_id in args.steps:
                 if not candidate.eligible:
                     rows.append(_ineligible_check(candidate, step_id))
                     continue
-                check = check_schema(
-                    candidate,
-                    step_id,
-                    batch_id=batch_id,
-                    ledger=ledger,
-                    client=client,
-                    writer=writer,
-                    key_path=settings.credential_file,
-                    key_index=settings.credential_token_index,
-                    bytes_per_token=settings.prompt_bytes_per_token_lower_bound,
-                )
+                check = send(candidate, step_id, None)
                 rows.append(_check_cells(check))
                 if check.outcome == "refused":
                     return f"cap: {check.detail}"
+                if bisection is not None and check.http_status == 400:
+                    stop = _bisect(check, partial(send, candidate, step_id), bisection)
+                    if stop is not None:
+                        return stop
         return None
 
     try:
@@ -1147,7 +1302,7 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
         _record_usage_after(root, batch_id, usage_client, args.live_command, sys.exception())
         _finish_report(
             report,
-            render_schema_report(batch_id, pool, ledger, args.steps, rows, stopped),
+            render_schema_report(batch_id, pool, ledger, args.steps, rows, stopped, bisection),
             sys.exception(),
         )
     state = ledger.state()

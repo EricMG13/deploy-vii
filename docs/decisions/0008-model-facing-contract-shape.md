@@ -202,8 +202,16 @@ the model no longer sees length limits in the schema; it learns them from valida
 Which construct OpenAI refused is not known, so `deploy-vii live schema-check` sends one
 16-token strict call per (model, step schema) through the normal client, ledger and key path
 (default cap US$0.05, nothing submitted) and reports the provider's own error text; a recorded
-HTTP 400 for the exact (model, step, sent schema hash) makes that step ineligible in later
-batches under the same artifact root before anything is reserved. Every pool change is to be
+schema-shaped HTTP 400 (`invalid_json_schema`, or a message naming the schema or
+`response_format`) for the exact (model, step, sent schema hash) makes that step ineligible in
+later batches under the same artifact root before anything is reserved, and any other 400 never
+blocks. The first run (schema-2026-10-22, US$0.0777) showed the relaxation is not sufficient:
+Grok accepted all five step schemas; OpenAI only `source_readiness` (`narrative`: "'oneOf' is
+not permitted"; the others with no keyword named); Google `source_readiness` and `readiness`
+("Request contains an invalid argument" for the rest). `schema-check --bisect` therefore sends,
+for each rejected cell, schema variants that each remove or rewrite one suspect class, report
+only ([live-schema-2026-10-22.md](../development/tasks/implementation/live-schema-2026-10-22.md)).
+Every pool change is to be
 checked this way before a CP-0 call. M7 backlog from the analysis (§6): a page-boundary hint for
 a quote that continues on the next page; the 60-character truncation in quote-mismatch text;
 the `hyphen-wrap` label printed only when the wrap is relevant; a check on free-text `period`
@@ -214,8 +222,8 @@ fields; a no-response column in the cohort tables. Records:
 [live-probe-5b-reconciled.md](../development/tasks/implementation/live-probe-5b-reconciled.md)
 and the analysis,
 [live-probe-5-analysis.md](../development/tasks/implementation/live-probe-5-analysis.md). Not
-verified: which keyword OpenAI rejected and whether it accepts the relaxed schema (the
-coordinator's `schema-check` run answers both).
+verified: which construct OpenAI and Google refuse in the relaxed `source_context`,
+`financials` and (OpenAI) `readiness` schemas; the coordinator's `--bisect` run is to answer it.
 
 ## Evidence
 

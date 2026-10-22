@@ -383,6 +383,15 @@ def test_probe5b_sol_source_context_refusal_names_the_providers_own_message() ->
         "HTTP 400: Provider returned error; OpenAI invalid_json_schema: Invalid schema for "
         "response_format 'source_context'. Please ensure it is a valid JSON Schema."
     )
+    assert result.provider_error_code == "invalid_json_schema"
+
+
+def test_a_long_provider_message_is_capped_and_says_so() -> None:
+    raw = "x" * 2000
+    body = json.dumps({"error": {"code": 400, "message": "m", "metadata": {"raw": raw}}})
+    result = classify(Response(400, body.encode()))
+    assert result.error_detail == "HTTP 400: m; " + "x" * 500 + " [truncated from 2000 chars]"
+    assert result.provider_error_code is None
 
 
 @pytest.mark.parametrize(

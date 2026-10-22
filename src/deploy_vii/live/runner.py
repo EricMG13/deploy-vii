@@ -14,6 +14,7 @@ used for the header and for scrubbing, and appears in no record.
 import hashlib
 import json
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -41,7 +42,12 @@ from deploy_vii.live.draw import Draw, draw
 from deploy_vii.live.ledger import CapExceeded, Ledger, Settlement
 from deploy_vii.live.prompts import UpstreamInput, build, response_format, schema_text
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter, response_envelope
-from deploy_vii.live.schema import schema_relaxations, unverified_keywords
+from deploy_vii.live.schema import (
+    RELAXATIONS_BASIS,
+    schema_keywords,
+    schema_relaxations,
+    unverified_keywords,
+)
 from deploy_vii.live.submission import STEPS, StepDef, Submitted, submit_model_payload
 
 COHORT = "openrouter-pool"
@@ -650,6 +656,7 @@ def _manifest(plan: _Plan, run: _Run) -> dict[str, Any]:
         ),
         # How the sent schema departs from the strict copy (task 2.11; Pydantic still validates).
         "schema_relaxations": schema_relaxations(plan.step.schema),
+        "schema_relaxations_basis": RELAXATIONS_BASIS,
         "served": {
             "model": result.served_model if result else None,
             "provider": result.served_provider if result else None,
@@ -850,9 +857,27 @@ def dispatch(
 
 SCHEMA_CHECK_CASE = "schema-check"
 SCHEMA_CHECK_RECORD = "schema-check-attempt/1"
+# `schema-check --bisect` variants: evidence apart from the plain checks, so a variant's verdict
+# can never block or lift a real run (`schema_rejections` reads `schema-check` only).
+SCHEMA_BISECT_CASE = "schema-bisect"
+SCHEMA_BISECT_RECORD = "schema-bisect-attempt/1"
 SCHEMA_CHECK_MAX_TOKENS = 16  # the brief's floor; a provider minimum above it answers a 400
 SCHEMA_CHECK_TIMEOUT_SECONDS = 120.0
 SCHEMA_CHECK_PROMPT = "Reply with one JSON object that conforms to the response format."
+# A 400 is a verdict on the schema only when it says so (review fix, task 2.11): schema-check
+# sends what a real run does not (16 tokens, no reasoning, a one-line prompt), so a 400 about
+# those would otherwise block the paid path with nothing able to lift it.
+_SCHEMA_WORDS = re.compile(r"schema|response_format", re.IGNORECASE)
+
+
+def schema_shaped(result: ChatResult) -> bool:
+    """True for an HTTP 400 whose provider code is `invalid_json_schema` or whose detail names
+    the schema or `response_format`. Google's "Request contains an invalid argument" does not."""
+    if result.classification != "http_error" or result.http_status != 400:
+        return False
+    if result.provider_error_code == "invalid_json_schema":
+        return True
+    return bool(_SCHEMA_WORDS.search(result.error_detail or ""))
 
 
 @dataclass(frozen=True)
@@ -872,6 +897,9 @@ class SchemaCheck:
     attempt_id: str
     charged_usd: Decimal | None
     held: bool
+    schema_rejection: bool = False  # a schema-shaped 400: blocks later runs (`schema_shaped`)
+    keywords: tuple[str, ...] = ()  # JSON-Schema keywords of the schema sent (`schema_keywords`)
+    variant: str | None = None  # the bisect variant sent; None for the plain check
 
 
 @dataclass
@@ -886,6 +914,7 @@ class _Check:
     cap_usd: Decimal
     clock: Callable[[], str]
     started_at: str
+    variant: str | None = None
     status: str = "interrupted"
     result: ChatResult | None = None
     error: str | None = None
@@ -897,19 +926,38 @@ class _Check:
     def schema(self) -> type[BaseModel]:
         return STEPS[self.step_id].schema
 
+    @property
+    def sent(self) -> dict[str, Any]:
+        sent: dict[str, Any] = self.chat.response_format["json_schema"]["schema"]
+        return sent
+
+    @property
+    def sent_sha256(self) -> str:
+        """The hash `schema_text` gives the plain sent schema (same serialisation)."""
+        text = json.dumps(self.sent, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(text.encode()).hexdigest()
+
     def event(self, name: str, **fields: object) -> None:
         self.events.append(
             {"seq": len(self.events) + 1, "at": self.clock(), "event": name, **fields}
         )
 
 
-def schema_check_request(candidate: PinnedCandidate, step_id: str) -> ChatRequest:
-    """The minimal strict request: one short user message, 16 tokens, no reasoning parameter."""
+def schema_check_request(
+    candidate: PinnedCandidate, step_id: str, schema: dict[str, Any] | None = None
+) -> ChatRequest:
+    """The minimal strict request: one short user message, 16 tokens, no reasoning parameter.
+
+    `schema` replaces the step's sent schema (a bisect variant); the format is otherwise the
+    one a probe sends (`name` = step id, `strict: true`)."""
+    fmt = response_format(step_id, STEPS[step_id].schema)
+    if schema is not None:
+        fmt = {**fmt, "json_schema": {**fmt["json_schema"], "schema": schema}}
     return ChatRequest(
         model=candidate.slug,
         messages=({"role": "user", "content": SCHEMA_CHECK_PROMPT},),
         max_tokens=SCHEMA_CHECK_MAX_TOKENS,
-        response_format=response_format(step_id, STEPS[step_id].schema),
+        response_format=fmt,
         reasoning_effort=None,
         accepted_model_ids=(candidate.slug, candidate.canonical_slug),
         timeout_s=SCHEMA_CHECK_TIMEOUT_SECONDS,
@@ -918,11 +966,12 @@ def schema_check_request(candidate: PinnedCandidate, step_id: str) -> ChatReques
 
 
 def _check_manifest(check: _Check, cost: _Cost) -> dict[str, Any]:
-    result, sent = check.result, check.chat.response_format["json_schema"]["schema"]
+    result, sent = check.result, check.sent
     return {
-        "schema": SCHEMA_CHECK_RECORD,
+        "schema": SCHEMA_CHECK_RECORD if check.variant is None else SCHEMA_BISECT_RECORD,
         "experiment_id": check.batch_id,
-        "case_id": SCHEMA_CHECK_CASE,
+        "case_id": check.locator.case,
+        "variant": check.variant,
         "attempt_id": check.locator.attempt,
         "model": check.candidate.slug,
         "module_id": STEPS[check.step_id].module_id,
@@ -935,16 +984,21 @@ def _check_manifest(check: _Check, cost: _Cost) -> dict[str, Any]:
         "http_status": result.http_status if result else None,
         "error": check.error,
         "error_detail": result.error_detail if result else None,
+        "provider_error_code": result.provider_error_code if result else None,
+        # Only a schema-shaped 400 blocks later runs (`schema_rejections`).
+        "schema_rejection": bool(result and schema_shaped(result)),
         "journal": "none: schema-check submits nothing",
         "code": {"live_package_sha256": code_sha256()},
         "hashes": {
-            "schema_sha256": hashlib.sha256(schema_text(check.schema).encode()).hexdigest(),
+            "schema_sha256": check.sent_sha256,
             "request_sha256": hashlib.sha256(
                 json.dumps(check.chat.body(), sort_keys=True).encode()
             ).hexdigest(),
         },
+        "schema_keywords": schema_keywords(sent),
         "schema_keywords_unverified": unverified_keywords(sent),
         "schema_relaxations": schema_relaxations(check.schema),
+        "schema_relaxations_basis": RELAXATIONS_BASIS,
         "endpoint": CHAT_URL,
         "routing": {"allow_fallbacks": False, "require_parameters": True, "models": None},
         "reasoning": "not sent: the provider default applies",
@@ -1014,11 +1068,14 @@ def _result(check: _Check) -> SchemaCheck:
         classification="not sent" if unsent or result is None else result.classification,
         http_status=result.http_status if result else None,
         detail=check.error if unsent or result is None else result.error_detail,
-        schema_sha256=hashlib.sha256(schema_text(check.schema).encode()).hexdigest(),
+        schema_sha256=check.sent_sha256,
         relaxations=tuple(schema_relaxations(check.schema)),
         attempt_id=check.locator.attempt,
         charged_usd=check.settlement.charged if check.settlement else None,
         held=bool(check.settlement and check.settlement.unreconciled),
+        schema_rejection=bool(result and schema_shaped(result)),
+        keywords=tuple(schema_keywords(check.sent)),
+        variant=check.variant,
     )
 
 
@@ -1034,20 +1091,25 @@ def check_schema(
     key_index: int,
     bytes_per_token: Decimal,
     clock: Callable[[], str] = utc_stamp,
+    variant: tuple[str, dict[str, Any]] | None = None,
 ) -> SchemaCheck:
     """Send `step_id`'s sent schema to `candidate` once and record the provider's verdict.
 
-    Evidence goes to `<root>/<batch_id>/schema-check/<model>/<attempt>/`. A reservation the cap
-    refuses is sealed and returned as outcome `refused` (nothing sent; the caller stops); a
-    connection failure propagates after the reservation is settled as held; a 402 raises
-    CreditExhausted after the attempt is sealed (DC-8)."""
-    chat = schema_check_request(candidate, step_id)
+    Evidence goes to `<root>/<batch_id>/schema-check/<model>/<attempt>/`; with `variant` (a
+    bisect variant's name and schema, which is sent instead) to `.../schema-bisect/...`, which
+    no real run reads. A reservation the cap refuses is sealed and returned as outcome
+    `refused` (nothing sent; the caller stops); a connection failure propagates after the
+    reservation is settled as held; a 402 raises CreditExhausted after the attempt is sealed
+    (DC-8)."""
+    name, schema = variant if variant is not None else (None, None)
+    chat = schema_check_request(candidate, step_id, schema)
     tokens = prompt_token_bound(chat.body(), bytes_per_token)
     # As in `dispatch`: a key that cannot be read stops the check before anything is written
     # or reserved, so no reservation is left open.
     loaded = load_key_with_note(key_path, key_index)
-    prefix = f"{candidate.slug.replace('/', '__')}-{step_id}"
-    base = AttemptLocator(batch_id, SCHEMA_CHECK_CASE, candidate.slug, prefix)
+    prefix = f"{candidate.slug.replace('/', '__')}-{step_id}" + (f"-{name}" if name else "")
+    case = SCHEMA_CHECK_CASE if name is None else SCHEMA_BISECT_CASE
+    base = AttemptLocator(batch_id, case, candidate.slug, prefix)
     attempt_id, _ = next_attempt_id(ledger, writer, base, prefix)
     check = _Check(
         candidate=candidate,
@@ -1060,6 +1122,7 @@ def check_schema(
         cap_usd=ledger.cap,
         clock=clock,
         started_at=clock(),
+        variant=name,
     )
     writer.begin(
         check.locator,
@@ -1146,15 +1209,21 @@ def _check_record(path: Path) -> dict[str, Any]:
 def schema_rejections(artifact_root: Path) -> dict[tuple[str, str, str], str]:
     """(model, step, sent schema sha256) -> the batch whose schema-check saw it refused.
 
-    Only verdicts count: an accepted call or an HTTP 400 (other errors, refusals and
-    interruptions say nothing about the schema). The latest verdict per key wins (finished_at,
+    Only verdicts on the schema count: an accepted call, or an HTTP 400 the record marks
+    `schema_rejection: true` (`schema_shaped`). Other errors, refusals, interruptions, a 400
+    that does not name the schema and a record written before that field existed say nothing
+    about the schema and neither block nor lift. The latest verdict per key wins (finished_at,
     then batch id), so a later accepted check lifts an earlier rejection, and a changed schema
     has a new hash and is never blocked by a verdict on the old one. An unreadable record fails
     closed (ValueError) before anything is spent."""
     latest: dict[tuple[str, str, str], tuple[str, str, bool]] = {}
     for path in sorted(artifact_root.glob(f"*/{SCHEMA_CHECK_CASE}/*/*/manifest.json")):
         record = _check_record(path)
-        rejected = record["status"] == "http_error" and record.get("http_status") == 400
+        rejected = (
+            record["status"] == "http_error"
+            and record.get("http_status") == 400
+            and record.get("schema_rejection") is True
+        )
         if record["status"] != "accepted" and not rejected:
             continue
         key = (str(record["model"]), str(record["step_id"]), str(record["hashes"]["schema_sha256"]))

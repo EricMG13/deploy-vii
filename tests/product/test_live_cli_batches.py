@@ -5,8 +5,10 @@ import hashlib
 import json
 import socket
 import stat
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,7 +18,7 @@ from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import Ledger
 from deploy_vii.live.prompts import schema_text
-from deploy_vii.live.schema import strict_schema
+from deploy_vii.live.schema import bisect_variant, strict_schema
 from deploy_vii.registry import modules
 from tests.product.live_support import (
     FAKE_KEY,
@@ -834,21 +836,44 @@ class SchemaResponder:
     """Fake transport for `schema-check`: refuses the listed (model, step) with probe-5b's real
     400 body, answers every other call with 16 tokens cut at the length limit."""
 
-    def __init__(self, refuse: set[tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        refuse: set[tuple[str, str]] | Callable[[str, str, dict[str, Any]], bool],
+        *,
+        refusal: bytes | None = None,
+        hang: Callable[[str, str, dict[str, Any]], bool] | None = None,
+    ) -> None:
         self.refuse = refuse
+        fixture = json.loads(SOL_400.read_text(encoding="utf-8"))
+        self.refusal = refusal or fixture["body_text"].encode("utf-8")
+        self.hang = hang
         self.requests: list[Request] = []
         self.key_requests: list[Request] = []
+
+    def schemas(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """(model, step, sent schema) of every chat call, in order."""
+        out = []
+        for request in self.requests:
+            body = json.loads(request.body or b"{}")
+            fmt = body["response_format"]["json_schema"]
+            out.append((body["model"], fmt["name"], fmt["schema"]))
+        return out
 
     def __call__(self, request: Request) -> Response:
         if request.url == KEY_URL:
             self.key_requests.append(request)
             return key_status("2.5")
         self.requests.append(request)
-        body = json.loads(request.body or b"{}")
-        model, step = body["model"], body["response_format"]["json_schema"]["name"]
-        if (model, step) in self.refuse:
-            fixture = json.loads(SOL_400.read_text(encoding="utf-8"))
-            return Response(fixture["http_status"], fixture["body_text"].encode("utf-8"))
+        model, step, schema = self.schemas()[-1]
+        if self.hang is not None and self.hang(model, step, schema):
+            raise TimeoutError("slow")
+        refused = (
+            self.refuse(model, step, schema)
+            if callable(self.refuse)
+            else (model, step) in self.refuse
+        )
+        if refused:
+            return Response(400, self.refusal)
         usage = {"prompt_tokens": 900, "completion_tokens": 16, "cost": float(CHECK_COST)}
         return ok('{"sch', model=model, finish_reason="length", usage=usage)
 
@@ -871,7 +896,9 @@ def check_argv(
 
 
 def check_rows(text: str) -> dict[tuple[str, str], list[str]]:
-    rows = step_lines(text, "openai/") + step_lines(text, "z-ai/")
+    """Rows of the plain `## Results` table only."""
+    results = text.split("## Bisect", 1)[0]
+    rows = step_lines(results, "openai/") + step_lines(results, "z-ai/")
     return {(row[0], row[1]): row for row in rows}
 
 
@@ -897,15 +924,21 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     rows = check_rows(text)
     refused = rows[(LUNA, "source_context")]
     assert refused[2:6] == ["http_error", "http_error", "400", "0"]  # known-zero: refused
-    assert refused[9] == (
+    assert refused[10] == "yes: schema rejection"
+    assert refused[9].startswith("$defs, $ref, additionalProperties, anyOf, enum, format, items")
+    assert refused[11] == (
         "HTTP 400: Provider returned error; OpenAI invalid_json_schema: Invalid schema for "
         "response_format 'source_context'. Please ensure it is a valid JSON Schema."
     )
     others = [rows[key] for key in rows if key != (LUNA, "source_context")]
     assert [row[2:6] for row in others] == [["accepted", "truncated", "200", "0.0000123"]] * 3
     assert rows[(GLM, "source_context")][8] == "nullable-enum, const-to-enum, drop-length"
-    assert (
-        rows[(GLM, "source_readiness")][8] == "none" and rows[(GLM, "source_readiness")][9] == "-"
+    readiness = rows[(GLM, "source_readiness")]
+    assert readiness[8] == "none" and readiness[10:] == ["-", "-"]
+    # The Keywords column: every JSON-Schema keyword of the sent schema, annotations left out.
+    assert readiness[9] == (
+        "$defs, $ref, additionalProperties, anyOf, enum, items, minItems, "
+        "properties, required, type"
     )
     digest = hashlib.sha256(schema_text(cli.STEPS["source_context"].schema).encode()).hexdigest()
     assert refused[7] == digest
@@ -995,3 +1028,101 @@ def test_a_recorded_schema_rejection_makes_that_step_ineligible_before_dispatch(
     assert context[2] == "source_context" and context[6] == "ineligible"
     assert context[7] == "ineligible: schema rejected by provider (s1)"
     assert context[8] == "0"  # nothing reserved, nothing spent
+
+
+def test_a_400_that_does_not_name_the_schema_is_reported_and_never_blocks(rig: Rig) -> None:
+    """Review fix (2.11 round 1): schema-check sends max_tokens 16 and no reasoning, which a
+    real run does not, so a 400 about those must not block the paid path."""
+    floor = {"error": {"code": 400, "message": "max_tokens must be at least 32"}}
+    refusing = SchemaResponder({(LUNA, "source_context")}, refusal=json.dumps(floor).encode())
+    assert rig.run(check_argv(rig, "--models", LUNA, "--steps", "source_context"), refusing) == 0
+    (row,) = step_lines(rig.report("s1"), "openai/")
+    assert row[2:5] == ["http_error", "http_error", "400"]
+    assert row[10] == "no: the 400 does not name the schema"
+    responder = Responder(rig.review)
+    assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], responder) == 0
+    assert len(responder.requests) == 2  # CP-0, then source_context was sent
+    _, context = step_lines(rig.report(), "module-00")[:2]
+    assert context[2] == "source_context" and context[6] != "ineligible"
+
+
+# --- 2.11 fix round 1: `schema-check --bisect` ------------------------------------------------
+
+
+def bisect_rows(text: str) -> list[list[str]]:
+    """Rows of the `## Bisect` table (model, step, variant, outcome, ...)."""
+    section = text.split("## Bisect", 1)[1].split("## First accepted variant", 1)[0]
+    return step_lines(section, "openai/")
+
+
+def has_one_of(model: str, step: str, schema: dict[str, Any]) -> bool:
+    return '"oneOf"' in json.dumps(schema)
+
+
+def test_bisect_stops_at_the_first_accepted_variant_and_never_feeds_a_real_run(rig: Rig) -> None:
+    responder = SchemaResponder(has_one_of)
+    argv = check_argv(rig, "--models", LUNA, "--steps", "narrative", "--bisect")
+    assert rig.run(argv, responder) == 0
+    sent = [schema for _, _, schema in responder.schemas()]
+    plain = strict_schema(cli.STEPS["narrative"].schema)
+    assert sent == [plain, bisect_variant("one-of-to-any-of", plain)]  # then it stopped
+    text = rig.report("s1")
+    (plain_row,) = check_rows(text).values()
+    assert plain_row[2:5] == ["http_error", "http_error", "400"]
+    (row,) = bisect_rows(text)
+    assert row[1:6] == ["narrative", "one-of-to-any-of", "accepted", "truncated", "200"]
+    digest = hashlib.sha256(
+        json.dumps(sent[1], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert row[8] == digest
+    assert f"- {LUNA} narrative: first accepted variant: one-of-to-any-of" in text
+    assert "- Bisect: yes" in text
+    root = rig.root / "artifacts" / "model-tests"
+    (variant_manifest,) = (root / "s1" / "schema-bisect").rglob("manifest.json")
+    record = json.loads(variant_manifest.read_text())
+    assert record["schema"] == "schema-bisect-attempt/1" and record["variant"] == "one-of-to-any-of"
+    # The variant's acceptance neither lifts nor adds a block: only the plain verdict counts.
+    plain_digest = hashlib.sha256(schema_text(cli.STEPS["narrative"].schema).encode()).hexdigest()
+    assert cli.schema_rejections(root) == {(LUNA, "narrative", plain_digest): "s1"}
+
+
+def test_bisect_reports_none_accepted_and_skips_variants_that_change_nothing(rig: Rig) -> None:
+    responder = SchemaResponder({(LUNA, "source_context")})
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context", "--bisect")
+    assert rig.run(argv, responder) == 0
+    text = rig.report("s1")
+    rows = [(r[2], r[3]) for r in bisect_rows(text)]
+    assert rows == [
+        ("one-of-to-any-of", "not applicable"),
+        ("drop-format", "http_error"),
+        ("drop-pattern", "http_error"),
+        ("drop-items-bounds", "http_error"),
+        ("open-object", "not applicable"),
+        ("any-of-null-to-type-union", "http_error"),
+        ("split-mixed-types", "not applicable"),
+        ("all", "http_error"),
+    ]
+    assert len(responder.requests) == 6  # the plain check and five variants
+    assert f"- {LUNA} source_context: none accepted" in text
+
+
+def test_a_cap_refusal_mid_bisect_stops_the_batch_and_says_the_bisect_did_not_finish(
+    rig: Rig,
+) -> None:
+    def drop_format_hangs(model: str, step: str, schema: dict[str, Any]) -> bool:
+        return '"format"' not in json.dumps(schema)  # the first variant sent: its call times out
+
+    responder = SchemaResponder({(LUNA, "source_context")}, hang=drop_format_hangs)
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context", "--bisect", cap="0.0008")
+    assert rig.run(argv, responder) == cli.EXIT_CAP
+    assert len(responder.requests) == 2  # the plain check and drop-format, nothing after
+    text = rig.report("s1")
+    rows = [(r[2], r[3], r[4]) for r in bisect_rows(text)]
+    assert rows == [
+        ("one-of-to-any-of", "not applicable", "not sent"),
+        ("drop-format", "other", "timeout"),
+        ("drop-pattern", "refused", "not sent"),
+    ]
+    assert "- Stopped: cap: " in text
+    assert f"- {LUNA} source_context: not finished (cap)" in text
+    assert cli.HELD_FOOTNOTE in text  # the timed-out variant's reservation is held

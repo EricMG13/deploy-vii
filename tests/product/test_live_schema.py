@@ -215,6 +215,136 @@ def test_shapes_the_relaxation_cannot_express_fail_closed(node: dict[str, Any]) 
         strict.relax({"properties": {"x": node}})
 
 
+# --- bisect variants (task 2.11 fix round 1): report-only, never sent by a real run ------------
+
+
+def test_bisect_variants_run_in_the_coordinators_order() -> None:
+    assert strict.BISECT_VARIANTS == (
+        "one-of-to-any-of",
+        "drop-format",
+        "drop-pattern",
+        "drop-items-bounds",
+        "open-object",
+        "any-of-null-to-type-union",
+        "split-mixed-types",
+        "all",
+    )
+
+
+def test_the_one_of_variant_sends_the_narrative_unions_as_any_of_without_discriminator() -> None:
+    sent = strict.strict_schema(SCHEMAS["narrative"])
+    snapshot = json.dumps(sent, sort_keys=True)
+    variant = strict.bisect_variant("one-of-to-any-of", sent)
+    keywords = set(strict.schema_keywords(sent))
+    assert {"oneOf", "discriminator"} <= keywords
+    assert set(strict.schema_keywords(variant)) == keywords - {"oneOf", "discriminator"}
+    assert json.dumps(sent, sort_keys=True) == snapshot  # pure
+
+
+@pytest.mark.parametrize(
+    "name, gone",
+    [
+        ("drop-format", {"format"}),
+        ("drop-pattern", {"pattern"}),
+        ("drop-items-bounds", {"minItems", "maxItems"}),
+    ],
+)
+def test_a_drop_variant_removes_only_its_keywords(name: str, gone: set[str]) -> None:
+    sent = strict.strict_schema(SCHEMAS["source_context"])
+    assert gone <= sent_keys(sent)
+    assert sent_keys(strict.bisect_variant(name, sent)) == sent_keys(sent) - gone
+
+
+def test_the_null_union_variant_merges_two_branch_null_unions_and_inlines_a_ref() -> None:
+    definition = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
+        "additionalProperties": False,
+    }
+    schema: dict[str, Any] = {
+        "$defs": {"D": definition},
+        "type": "object",
+        "properties": {
+            "r": {"anyOf": [{"$ref": "#/$defs/D"}, {"type": "null"}], "title": "R"},
+            "d": {"anyOf": [{"format": "date", "type": "string"}, {"type": "null"}]},
+            "e": {"anyOf": [{"enum": ["a"], "type": "string"}, {"type": "null"}]},
+            "three": {"anyOf": [{"type": "number"}, {"type": "string"}, {"type": "null"}]},
+            "union": {"anyOf": [{"$ref": "#/$defs/D"}, {"type": "string"}]},
+            "typed": {"anyOf": [{"type": ["string", "number"]}, {"type": "null"}]},
+        },
+    }
+    merged = strict.bisect_variant("any-of-null-to-type-union", schema)["properties"]
+    assert merged["r"] == {**definition, "type": ["object", "null"], "title": "R"}
+    assert merged["d"] == {"format": "date", "type": ["string", "null"]}
+    assert merged["e"] == {"enum": ["a"], "type": ["string", "null"]}
+    for name in ("three", "union", "typed"):  # not a two-branch union with one simple type
+        assert merged[name] == schema["properties"][name]
+    sent = strict.bisect_variant(
+        "any-of-null-to-type-union", strict.strict_schema(SCHEMAS["source_context"])
+    )
+    assert not [
+        n for n in nodes(sent) if len(n.get("anyOf", ())) == 2 and {"type": "null"} in n["anyOf"]
+    ]
+
+
+def test_the_split_variant_rewrites_mixed_enums_and_long_type_arrays() -> None:
+    schema: dict[str, Any] = {
+        "properties": {
+            "m": {"enum": ["a", 1, None], "title": "M"},
+            "t": {"type": ["string", "number", "null"], "title": "T"},
+            "ok": {"type": ["string", "null"], "enum": ["x"]},
+            "odd": {"enum": ["a", [1]]},
+        }
+    }
+    split = strict.bisect_variant("split-mixed-types", schema)["properties"]
+    assert split["m"] == {
+        "title": "M",
+        "anyOf": [
+            {"type": "string", "enum": ["a"]},
+            {"type": "integer", "enum": [1]},
+            {"type": "null"},
+        ],
+    }
+    assert split["t"] == {
+        "title": "T",
+        "anyOf": [{"type": "string"}, {"type": "number"}, {"type": "null"}],
+    }
+    assert split["ok"] == schema["properties"]["ok"]
+    assert split["odd"] == schema["properties"]["odd"]  # a non-scalar value: left as it is
+
+
+def test_open_objects_are_counted_never_rewritten_and_absent_from_the_step_schemas() -> None:
+    schema: dict[str, Any] = {
+        "properties": {
+            "free": {"type": "object", "additionalProperties": {"type": "number"}},
+            "closed": {"type": "object", "properties": {}, "additionalProperties": False},
+        }
+    }
+    assert strict.open_objects(schema) == 1
+    assert strict.bisect_variant("open-object", schema) == schema
+    assert all(strict.open_objects(strict.strict_schema(model)) == 0 for model in SCHEMAS.values())
+
+
+@pytest.mark.parametrize("step", sorted(SCHEMAS))
+def test_the_all_variant_is_every_rewrite_at_once(step: str) -> None:
+    sent = strict.strict_schema(SCHEMAS[step])
+    composed = sent
+    for name in strict.BISECT_VARIANTS:
+        if name not in {"open-object", "all"}:
+            composed = strict.bisect_variant(name, composed)
+    every = strict.bisect_variant("all", sent)
+    assert every == composed
+    assert not {"oneOf", "discriminator", "format", "pattern", "minItems", "maxItems"} & sent_keys(
+        every
+    )
+
+
+def test_an_unknown_variant_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown bisect variant"):
+        strict.bisect_variant("drop-everything", {})
+
+
 def _source_context_document(tmp_path: Path) -> dict[str, Any]:
     payload = replay_support.cp1_seed_payloads(tmp_path)["source_context"]
     document: dict[str, Any] = json.loads(payload)

@@ -27,6 +27,7 @@ GENERATION_ID = re.compile(r"gen-[A-Za-z0-9_-]{1,200}")
 KEY_TIMEOUT_SECONDS = 30.0
 DEFAULT_TIMEOUT_SECONDS = 600.0
 READ_CHUNK_BYTES = 64 * 1024
+PROVIDER_DETAIL_CHARS = 500  # the upstream message kept in `error_detail` (task 2.11)
 USAGE_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
@@ -125,6 +126,9 @@ class ChatResult:
     usage: Usage
     latency_s: float
     error_detail: str | None
+    # OpenRouter's `error.metadata.provider_error_code` of a non-2xx reply, when it is text
+    # (probe-5b OpenAI: "invalid_json_schema"); None otherwise.
+    provider_error_code: str | None = None
 
 
 def _count(value: object) -> int | None:
@@ -346,7 +350,11 @@ def _classify(request: ChatRequest, response: Response, key: str, latency: float
         return _failed(failure, message or None, "insufficient_credit")
     if not success:
         provider = _provider_detail(error, key)
-        return _failed(failure, "; ".join(part for part in (message, provider) if part) or None)
+        explained = "; ".join(part for part in (message, provider) if part) or None
+        return replace(
+            _failed(failure, explained),
+            provider_error_code=_text(_as_dict(error.get("metadata")).get("provider_error_code")),
+        )
     choices = document.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else None
     if not isinstance(choice, dict):
@@ -376,7 +384,8 @@ def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
 
     OpenRouter's `message` is generic ("Provider returned error"); the reason (probe-5b: "Invalid
     schema for response_format 'source_context' ...") is only inside `raw`. A raw JSON text gives
-    its `error.message` (or `message`); any other raw text is kept as it is."""
+    its `error.message` (or `message`); any other raw text is kept as it is, up to
+    `PROVIDER_DETAIL_CHARS` characters (an HTML error page must not flood reports)."""
     metadata = _as_dict(error.get("metadata"))
     raw = _text(metadata.get("raw"))
     if raw is None or not raw.strip():
@@ -388,6 +397,8 @@ def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
         document = {}
     inner = _as_dict(document.get("error")) or document
     text = _text(inner.get("message")) or text
+    if len(text) > PROVIDER_DETAIL_CHARS:
+        text = f"{text[:PROVIDER_DETAIL_CHARS]} [truncated from {len(text)} chars]"
     label = " ".join(
         name
         for name in (
