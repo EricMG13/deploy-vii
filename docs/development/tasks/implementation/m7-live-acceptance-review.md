@@ -74,3 +74,16 @@ enforced, and the ledger rule is reconciliation of spend, not analysis.
 Not verified: live model uptake of the new prompt rules and mismatch text (E1 answers it);
 how long the account-usage counter takes to settle (the reconcile-time recheck refuses, it
 does not wait).
+
+## 7.0c Configurable request deadline
+
+E1 batch `e1-cp1-2` lost the CP-1 `financials` call to the fixed 600-second request deadline,
+because a 64,000-token completion from Sol (about 70 tokens a second) can need 15 minutes.
+`deploy-vii live` now takes `--timeout SECONDS` (and `make live-module` takes `TIMEOUT=`), default
+600, applied to each socket operation and the whole call of every model, and printed in the report
+header.
+
+Evidence: batch `e1-cp1-2`: `financials` timed out at 600 s with a 64,000-token budget;
+reconciled at US$0 (the provider did not bill the abandoned generation).
+
+Not verified: a live call under a longer deadline (the coordinator reruns E1).

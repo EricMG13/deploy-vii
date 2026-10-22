@@ -61,7 +61,7 @@ diff:
 DIRECTORY ?= artifacts/execution
 LIVE = uv run --locked python -m deploy_vii live
 # live-module pass-through (task 7.0): each option is sent only when its variable is set.
-LIVE_MODULE_OPTIONS = $(if $(MODELS), --models "$(MODELS)")$(if $(MAX_TOKENS), --max-tokens "$(MAX_TOKENS)")$(if $(BATCH_ID), --batch-id "$(BATCH_ID)")$(if $(SEED), --seed "$(SEED)")
+LIVE_MODULE_OPTIONS = $(if $(MODELS), --models "$(MODELS)")$(if $(MAX_TOKENS), --max-tokens "$(MAX_TOKENS)")$(if $(TIMEOUT), --timeout "$(TIMEOUT)")$(if $(BATCH_ID), --batch-id "$(BATCH_ID)")$(if $(SEED), --seed "$(SEED)")
 
 replay:
 	uv run --locked pytest tests/product/test_replay.py -q -rs

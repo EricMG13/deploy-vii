@@ -55,8 +55,15 @@ def test_live_module_passes_models_max_tokens_batch_id_and_seed_through() -> Non
 def test_live_module_without_the_optional_variables_sends_no_such_option() -> None:
     done = make("live-module", "MODULE=CP-0", "CAP=2")
     assert done.returncode == 0
-    for option in ("--models", "--max-tokens", "--batch-id", "--seed"):
+    for option in ("--models", "--max-tokens", "--timeout", "--batch-id", "--seed"):
         assert option not in done.stdout
+
+
+def test_live_module_passes_timeout_through() -> None:
+    """Task 7.0c: a longer request deadline for a large completion budget."""
+    done = make("live-module", "MODULE=CP-1", "CAP=3", "MAX_TOKENS=64000", "TIMEOUT=1800")
+    assert done.returncode == 0
+    assert '--max-tokens "64000" --timeout "1800"' in done.stdout
 
 
 def test_makefile_never_names_the_key() -> None:

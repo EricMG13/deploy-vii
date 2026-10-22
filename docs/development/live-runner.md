@@ -198,7 +198,12 @@ section). Common options of the four batch commands:
 (saved models JSON; without it the catalog is fetched), `--report-directory`, `--max-tokens N`
 (task 2.10: the completion budget of every call in the batch, every model alike, default 16000,
 `runner.DEFAULT_MAX_TOKENS`; a positive integer, no per-model syntax; it goes through the context
-fit below, into each manifest's `budgets.max_tokens` and into the report header). There is no key
+fit below, into each manifest's `budgets.max_tokens` and into the report header), `--timeout SECONDS` (task
+7.0c: the request deadline of every call, every model alike, default 600,
+`client.DEFAULT_TIMEOUT_SECONDS`; a positive finite number; into each manifest's
+`budgets.timeout_s` and `budgets.deadline_s` and into the report header as `- Timeout:`; Sol at about
+70 completion tokens a second needs up to 15 minutes for 64,000 tokens, so raise it with the budget;
+`make live-module` takes `TIMEOUT=`). There is no key
 option: the runner reads the DC-7 file from settings at dispatch, taking the token at
 `credential_token_index`.
 
@@ -680,7 +685,8 @@ at the per-operation timeout, so the overrun past the deadline is at most one su
 An HTTP error status body is read as before (whole, per-operation timeout only): it arrives at
 once, without keep-alive padding.
 Unlike a 504-in-200, an expiry keeps no body and so no generation id: `live reconcile` reports it
-unresolved ("no provider_request_id recorded") until the coordinator settles it. Each manifest
+unresolved ("no provider_request_id recorded") until the coordinator settles it. The deadline is per call, set by `--timeout` (default 600 s): each socket operation and the
+whole-call wall clock both use it. Each manifest
 records `budgets.deadline_s` beside `budgets.timeout_s` (the same value: whole call, and each
 socket operation).
 

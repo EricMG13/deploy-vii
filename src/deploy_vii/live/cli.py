@@ -10,6 +10,7 @@ a summary table only: no response bodies, prompts, source text or validator word
 import argparse
 import hashlib
 import json
+import math
 import random
 import re
 import secrets
@@ -32,7 +33,14 @@ from deploy_vii.live.catalog import (
     parse_selection,
     utc_stamp,
 )
-from deploy_vii.live.client import ChatClient, Request, Response, TransportError, urllib_transport
+from deploy_vii.live.client import (
+    DEFAULT_TIMEOUT_SECONDS,
+    ChatClient,
+    Request,
+    Response,
+    TransportError,
+    urllib_transport,
+)
 from deploy_vii.live.cohort import ProxyResult, credit_state
 from deploy_vii.live.corpus import CORPUS_ROOT, REPOSITORY_ROOT, CorpusError, write_entry
 from deploy_vii.live.credential import CredentialError
@@ -229,6 +237,16 @@ def _max_tokens(text: str) -> int:
     return value
 
 
+def _timeout_s(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("--timeout must be a positive, finite number of seconds")
+    return value
+
+
 def _models(text: str) -> tuple[ModelSelection, ...]:
     try:
         return parse_selection(text)
@@ -291,6 +309,13 @@ def configure(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MAX_TOKENS,
         help=f"completion budget per call, every model (default {DEFAULT_MAX_TOKENS}); "
         "a model whose context or completion limit cannot hold it is ineligible",
+    )
+    common.add_argument(
+        "--timeout",
+        type=_timeout_s,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help="request deadline per call in seconds, every model (default 600): each socket "
+        "operation and the whole call",
     )
     common.add_argument("--catalog", type=Path, help="saved models JSON; else fetched")
     common.add_argument("--report-directory", type=Path, default=REPORT_DIRECTORY)
@@ -422,6 +447,7 @@ def _run_cell(
     bytes_per_token: Decimal,
     effort: str,
     max_tokens: int,
+    timeout_s: float,
     evidence: Path,
     batch: Batch,
     rejections: Mapping[tuple[str, str, str], str],
@@ -442,7 +468,7 @@ def _run_cell(
                 return
             current = module
         result = dispatch(
-            StepSpec(step_id, cell.case_id, sources, max_tokens=max_tokens),
+            StepSpec(step_id, cell.case_id, sources, max_tokens=max_tokens, timeout_s=timeout_s),
             store=store,
             ticket_id=ticket,
             ledger=ledger,
@@ -606,6 +632,7 @@ def render_report(
     batch: Batch,
     default_effort: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
     """Summary tables only; counts come from the registry and the retained results."""
     state = ledger.state()
@@ -647,6 +674,7 @@ def render_report(
         f"{pool.looked_up_at}",
         f"- Registry modules with a live step contract: {len(live)} of {len(modules())}",
         f"- Max tokens: {max_tokens} per call (every model)",
+        f"- Timeout: {timeout_s} s per call (every model)",
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
         f"- Stopped: {batch.stopped or 'no'}",
@@ -855,6 +883,7 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 bytes_per_token=settings.prompt_bytes_per_token_lower_bound,
                 effort=default_effort,
                 max_tokens=args.max_tokens,
+                timeout_s=args.timeout,
                 evidence=root / batch_id,
                 batch=batch,
                 rejections=rejections,
@@ -878,6 +907,7 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 batch,
                 default_effort,
                 args.max_tokens,
+                args.timeout,
             ),
             sys.exception(),
         )

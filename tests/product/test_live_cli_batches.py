@@ -792,6 +792,36 @@ def test_a_non_positive_max_tokens_is_refused_by_the_parser(value: str) -> None:
             parser.parse_args([*word, "--cap", "1", "--directory", "d", "--max-tokens", value])
 
 
+def _deadlines(rig: Rig, batch: str) -> set[tuple[float, float]]:
+    manifests = list((rig.root / "artifacts" / "model-tests" / batch).rglob("manifest.json"))
+    assert manifests
+    budgets = [json.loads(m.read_text())["budgets"] for m in manifests]
+    return {(b["timeout_s"], b["deadline_s"]) for b in budgets}
+
+
+def test_timeout_reaches_every_request_manifest_and_the_report_header(rig: Rig) -> None:
+    """Task 7.0c: the request deadline is per call, every model; the default stays 600 s."""
+    argv = [*rig.argv("probe"), *four_models(rig), "--models", FOUR, "--timeout", "1800"]
+    assert rig.run(argv, Responder(rig.review)) == 0
+    assert _deadlines(rig, "b1") == {(1800.0, 1800.0)}
+    assert "- Timeout: 1800.0 s per call (every model)" in rig.report()
+    argv = [*rig.argv("probe", batch="b2"), *four_models(rig), "--models", FOUR]
+    assert rig.run(argv, Responder(rig.review)) == 0
+    assert _deadlines(rig, "b2") == {(600.0, 600.0)}
+    assert "- Timeout: 600.0 s per call (every model)" in rig.report("b2")
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf", "slow"])
+def test_a_bad_timeout_is_refused_by_the_parser(value: str) -> None:
+    parser = argparse.ArgumentParser()
+    cli.configure(parser)
+    for word in (["probe"], ["module", "--module", "CP-0"], ["regression"], ["canary"]):
+        assert parser.parse_args([*word, "--cap", "1", "--directory", "d"]).timeout == 600.0
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args([*word, "--cap", "1", "--directory", "d", "--timeout", value])
+        assert refused.value.code == 2
+
+
 def test_one_batch_with_an_ineligible_model_a_refused_cp1_and_a_deadline_hold_then_reconcile(
     rig: Rig,
 ) -> None:
