@@ -3,8 +3,8 @@
 `deploy_vii.execution.Execution` is the local execution substrate. The `execution`
 CLI provides trusted CP-0 review submission and ordered CP-1 stage submission.
 The standalone `cp0` delivery command remains separate. Live model calls go through
-the runner (`deploy_vii.live`, [live-runner.md](live-runner.md)); CP-1 final module
-projection is pending. A model-supplied success flag is never a validator. Synthetic protocol tests do not qualify analytical judgments.
+the runner (`deploy_vii.live`, [live-runner.md](live-runner.md)); CP-1 is settled by
+promotion (below, task 6.4). A model-supplied success flag is never a validator. Synthetic protocol tests do not qualify analytical judgments.
 
 - `Execution.create(directory, pack)` starts a new store for a validated frozen
   pack. Use `load_pack` first when reading an on-disk prepared pack. Run identity,
@@ -99,8 +99,11 @@ references that Python resolves and spells. The model never writes a number.
   100-exponent bound) plus the amount's scale label, and marks provenance with the
   fact's report-wide id (`K#` before `C#`/`S#`, `G#` for gaps). It raises on any issue.
   That raise is a deliberate backstop: the main path settles a bad claim `rejected` through
-  `candidate_issues` before it can be accepted, while the standalone `deliver_cp0` path,
-  which does not use the journal, stops at render instead. Stored modules: a module
+  `candidate_issues` before it can be accepted, and the standalone `deliver_cp0` path, which
+  does not use the journal, checks `prose_issues` first and publishes a `rejected` delivery
+  (task 6.4: `rejected.json` with the issues, a candidate page showing CP-0 rejected with no
+  findings, receipt `status: rejected`, no accepted view or page) instead of raising at
+  render. Stored modules: a module
   accepted before this rule whose claims carry free figures no longer renders; a stored
   `[E1]`-style token parses as a chip and fails at render as an unresolved reference; a
   stored `[see note]` (not an identifier) fails when the module is parsed, as malformed.
@@ -150,6 +153,13 @@ references that Python resolves and spells. The model never writes a number.
   loads the blob, rejects it if its module id, inputs, commands or (for a live head)
   status differ from the head, and applies the status and notes, which reproduces the
   module the journal formerly kept inline (stale limitations included).
+- `Head.qualification` (task 6.4) holds the plan's four statuses of the settled artifact
+  (`implementation`, `analytical_qualification`, `rendering_acceptance`,
+  `native_host_qualification`) where a promotion recorded them; CP-1 promotion records
+  `implemented` and three `unrun`. `implemented` means the artifact passed every implemented
+  structural gate, not the module's coverage-map row. A blocked result never carries them.
+  When absent the key is omitted from the JSON, so every head written before it keeps its
+  bytes and snapshot hashes; `execution/5` is unchanged and nothing is migrated.
 - What is loaded, and when. `current_inputs`, `invalidate`, `blocked_ancestors` and
   `begin` read only snapshot fields (no blob). `settle` loads the result blob of each
   directly bound upstream head, only when a candidate validates, to carry its
@@ -234,11 +244,49 @@ identity-confirmed source produces rejection, then blocking if repair also fails
 4. `readiness`: validate `DownstreamReview` against those exact inputs, then retain
    the canonical downstream report with historical Model readiness distinct.
 
-The final step leaves the ticket pending. It does not accept CP-1 or CP-MODEL.
-Source and constructed statement previews are available through `statement-preview`;
-see [table projection](report-tables.md). Canonical Markdown, complete Workbench
-projection, final module validation and promotion remain pending. Historical Model
-calculations are not the CP-MODEL workbook export. Every analytical qualification remains `unrun`.
+The final step leaves the ticket pending. It does not accept CP-1 or CP-MODEL;
+promotion (below) does. Source and constructed statement previews are available through
+`statement-preview`; see [table projection](report-tables.md). Complete Workbench
+projection remains pending (task 6.5). Historical Model calculations are not the CP-MODEL
+workbook export. Every analytical qualification remains `unrun`.
+
+### CP-1 promotion (task 6.4)
+
+`promote_cp1(store, ticket_id, review_json)` (CLI `cp1-promote --ticket T --review FILE`)
+retains a `QualityReview` (judgments only, decision 0008: materiality, lineage within each
+ceiling, findings) as a fifth step, `quality`, of the same attempt and repair budget
+(`CP1_PROMOTION`), then settles CP-1 with `finish`. The QA inputs to bind a review to are
+printed by `cp1-quality-inputs --ticket T`. CP-1 is promoted only when every condition holds:
+
+1. CP-0 authorised it: CP-0's T8 `exact_command` for CP-1 is `Run CP-1` (`current_inputs`
+   raises `NotAuthorized` before anything is retained otherwise);
+2. the module is accepted: the four stages are valid and each recomputes to its retained
+   output, and the candidate passes `candidate_issues` and equals its recomputation;
+3. the QA lineage ceilings hold (6.3): the review binds the current QA inputs, assesses every
+   claim and evidence reference once and upgrades none; QA is not `Blocked`;
+4. prose runs resolve (6.2): every claim resolves (the envelope writer and `prose_issues`);
+5. the handoff verifies: the register envelope's `canonical-handoff` slot is present and the
+   promoted envelope (with QA and the journal inputs) round-trips.
+
+A failed condition makes the `quality` step invalid with its issues, so the attempt settles
+`rejected` (attempt 0) or `blocked` (the repair), by status rather than by exception; a
+Python exception (a retained stage that no longer recomputes) leaves the step pending. A
+passing candidate is the registers' module bound to the attempt's journal inputs, without the
+register-candidate note and, unless QA passed, with the own limitation
+`CP-1 QA <status>: confidence <score> (<band>)`. Promotion adds no other limitation, so
+`accepted` stays reachable. Settlement then follows the M4 rules (decision 0007): own
+limitations, a blocked ancestor or a synthetic run make it `restricted`, otherwise
+`accepted`. The register projection's own subartifact notes are own limitations, so the
+fixture CP-1 settles `restricted`. The head records the four statuses. A crash between the step and the
+settlement resumes from the retained valid step (the same review), as for CP-0. The retained
+step output is `CP1Handoff` (`cp1-handoff/1`: registers hash, QA report, gap-register
+limitations, candidate, envelope and sidecar hashes). `envelope --module CP-1 --output DIR`
+exports the promoted head's envelope ([canonical envelope](canonical-tables.md)).
+
+A data-driven QA `Blocked` (for example a blocked narrative) is refused like any other failed
+condition, so it consumes the attempt and its repair before CP-1 settles `blocked`; a direct
+`blocked` settlement of a valid but QA-Blocked candidate would change the M4 settlement rule
+and is not implemented.
 
 CP-MODEL's artifact (decision 0006 DC-5) is the HTML Model destination plus the calculation
 JSON of the accepted CP-1 financial model; the r14 XLSX workbook export is deferred and
@@ -265,5 +313,5 @@ against one snapshot before writing. Exact retained output and current upstream
 hashes must match. The candidate contains all canonical register table IDs with
 context-aware readiness, preserving the journal and its pending ticket. See
 [register projection and receipt](canonical-tables.md). Findings and evidence trace
-are now projected with coverage; the final envelope, QA and
-final acceptance remain pending.
+are projected with coverage. The preview reads the first four steps, so it still works
+after promotion; the canonical envelope and promotion are above.

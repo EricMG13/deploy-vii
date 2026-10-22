@@ -95,8 +95,15 @@ divergence from r14 was found.
 - one slot per narrative dimension (present when explicitly assessed, including evidence-backed
   not-applicable), per required event/funding story, plus funding, analytical findings and the
   source gate;
-- `canonical-handoff`, always absent: the final canonical envelope and handoff verification do not
-  exist yet;
+- `canonical-handoff` (task 6.4): present when the canonical envelope of these registers
+  round-trips (`envelope.handoff_issues(register_envelope(registers))` is empty: written, read
+  back, every r14 section, cell, evidence marker, prose run and footer hash verified against its
+  sidecar); absent otherwise, with the first issues as its rationale (`Canonical envelope does
+  not verify: ...`). The register envelope carries no QA section, because QA is computed from
+  this slot, and no journal binding. The slot is a deterministic function of the registers, so an
+  analyst can bind a review to the inputs before promotion. The promoted envelope, which adds QA
+  and the journal inputs, is verified again at promotion; a failure there refuses promotion
+  ([execution](execution.md)) but does not change these inputs;
 - one candidate claim per narrative finding, listing the distinct evidence IDs referenced across
   its evidence, risk and credit passages in first-appearance order;
 - source gate pass, partial or fail from candidate, restricted or any other context status;
@@ -141,9 +148,10 @@ Shape validation of a report against its own embedded inputs is not authenticati
 
 ## Remaining
 
-The canonical Markdown envelope and handoff (and the `canonical-handoff` slot), the analytical
-review that supplies lineage and materiality judgments, final promotion, CP-1A and live or
-native-host qualification remain pending. The Python arithmetic is a key-area calculation; its
-rewrite tournament kept the incumbent (see the review).
+The analytical review that supplies lineage and materiality judgments (a live model or analyst
+QA review), CP-1A and live or native-host qualification remain pending. The envelope and the
+promotion that consumes a `QualityReview` landed in task 6.4
+([canonical envelope](canonical-tables.md), [execution](execution.md)). The Python arithmetic is
+a key-area calculation; its rewrite tournament kept the incumbent (see the review).
 
 Review: [confidence review](tasks/implementation/quality-review.md).

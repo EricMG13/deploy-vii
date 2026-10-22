@@ -192,3 +192,88 @@ parses as a chip and fails at render as unresolved, `[see note]` fails at parse 
 malformed, and a stored module whose claims carry free figures no longer renders.
 `N of N` admits any such pair ("2 of 3 covenants"), as page and section labels admit any
 number after their word.
+
+## 6.4 Envelope and handoff
+
+Task `dvii-impl-m6-envelope`. Plan M6 6.4: the canonical Markdown envelope (r14 ordered
+sections, `null` in the transport only), handoff verification, the reader, and CP-1 promotion
+under the M4 status rules and the decision 0008 contract shape.
+
+What changed:
+
+- `envelope.py` (new): `Envelope` (`envelope/1`, the JSON sidecar: run, module, registers hash,
+  gap-register limitations, QA report, journal inputs), `write_envelope`, `read_envelope`,
+  `envelope_issues`, `handoff_issues`, `register_envelope`, `resolved_claims`. Section order is
+  the r14 CP-1 "17-Section Output" (`CP-1_SCHEMA_REFERENCE.md`, pinned Deploy VI `bd71346`);
+  the table placement, empty-section lines, cell spelling (`∅ G#`, never `null`), marker
+  grammar, Evidence list and Provenance footer are in
+  [canonical-tables.md](../../canonical-tables.md) "Canonical envelope".
+- `cp1_quality.py`: the `canonical-handoff` slot is present when the register envelope
+  round-trips and absent with the first issues otherwise (it was always absent). The register
+  envelope has no QA section, since QA is computed from this slot.
+- `cp1_workflow.py`: `cp1_registers`, `promote_cp1` (the QA review retained as a fifth step,
+  `quality`, of the same attempt and budget), `CP1Handoff` (`cp1-handoff/1`, the step output)
+  and `write_cp1_envelope`. A failed condition settles the attempt `rejected` (or `blocked` on
+  the repair); it never promotes. `cp1_register_preview` shares the stage recomputation and
+  reads the first four steps.
+- `execution.py`: `Qualification` (the plan's four statuses) on `Head.qualification`, omitted
+  from the JSON when absent so earlier heads keep their bytes (`execution/5` unchanged);
+  `finish(..., qualification=)`; a blocked result never carries it.
+- `execution_cli.py`: `cp1-quality-inputs`, `cp1-promote`, `envelope --module CP-1`.
+- Carried from 6.2: `register_view` prints resolved claim text (`resolved_claims`), and
+  `deliver_cp0` publishes a `rejected` delivery for claims that do not resolve instead of
+  raising at render.
+- Carried from 6.1: decision 0007's CP-MODEL line now states how 6.1 resolved the upstream
+  edge; the coverage map's CP-MODEL label reads "task 6.5" (not "M6.5"), its adaptation list
+  records DC-5, and the CP-1 row names this task.
+- Carried from 6.3: `Partial`/`Conflicted` statuses still cap at Calculated; recorded as
+  accepted (coordinator), unchanged here.
+- Small refactors: `table_markdown.null_confusable` (the interface null-marker rule, shared by
+  both writers), `canonical_tables.REGISTER_NOTE` (the register note promotion removes).
+
+Promotion conditions: CP-0 `Run CP-1`; the four stages valid and recomputing; the review binds
+the current QA inputs and upgrades no ceiling; QA not `Blocked`; claims resolve; the
+`canonical-handoff` slot present and the promoted envelope verifying. Settlement is decision
+0007's: the fixture CP-1 settles `restricted` from its own register limitations. Promotion
+adds only the `CP-1 QA <status>` line when QA did not pass, so `accepted` stays reachable.
+
+Deviations from the brief:
+
+- Edited outside the listed paths: `cp1_quality.py` (the slot lives there, not in
+  `quality.py`), `canonical_tables.py` and `table_markdown.py` (constant and helper
+  extraction, no behaviour change), `execution_cli.py`, `docs/development/product-cli.md`
+  (`execution-cli.md` does not exist; the execution commands are documented there),
+  `docs/decisions/0007-degradation-and-status-semantics.md` and
+  `docs/methodology/r14-coverage.json` (the 6.1 carried items), and the tests
+  `test_cp1_quality.py` (two assertions of the always-absent slot) and
+  `test_narrative_projection.py` (its browser test asserted the raw claim text in the preview).
+- r14's 17 sections have no Analysis H2; the findings open section 14, Evidence Trace.
+- The QA review reaches the journal as a fifth step rather than a new CP-1 stage, so the live
+  runner's four-step sequence is untouched.
+- A data-driven QA `Blocked` (the partial fixture's blocked narrative) is refused like any
+  failed condition, so it consumes the attempt and its repair before CP-1 settles `blocked`. A
+  direct `blocked` settlement would change the M4 settlement rule; not done, flagged.
+
+Evidence: `tests/product/test_envelope.py` (the 17 ordered H2s, absent and empty sections,
+gap cells and sidecar nulls, resolved claims and the Evidence list, determinism by hash,
+`test_read_of_write_is_the_envelope` (hypothesis), a changed digit, a dropped and a reordered
+section, an unresolved marker, a footer hash, bare figures in Markdown and sidecar, an
+unplaced table, gap-like known text, hostile titles, gap-like QA text, the fixture registers
+round trip and a statement-cell tamper), `tests/product/test_cp1_workflow.py` (promotion,
+the four statuses and export; lineage upgrade, unbound review, critical finding, blocked
+narrative, failed and absent handoff, an unresolved claim, CP-0 not authorising, four stages
+required, crash and resume, CLI), `test_cp1_quality.py` (slot present and absent with reason),
+`test_execution.py` (head statuses omitted until recorded), `test_delivery.py` (rejected
+delivery) and `test_register_view.py` (resolved preview text). Causal checks: the delivery,
+register-preview, slot and hostile-title tests fail against the base code; the two
+confidence-review tests failed before their fixes.
+
+Reviews: confidence review fixed two defects (the promotion note made `accepted` unreachable;
+the reader read gap-like QA text as markers). Rewrite tournament (inline, no subagents) on the
+reader and on the promotion rule: the incumbent held both times; the speed challengers were
+disqualified (one dropped the codec limits on the happy path, one changed the QA inputs hash).
+
+Not verified: real Caesars packs (absent from the worktree, so `make replay` skips them as
+`pack-absent`); envelope size and timing on a real-size pack (the fixture is 45k facts, 3.5 MB
+Markdown, a 43 MB sidecar, about 22 s per promotion); the 20,000-row codec limit against real
+gap counts; live model QA reviews; rendering of the envelope by downstream consumers; Linux CI.

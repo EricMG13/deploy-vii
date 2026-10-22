@@ -149,6 +149,7 @@ class _Block:
     heading: str | None  # None: the section's lead text, before any H3
     body: str
     table: bool
+    cells: bool = False  # a module table, whose unsettled cells carry gap markers
 
 
 @dataclass(frozen=True)
@@ -363,6 +364,7 @@ def _sections(envelope: Envelope) -> tuple[_Section, ...]:
                 f"{table_id} — {markdown_cell(tables[table_id].title)}",
                 _table(tables[table_id], facts, gaps, markers),
                 table=True,
+                cells=True,
             )
             if table_id in tables
             else _Block(table_id, f"Not produced: {table_id} is not in this module.", table=False)
@@ -473,7 +475,11 @@ def _table_issues(where: str, actual: MarkdownTable, expected: MarkdownTable) ->
 def _block_issues(
     where: str, body: str, expected: _Block, tables: dict[str, MarkdownTable]
 ) -> list[str]:
-    """Compare one parsed block with the sidecar's; a readable table is kept in ``tables``."""
+    """Compare one parsed block with the sidecar's.
+
+    A readable module table or the Evidence list is kept in ``tables``: only module cells
+    carry gap markers, so QA or provenance text that looks like one is never read as one.
+    """
     if not expected.table:
         if body == expected.body:
             return []
@@ -486,7 +492,8 @@ def _block_issues(
     actual = _decode(body)  # read even when identical: the codec's limits still apply
     if isinstance(actual, str):
         return [f"{where}: unreadable table: {actual}"]
-    tables[where] = actual
+    if expected.cells or expected.heading == EVIDENCE_LIST:
+        tables[where] = actual
     if body == expected.body:
         return []
     wanted = _decode(expected.body)
@@ -525,10 +532,13 @@ def _marker_issues(
     return issues
 
 
-def _footer_issues(tables: dict[str, MarkdownTable], envelope: Envelope) -> list[str]:
+def _footer_issues(
+    parsed: list[tuple[str, list[tuple[str | None, str]]]], envelope: Envelope
+) -> list[str]:
     """The provenance footer's hashes are the sidecar's, recomputed here."""
-    table = tables.get(f"Module Handoff / {PROVENANCE}")
-    if table is None:
+    blocks = dict(next((b for n, b in parsed if n == "Module Handoff"), []))
+    table = _decode(blocks.get(PROVENANCE) or "")
+    if isinstance(table, str):
         return ["Provenance footer is missing or unreadable"]
     footer = dict(row for row in table.rows if len(row) == 2)
     quality = envelope.quality
@@ -586,7 +596,7 @@ def envelope_issues(markdown: str, sidecar: str) -> tuple[str, ...]:
             where = f"{section.name} / {heading}" if heading else section.name
             issues.extend(_block_issues(where, body, block, tables))
     issues.extend(_marker_issues(parsed, tables))
-    issues.extend(_footer_issues(tables, envelope))
+    issues.extend(_footer_issues(parsed, envelope))
     bound = prose.bind(envelope.module.facts)
     names_ = (envelope.run.issuer_name,)
     for claim in envelope.module.claims:  # no bare figure survives in a sidecar claim

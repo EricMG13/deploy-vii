@@ -101,12 +101,32 @@ uv run --locked deploy-vii execution --directory runs/example/execution-1 replac
 An interruption consumes the attempt. `replace-pack` requires no pending ticket
 and identical run identity/scope, stales heads, and retains old snapshots and repair
 counts. It does not reconcile provider spend. See [execution contracts](execution.md)
-for format compatibility and the still-pending CP-1 delivery/promotion boundary.
+for format compatibility.
+
+### CP-1 promotion and the canonical envelope (task 6.4)
+
+After the four valid CP-1 stages:
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 cp1-quality-inputs --ticket TICKET
+uv run --locked deploy-vii execution --directory runs/example/execution-1 cp1-promote --ticket TICKET --review runs/example/quality-review.json
+uv run --locked deploy-vii execution --directory runs/example/execution-1 envelope --module CP-1 --output runs/example/envelope-1
+```
+
+`cp1-quality-inputs` recomputes the stages and prints the `QualityInputs` JSON a
+`QualityReview` must bind (`inputs_sha256`). `cp1-promote` retains the review as the
+`quality` step and prints the finished attempt with its settled module; a review that
+fails a promotion condition finishes the attempt `rejected` (or `blocked` on the repair)
+with its issues. Repeat the identical command to resume after a crash. `envelope` writes
+`envelope.md`, `envelope.json` and `complete.json` for the promoted CP-1 head into a new
+directory and prints the `envelope.md` path; it refuses an existing directory and a
+missing, stale or blocked head. Conditions and formats: [execution](execution.md) and
+[canonical envelope](canonical-tables.md).
 
 After the valid financial stage, `statement-preview --ticket TICKET --output
 runs/example/statements-1` creates a source and constructed-period statement
 candidate without settling the attempt. See [table projection and limits](report-tables.md);
-complete CP-1 delivery remains pending.
+CP-1 delivery is the promoted envelope above.
 
 `interface-preview --ticket TICKET --output runs/example/interface-1` also adds
 Model source registers, contextual schedules and verified Markdown table previews.

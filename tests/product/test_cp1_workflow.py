@@ -10,7 +10,6 @@ from deploy_vii.canonical_tables import REGISTER_NOTE
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
     PROMOTED,
-    PROMOTED_NOTE,
     CP1Handoff,
     FinancialStage,
     cp1_register_preview,
@@ -124,7 +123,7 @@ def test_promotion_settles_by_m4_rules_and_records_the_four_statuses(
         "native_host_qualification": "unrun",
     }
     module = store.head_module(head)
-    assert module.limitations[0] == PROMOTED_NOTE and REGISTER_NOTE not in module.limitations
+    assert REGISTER_NOTE not in module.limitations
     assert any(t.startswith("CP-1 QA Restricted: confidence ") for t in module.limitations)
     assert module.inputs[: len(finished.inputs)] == finished.inputs
     handoff = CP1Handoff.model_validate_json(step_text(store, finished.steps[-1]))
@@ -342,3 +341,23 @@ def test_envelope_export_requires_a_promoted_cp1_head(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no accepted or restricted head"):
         write_cp1_envelope(store, tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+def test_promotion_adds_no_limitation_beyond_a_non_passed_qa_line(
+    journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    """Accepted stays reachable (decision 0007): promotion itself is not an own finding."""
+    from deploy_vii.cp1_workflow import _candidate
+    from deploy_vii.quality import assess_quality
+
+    store, ticket, inputs = journal
+    registers = cp1_registers(store, ticket)
+    attempt = next(a for a in store.read().attempts if a.ticket_id == ticket)
+    quality = assess_quality(inputs, at_ceiling(inputs))
+    passed = quality.model_copy(
+        update={"confidence": quality.confidence.model_copy(update={"qa_status": "Passed"})}
+    )
+    rest = tuple(t for t in registers.module.limitations if t != REGISTER_NOTE)
+    assert _candidate(registers, attempt, passed).limitations == rest
+    restricted = _candidate(registers, attempt, quality).limitations
+    assert restricted[1:] == rest and restricted[0].startswith("CP-1 QA Restricted: confidence ")

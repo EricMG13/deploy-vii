@@ -315,10 +315,6 @@ class CP1Handoff(Contract):
     sidecar_sha256: Hash
 
 
-PROMOTED_NOTE = (
-    "Promoted from recomputed canonical registers and a verified canonical envelope; "
-    "analytical, rendering and native-host qualification remain unrun."
-)
 # The four statuses a promotion records on the CP-1 head (plan: "four statuses per module").
 PROMOTED = Qualification(implementation="implemented")
 
@@ -326,8 +322,9 @@ PROMOTED = Qualification(implementation="implemented")
 def _candidate(registers: CanonicalTables, attempt: Attempt, quality: QualityReport) -> Module:
     """The promoted CP-1 candidate: the registers' module bound to the journal attempt.
 
-    Own limitations replace the register note with the promotion note and, unless QA passed,
-    a QA line, so the M4 rule (own findings restrict) settles the status.
+    Own limitations drop the register note and, unless QA passed, gain a QA line, so the M4
+    rule (own findings restrict) settles the status. Promotion itself is not a finding: the
+    head's four statuses record that qualification is unrun, so `accepted` stays reachable.
     """
     module = registers.module
     if REGISTER_NOTE not in module.limitations:
@@ -348,7 +345,7 @@ def _candidate(registers: CanonicalTables, attempt: Attempt, quality: QualityRep
                 "inputs": (*attempt.inputs, *module.inputs),
                 "attempt": attempt.number,
                 "status": "candidate",
-                "limitations": (PROMOTED_NOTE, *qa, *rest),
+                "limitations": (*qa, *rest),
             }
         ).model_dump_json()
     )

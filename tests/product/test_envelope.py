@@ -395,3 +395,31 @@ def test_hostile_titles_and_text_cannot_open_sections_or_tables() -> None:
     assert _h2(markdown) == [name for name, _ in SECTIONS]
     assert "| forged | row |" not in markdown
     assert read_envelope(markdown, sidecar) == changed
+
+
+def test_qa_text_that_looks_like_a_gap_marker_is_not_a_marker() -> None:
+    from deploy_vii.quality import (
+        CoverageField,
+        EvidenceCeiling,
+        QaFinding,
+        QualityInputs,
+        QualityReview,
+        assess_quality,
+    )
+
+    inputs = QualityInputs(
+        artifact_sha256="c" * 64,
+        coverage_policy="synthetic",
+        claims=(),
+        coverage=(CoverageField(field_id="slot", present=True, rationale="Synthetic slot"),),
+        source_gate="pass",
+        module_status="complete",
+        references=("ref",),
+        ceilings=(EvidenceCeiling.of("ref", "gap"),),
+    )
+    finding = QaFinding(finding_id="minor", severity="MINOR", description="∅ G999")
+    review = QualityReview(inputs_sha256=inputs.content_hash(), claims=(), findings=(finding,))
+    envelope = small_envelope().model_copy(update={"quality": assess_quality(inputs, review)})
+    markdown, sidecar = write_envelope(envelope)
+    assert "| minor | MINOR | open | ∅ G999 |" in markdown
+    assert read_envelope(markdown, sidecar) == envelope
