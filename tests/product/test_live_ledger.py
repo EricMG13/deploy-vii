@@ -11,7 +11,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.live import ledger as ledger_module
-from deploy_vii.live.ledger import ADJUST_404_SOURCE, CapExceeded, Ledger, LedgerError
+from deploy_vii.live.ledger import (
+    ADJUST_404_SOURCE,
+    ADJUST_USAGE_SOURCE,
+    CapExceeded,
+    Ledger,
+    LedgerError,
+)
 
 D = Decimal
 
@@ -443,3 +449,69 @@ def test_a_generation_404_adjustment_is_zero_and_carries_its_evidence(tmp_path: 
     assert state.spent == 0
     line = json.loads(ledger.path.read_text(encoding="utf-8").splitlines()[-1])
     assert line["source"] == ADJUST_404_SOURCE and line["evidence"] == evidence
+
+
+# --- 7.0: a hold without a generation id, attributed by the account-usage delta -------------
+
+USAGE_EVIDENCE = {"usage_delta_usd": "0.0412", "held_attempts": ["a"], "other_attempts": []}
+
+
+def test_an_account_usage_adjustment_names_no_generation_and_carries_its_evidence(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger(tmp_path / "l.jsonl", Decimal("1"), clock=lambda: "t")
+    ledger.reserve("a", Decimal("0.28"))
+    ledger.settle("a", None, "no response received; reservation held as worst case")
+    for amount, generation, facts, message in (
+        (Decimal("0.0412"), "gen-x", USAGE_EVIDENCE, "names no generation"),
+        (Decimal("0.0412"), None, None, "needs evidence"),
+        (Decimal("0.0412"), None, {}, "needs evidence"),
+        (Decimal("0.29"), None, USAGE_EVIDENCE, "above its reservation"),
+    ):
+        with pytest.raises(LedgerError, match=message):
+            ledger.adjust(
+                "a",
+                amount,
+                generation_id=generation,
+                checked_at="t",
+                source=ADJUST_USAGE_SOURCE,
+                evidence=facts,
+            )
+    with pytest.raises(LedgerError, match="without a generation id"):
+        ledger.adjust("a", Decimal(0), generation_id=None, checked_at="t")  # endpoint source
+    done = ledger.adjust(
+        "a",
+        Decimal("0.0412"),
+        generation_id=None,
+        checked_at="t",
+        source=ADJUST_USAGE_SOURCE,
+        evidence=USAGE_EVIDENCE,
+    )
+    assert (done.source, done.generation_id, done.evidence) == (
+        ADJUST_USAGE_SOURCE,
+        None,
+        USAGE_EVIDENCE,
+    )
+    (record,) = ledger.state().attempts
+    assert record.charged_usd == record.actual_usd == Decimal("0.0412")
+    assert record.basis == ADJUST_USAGE_SOURCE and ledger.state().spent == Decimal("0.0412")
+    line = json.loads(ledger.path.read_text(encoding="utf-8").splitlines()[-1])
+    assert line["source"] == ADJUST_USAGE_SOURCE and line["generation_id"] is None
+    assert line["evidence"] == USAGE_EVIDENCE
+
+
+def test_an_account_usage_adjustment_up_to_the_whole_reservation_is_accepted(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger(tmp_path / "l.jsonl", Decimal("1"), clock=lambda: "t")
+    ledger.reserve("a", Decimal("0.28"))
+    ledger.settle("a", None, "unknown")
+    ledger.adjust(
+        "a",
+        Decimal("0.28"),
+        generation_id=None,
+        checked_at="t",
+        source=ADJUST_USAGE_SOURCE,
+        evidence=USAGE_EVIDENCE,
+    )
+    assert ledger.state().overrun == 0 and ledger.state().spent == Decimal("0.28")

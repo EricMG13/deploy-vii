@@ -45,6 +45,7 @@ from deploy_vii.live.reconcile import (
     RetainedAttempt,
     batch_attempts,
     candidates,
+    lookup_order,
     read_usage,
     reconcile_attempt,
     usage_path,
@@ -93,6 +94,9 @@ HELD_FOOTNOTE = (
 )
 # A step CP-0 did not authorize (its T8 command is not `Run <id>`): nothing sent, nothing spent.
 NOT_AUTHORIZED = "not-authorized"
+# The runner's status for an attempt that returned no model payload (timeout, an HTTP error or
+# an error inside a 200, a deadline hold): never a validator verdict, so no issue count.
+NO_RESPONSE = "no-response"
 NOT_AUTHORIZED_SCHEMA = "live-step-not-authorized/1"
 SCHEMA_CHECK_CAP = Decimal("0.05")  # a call costs about US$0.0005 (task 2.11)
 
@@ -124,6 +128,7 @@ class Row:
     cost: str
     issue_count: int
     cohort: str = COHORT
+    prompt_bound: int | None = None  # prompt tokens upper bound of the attempt (Pool table)
 
     def cells(self) -> tuple[object, ...]:
         return (
@@ -136,7 +141,7 @@ class Row:
             self.status,
             self.classification,
             self.cost,
-            self.issue_count,
+            "-" if self.status == NO_RESPONSE else self.issue_count,
         )
 
 
@@ -172,6 +177,7 @@ class CohortSummary:
     attempts: int
     accepted: int
     rejected: int
+    no_response: int
     pooled: bool
     qualification: bool | None
 
@@ -189,6 +195,7 @@ def summarize_cohorts(rows: Sequence[Row]) -> list[CohortSummary]:
                 len(group),
                 sum(row.status == "accepted" for row in group),
                 sum(row.status == "rejected" for row in group),
+                sum(row.status == NO_RESPONSE for row in group),
                 pooled,
                 None if pooled else False,
             )
@@ -463,6 +470,7 @@ def _run_cell(
                     result.cost_usd, bool(result.settlement and result.settlement.unreconciled)
                 ),
                 len(result.issues),
+                prompt_bound=result.prompt_tokens_upper_bound,
             )
         )
         if module == "CP-0":
@@ -560,12 +568,16 @@ def _row(values: Sequence[object]) -> str:
 
 
 def _pool_cells(
-    candidate: PinnedCandidate, default_effort: str, reserved: Mapping[str, Decimal]
+    candidate: PinnedCandidate,
+    default_effort: str,
+    reserved: Mapping[str, Decimal],
+    bounds: Mapping[str, int],
 ) -> tuple[str, ...]:
     held = reserved.get(candidate.slug)
     amount = "-" if held is None else format(held, "f")
+    bound = str(bounds[candidate.slug]) if candidate.slug in bounds else "-"
     if not candidate.eligible:
-        return (candidate.slug, "no", candidate.exclusion_reason or "", "-", "-", amount)
+        return (candidate.slug, "no", candidate.exclusion_reason or "", "-", "-", bound, amount)
     decision = candidate.effort_for(default_effort)
     own = candidate.requested_effort
     sent = (
@@ -579,6 +591,7 @@ def _pool_cells(
         "",
         own if own else f"{default_effort} (default)",
         sent,
+        bound,
         amount,
     )
 
@@ -602,6 +615,11 @@ def render_report(
         model = models.get(record.attempt_id)
         if model is not None:
             reserved[model] = max(reserved.get(model, Decimal(0)), record.reserved_usd)
+    # The prompt bound behind each reservation, also for an attempt sealed ineligible.
+    bounds: dict[str, int] = {}
+    for row in batch.rows:
+        if row.prompt_bound is not None:
+            bounds[row.model] = max(bounds.get(row.model, 0), row.prompt_bound)
     pool_line = (
         f"user-selected ({POOL_RULING})" if pool.pool_label == USER_SELECTED else "catalog rule"
     )
@@ -614,6 +632,7 @@ def render_report(
         "Reason",
         "Requested effort",
         "Effort sent",
+        "Prompt token bound (largest)",
         "Reserved USD per attempt (largest)",
     )
     lines = [
@@ -636,7 +655,7 @@ def render_report(
         "",
         _row(pool_header),
         _row(("---",) * len(pool_header)),
-        *(_row(_pool_cells(c, default_effort, reserved)) for c in pool.candidates),
+        *(_row(_pool_cells(c, default_effort, reserved, bounds)) for c in pool.candidates),
         "",
         "## Steps",
         "",
@@ -658,7 +677,15 @@ def render_report(
                 "",
             ]
     lines += _held_footnote(batch.rows)
-    cohort_header = ("Cohort", "Attempts", "Accepted", "Rejected", "Pooled", "Qualification")
+    cohort_header = (
+        "Cohort",
+        "Attempts",
+        "Accepted",
+        "Rejected",
+        "No response",
+        "Pooled",
+        "Qualification",
+    )
     lines += [
         "## Cohorts",
         "",
@@ -671,6 +698,7 @@ def render_report(
                     s.attempts,
                     s.accepted,
                     s.rejected,
+                    s.no_response,
                     "yes" if s.pooled else "no",
                     "not decided here" if s.qualification is None else str(s.qualification).lower(),
                 )
@@ -1000,7 +1028,7 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
     refused = read_not_authorized(root, args.batch_id)  # a bad record fails before any call
     usage = read_usage(root, args.batch_id)
     try:
-        for attempt in candidates(root, args.batch_id):
+        for attempt in lookup_order(candidates(root, args.batch_id)):
             outcomes.append(
                 reconcile_attempt(attempt, ledger, client, utc_stamp, batch=retained, usage=usage)
             )

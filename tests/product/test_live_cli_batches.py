@@ -840,21 +840,84 @@ def test_one_batch_with_an_ineligible_model_a_refused_cp1_and_a_deadline_hold_th
     assert all(not a[0].endswith("source_context-1") for a in attempts)
 
     assert rig.run(reconcile_argv(rig), served) == 0
-    assert ledger_state() == before  # nothing to look up: the hold stands, no adjust line
+    # Task 7.0: nothing to look up, but it is the only hold and the account usage moved by
+    # exactly the other two attempts' costs, so the deadline call is adjusted to 0.
+    reserved_after, spent_after, attempts_after = ledger_state()
+    assert reserved_after == 0 and spent_after == Decimal("0.00066")
+    assert [a for a in attempts_after if a[0] == held[0]] == [(held[0], Decimal(0), Decimal(0))]
+    (record,) = [a for a in ledger(rig).state().attempts if a.attempt_id == held[0]]
+    assert record.adjustment is not None and record.adjustment.source == "account-usage-delta"
     reconciled = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
     statuses = sorted(r[6] for r in step_lines(reconciled, "probe-"))
     assert statuses == sorted(
         ["no-response", "ineligible", "accepted", "accepted", "not-authorized", "not-authorized"]
     )
     (outcome,) = [
-        line for line in reconciled.splitlines() if held[0] in line and "unresolved" in line
+        line for line in reconciled.splitlines() if held[0] in line and "reconciled |" in line
     ]
-    assert "no provider_request_id recorded; nothing to look up" in outcome
-    assert "Looked up this run: 1; reconciled 0, unresolved 1" in reconciled
+    assert "no generation id; account usage moved 0.00066" in outcome
+    assert "Looked up this run: 1; reconciled 1, unresolved 0" in reconciled
 
 
 def ledger(rig: Rig, batch: str = "b1") -> Ledger:
     return cli.open_ledger(rig.root / "artifacts" / "model-tests" / ".ledgers" / f"{batch}.jsonl")
+
+
+# --- 7.0: report tables -----------------------------------------------------------------------
+
+
+def test_a_cell_without_model_output_is_counted_as_no_response_never_as_a_rejection(
+    rig: Rig,
+) -> None:
+    """Probe-5 analysis: the cohort table had no column for no-response outcomes. Luna's call
+    passes its deadline (held), GLM's provider fails inside a 200 (5xx-in-200), DeepSeek returns
+    a payload the validator rejects; only DeepSeek's cell is a rejection."""
+    served = Responder("{}")
+
+    def transport(request: Request) -> Response:
+        if request.url == KEY_URL:
+            return served(request)
+        model = json.loads(request.body or b"{}")["model"]
+        served.requests.append(request)
+        if model == LUNA:
+            raise TimeoutError(f"wall-clock deadline of {request.timeout_s} s exceeded")
+        if model == GLM:
+            return Response(200, choice_error_body(error={"code": 502, "message": "Upstream"}))
+        return ok("{}", model=model)
+
+    assert rig.run(rig.argv("probe"), transport) == 0
+    text = rig.report()
+    rows = {r[3]: r for r in step_lines(text, "probe-")}
+    assert rows[LUNA][6:8] == ["no-response", "timeout"] and rows[LUNA][8].startswith("reservation")
+    assert rows[GLM][6:8] == ["no-response", "http_error"]
+    assert rows[LUNA][9] == rows[GLM][9] == "-"  # no payload reached the validator
+    assert rows[DEEPSEEK][6] == "rejected" and int(rows[DEEPSEEK][9]) > 0
+    cohorts = text.split("## Cohorts", 1)[1]
+    assert "| Cohort | Attempts | Accepted | Rejected | No response | Pooled | Qualification |" in (
+        cohorts
+    )
+    (pool,) = step_lines(cohorts, "openrouter-pool")
+    assert pool[1:5] == ["3", "0", "1", "2"]
+
+
+def test_the_pool_table_prints_the_prompt_token_bound_beside_the_reservation(rig: Rig) -> None:
+    assert rig.run(rig.argv("module", "--module", "CP-0"), Responder(rig.review)) == 0
+    text = rig.report()
+    pool_section = text.split("## Pool", 1)[1].split("## Steps", 1)[0]
+    assert (
+        "| Model | Eligible | Reason | Requested effort | Effort sent | Prompt token bound "
+        "(largest) | Reserved USD per attempt (largest) |" in pool_section
+    )
+    (manifest,) = (rig.root / "artifacts" / "model-tests" / "b1").rglob("manifest.json")
+    record = json.loads(manifest.read_text(encoding="utf-8"))
+    metrics = json.loads((manifest.parent / "metrics.json").read_text(encoding="utf-8"))
+    bound = metrics["estimate"]["prompt_tokens_upper_bound"]
+    assert isinstance(bound, int) and bound > 0
+    drawn = [r for r in step_lines(pool_section, "") if r[0] == record["model"]]
+    (row,) = drawn
+    assert row[5] == str(bound) and Decimal(row[6]) == Decimal(record["budgets"]["reserved_usd"])
+    undrawn = [r for r in step_lines(pool_section, "") if r[0] not in {record["model"], "Model"}]
+    assert undrawn and all(r[5] == "-" for r in undrawn if r[0] != "---")
 
 
 # --- 2.11: `live schema-check` ----------------------------------------------------------------

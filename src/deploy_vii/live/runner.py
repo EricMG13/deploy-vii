@@ -123,6 +123,7 @@ class DispatchResult:
     cost_usd: Decimal | None
     issues: tuple[str, ...]
     ticket_interrupted: bool = False
+    prompt_tokens_upper_bound: int | None = None  # the reservation's prompt bound (MC-10)
 
 
 @cache
@@ -806,6 +807,7 @@ def dispatch(
             settlement=None,
             cost_usd=Decimal(0),
             issues=(),
+            prompt_tokens_upper_bound=plan.prompt_tokens,
         )
     try:
         ledger.reserve(plan.attempt_id, plan.reserve_usd)
@@ -847,6 +849,7 @@ def dispatch(
         cost_usd=run.settlement.charged if run.settlement else None,
         issues=run.issues,
         ticket_interrupted=run.ticket_interrupted,
+        prompt_tokens_upper_bound=plan.prompt_tokens,
     )
 
 

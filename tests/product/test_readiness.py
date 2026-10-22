@@ -383,17 +383,19 @@ def test_a_quote_is_never_rescued_from_another_page_or_stitched_together() -> No
         ),
         (source,),
     )
+    # Task 7.0: quoted fragments up to 200 characters; the case change is named, not accepted.
     assert issues == (
         f"Quote/locator mismatch: quote not found under czr-2025-10k page:27 ({RULE}): "
         '"Item 1B. Unr esolved Staff Comments"',
         f"Quote/locator mismatch: quote not found under czr-2025-10k page:45 ({RULE}): "
-        '"The CEI Revolving Credit Facility, the CEI Term Loan A, the …"',
+        f'"{normalise(LUNA_P77)}"',
         f"Quote/locator mismatch: quote not found under czr-2025-10k page:45 ({RULE}): "
-        '"We estimate our lease payments to VICI and GLPI to be approx…"',
+        f'"{stitched}"',
         f"Quote/locator mismatch: quote not found under czr-2025-10k page:45 ({RULE}): "
-        '"we estimate our lease payments to vici and glpi to be approx…"',
-        "Quote/locator mismatch: no locator page:99 in czr-2025-10k: "
-        '"We estimate our lease payments to VICI and GLPI to be approx…"',
+        f'"{LUNA_P45.lower()}": the quote matches the span only ignoring case and character '
+        'variants; first difference at offset 0: "w" (U+0077) in the quote, "W" (U+0057) in the '
+        "span",
+        f'Quote/locator mismatch: no locator page:99 in czr-2025-10k: "{LUNA_P45}"',
     )
 
 
@@ -514,22 +516,34 @@ def test_hyphen_wrap_only_widens_the_span_side() -> None:
 def test_hyphen_wrap_does_not_relax_case_or_column_interleave() -> None:
     p13, p104 = paged_source(p13=P13), paged_source(p104=P104)
     # p13: the source says "Such forward-looking statements"; case is compared exactly.
+    # Task 7.0 names the case change (still a rejection).
     assert citation_issues((cite(p13, "page:13", SOL_P13),), (p13,)) == (
         f"Quote/locator mismatch: quote not found under czr-2025-10k page:13 ({RULE}): "
-        '"Forward-looking statements are only predictions and involve …"',
+        f'"{SOL_P13}": the quote matches the span only ignoring case and character variants; '
+        'first difference at offset 0: "F" (U+0046) in the quote, "f" (U+0066) in the span',
     )
     # p104: a two-column exhibit table interleaves "Previously filed on Form 8-K filed" between
-    # "from time" and "to time" (a known layout limit, not handled); the shorter quote holds.
-    assert citation_issues((cite(p104, "page:104", SOL_P104),), (p104,))
+    # "from time" and "to time" (a known layout limit, not matched; task 7.0 names it); the
+    # shorter quote holds.
+    (interleaved,) = citation_issues((cite(p104, "page:104", SOL_P104),), (p104,))
+    assert interleaved.endswith(
+        "the quote matches the span as two runs separated by interleaved text (columns or table "
+        "cells) at offset 117; quote one contiguous run or choose another locator"
+    )
     shorter = SOL_P104.split(" to time,")[0]
     assert shorter.endswith("from time") and quoted(shorter, P104)
 
 
-def test_the_issue_names_hyphen_wrap_only_where_the_span_has_one() -> None:
+def test_the_issue_names_hyphen_wrap_only_where_the_attempted_match_crosses_one() -> None:
     wrapped, plain = paged_source(p135=P135), paged_source(p13=P13)
+    # Task 7.0: a wrap elsewhere in the span is not named (probe-5 Gemini p84).
     assert citation_issues((cite(wrapped, "page:135", "invented"),), (wrapped,)) == (
+        f'Quote/locator mismatch: quote not found under czr-2025-10k page:135 ({RULE}): "invented"',
+    )
+    crossing = "RESTATED PUT-CALL RIGHT AGREEMENT (this Agreement)"
+    assert citation_issues((cite(wrapped, "page:135", crossing),), (wrapped,)) == (
         f"Quote/locator mismatch: quote not found under czr-2025-10k page:135 ({WRAP_RULE}): "
-        '"invented"',
+        f'"{crossing}"',
     )
     assert f"({RULE}):" in citation_issues((cite(plain, "page:13", "invented"),), (plain,))[0]
 

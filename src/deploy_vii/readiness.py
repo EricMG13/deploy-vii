@@ -19,7 +19,7 @@ from deploy_vii.contracts import (
     Text,
 )
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.quotes import normalisation, prefix, quoted
+from deploy_vii.quotes import explain, prefix, quoted
 from deploy_vii.registry import canonical, plan
 
 Readiness = Literal["READY", "READY_WITH_LIMITATIONS", "CONDITIONAL", "BLOCKED"]
@@ -104,7 +104,8 @@ def citation_issues(
     """One issue per citation whose source, locator or quote does not hold in the pack.
 
     The locator is matched exactly; the quote with `deploy_vii.quotes` (layout normalisation,
-    still a contiguous substring of that one span). The issue names the quote's prefix."""
+    still a contiguous substring of that one span). The issue names the quote's prefix and,
+    where `quotes.explain` finds one (task 7.0), why it failed; it never accepts a quote."""
     index = {source.source_id: source for source in sources}
     issues: list[str] = []
     for citation in citations:
@@ -112,19 +113,30 @@ def citation_issues(
         if source is None or source.status != "ready" or source.sha256 != citation.source_sha256:
             issues.append(f"Unavailable or changed source: {citation.source_id}")
             continue
-        span = next((item for item in source.spans if item.locator == citation.locator), None)
-        where = f"{citation.source_id} {citation.locator}"
-        if span is None:
+        position = next(
+            (i for i, item in enumerate(source.spans) if item.locator == citation.locator), None
+        )
+        if position is None:
             issues.append(
                 f"Quote/locator mismatch: no locator {citation.locator} in "
                 f'{citation.source_id}: "{prefix(citation.quote)}"'
             )
-        elif not quoted(citation.quote, span.text):
-            issues.append(
-                f"Quote/locator mismatch: quote not found under {where} "
-                f"({normalisation(span.text)}): "
-                f'"{prefix(citation.quote)}"'
-            )
+            continue
+        span = source.spans[position]
+        if quoted(citation.quote, span.text):
+            continue
+        spans = source.spans
+        following = (
+            (spans[position + 1].locator, spans[position + 1].text)
+            if position + 1 < len(spans)
+            else None
+        )
+        preceding = (spans[position - 1].locator, spans[position - 1].text) if position else None
+        why = explain(citation.quote, span.text, following, preceding)
+        issues.append(
+            f"Quote/locator mismatch: quote not found under {citation.source_id} "
+            f'{citation.locator} ({why.label}): "{prefix(citation.quote)}"{why.hint}'
+        )
     return tuple(issues)
 
 

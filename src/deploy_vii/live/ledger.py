@@ -17,7 +17,11 @@ CLI's cumulative-ceiling check all read the adjusted figure. An `adjust` names i
 `generation-endpoint` (the generation record's `total_cost`) or `generation-404+usage-delta`
 (decision 0008: the generation endpoint answered 404 and the batch's account-usage delta equals
 the other attempts' measured costs, so the held attempt cost nothing). The second is always
-zero and carries both facts in `evidence`.
+zero and carries both facts in `evidence`. Task 7.0 adds `account-usage-delta`: a held attempt
+with no generation id (a deadline expiry, nothing to look up) that is the batch's only held
+attempt, every other attempt's cost being measured, takes the account-usage delta less those
+costs. It names no generation (`generation_id` null), carries its facts in `evidence` and is at
+most the attempt's reservation (a larger residual is other spend, never attributed).
 
 The first line records the cap the file was opened with; it is written together with the first
 reservation, so a file that exists is always bound. Opening the same file with another
@@ -38,7 +42,10 @@ from typing import Any, Literal
 
 ADJUST_SOURCE = "generation-endpoint"
 ADJUST_404_SOURCE = "generation-404+usage-delta"
-ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE})
+ADJUST_USAGE_SOURCE = "account-usage-delta"
+ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE, ADJUST_USAGE_SOURCE})
+# Sources whose line must carry `evidence` (the facts behind the figure).
+_EVIDENCED = frozenset({ADJUST_404_SOURCE, ADJUST_USAGE_SOURCE})
 
 
 class LedgerError(Exception):
@@ -77,11 +84,11 @@ class Adjustment:
 
     previous_charged_usd: Decimal
     reconciled_usd: Decimal
-    generation_id: str
+    generation_id: str | None  # None only for an account-usage-delta adjustment
     checked_at: str
     seq: int
     source: str = ADJUST_SOURCE
-    evidence: dict[str, Any] | None = None  # the facts behind a generation-404+usage-delta
+    evidence: dict[str, Any] | None = None  # the facts behind a 404 or usage-delta figure
 
 
 @dataclass(frozen=True)
@@ -233,19 +240,32 @@ class Ledger:
         if source not in ADJUST_SOURCES:
             raise LedgerError(f"ledger line {number} adjusts from an unknown source")
         generation, checked = entry.get("generation_id"), entry.get("checked_at")
-        if not isinstance(generation, str) or not generation.strip():
+        if source == ADJUST_USAGE_SOURCE:
+            if generation is not None:
+                raise LedgerError(
+                    f"ledger line {number}: a {source} adjustment names no generation"
+                )
+        elif not isinstance(generation, str) or not generation.strip():
             raise LedgerError(f"ledger line {number} adjusts without a generation id")
         if not isinstance(checked, str) or not checked.strip():
             raise LedgerError(f"ledger line {number} adjusts without a check time")
         reconciled = _money(entry.get("reconciled_usd"), f"line {number} reconciled cost")
         evidence = entry.get("evidence")
-        if source == ADJUST_404_SOURCE:
-            if reconciled != 0:
-                raise LedgerError(f"ledger line {number}: a {source} adjustment is always zero")
+        if source in _EVIDENCED:
             if not isinstance(evidence, dict) or not evidence:
                 raise LedgerError(f"ledger line {number}: a {source} adjustment needs evidence")
         elif evidence is not None:
-            raise LedgerError(f"ledger line {number}: only {ADJUST_404_SOURCE} carries evidence")
+            raise LedgerError(
+                f"ledger line {number}: only {ADJUST_404_SOURCE} or {ADJUST_USAGE_SOURCE} "
+                "carries evidence"
+            )
+        if source == ADJUST_404_SOURCE and reconciled != 0:
+            raise LedgerError(f"ledger line {number}: a {source} adjustment is always zero")
+        if source == ADJUST_USAGE_SOURCE and reconciled > held.reserved_usd:
+            raise LedgerError(
+                f"ledger line {number}: a {source} adjustment above its reservation is not "
+                "attributable to the attempt"
+            )
         return replace(
             held,
             actual_usd=reconciled,
@@ -359,7 +379,7 @@ class Ledger:
         attempt_id: str,
         reconciled_usd: Decimal,
         *,
-        generation_id: str,
+        generation_id: str | None,
         checked_at: str,
         source: str = ADJUST_SOURCE,
         evidence: dict[str, Any] | None = None,

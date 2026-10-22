@@ -3,6 +3,7 @@
 import argparse
 import json
 import socket
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,8 @@ import pytest
 
 from deploy_vii.live import cli
 from deploy_vii.live.client import CHAT_URL, GENERATION_URL, KEY_URL, Request, Response
-from deploy_vii.live.ledger import Ledger
-from deploy_vii.live.reconcile import generation_cost
+from deploy_vii.live.ledger import AttemptRecord, Ledger
+from deploy_vii.live.reconcile import RetainedAttempt, generation_cost
 from tests.product.live_support import FAKE_KEY, ok
 from tests.product.test_live_cli_batches import DEEPSEEK, Rig, key_status, step_lines
 
@@ -469,3 +470,172 @@ def test_only_a_404_is_corroborated_by_the_usage_delta(rig: Rig) -> None:
     assert ledger(rig).path.read_bytes() == lines
     reason = load(deepseek_dir(rig) / "metrics.json")["ledger"]["reconciliation"]["reason"]
     assert reason == "HTTP 500 from the generation endpoint"
+
+
+# --- 7.0: a deadline hold without a generation id, attributed by the account-usage delta ----
+
+
+class DeadlineResponder(ProbeResponder):
+    """The first `deadlines` DeepSeek calls pass their wall-clock deadline (the TimeoutError
+    `urllib_transport` raises: no body, so no generation id) yet cost the account `held_cost`;
+    later DeepSeek calls time out inside a 200 with a generation id, as in ProbeResponder."""
+
+    def __init__(
+        self,
+        content: str,
+        *,
+        held_cost: str = "0.0123",
+        deadlines: int = 1,
+        unexplained: str = "0",
+    ) -> None:
+        super().__init__(content, unexplained=unexplained)
+        self.held_cost = Decimal(held_cost)
+        self.deadlines = deadlines
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == CHAT_URL and json.loads(request.body or b"{}")["model"] == DEEPSEEK:
+            if self.deadlines > 0:
+                self.deadlines -= 1
+                self.requests.append(request)
+                self.usage += self.held_cost
+                raise TimeoutError(f"wall-clock deadline of {request.timeout_s} s exceeded")
+        return super().__call__(request)
+
+
+def deadline_hold(rig: Rig) -> AttemptRecord:
+    (held,) = [a for a in ledger(rig).state().attempts if a.actual_usd is None]
+    manifest = load(deepseek_dir(rig) / "manifest.json")
+    assert manifest["served"]["provider_request_id"] is None  # nothing to look up
+    assert manifest["classification"] == "timeout"
+    return held
+
+
+@pytest.mark.parametrize(
+    ("held_cost", "unexplained", "expected"),
+    [
+        ("0.0123", "0", "0.0123"),  # the deadline call still cost the account
+        ("0", "0", "0"),  # it cost nothing
+        ("0", "-0.0000004", "0"),  # usage read a hair low: within the tolerance, never negative
+    ],
+)
+def test_a_lone_deadline_hold_takes_the_account_usage_residual(
+    rig: Rig, held_cost: str, unexplained: str, expected: str
+) -> None:
+    responder = DeadlineResponder(rig.review, held_cost=held_cost, unexplained=unexplained)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    held = deadline_hold(rig)
+    before = ledger(rig).state()
+    sent = len(responder.requests)
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert len(responder.requests) == sent  # no generation lookup: there is no id
+    after = ledger(rig).state()
+    record = {a.attempt_id: a for a in after.attempts}[held.attempt_id]
+    assert record.charged_usd == record.actual_usd == Decimal(expected)
+    adjustment = record.adjustment
+    assert adjustment is not None and adjustment.source == "account-usage-delta"
+    assert adjustment.generation_id is None
+    evidence = adjustment.evidence
+    others = [a for a in before.attempts if a.attempt_id != held.attempt_id]
+    measured = sum((a.charged_usd or Decimal(0) for a in others), Decimal(0))
+    assert evidence is not None
+    assert evidence["held_attempts"] == [held.attempt_id]
+    assert evidence["other_attempts"] == sorted(a.attempt_id for a in others)
+    assert Decimal(evidence["other_attempts_measured_usd"]) == measured
+    assert Decimal(evidence["usage_delta_usd"]) == measured + Decimal(held_cost) + Decimal(
+        unexplained
+    )
+    assert Decimal(evidence["reserved_usd"]) == held.reserved_usd
+    assert evidence["tolerance_usd"] == "0.000001"
+    assert after.spent == before.spent - held.reserved_usd + Decimal(expected)
+    block = load(deepseek_dir(rig) / "metrics.json")["ledger"]
+    assert block["cost_basis"] == "account-usage-delta" and block["unreconciled"] is False
+    assert block["reconciliation"]["evidence"] == evidence
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    assert "Looked up this run: 1; reconciled 1, unresolved 0" in report
+
+
+def _two_deadlines(rig: Rig) -> DeadlineResponder:
+    responder = DeadlineResponder(rig.review, deadlines=2)
+    assert rig.run(rig.argv("probe", "--draws-per-model", "2"), responder) == 0
+    return responder
+
+
+def _estimate_elsewhere(rig: Rig) -> DeadlineResponder:
+    responder = DeadlineResponder(rig.review)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    glm = next((rig.root / "artifacts" / "model-tests" / "b1").glob("probe/z-ai__*/*"))
+    metrics = load(glm / "metrics.json")
+    metrics["ledger"]["cost_basis"] = "estimate-from-tokens"
+    (glm / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+    return responder
+
+
+def _plain(rig: Rig, held_cost: str = "0.0123", unexplained: str = "0") -> DeadlineResponder:
+    responder = DeadlineResponder(rig.review, held_cost=held_cost, unexplained=unexplained)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    return responder
+
+
+def _no_usage_after(rig: Rig) -> DeadlineResponder:
+    responder = _plain(rig)
+    (rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-after.json").unlink()
+    return responder
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        (_two_deadlines, "2 held attempts in the batch"),
+        (lambda rig: _plain(rig, held_cost="9"), "above the attempt's reservation"),
+        (
+            lambda rig: _plain(rig, held_cost="0", unexplained="-0.0000011"),
+            "less than the other attempts",
+        ),
+        (_estimate_elsewhere, "is not a measured cost"),
+        (_no_usage_after, "no account usage was recorded after the batch"),
+    ],
+)
+def test_a_deadline_hold_the_usage_delta_cannot_attribute_stays_held_with_the_reason(
+    rig: Rig, setup: Callable[[Rig], DeadlineResponder], reason: str
+) -> None:
+    responder = setup(rig)
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines  # no adjust: the hold stands
+    held = [a for a in ledger(rig).state().attempts if a.actual_usd is None]
+    assert held
+    for directory in (rig.root / "artifacts" / "model-tests" / "b1").glob("probe/deepseek__*/*"):
+        block = load(directory / "metrics.json")["ledger"]
+        assert block["unreconciled"] is True
+        assert (
+            "no provider_request_id recorded; nothing to look up"
+            in block["reconciliation"]["reason"]
+        )
+        assert reason in block["reconciliation"]["reason"]
+
+
+def test_a_deadline_hold_is_attributed_after_the_other_holds_are_looked_up(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execution order: held attempts with a generation id are reconciled first, so a lone
+    hold without one is attributed in the same run whatever order the directories sort in."""
+    responder = DeadlineResponder(rig.review, unexplained="0.002")  # the 200-error's real cost
+    assert rig.run(rig.argv("probe", "--draws-per-model", "2"), responder) == 0
+    (looked_up,) = responder.ids
+    responder.generations = {looked_up: generation(0.002, generation_id=looked_up)}
+    found = cli.candidates
+
+    def no_id_first(root: Path, batch: str) -> list[RetainedAttempt]:
+        def has_id(item: RetainedAttempt) -> bool:
+            return item.manifest["served"]["provider_request_id"] is not None
+
+        return sorted(found(root, batch), key=has_id)
+
+    monkeypatch.setattr(cli, "candidates", no_id_first)
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    state = ledger(rig).state()
+    sources = sorted(a.adjustment.source for a in state.attempts if a.adjustment is not None)
+    assert sources == ["account-usage-delta", "generation-endpoint"]
+    usage = next(a for a in state.attempts if a.adjustment and a.adjustment.generation_id is None)
+    assert usage.charged_usd == Decimal("0.0123")
+    assert all(a.actual_usd is not None for a in state.attempts)

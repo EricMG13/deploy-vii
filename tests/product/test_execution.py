@@ -9,6 +9,8 @@ from playwright.sync_api import expect, sync_playwright
 
 from deploy_vii.contracts import PATHWAY_MODULES, Citation, Claim, Fact, Input, Module, PathwayId
 from deploy_vii.execution import (
+    MAX_INTERRUPTION_CHARS,
+    MAX_ISSUE_CHARS,
     Attempt,
     Command,
     Execution,
@@ -21,7 +23,7 @@ from deploy_vii.execution import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
-from deploy_vii.registry import plan
+from deploy_vii.registry import _NOT_CP5_FAN_IN, plan
 from deploy_vii.render import render
 from tests.product.test_readiness import readiness_fixture
 
@@ -576,8 +578,9 @@ def test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run(
     """Decision 0009 (task 6.5): in a preset that requests CP-MODEL it is a CP-5 input."""
     scope = PATHWAY_MODULES[pathway]
     store = cp_model_store(tmp_path, scope)
-    # Every other analyst CP-5 follows has settled; only CP-MODEL has never run.
-    analysts = [m for m in plan(scope) if m not in {"CP-0", "CP-MODEL", "CP-5", "CP-6", "CP-8"}]
+    # Every other analyst CP-5 follows has settled; only CP-MODEL has never run. CP-0 is
+    # settled by the fixture; the registry's own set says what CP-5 does not follow.
+    analysts = [m for m in plan(scope) if m not in _NOT_CP5_FAN_IN | {"CP-0", "CP-MODEL"}]
     for module_id in analysts:
         settle_module(store, module_id)
     with pytest.raises(ValueError, match="upstream is unrun"):
@@ -1075,7 +1078,7 @@ def test_malformed_candidate_issues_never_quote_the_payload(tmp_path: Path) -> N
         }
 
     sizes: dict[str, list[int]] = {}
-    for size in (400, 50_000):
+    for size in (700, 50_000):  # both above the issue line cap (MAX_ISSUE_CHARS)
         store = fixture_store(tmp_path / f"s{size}")
         for number, (kind, payload) in enumerate(payloads(size).items()):
             if number:  # a fresh input set, so this payload is attempt 0 again
@@ -1084,13 +1087,13 @@ def test_malformed_candidate_issues_never_quote_the_payload(tmp_path: Path) -> N
                 store.replace_pack(pack.model_copy(update={"sources": (source,)}))
             ticket = store.begin("CP-0")
             attempt = store.finish(ticket.ticket_id, payload, no_issues)
-            assert attempt.issues and all(len(issue) <= 330 for issue in attempt.issues)
+            assert attempt.issues and all(len(issue) <= MAX_ISSUE_CHARS for issue in attempt.issues)
             assert len(attempt.issues) <= 21  # a capped list, with a count of the rest
             assert all(issue.startswith("Malformed candidate: ") for issue in attempt.issues[:20])
             raw = snapshot_bytes(store)
             # Field names are payload text too: at most one capped line of them is kept.
-            assert b"K" * 300 not in raw and b"zzzzzzzz" not in raw
-            assert b"L" * 300 not in raw and b"M" * 300 not in raw
+            assert b"K" * MAX_ISSUE_CHARS not in raw and b"zzzzzzzz" not in raw
+            assert b"L" * MAX_ISSUE_CHARS not in raw and b"M" * MAX_ISSUE_CHARS not in raw
             sizes.setdefault(kind, []).append(len(raw))
     # The snapshot after each payload kind has the same size at both payload sizes, except for
     # the digits of the count of omitted errors (125 times more elements, a few more digits).
@@ -1121,11 +1124,12 @@ def snapshot_after_rejected_citations(
 
 def test_every_inline_issue_list_is_capped(tmp_path: Path) -> None:
     # citation_issues quotes the locator, which is caller text of any length.
-    short, short_size = snapshot_after_rejected_citations(tmp_path / "a", ["L" * 400])
+    short, short_size = snapshot_after_rejected_citations(tmp_path / "a", ["L" * 700])
     long, long_size = snapshot_after_rejected_citations(tmp_path / "b", ["L" * 50_000])
-    assert short.issues and all(len(issue) <= 300 for issue in short.issues + long.issues)
+    lines = short.issues + long.issues
+    assert short.issues and all(len(issue) <= MAX_ISSUE_CHARS for issue in lines)
     assert long_size == short_size
-    assert b"L" * 300 not in snapshot_bytes(Execution(tmp_path / "b" / "execution"))
+    assert b"L" * MAX_ISSUE_CHARS not in snapshot_bytes(Execution(tmp_path / "b" / "execution"))
 
     # Thousands of distinct invalid citations: 20 lines and a count of the rest.
     few, few_size = snapshot_after_rejected_citations(
@@ -1147,9 +1151,9 @@ def test_step_issues_are_capped_like_attempt_issues(tmp_path: Path) -> None:
     ticket = store.begin("CP-0")
     finished = store.submit_step(ticket.ticket_id, "CP-0", ("a",), "a", "raw", complaining)
     (step,) = finished.steps
-    assert len(step.issues) == 21 and all(len(issue) <= 300 for issue in step.issues)
+    assert len(step.issues) == 21 and all(len(issue) <= MAX_ISSUE_CHARS for issue in step.issues)
     assert finished.issues == step.issues
-    assert b"w" * 300 not in snapshot_bytes(store)
+    assert b"w" * MAX_ISSUE_CHARS not in snapshot_bytes(store)
 
 
 def test_interruption_text_is_capped(tmp_path: Path) -> None:
@@ -1157,8 +1161,9 @@ def test_interruption_text_is_capped(tmp_path: Path) -> None:
     long, long_size = snapshot_after_rejected_citations(tmp_path / "b", [], "r" * 50_000)
     assert long.interruption == short.interruption
     assert long.interruption is not None
-    assert len(long.interruption) == 300 and long.interruption.endswith("…")
-    assert long.issues == short.issues and len(long.issues[0]) <= 300
+    assert len(long.interruption) == MAX_INTERRUPTION_CHARS == 300
+    assert long.interruption.endswith("…")
+    assert long.issues == short.issues and len(long.issues[0]) <= MAX_ISSUE_CHARS
     assert long_size == short_size
     quick, _ = snapshot_after_rejected_citations(tmp_path / "c", [], "stopped")
     assert quick.interruption == "stopped" and quick.issues == ("Interrupted: stopped",)

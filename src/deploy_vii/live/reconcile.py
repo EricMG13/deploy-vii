@@ -20,6 +20,16 @@ a difference above the tolerance) leaves the attempt unresolved with the reason.
 moves with any other spend on the account in the batch window; that can only make the
 difference larger, never fake a match.
 
+Task 7.0: a held attempt with no generation id at all (a deadline expiry: nothing to look up)
+is adjusted from the same usage window when it is the batch ledger's only held attempt and every
+other attempt's charge is measured (provider-reported, known-zero or generation-endpoint): it
+takes the delta less those charges, source `account-usage-delta`, both facts in the ledger line.
+A residual below zero by more than US$0.000001, or above the attempt's reservation (other spend
+on the account, which the delta cannot tell apart), leaves it held with the reason; so do two or
+more held attempts, any charge that is not measured and a missing usage record. Attempts with a
+generation id are looked up first (`lookup_order`), so the outcome does not depend on the order
+the attempt directories sort in.
+
 `metrics.json` is the one retained file this rewrites (atomically, temp file then rename). The
 values it replaces are kept under `ledger.reconciliation.previous`, and the ledger line is the
 authority. Request, response, output, events and manifest are never touched.
@@ -38,6 +48,7 @@ from deploy_vii.live.client import GENERATION_ID, ChatClient, Response
 from deploy_vii.live.ledger import (
     ADJUST_404_SOURCE,
     ADJUST_SOURCE,
+    ADJUST_USAGE_SOURCE,
     AttemptRecord,
     Ledger,
     LedgerError,
@@ -249,6 +260,104 @@ def corroborate_404(
     )
 
 
+@dataclass(frozen=True)
+class Attribution:
+    """The account-usage residual of the batch's only held attempt, or why there is none."""
+
+    amount: Decimal | None
+    evidence: dict[str, Any] | None
+    reason: str
+
+
+def _measured_now(record: AttemptRecord, retained: dict[str, RetainedAttempt]) -> bool:
+    """Whether a ledger charge is a measured pool cost, read from the ledger where it was
+    adjusted (metrics read at the start of a run may predate that adjust)."""
+    other = retained.get(record.attempt_id)
+    if other is None or other.manifest.get("cohort") != POOL_COHORT or record.actual_usd is None:
+        return False
+    if record.adjustment is not None:
+        return record.adjustment.source == ADJUST_SOURCE
+    block = other.metrics.get("ledger")
+    return isinstance(block, dict) and block.get("cost_basis") in MEASURED_BASES
+
+
+def attribute_usage(
+    attempt: RetainedAttempt,
+    records: Sequence[AttemptRecord],
+    batch: Sequence[RetainedAttempt],
+    usage: tuple[UsageWindow | None, str],
+) -> Attribution:
+    """The usage delta less every other charge, for a held attempt with no generation id that
+    is the ledger's only held attempt; anything short of that names why (fail closed)."""
+    window, why = usage
+    if window is None:
+        return Attribution(None, None, why)
+    held = [r for r in records if r.actual_usd is None]
+    if [r.attempt_id for r in held] != [attempt.attempt_id]:
+        return Attribution(
+            None,
+            None,
+            f"{len(held)} held attempts in the batch; the account usage delta is not "
+            "attributable to one",
+        )
+    (own,) = held
+    retained = {item.attempt_id: item for item in batch}
+    others = [r for r in records if r.attempt_id != attempt.attempt_id]
+    unmeasured = next((r for r in others if not _measured_now(r, retained)), None)
+    if unmeasured is not None:
+        return Attribution(
+            None,
+            None,
+            f"the charge of {unmeasured.attempt_id} is not a measured cost; the account usage "
+            "delta is not attributable",
+        )
+    total = sum((r.charged_usd or Decimal(0) for r in others), Decimal(0))
+    residual = window.delta - total
+    delta, measured = format(window.delta, "f"), format(total, "f")
+    if residual < -USAGE_TOLERANCE_USD:
+        return Attribution(
+            None,
+            None,
+            f"account usage moved {delta}, less than the other attempts' measured costs "
+            f"{measured} (difference {format(residual, 'f')}); not attributable",
+        )
+    if residual > own.reserved_usd:
+        return Attribution(
+            None,
+            None,
+            f"the residual {format(residual, 'f')} (usage moved {delta}, the other attempts' "
+            f"measured costs {measured}) is above the attempt's reservation "
+            f"{format(own.reserved_usd, 'f')}: other account spend; not attributable",
+        )
+    amount = max(residual, Decimal(0))
+    evidence = {
+        "usage_before_usd": format(window.before, "f"),
+        "usage_before_checked_at": window.before_at,
+        "usage_after_usd": format(window.after, "f"),
+        "usage_after_checked_at": window.after_at,
+        "usage_delta_usd": delta,
+        "held_attempts": [attempt.attempt_id],
+        "other_attempts": sorted(r.attempt_id for r in others),
+        "other_attempts_measured_usd": measured,
+        "residual_usd": format(residual, "f"),
+        "reserved_usd": format(own.reserved_usd, "f"),
+        "tolerance_usd": format(USAGE_TOLERANCE_USD, "f"),
+        "usage_recorded_by": list(window.recorded_by),
+    }
+    return Attribution(
+        amount,
+        evidence,
+        f"no generation id; account usage moved {delta}, the other attempts' measured costs "
+        f"{measured}: the batch's only held attempt cost {format(amount, 'f')}",
+    )
+
+
+def lookup_order(attempts: Sequence[RetainedAttempt]) -> list[RetainedAttempt]:
+    """Attempts with a recorded generation id first (stable), so a hold without one is
+    attributed after every lookup that could settle another hold."""
+    return sorted(attempts, key=lambda item: generation_id(item)[0] is None)
+
+
 def _replace_metrics(directory: Path, metrics: dict[str, Any]) -> None:
     path = directory / "metrics.json"
     descriptor, temporary = tempfile.mkstemp(prefix=".metrics-", dir=directory)
@@ -341,12 +450,10 @@ def reconcile_attempt(
         _record_unresolved(attempt, generation, source, reason, clock())
         return Outcome(attempt.attempt_id, generation, source, "unresolved", None, None, reason)
     previous = record.charged_usd
-    if generation is None or not GENERATION_ID.fullmatch(generation):
-        reason = (
-            "no provider_request_id recorded; nothing to look up"
-            if generation is None
-            else "the recorded id is not a generation id; not looked up"
-        )
+    if generation is None:
+        return _attribute(attempt, ledger, clock, records, batch, usage, source)
+    if not GENERATION_ID.fullmatch(generation):
+        reason = "the recorded id is not a generation id; not looked up"
         _record_unresolved(attempt, generation, source, reason, clock())
         return Outcome(attempt.attempt_id, generation, source, "unresolved", previous, None, reason)
     checked_at = clock()
@@ -377,6 +484,38 @@ def reconcile_attempt(
     adjusted = {item.attempt_id: item for item in ledger.state().attempts}[attempt.attempt_id]
     _record_reconciled(attempt, adjusted, source, reason)
     return Outcome(attempt.attempt_id, generation, source, "reconciled", previous, cost, reason)
+
+
+def _attribute(
+    attempt: RetainedAttempt,
+    ledger: Ledger,
+    clock: Callable[[], str],
+    records: dict[str, AttemptRecord],
+    batch: Sequence[RetainedAttempt],
+    usage: tuple[UsageWindow | None, str],
+    source: str,
+) -> Outcome:
+    """A held attempt with no generation id: the usage residual, or unresolved with why."""
+    previous = records[attempt.attempt_id].charged_usd
+    checked_at = clock()
+    found = attribute_usage(attempt, tuple(records.values()), batch, usage)
+    if found.amount is None or found.evidence is None:
+        reason = f"no provider_request_id recorded; nothing to look up; {found.reason}"
+        _record_unresolved(attempt, None, source, reason, checked_at)
+        return Outcome(attempt.attempt_id, None, source, "unresolved", previous, None, reason)
+    ledger.adjust(
+        attempt.attempt_id,
+        found.amount,
+        generation_id=None,
+        checked_at=checked_at,
+        source=ADJUST_USAGE_SOURCE,
+        evidence=found.evidence,
+    )
+    adjusted = {item.attempt_id: item for item in ledger.state().attempts}[attempt.attempt_id]
+    _record_reconciled(attempt, adjusted, source, found.reason)
+    return Outcome(
+        attempt.attempt_id, None, source, "reconciled", previous, found.amount, found.reason
+    )
 
 
 def candidates(artifact_root: Path, batch_id: str) -> list[RetainedAttempt]:

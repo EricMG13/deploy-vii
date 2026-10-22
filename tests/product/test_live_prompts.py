@@ -5,6 +5,8 @@ import re
 from importlib.resources import files
 from typing import Any
 
+import pytest
+
 from deploy_vii.live import prompts
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
@@ -14,6 +16,7 @@ from deploy_vii.live.submission import (
     rejection_issues,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.prose import bare_figures
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
 from tests.product.test_live_submission import paged_pack
@@ -135,3 +138,57 @@ def test_other_steps_get_no_consumer_lines() -> None:
     schema = STEPS["source_context"].schema
     user = prompts.build("source_context", pack, ("filing",), schema)[1].content
     assert "consumers" not in user and "Canonical data foundation" not in user
+
+
+# --- 7.0: the prompt states what the quote matcher and the run-text rule enforce ------------
+
+INTERLEAVE_RULE = (
+    "Copy a run that is contiguous in the SOURCE block as printed; never reassemble a sentence "
+    "across interleaved table text."
+)
+PAGE_RULE = "Never continue a quote onto the next page."
+RUN_TEXT_EXAMPLES = (
+    "FY2025",
+    "Q3 2025",
+    "LTM",
+    "Items 7, 7A",
+    "page:12",
+    "pages 16-18",
+    "001-36629",
+    "195 of 195 pages",
+)
+
+
+def composed(step_id: str) -> str:
+    pack, _ = readiness_fixture()
+    schema = STEPS[step_id].schema
+    return prompts.build(step_id, pack, ("filing",), schema)[0].content
+
+
+def test_the_citation_rule_states_the_interleave_and_page_rules_once() -> None:
+    assert INTERLEAVE_RULE in prompts.CITATION_RULE and PAGE_RULE in prompts.CITATION_RULE
+    for step_id in ("source_readiness", "source_context"):
+        system = composed(step_id)
+        assert system.count(INTERLEAVE_RULE) == 1 and system.count(PAGE_RULE) == 1, step_id
+
+
+def test_the_readiness_step_states_the_run_text_rule_once_and_cp0_md_carries_it() -> None:
+    system = composed("source_readiness")
+    assert prompts.RUN_TEXT_RULE in prompts.STEP_CONTRACTS["source_readiness"]
+    assert system.count(prompts.RUN_TEXT_RULE) == 1
+    assert prompts.RUN_TEXT_RULE not in composed("source_context")
+    assert "`analysis[].text`" in prompts.RUN_TEXT_RULE
+    assert "the validator rejects a bare figure" in prompts.RUN_TEXT_RULE
+    assert all(f"`{label}`" in prompts.RUN_TEXT_RULE for label in RUN_TEXT_EXAMPLES)
+    brief = files("deploy_vii").joinpath("methods", "cp0.md").read_text(encoding="utf-8")
+    assert " ".join(prompts.RUN_TEXT_RULE.split()) in " ".join(brief.split())
+
+
+@pytest.mark.parametrize("label", RUN_TEXT_EXAMPLES)
+def test_every_label_the_run_text_rule_allows_is_one_the_validator_allows(label: str) -> None:
+    """The prompt never tells the model a figure is allowed that `prose` would reject."""
+    assert bare_figures(f"Coverage is stated as {label} in the filing.") == ()
+
+
+def test_a_bare_figure_the_rule_forbids_is_rejected() -> None:
+    assert bare_figures("Revenue was 11,456 in the year.") == ("11,456",)

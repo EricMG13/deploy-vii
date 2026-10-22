@@ -395,9 +395,10 @@ def test_proxy_cohort_never_pools(tmp_path: Path) -> None:
     ]
     by_cohort = {row[0]: row for row in summary}
     assert set(by_cohort) == {COHORT, "proxy:claude-agent"}  # never merged
-    assert by_cohort["proxy:claude-agent"][1:] == ["1", "1", "0", "no", "false"]
-    assert by_cohort[COHORT][1] == "1" and by_cohort[COHORT][4] == "yes"
-    assert by_cohort[COHORT][5] != "true"
+    # Columns: attempts, accepted, rejected, no response (task 7.0), pooled, qualification.
+    assert by_cohort["proxy:claude-agent"][1:] == ["1", "1", "0", "0", "no", "false"]
+    assert by_cohort[COHORT][1] == "1" and by_cohort[COHORT][5] == "yes"
+    assert by_cohort[COHORT][6] != "true"
     # Proxy attempts are listed under their own cohort, never in the pool steps table.
     pool_section = text.split("## Steps", 1)[1].split("##", 1)[0]
     assert done.attempt_id not in pool_section and pooled.attempt_id in pool_section

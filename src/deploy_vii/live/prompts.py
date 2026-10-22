@@ -48,7 +48,17 @@ CITATION_RULE = (
     "exactly (for example page:1: no brackets, ranges or notes) and quotes a verbatim substring "
     "of that span's text. Runs of whitespace and line breaks may be written as one space and "
     "curly quotes or dashes in ASCII; every other character is copied exactly, and the quote "
-    "must be in the span its locator names."
+    "must be in the span its locator names. Copy a run that is contiguous in the SOURCE block "
+    "as printed; never reassemble a sentence across interleaved table text. Never continue a "
+    "quote onto the next page."
+)
+# Task 7.0: the 6.2 run-text rule (`deploy_vii.prose`), as the validator applies it to
+# `analysis[].text`; every example is a `prose.LABELS` label (a test holds them to it).
+RUN_TEXT_RULE = (
+    "`analysis[].text` is run text: digits only in period labels (`FY2025`, `Q3 2025`, `LTM`), "
+    "filing and section labels (`Items 7, 7A`, `page:12`, `pages 16-18`), SEC file numbers "
+    "(`001-36629`) and coverage counts (`195 of 195 pages`); every other figure belongs in a "
+    "citation's quote, not in the text (the validator rejects a bare figure)."
 )
 COVERAGE_RULE = (
     "The CONTEXT block states each source's extraction coverage. Never call a page or locator "
@@ -79,7 +89,7 @@ STEP_CONTRACTS: Mapping[str, str] = {
         "consumer is READY or READY_WITH_LIMITATIONS. A source whose fidelity is not verified, "
         "or whose authority, entity or period is unknown, lists a limitation.\n"
         "h. `analysis`: at least one evidence-grounded read-through entry; an empty list is "
-        "rejected."
+        f"rejected. {RUN_TEXT_RULE}"
     ),
     "source_context": (
         "Describe what each supplied financial source is (entity, period, statement kind, units, "

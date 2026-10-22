@@ -172,10 +172,12 @@ references that Python resolves and spells. The model never writes a number.
   head against its blob, and a head blob must always be an `accepted`, `restricted` or
   `blocked` module, stale or not. The trust boundary is the snapshot and pointer pair,
   as before: a local hash chain detects changed bytes, not a rewritten snapshot.
-- Inline text that remains in a snapshot is bounded by one cap: at most 20 lines of at
-  most 300 characters, then a line counting the rest (`bounded_issues`; a longer line
-  ends in `…`). It applies to `Attempt.issues` and the `repair_issues` copy of them, to
-  `StepSubmission.issues`, and (300 characters, marker included) to `Attempt.interruption`.
+- Inline text that remains in a snapshot is bounded: at most 20 lines of at most 600
+  characters, then a line counting the rest (`bounded_issues`; a longer line ends in `…`).
+  It applies to `Attempt.issues` and the `repair_issues` copy of them and to
+  `StepSubmission.issues`; `Attempt.interruption` keeps 300 characters, marker included.
+  The line cap was 300 until task 7.0, which raised it so a quote mismatch (a 200-character
+  quoted fragment and the clause saying why it failed) reaches the REPAIR prompt whole.
   Schema errors of a malformed response are `loc: message` lines with no input value or
   URL, and pass through the same cap; citation and validator findings may quote caller
   text (a locator, a field name) and are cut by it. The cap hides lines beyond the

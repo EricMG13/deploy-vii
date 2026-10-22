@@ -315,15 +315,18 @@ def inherited_limitations(
 
 
 MAX_ISSUES = 20
-MAX_ISSUE_CHARS = 300
+# Task 7.0: an issue line holds a quote mismatch whole (a 200-character quoted fragment plus
+# the clause saying why it failed), since the REPAIR prompt carries these lines.
+MAX_ISSUE_CHARS = 600
+MAX_INTERRUPTION_CHARS = 300
 
 
-def shortened(text: str) -> str:
-    return text if len(text) <= MAX_ISSUE_CHARS else text[: MAX_ISSUE_CHARS - 1] + "…"
+def shortened(text: str, limit: int = MAX_ISSUE_CHARS) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def bounded_issues(issues: Sequence[str]) -> tuple[str, ...]:
-    """At most 20 lines of at most 300 characters, then a count of the lines left out.
+    """At most 20 lines of at most 600 characters, then a count of the lines left out.
 
     Issue text can quote caller content (a citation locator, a field name), so no issue
     list reaches a snapshot unbounded.
@@ -364,7 +367,7 @@ def settle(
         issues = candidate_issues(snapshot, attempt, candidate, pack=pack)
     except ValidationError as error:
         issues = malformed_issues(error)
-    reason = None if interruption is None else shortened(interruption)
+    reason = None if interruption is None else shortened(interruption, MAX_INTERRUPTION_CHARS)
     if reason is not None:
         issues = (f"Interrupted: {reason}",)
     if candidate is not None and not issues:
