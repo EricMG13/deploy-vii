@@ -120,7 +120,16 @@ the live probe (2.6) and decision 0008 (2.7) are the coordinator's and have not 
   Confidence review: one defect fixed (the schema-check key was read after the reservation, so a
   refused credential left it open). Tournaments (inline): the relaxation pass, the rejection
   lookup, and `execution.current_inputs`/`NotAuthorized` and `runner.journal_outcome` as
-  adapted to `execution/5`: incumbent holds in each.
+  adapted to `execution/5`: incumbent holds in each. Fix round 1 (after the coordinator's first
+  live schema-check, `live-schema-2026-10-22.md`): only a schema-shaped 400 blocks later runs
+  (provider code `invalid_json_schema`, or a detail naming the schema or `response_format`;
+  manifest `schema_rejection` and `provider_error_code`; older records do not block), so
+  Google's "Request contains an invalid argument" is reported and never blocks;
+  `schema-check --bisect` sends one-class variants of a 400'd cell's schema until one is accepted,
+  as report-only evidence under `schema-bisect/` that no real run reads or sends; the plain
+  report gains Keywords and Blocks columns; provider detail is capped at 500 characters.
+  Confidence review: one stale docstring fixed; tournaments (inline) on `_bisect` and
+  `schema_shaped`: incumbent holds. Round-1 gates are in the task report.
 
 Not verified: account entitlement and funded credit; live acceptance of `xhigh` or of the
 strict JSON schemas; whether a native Luna agent is entitled when `codex` is on PATH.

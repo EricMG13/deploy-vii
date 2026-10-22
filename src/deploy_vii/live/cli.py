@@ -1236,8 +1236,9 @@ def _bisect(
 def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
     """`live schema-check`: the provider's verdict on each sent step schema, for cents.
 
-    A rejection recorded here (an HTTP 400) makes the same (model, step, schema) cell of a later
-    probe or module batch under the same artifact root ineligible before dispatch."""
+    A schema-shaped rejection recorded here (an HTTP 400 naming the schema, `schema_shaped`)
+    makes the same (model, step, schema) cell of a later probe or module batch under the same
+    artifact root ineligible before dispatch; `--bisect` variants never do."""
     transport = transport or urllib_transport
     effort = [item.model_id for item in args.models if item.effort is not None]
     if effort:
