@@ -86,7 +86,7 @@ def test_coverage_map_cp_model_matches_dc5() -> None:
     deferred = contract["deferred"]["xlsx_workbook"]
     assert "Credit Snapshot" in deferred["required_sheet_names"]
     assert "DC-5" in deferred["reason"]
-    assert entry["implementation"].startswith("partial")
+    assert entry["implementation"].startswith("implemented")
     edges = {(e["source"], e["target"]) for e in coverage["reference_edges"]}
     assert ("CP-1", "CP-MODEL") in edges
     assert ("CP-0", "CP-MODEL") not in edges

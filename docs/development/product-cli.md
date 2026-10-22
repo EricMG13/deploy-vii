@@ -137,6 +137,20 @@ immutable. The receipt records `head_rendering_acceptance` as the journal holds 
 `browser_acceptance: unrun`; the command accepts nothing. Details:
 [execution](execution.md).
 
+To publish the Model destination once CP-1 is promoted (task 7.1a):
+
+```sh
+uv run --locked deploy-vii execution --directory runs/example/execution-1 cp-model-publish --output runs/example/model-1
+```
+
+`cp-model-publish` is Python only (no model call). It refuses with exit 2 and the reason on
+stderr unless the run requests CP-MODEL, CP-1 holds a promoted accepted or restricted head
+that retains a calculated Model, and the output directory does not exist; nothing is written
+or begun on a refusal. Otherwise it writes `model.html` (the CP-1 page with the Model panel
+populated), `calculation.json` and `receipt.json` into the new directory, settles the CP-MODEL
+head only after all three are written, and prints the finished attempt. A write failure
+interrupts the attempt and leaves no head. Details: [execution](execution.md).
+
 After the valid financial stage, `statement-preview --ticket TICKET --output
 runs/example/statements-1` creates a source and constructed-period statement
 candidate without settling the attempt. See [table projection and limits](report-tables.md);

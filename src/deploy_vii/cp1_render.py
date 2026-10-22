@@ -10,22 +10,44 @@ import hashlib
 import json
 from pathlib import Path
 
-from deploy_vii.contracts import ModuleView, View
+from deploy_vii.contracts import Module, ModuleView, View
 from deploy_vii.cp1_workflow import EnvelopeRefused, read_cp1_envelope
 from deploy_vii.envelope import Envelope
 from deploy_vii.execution import Execution
 from deploy_vii.render import render
 
 
-def _with_cp1(base: View, cp1: ModuleView) -> View:
-    if not any(item.module_id == "CP-1" for item in base.modules):
-        raise ValueError("The view has no CP-1 module")
+def _with_module(base: View, module_id: str, replacement: ModuleView) -> View:
+    if not any(item.module_id == module_id for item in base.modules):
+        raise ValueError(f"The view has no {module_id} module")
     return View.model_validate_json(
         base.model_copy(
             update={
-                "modules": tuple(cp1 if item.module_id == "CP-1" else item for item in base.modules)
+                "modules": tuple(
+                    replacement if item.module_id == module_id else item for item in base.modules
+                )
             }
         ).model_dump_json()
+    )
+
+
+def _with_cp1(base: View, cp1: ModuleView) -> View:
+    return _with_module(base, "CP-1", cp1)
+
+
+def _settled(shown: ModuleView, module: Module) -> ModuleView:
+    """`shown` carrying the settled `module`'s outputs, as `Execution.view` draws a head."""
+    return shown.model_copy(
+        update={
+            "status": module.status,
+            "artifact_sha256": module.content_hash(),
+            "facts": module.facts,
+            "tables": module.tables,
+            "claims": module.claims,
+            "limitations": tuple(
+                dict.fromkeys((*module.limitations, *module.inherited_limitations))
+            ),
+        }
     )
 
 
@@ -44,21 +66,7 @@ def envelope_view(base: View, envelope: Envelope) -> View:
         raise ValueError("The envelope belongs to another run than the view")
     if module.status not in ("accepted", "restricted"):
         raise ValueError(f"A {module.status} envelope module is not shown")
-    return _with_cp1(
-        base,
-        _cp1_of(base).model_copy(
-            update={
-                "status": module.status,
-                "artifact_sha256": module.content_hash(),
-                "facts": module.facts,
-                "tables": module.tables,
-                "claims": module.claims,
-                "limitations": tuple(
-                    dict.fromkeys((*module.limitations, *module.inherited_limitations))
-                ),
-            }
-        ),
-    )
+    return _with_cp1(base, _settled(_cp1_of(base), module))
 
 
 def refused_view(base: View, issues: tuple[str, ...]) -> View:
@@ -78,6 +86,19 @@ def refused_view(base: View, issues: tuple[str, ...]) -> View:
             }
         ),
     )
+
+
+def model_destination_html(store: Execution, directory: Path, model: Module) -> str:
+    """The Model destination page: the verified CP-1 envelope plus the settled CP-MODEL module.
+
+    Task 7.1a. The envelope is read back against the journal (`read_cp1_envelope`); a refusal
+    raises `EnvelopeRefused`, because a published page never shows refused CP-1 data.
+    """
+    if model.module_id != "CP-MODEL" or model.status not in ("accepted", "restricted"):
+        raise ValueError("The Model destination shows a settled CP-MODEL module")
+    view = envelope_view(store.view(), read_cp1_envelope(store, directory))
+    shown = next(item for item in view.modules if item.module_id == "CP-MODEL")
+    return render(_with_module(view, "CP-MODEL", _settled(shown, model)))
 
 
 def render_cp1_envelope(

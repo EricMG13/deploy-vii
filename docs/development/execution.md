@@ -297,8 +297,50 @@ recorded so in `docs/methodology/r14-coverage.json`. CP-MODEL requires accepted 
 blocked CP-1 blocks it) and, when selected, is an analyst input to CP-5 (restricted if
 blocked). The presets whose composition holds a Model-owned block (Credit Snapshot,
 Earnings Update, Relative Value, Portfolio Decision) request it right after CP-1
-(decision 0009, task 6.5). Nothing runs it yet, so it stays `unrun` and the Model
-destination says "Model not run"; its calculation JSON is M8.
+(decision 0009, task 6.5). Until it is published it stays `unrun` and the Model
+destination says "Model not run"; `publish_cp_model` below gives it a head.
+
+### CP-MODEL publication (task 7.1a)
+
+`publish_cp_model(store, output=DIR)` (CLI `cp-model-publish --output DIR`) is Python only:
+no model call, no prompt, no review. It is refused (`CpModelRefused`; the CLI prints the
+reason on stderr and exits 2) before any file is written and before any attempt begins unless:
+
+1. the run requests CP-MODEL (decision 0009 presets: Credit Snapshot, Earnings Update,
+   Relative Value, Portfolio Decision);
+2. CP-1's head is `accepted` or `restricted` and records `Head.qualification` (so it was
+   promoted by 6.4, not settled by the engine alone) and its promotion attempt retains the
+   `quality` handoff and a `financials` stage that calculated a Model (`FinancialStage.model`);
+3. `DIR` does not exist; and no attempt is pending (`begin` refuses otherwise).
+
+Then it begins `CP-MODEL` and builds the candidate `Module` from the journal alone: three
+text registers (the Model destination manifest, the calculation JSON identity, and the
+provenance binding CP-1's head, the envelope Markdown and sidecar hashes and the pack hash)
+and one claim without a figure. It settles that candidate in memory with the journal's own
+`settle` to learn the head it will become, renders `model.html` for that head (the CP-1
+page through the accepted route, `read_cp1_envelope`, with the Model panel populated),
+writes `model.html`, `calculation.json` (CP-1's `ModelReport`, `financial-model/3`, in its
+canonical JSON) and `receipt.json` (last), and only then calls `finish`. The validator
+re-derives the candidate from the journal and refuses any difference, so two runs from the
+same inputs give the same files and the same head hash (tested). Any failure before `finish`
+(a file that cannot be written, a render error) interrupts the attempt: no head, no partial
+publication is promoted; the receipt names the head the journal is to hold, so a directory
+without that head in the journal is not a publication. The interrupted attempt consumes the
+one repair. A page cannot hold its own hash and the receipt names the head, so the manifest
+lists those two files with "Recorded in receipt.json" instead of a hash; the receipt holds
+the hashes of `model.html` and `calculation.json`.
+
+M4 inheritance: settlement follows the journal's rules unchanged. CP-1's limitations are
+inherited and shown; a `restricted` CP-1 head also gives CP-MODEL the own limitation
+"Published from a restricted CP-1 head; the Model carries its limitations", so CP-MODEL
+settles `restricted`; a synthetic run restricts it as for any module. A blocked CP-1 blocks
+CP-MODEL (the edge blocks). CP-MODEL is exempt from CP-0's consumer review.
+
+The head records `Qualification(implementation="implemented")` and the other three statuses
+`unrun`. The contract has no `not_applicable` literal for `analytical_qualification`, so
+`unrun` is used: no analyst has qualified the Model's figures, and the contract is not
+extended here. After publication CP-5 can begin under the presets that request CP-MODEL
+(`test_cp5_is_held_until_cp_model_is_published_then_begins`).
 
 ### Rendering the accepted envelope (task 6.5)
 

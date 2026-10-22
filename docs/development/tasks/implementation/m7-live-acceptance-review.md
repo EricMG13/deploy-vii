@@ -179,3 +179,21 @@ The schema now states rules the validators already enforced.
 
 Not verified: provider acceptance of the enum-bearing schema (the coordinator runs `live
 schema-check --steps financials`) and live uptake (E1 batch 4).
+## 7.1a CP-MODEL deterministic publication
+
+`cp_model_workflow.publish_cp_model` (CLI `cp-model-publish`) gives CP-MODEL a head once CP-1
+is promoted: the Model destination page, the calculation JSON and a receipt, Python only.
+CP-5 can then begin under the four presets that request CP-MODEL. Preconditions, the M4
+inheritance, the `Qualification` used (`implementation: implemented`, the rest `unrun`: the
+contract has no `not_applicable`) and the file order are in `execution.md` "CP-MODEL
+publication (task 7.1a)". `r14-coverage.json` CP-MODEL `implementation` is now `implemented`;
+its `rendering_acceptance` stays `unrun` (no browser acceptance run has qualified the page).
+
+Deviations from the brief: the manifest cannot hold the page's or the receipt's hash (cycle),
+so the receipt does; the CP-MODEL bindings (`bindings/cp_model.py`, bound to the Evidence
+destination) were needed because the report builder refuses unbound facts; the browser test of
+the populated Model panel sits in `test_cp_model_workflow.py` beside its journal fixture.
+
+Not verified: publication on a real promoted CP-1 (none exists until E1); the XLSX workbook
+(deferred, decision 0006 DC-5); a CP-1 whose financial stage has no calculated Model (refused,
+untested end to end); analytical qualification of the Model figures.
