@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-from html import unescape
 from pathlib import Path
 
 import pytest
@@ -248,7 +247,13 @@ def test_narrative_preview_offline_exact_claims_and_provenance(
     module = next(m for m in view.modules if m.module_id == "CP-1")
     claim = module.claims[0]
     markdown = (path.parent / "tables.md").read_text()
-    assert claim.text in unescape(markdown.replace("<br>", "\n"))
+    # The preview prints resolved run text (task 6.4), never the raw [<fact id>] chips.
+    from deploy_vii.envelope import resolved_claims
+    from deploy_vii.report_view import build_index
+
+    ((line, _),) = resolved_claims(module, build_index(view)[1], (view.run.issuer_name,))
+    assert line in markdown.split("\n") and "interface-fact:" not in line
+    assert claim.claim_id in line
     assert "<script>window.injected" not in markdown and "<img src" not in markdown
     evidence = (
         Path("artifacts/rendering/narrative-projection") / tmp_path.parent.name / tmp_path.name

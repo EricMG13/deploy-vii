@@ -172,3 +172,21 @@ def test_cp0_actual_fields_browser_evidence_and_offline_report(
         )
     )
     assert ReadinessReview.model_validate_json((evidence / "review.json").read_bytes()) == review
+
+
+def test_a_figure_bearing_claim_settles_rejected_instead_of_raising(tmp_path: Path) -> None:
+    pack, review = readiness_fixture()
+    claim = review.analysis[0].model_copy(update={"text": "Leverage reached 5.2x in FY2025"})
+    target = tmp_path / "rejected"
+    path = deliver_cp0(pack, review.model_copy(update={"analysis": (claim,)}), target)
+    assert path == target / "candidate.html" and path.is_file()
+    receipt = json.loads((target / "complete.json").read_bytes())
+    assert receipt["status"] == "rejected" and receipt["structural_validation"] == "failed"
+    assert not (target / "accepted.html").exists() and not (target / "accepted-view.json").exists()
+    rejected = json.loads((target / "rejected.json").read_bytes())
+    assert rejected["status"] == "rejected" and not rejected["claims"]
+    assert any("Bare figure: 5.2x" in text for text in rejected["limitations"])
+    view = View.model_validate_json((target / "candidate-view.json").read_bytes())
+    assert view.modules[0].status == "rejected" and not view.modules[0].claims
+    for name, digest in receipt["files"].items():
+        assert hashlib.sha256((target / name).read_bytes()).hexdigest() == digest

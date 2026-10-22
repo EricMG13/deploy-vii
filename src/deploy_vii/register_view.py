@@ -6,9 +6,11 @@ from pathlib import Path
 
 from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import View
+from deploy_vii.envelope import resolved_claims
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.render import empty_view, render
-from deploy_vii.table_markdown import markdown_cell, table_markdown, validate_table_markdown
+from deploy_vii.report_view import build_index
+from deploy_vii.table_markdown import table_markdown, validate_table_markdown
 
 
 def write_register_preview(
@@ -55,7 +57,10 @@ def write_register_preview(
         "remain pending. This is not the final downstream Markdown handoff.",
     ]
     sections.append("## Analysis")
-    sections.extend(markdown_cell(claim.text) for claim in module.claims)
+    # Resolved run text (decision 0005 MC-2), as in the canonical envelope: never raw tokens.
+    _, index = build_index(view)
+    claims = resolved_claims(module, index, (pack.run.issuer_name,))
+    sections.extend(line for line, _ in claims)
     if not module.claims:
         sections.append("No analytical findings supplied. Review coverage and gap registers.")
     facts = {f.fact_id: f for f in module.facts}

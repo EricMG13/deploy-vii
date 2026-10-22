@@ -15,10 +15,16 @@ import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 
 from deploy_vii.contracts import (
     Claim,
@@ -92,11 +98,27 @@ class Command(Contract):
     text: str | None
 
 
+class Qualification(Contract):
+    """The plan's four statuses of one settled module artifact ("four statuses per module").
+
+    They describe this artifact, not the module's coverage-map row: `implemented` means it
+    passed every implemented structural gate; the other three stay `unrun` until a live,
+    rendering or native-host test qualifies this artifact.
+    """
+
+    implementation: Literal["unrun", "partial", "implemented"]
+    analytical_qualification: Literal["unrun", "partial", "qualified", "blocked"] = "unrun"
+    rendering_acceptance: Literal["unrun", "partial", "accepted", "blocked"] = "unrun"
+    native_host_qualification: Literal["unrun", "qualified", "blocked"] = "unrun"
+
+
 class Head(Contract):
     """The current record of one module: a hash of its settled `Module` blob plus the few
     fields the journal reads on every transition, so no blob is loaded to resolve inputs.
 
     `status` and `notes` are the live state: staling changes them, never the blob.
+    `qualification` holds the four statuses where a promotion recorded them (CP-1, task 6.4);
+    absent, it is omitted from the JSON, so heads written before it keep their bytes and hashes.
     """
 
     module_id: Identifier
@@ -105,6 +127,14 @@ class Head(Contract):
     inputs: tuple[Input, ...]
     commands: tuple[Command, ...] = ()
     notes: tuple[Text, ...] = ()
+    qualification: Qualification | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_qualification(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.qualification is None:
+            data.pop("qualification", None)
+        return data
 
 
 def commands_of(module: Module) -> tuple[Command, ...]:
@@ -115,7 +145,7 @@ def commands_of(module: Module) -> tuple[Command, ...]:
     )
 
 
-def head_of(result: Module) -> Head:
+def head_of(result: Module, qualification: Qualification | None = None) -> Head:
     status = result.status
     if status not in ("accepted", "restricted", "blocked"):
         raise ValueError("Only an accepted, restricted or blocked module can be a head")
@@ -125,6 +155,8 @@ def head_of(result: Module) -> Head:
         result_sha256=result.content_hash(),
         inputs=result.inputs,
         commands=commands_of(result),
+        # The statuses describe a promoted artifact; a blocked result never carries them.
+        qualification=None if status == "blocked" else qualification,
     )
 
 
@@ -555,7 +587,13 @@ class Execution:
             return attempt
 
     def finish(
-        self, ticket_id: str, payload: str, validator: Validator, *, interruption: str | None = None
+        self,
+        ticket_id: str,
+        payload: str,
+        validator: Validator,
+        *,
+        interruption: str | None = None,
+        qualification: Qualification | None = None,
     ) -> Attempt:
         with self._locked():
             snapshot = self.read()
@@ -603,18 +641,25 @@ class Execution:
                 pack=self.pack(snapshot),
                 load=self.head_module,
             )
-            self._save_finished(snapshot, finished, result)
+            self._save_finished(snapshot, finished, result, qualification)
             return finished
 
     def _save_finished(
-        self, snapshot: ExecutionSnapshot, finished: Attempt, result: Module
+        self,
+        snapshot: ExecutionSnapshot,
+        finished: Attempt,
+        result: Module,
+        qualification: Qualification | None = None,
     ) -> None:
         """Caller holds the execution lock; preserve the existing invalidation policy."""
         if self._store(result.model_dump_json()) != finished.result_sha256:
             raise ValueError("Settled result is not the attempt's result")
         heads = invalidate(snapshot.heads, finished.module_id)
         if result.status != "rejected":
-            heads = (*tuple(h for h in heads if h.module_id != finished.module_id), head_of(result))
+            heads = (
+                *tuple(h for h in heads if h.module_id != finished.module_id),
+                head_of(result, qualification),
+            )
         self._write(
             snapshot.model_copy(
                 update={

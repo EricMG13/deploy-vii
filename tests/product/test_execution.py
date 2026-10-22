@@ -1348,3 +1348,34 @@ def test_every_view_entry_point_applies_the_pathway_scope(tmp_path: Path) -> Non
                 name,
                 module_id,
             )
+
+
+def test_head_statuses_are_omitted_until_a_promotion_records_them() -> None:
+    from deploy_vii.execution import Qualification, head_of
+
+    head = Head(module_id="CP-0", status="accepted", result_sha256="a" * 64, inputs=())
+    raw = head.model_dump_json()
+    assert "qualification" not in raw  # heads written before task 6.4 keep their bytes
+    assert Head.model_validate_json(raw) == head
+    promoted = Qualification(implementation="implemented")
+    recorded = head.model_copy(update={"qualification": promoted})
+    assert json.loads(recorded.model_dump_json())["qualification"] == {
+        "implementation": "implemented",
+        "analytical_qualification": "unrun",
+        "rendering_acceptance": "unrun",
+        "native_host_qualification": "unrun",
+    }
+    assert Head.model_validate_json(recorded.model_dump_json()) == recorded
+    blocked = Module.model_validate_json(
+        json.dumps(
+            {
+                "run_id": "r",
+                "issuer_id": "i",
+                "as_of": "2026-01-01",
+                "module_id": "CP-1",
+                "status": "blocked",
+                "limitations": ["Repair failed"],
+            }
+        )
+    )
+    assert head_of(blocked, promoted).qualification is None

@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 from deploy_vii.contracts import Module, ModuleView, View
+from deploy_vii.execution import bounded_issues
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.prose import prose_issues
 from deploy_vii.readiness import ReadinessReview, build_readiness
 from deploy_vii.registry import idle_statuses, modules
 from deploy_vii.render import render
@@ -42,9 +44,66 @@ def cp0_view(pack: PreparedPack, module: Module, *, accepted: bool) -> View:
     )
 
 
+def _deliver_rejected(
+    pack: PreparedPack,
+    review: ReadinessReview,
+    candidate: Module,
+    issues: tuple[str, ...],
+    destination: Path,
+) -> Path:
+    """Publish a rejection, as the journal settles one: an empty module carrying the issues.
+
+    Nothing is accepted, so there is no accepted view or page; the candidate page shows CP-0
+    rejected with its issues and no findings (decision 0005 MC-2: fail closed by status).
+    """
+    rejected = Module(
+        run_id=candidate.run_id,
+        issuer_id=candidate.issuer_id,
+        as_of=candidate.as_of,
+        module_id=candidate.module_id,
+        inputs=candidate.inputs,
+        attempt=candidate.attempt,
+        status="rejected",
+        limitations=bounded_issues(issues),
+    )
+    view = cp0_view(pack, rejected, accepted=False)
+    payloads = {
+        "candidate.json": candidate.model_dump_json(indent=2),
+        "rejected.json": rejected.model_dump_json(indent=2),
+        "review.json": review.model_dump_json(indent=2),
+        "candidate-view.json": view.model_dump_json(indent=2),
+        "candidate.html": render(view),
+    }
+    receipt = {
+        "schema_version": "cp0-delivery/1",
+        "pack_sha256": pack.content_hash(),
+        "candidate_sha256": candidate.content_hash(),
+        "rejected_sha256": rejected.content_hash(),
+        "structural_validation": "failed",
+        "analytical_qualification": "unrun",
+        "browser_acceptance": "unrun",
+        "native_host_qualification": "unrun",
+        "status": "rejected",
+        "files": {
+            name: hashlib.sha256(value.encode()).hexdigest() for name, value in payloads.items()
+        },
+    }
+    destination.mkdir(parents=True, exist_ok=False)
+    for name, payload in payloads.items():
+        (destination / name).write_text(payload, encoding="utf-8")
+    (destination / "complete.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    return destination / "candidate.html"
+
+
 def deliver_cp0(pack: PreparedPack, review: ReadinessReview, destination: Path) -> Path:
-    """Validate before publication; acceptance here is structural, not live qualification."""
+    """Validate before publication; acceptance here is structural, not live qualification.
+
+    Claims whose run text does not resolve (a bare figure, an unknown reference) settle the
+    delivery `rejected`, as the journal does, instead of raising when the page renders.
+    """
     candidate = build_readiness(pack, review)
+    if issues := prose_issues(candidate, names=(pack.run.issuer_name,)):
+        return _deliver_rejected(pack, review, candidate, issues, destination)
     usable = any(
         source.status == "ready" and assessment.fidelity != "blocked"
         for source in pack.sources

@@ -5,11 +5,15 @@ import json
 from pathlib import Path
 
 from deploy_vii.cp0_workflow import submit_cp0_review
+from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
     CP1_STEPS,
     cp1_register_preview,
+    cp1_registers,
     cp1_statement_preview,
+    promote_cp1,
     submit_cp1_step,
+    write_cp1_envelope,
 )
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.preparation import load_pack
@@ -26,7 +30,11 @@ def configure(parser: argparse.ArgumentParser) -> None:
         preview = actions.add_parser(name)
         preview.add_argument("--ticket", required=True)
         preview.add_argument("--output", type=Path, required=True)
-    for name in ("interrupt", "cp0-submit", "cp1-submit", "step-output"):
+    envelope = actions.add_parser("envelope")
+    envelope.add_argument("--module", required=True, choices=("CP-1",))
+    envelope.add_argument("--output", type=Path, required=True)
+    actions.add_parser("cp1-quality-inputs").add_argument("--ticket", required=True)
+    for name in ("interrupt", "cp0-submit", "cp1-submit", "cp1-promote", "step-output"):
         action = actions.add_parser(name)
         action.add_argument("--ticket", required=True)
         if name == "interrupt":
@@ -55,6 +63,13 @@ def execute(args: argparse.Namespace) -> str:
         store.replace_pack(load_pack(args.pack))
     elif args.action == "register-preview":
         return str(cp1_register_preview(store, args.ticket, args.output))
+    elif args.action == "cp1-quality-inputs":
+        return cp1_quality_inputs(cp1_registers(store, args.ticket)).model_dump_json()
+    elif args.action == "cp1-promote":
+        review = args.review.read_text(encoding="utf-8")
+        return attempt_json(store, promote_cp1(store, args.ticket, review))
+    elif args.action == "envelope":
+        return str(write_cp1_envelope(store, args.output))
     elif args.action in {"statement-preview", "interface-preview"}:
         return str(
             cp1_statement_preview(

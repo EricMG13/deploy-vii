@@ -9,6 +9,7 @@ from deploy_vii.canonical_tables import CanonicalTables, canonical_tables
 from deploy_vii.context_binding import FinancialContextBinding
 from deploy_vii.contracts import Contract
 from deploy_vii.downstream_readiness import DownstreamReview
+from deploy_vii.envelope import handoff_issues, register_envelope
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_model import ModelValue
 from deploy_vii.financial_periods import HistoricalValue, _id
@@ -119,6 +120,27 @@ def _ceilings(
     return tuple(EvidenceCeiling.of(i, b) for i, b in bases.items())
 
 
+def _handoff_slot(registers: CanonicalTables) -> CoverageField:
+    """Present when these registers' canonical envelope round-trips cleanly (writer, reader,
+    every section, cell, marker, prose run and footer hash); absent with the reason otherwise.
+
+    The register envelope carries no QA section, because QA is computed from this slot; the
+    promoted envelope, which adds QA and the journal binding, is verified again at promotion.
+    """
+    issues = handoff_issues(register_envelope(registers))
+    return CoverageField(
+        field_id="canonical-handoff",
+        present=not issues,
+        rationale=(
+            "Canonical envelope of these registers round-trips: r14 sections, cells, evidence "
+            "markers, prose runs and footer hashes verified against its sidecar"
+            if not issues
+            else "Canonical envelope does not verify: "
+            + "; ".join(issue[:300] for issue in issues[:3])
+        ),
+    )
+
+
 def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
     """Project scope from trusted registers; authenticate with canonical_quality.
 
@@ -191,11 +213,7 @@ def cp1_quality_inputs(registers: CanonicalTables) -> QualityInputs:
                 present=bool(narrative.review.findings),
                 rationale="At least one evidence-risk-credit chain is supplied",
             ),
-            CoverageField(
-                field_id="canonical-handoff",
-                present=False,
-                rationale="Final canonical envelope and handoff verification remain pending",
-            ),
+            _handoff_slot(registers),
         )
     )
     claims = tuple(

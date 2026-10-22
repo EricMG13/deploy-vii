@@ -330,10 +330,10 @@ def test_unassessed_narrative_leaves_every_analytical_scope_field_absent(
     assert not any(seen[d] for d in dimensions)
     assert seen["funding-assessment"] is False and seen["analytical-findings"] is False
     assert inputs.claims == ()
-    assert seen["canonical-handoff"] is False and seen["source-gate"] is True
+    assert seen["canonical-handoff"] is True and seen["source-gate"] is True
 
 
-def test_assessed_dimensions_funding_and_findings_count_present_but_handoff_never(
+def test_assessed_dimensions_funding_and_findings_count_present(
     reviewed: tuple[Args, CanonicalTables, QualityInputs],
 ) -> None:
     _, _, scope = reviewed
@@ -346,9 +346,32 @@ def test_assessed_dimensions_funding_and_findings_count_present_but_handoff_neve
     assert seen["dimension:liquidity"] is True
     assert not any(seen[f"dimension:{d}"] for d in ("data_quality", "definition_risks", "key_gaps"))
     assert seen["funding-assessment"] and seen["analytical-findings"]
-    assert seen["canonical-handoff"] is False
+
+
+def test_canonical_handoff_slot_is_present_when_the_registers_envelope_round_trips(
+    reviewed: tuple[Args, CanonicalTables, QualityInputs],
+) -> None:
+    _, _, scope = reviewed
     handoff = next(c for c in scope.coverage if c.field_id == "canonical-handoff")
-    assert "pending" in handoff.rationale
+    assert handoff.present and "round-trips" in handoff.rationale
+
+
+def test_canonical_handoff_slot_is_absent_with_the_reason_when_the_envelope_fails(
+    registers: CanonicalTables,
+) -> None:
+    module = registers.module
+    stray = module.tables[0].model_copy(update={"table_id": "T9.9", "rows": ()})
+    unplaced = registers.model_copy(
+        update={"module": module.model_copy(update={"tables": (*module.tables, stray)})}
+    )
+    handoff = next(
+        c for c in cp1_quality_inputs(unplaced).coverage if c.field_id == "canonical-handoff"
+    )
+    assert not handoff.present
+    assert handoff.rationale == (
+        "Canonical envelope does not verify: Canonical envelope cannot be written: "
+        "No r14 envelope section for table: T9.9"
+    )
 
 
 def test_required_stories_are_present_only_when_linked_to_a_validated_finding() -> None:
