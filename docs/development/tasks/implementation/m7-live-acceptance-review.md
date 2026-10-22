@@ -134,3 +134,36 @@ Decision 0008 MC-7 gives each input set one repair, but `deploy-vii live module`
 Evidence: E1 batches 1 to 3 (22 October 2026) each ended at the rejected `financials` step with `repair_count` 0.
 
 Not verified: a live repair (the coordinator runs E1 batch 4).
+
+## 7.0d The financials sent schema states the Python vocabularies
+
+The `financials` step's sent schema now enforces two rules that only Python held before. First,
+every `Number` amount is a JSON number: the `decimal-number-only` relaxation in `live.schema`
+drops the string branch of Pydantic's Decimal union. It selects the node by the
+`DECIMAL_MARKER` that `financial_contracts.Number` adds, so a real number-or-text union is never
+rewritten, and a marked node of another shape raises `ValueError`. Second,
+`AccountObservation.metric_id` is an enum of the 36 `ACCOUNT_IDS`. The prompt replaces "Report
+each amount exactly as the source states it." with four step rules: amounts as JSON numbers
+(`3,624` is 3624; `(211)` is -211); `metric_id` from the enum, with a figure that has no account
+metric going to `statement_lines` (issuer detail under the `other:` prefix); the
+`context_step_sha256` binding; every `period_id` declared in its book's `periods`. Decision 0008
+carries the amendment. The stored contracts, their validators and messages, and the replay
+corpus are unchanged.
+
+Evidence: batch `e1-cp1-3` (Sol @high, 61,035 completion tokens, 745 s, US$1.08) was rejected by
+shape validation alone: 131 amounts sent as printed strings and 12 "unknown CP-1 account metric"
+issues (19 of 22 `metric_id` values invented).
+
+`schema_shape` of the `financials` sent schema: before, depth 14 (7 objects), 232 properties, 32
+enum nodes with 100 members; after, depth 14 (7 objects), 232 properties, 33 enum nodes with 136
+members. The keyword set is unchanged. The sent schema grew from 28,899 to 29,555 bytes.
+
+Only `AccountObservation.metric_id` gained an enum. Every other model or field validator in
+`financial_contracts`, `canonical_audit` and `context_binding` checks either a `Literal` (already
+an enum) or a set that is derived from the payload or open by an `other:` prefix.
+
+No `methodology-adaptation.md` row: the accepted values and every analytical rule are unchanged.
+The schema now states rules the validators already enforced.
+
+Not verified: provider acceptance of the enum-bearing schema (the coordinator runs `live
+schema-check --steps financials`) and live uptake (E1 batch 4).

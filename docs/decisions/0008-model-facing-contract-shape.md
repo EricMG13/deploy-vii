@@ -258,6 +258,24 @@ cost, and therefore `live reconcile` takes a fresh `GET /api/v1/key` reading and
 adjust only when it equals the recorded after-figure within US$0.000001; otherwise the attempt
 stays held with "usage moved since the after-check" and a later reconcile may retry.
 
+## Amendment, 22 Oct 2026 (task 7.0d)
+
+E1 batch `e1-cp1-3` (Sol @high) ran CP-1 `financials` to completion for the first time: 61,035
+completion tokens, a 232 KB `FinancialSubmission`, 745 s and US$1.08. Shape validation then
+rejected it for two causes the sent schema permitted: 131 amounts were strings copied as printed
+(`"3,624"`, `"(211)"`; "Input should be a valid decimal"), and 19 of the 22 `metric_id` values
+were invented (12 issues "unknown CP-1 account metric"). The sent copy now says both rules. The
+new `decimal-number-only` relaxation keeps only the number branch, with its bounds and any null
+branch, of each `Number` amount (Pydantic's `anyOf` of number and string). It selects these nodes
+by a marker that `financial_contracts.Number` adds, never by shape. `AccountObservation.metric_id`
+is sent as an enum of the 36 `ACCOUNT_IDS`. The `financials` prompt states both rules, the
+`statement_lines` home of a figure that has no account metric, and the declared-period rule.
+The stored contracts, their validators and the values they accept are unchanged: a stored
+string amount still validates, and `controlled_metric` still refuses an unknown id with the same
+message. Item 3 (`FinancialSubmission` split) stays deferred. Its measured basis is now one
+draw: about 61k output tokens, 12.5 minutes and about US$1.1. Its trigger is first-pass validity
+below 2 of 3 draws *after* the sent schema enforces the Python vocabularies.
+
 ## Evidence
 
 - [live-probe-2.md](../development/tasks/implementation/live-probe-2.md): batch report and

@@ -14,9 +14,19 @@ from deploy_vii.contracts import Citation, Claim, Contract, Hash, Identifier, Te
 from deploy_vii.model.dates import fiscal_year_number
 from deploy_vii.model.history import BALANCE_METRICS, FLOW_METRICS
 
+# Task 7.0d: marks a `Number` node in the JSON schema. The sent copy keeps only its number branch
+# (`live.schema`, "decimal-number-only"); the stored contract and its parse are unchanged, so a
+# stored string amount still validates.
+DECIMAL_MARKER = "x-deploy-vii-decimal"
 Number = Annotated[
     Decimal,
-    Field(gt=Decimal("-1e18"), lt=Decimal("1e18"), max_digits=28, decimal_places=10),
+    Field(
+        gt=Decimal("-1e18"),
+        lt=Decimal("1e18"),
+        max_digits=28,
+        decimal_places=10,
+        json_schema_extra={DECIMAL_MARKER: True},
+    ),
 ]
 Currency = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
 Unit = Literal["UNITS", "THOUSANDS", "MILLIONS"]
@@ -106,7 +116,8 @@ class FinancialPeriod(Contract):
 
 
 class AccountObservation(Contract):
-    metric_id: Identifier
+    # The enum is for the sent schema only (task 7.0d); `controlled_metric` still decides.
+    metric_id: Identifier = Field(json_schema_extra={"enum": [*sorted(ACCOUNT_IDS)]})
     period_id: Identifier
     value: Observation
 

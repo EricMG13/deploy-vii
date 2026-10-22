@@ -192,3 +192,41 @@ def test_every_label_the_run_text_rule_allows_is_one_the_validator_allows(label:
 
 def test_a_bare_figure_the_rule_forbids_is_rejected() -> None:
     assert bare_figures("Revenue was 11,456 in the year.") == ("11,456",)
+
+
+# --- 7.0d: the financials step states what its sent schema and validators enforce ------------
+
+FINANCIAL_RULES = (
+    prompts.AMOUNT_RULE,
+    prompts.ACCOUNT_METRIC_RULE,
+    prompts.CONTEXT_STEP_RULE,
+    prompts.DECLARED_PERIOD_RULE,
+)
+
+
+def test_the_financials_step_states_each_rule_once_and_no_longer_asks_for_printed_amounts() -> None:
+    system = composed("financials")
+    for rule in FINANCIAL_RULES:
+        assert rule in prompts.STEP_CONTRACTS["financials"]
+        assert system.count(rule) == 1, rule
+    assert "Report each amount exactly as the source states it." not in system
+    for step_id in ("source_readiness", "source_context", "narrative", "readiness"):
+        assert not [rule for rule in FINANCIAL_RULES if rule in composed(step_id)], step_id
+
+
+def test_the_amount_rule_shows_the_two_printed_forms_e1_batch_3_sent_as_strings() -> None:
+    rule = prompts.AMOUNT_RULE
+    assert "JSON number" in rule and "never a string" in rule
+    assert "`3,624` is 3624" in rule and "`(211)` is -211" in rule
+    assert "never arithmetic" in rule
+
+
+def test_the_account_rule_names_the_enum_and_where_other_figures_go() -> None:
+    rule = prompts.ACCOUNT_METRIC_RULE
+    assert "`metric_id`" in rule and "enum" in rule
+    assert "`statement_lines`" in rule and "`other:`" in rule and "not in `accounts`" in rule
+    # The enum the rule points at is the one the schema printed below the rule carries.
+    enum = strict_schema(STEPS["financials"].schema)["$defs"]["AccountObservation"]["properties"][
+        "metric_id"
+    ]["enum"]
+    assert json.dumps(enum, separators=(",", ":")) in composed("financials")

@@ -64,6 +64,24 @@ COVERAGE_RULE = (
     "The CONTEXT block states each source's extraction coverage. Never call a page or locator "
     "absent when that coverage lists it."
 )
+# Task 7.0d (E1 batch e1-cp1-3): the `financials` rules its sent schema (amounts as JSON numbers,
+# `live.schema` "decimal-number-only"; the `metric_id` enum) and its validators enforce.
+AMOUNT_RULE = (
+    "Every `amount` is a JSON number exactly as the source prints it (money in its book's `unit` "
+    "and `currency`): remove thousands separators, and write parentheses or a leading minus as a "
+    "negative number (`3,624` is 3624; `(211)` is -211). It is never a string, never carries a "
+    "unit or currency symbol, and is never arithmetic."
+)
+ACCOUNT_METRIC_RULE = (
+    "`accounts[].metric_id` is one of the account metrics the schema's `metric_id` enum lists: "
+    "the r14 canonical accounts Python calculates from. A figure the filing reports that has no "
+    "account metric belongs in `statement_lines` under its own `item_id` (issuer detail with the "
+    "`other:` prefix), with its `statement` and `sign_convention`, not in `accounts`."
+)
+CONTEXT_STEP_RULE = (
+    "`context_step_sha256` must equal the sha256 shown on the step:source_context block."
+)
+DECLARED_PERIOD_RULE = "Every `period_id` an entry uses must be declared in its book's `periods`."
 
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
@@ -103,8 +121,12 @@ STEP_CONTRACTS: Mapping[str, str] = {
     ),
     "financials": (
         "Extract the financial statement values, the definition review and the context binding "
-        "for the financial sources. Report each amount exactly as the source states it. "
-        "`context_step_sha256` must equal the sha256 shown on the step:source_context block."
+        "for the financial sources.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {AMOUNT_RULE}\n"
+        f"b. {ACCOUNT_METRIC_RULE}\n"
+        f"c. {CONTEXT_STEP_RULE}\n"
+        f"d. {DECLARED_PERIOD_RULE}"
     ),
     # The narrative and readiness hash bindings are not model-computable from the step hash
     # alone; Python pre-fills them in the contract-shape work (plan 2.7, MC-1).

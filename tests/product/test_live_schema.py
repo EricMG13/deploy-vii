@@ -4,11 +4,12 @@ import json
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
+from deploy_vii.financial_contracts import Alternative, Observation
 from deploy_vii.live import schema as strict
 from deploy_vii.live.prompts import response_format, schema_text
 from deploy_vii.live.runner import STEPS
@@ -214,6 +215,7 @@ def test_relaxations_name_the_nullable_array_and_one_of_rewrites() -> None:
         "drop-length",
         "nullable-array-anyof",
         "oneof-anyof",
+        "decimal-number-only",
     )
     assert strict.schema_relaxations(SCHEMAS["narrative"]) == [
         "const-to-enum",
@@ -673,3 +675,101 @@ def test_numbers_keep_their_exact_text_when_a_payload_is_rewritten() -> None:
         "value": Decimal("1234567890.123456789012"),
         "notes": [],
     }
+
+
+# --- task 7.0d: Decimal amounts are sent as JSON numbers only (E1 batch e1-cp1-3) -------------
+
+
+def number_or_string(node: dict[str, Any]) -> bool:
+    kinds = [b.get("type") for b in node.get("anyOf", ()) if isinstance(b, dict)]
+    return "number" in kinds and "string" in kinds
+
+
+def test_observation_and_alternative_amounts_are_sent_without_a_string_branch() -> None:
+    bounds = {"exclusiveMaximum": 1e18, "exclusiveMinimum": -1e18, "type": "number"}
+    assert strict.strict_schema(Observation)["properties"]["amount"] == {
+        "anyOf": [bounds, {"type": "null"}],
+        "title": "Amount",
+    }
+    alternative = strict.strict_schema(Alternative)["properties"]["amount"]
+    assert alternative == {**bounds, "title": "Amount"}
+    sent = strict.strict_schema(SCHEMAS["financials"])
+    assert not [n for n in nodes(sent) if number_or_string(n)]
+    # The stored contract's own schema still has the string branch (normalise reads it).
+    assert [n for n in nodes(SCHEMAS["financials"].model_json_schema()) if number_or_string(n)]
+    # The marker is consumed on the way out: no step's sent schema carries it.
+    for model in SCHEMAS.values():
+        assert strict.DECIMAL_MARKER not in sent_keys(strict.strict_schema(model))
+
+
+Lookalike = Annotated[float, Field(gt=-1e18, lt=1e18)]
+
+
+class NumberOrText(BaseModel):
+    plain: float | str
+    bounded: Lookalike | str
+    optional: Lookalike | str | None
+
+
+def test_a_genuine_number_or_string_union_is_not_rewritten() -> None:
+    """The rule fires on the `Number` marker only, never on a shape that merely looks alike (a
+    float with the Decimal bounds beside a string is a real union)."""
+    copied = strict.strict_copy(NumberOrText)
+    sent = strict.strict_schema(NumberOrText)
+    for name in ("plain", "bounded", "optional"):
+        assert number_or_string(sent["properties"][name]), name
+        assert sent["properties"][name] == copied["properties"][name], name
+    assert "decimal-number-only" not in strict.relaxations(copied)
+
+
+def test_relaxations_name_decimal_number_only_where_it_applied() -> None:
+    assert strict.RELAXATIONS[-1] == "decimal-number-only"
+    assert "decimal-number-only" in strict.schema_relaxations(SCHEMAS["financials"])
+    for step in sorted(set(SCHEMAS) - {"financials"}):
+        assert "decimal-number-only" not in strict.schema_relaxations(SCHEMAS[step]), step
+    assert "decimal-number-only" in strict.RELAXATIONS_BASIS
+    # Reported on the strict copy only: the sent copy no longer carries the marker.
+    assert "decimal-number-only" not in strict.relaxations(strict.strict_schema(Observation))
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"anyOf": [{"type": "number"}, {"type": "integer"}]},
+        {"anyOf": [{"type": "number"}, {"type": "string", "format": "date"}]},
+        {"anyOf": [{"type": "number", "enum": [1]}, {"type": "string"}]},
+        {"anyOf": [{"type": "number"}, {"type": "string"}, {"type": "string"}]},
+        {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        {"type": "number"},
+    ],
+    ids=["no-string", "string-format", "number-enum", "two-strings", "no-number", "no-any-of"],
+)
+def test_a_marked_node_of_another_shape_fails_closed(node: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="cannot be relaxed"):
+        strict.relax({"properties": {"x": {**node, strict.DECIMAL_MARKER: True}}})
+
+
+def test_a_defaulted_marked_number_keeps_its_null_branch() -> None:
+    """`_nullable` appends null inside a marked node; only the string branch is dropped."""
+    marked = {
+        "anyOf": [{"type": "number", "minimum": 0}, {"type": "string"}, {"type": "null"}],
+        "title": "N",
+        strict.DECIMAL_MARKER: True,
+    }
+    assert strict.relax({"properties": {"n": marked}}) == {
+        "properties": {
+            "n": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}], "title": "N"}
+        }
+    }
+
+
+def test_a_stored_string_amount_still_validates_and_a_printed_one_is_still_refused() -> None:
+    """The sent copy only: the stored contract and its parse are unchanged (I2)."""
+    citation = {"source_id": "filing", "source_sha256": "0" * 64, "locator": "page:1", "quote": "q"}
+    stored = {"amount": "3624", "citations": [citation], "explanation": "A"}
+    assert Alternative.model_validate_json(json.dumps(stored)).amount == Decimal("3624")
+    number = json.dumps({**stored, "amount": 0}).replace('"amount": 0', '"amount": 3624.10')
+    assert Alternative.model_validate_json(number).amount == Decimal("3624.10")
+    for printed in ("3,624", "(211)"):
+        with pytest.raises(ValidationError, match="Input should be a valid decimal"):
+            Alternative.model_validate_json(json.dumps({**stored, "amount": printed}))

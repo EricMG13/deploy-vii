@@ -19,6 +19,13 @@ Round 3 (bisects schema-2026-10-22-bisect and -bisect2, OpenAI): a nullable arra
 `anyOf: [{type: "array", items, ...bounds}, {"type": "null"}]` instead of a `type` union
 ("nullable-array-anyof"), and `oneOf` + `discriminator` as `anyOf` ("oneof-anyof"); both are
 lossless, because every such array defaults to `[]` and the stored contract keeps its tags.
+Task 7.0d (E1 batch e1-cp1-3: 131 amounts sent as printed strings such as "3,624"): a `Number`
+node, marked `DECIMAL_MARKER` by `financial_contracts`, is Pydantic's Decimal union `anyOf:
+[{type: number, ...bounds}, {type: string}]` (null joins it when nullable). The sent copy keeps
+the number branch with its bounds and any null branch and drops the string branch
+("decimal-number-only"); the marker, not the shape, selects the node, so a genuine number-or-text
+union is never rewritten, and a marked node of any other shape raises ValueError. The stored
+contract still accepts a string amount (a stored payload replays unchanged).
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
 widens what the provider is asked to enforce: the reply is still validated by the unchanged
 Pydantic contract, so every dropped constraint is still enforced on the way in.
@@ -39,6 +46,8 @@ from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
+
+from deploy_vii.financial_contracts import DECIMAL_MARKER as DECIMAL_MARKER
 
 ANNOTATIONS = ("title", "description")
 # Present in the step schemas; acceptance under strict mode is not stated in the fetched docs.
@@ -67,8 +76,15 @@ RELAXATIONS = (
     "drop-length",
     "nullable-array-anyof",
     "oneof-anyof",
+    "decimal-number-only",
 )
 _LENGTH = frozenset({"minLength", "maxLength"})
+# The keywords a Decimal union's branches may carry (`_kind`); a later Pydantic may add a
+# `pattern` to the string branch.
+_NUMBER_KEYS = frozenset(
+    {"type", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"}
+)
+_STRING_KEYS = frozenset({"type", "pattern"})
 # Keys whose values are data (names, constants, defaults), never schema nodes.
 _DATA = frozenset({"enum", "const", "required", "default", "discriminator"})
 
@@ -193,7 +209,34 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"schema node cannot be relaxed (oneOf beside anyOf): {node}")
     # Round 3 (bisects schema-2026-10-22-bisect and -bisect2): OpenAI refuses a nullable array
     # written as a type union and accepts the `anyOf` form; it refuses `oneOf` ("narrative").
-    return _array_to_any_of(_one_of_to_any_of(node))
+    return _number_only(_array_to_any_of(_one_of_to_any_of(node)))
+
+
+def _kind(branch: object) -> str:
+    """The kind of one Decimal union branch: number or string (keys within `_NUMBER_KEYS`,
+    `_STRING_KEYS`), null, or other."""
+    if branch == _NULL:
+        return "null"
+    for kind, keys in (("number", _NUMBER_KEYS), ("string", _STRING_KEYS)):
+        if isinstance(branch, dict) and branch.get("type") == kind and set(branch) <= keys:
+            return kind
+    return "other"
+
+
+def _number_only(node: dict[str, Any]) -> dict[str, Any]:
+    """A `DECIMAL_MARKER` node without its string branch and marker ("decimal-number-only"): the
+    number branch alone, or `anyOf` [number, null] where the node admits null. Any other node is
+    returned as it is; a marked node whose `anyOf` is not one number and one string branch
+    (and at most one null branch) raises ValueError."""
+    if DECIMAL_MARKER not in node:
+        return node
+    branches: list[Any] = node["anyOf"] if isinstance(node.get("anyOf"), list) else []
+    kinds = [_kind(branch) for branch in branches]
+    if sorted(kinds) not in (["number", "string"], ["null", "number", "string"]):
+        raise ValueError(f"schema node cannot be relaxed (decimal marker on another shape): {node}")
+    outer = {key: value for key, value in node.items() if key not in {"anyOf", DECIMAL_MARKER}}
+    kept = [branch for branch, kind in zip(branches, kinds, strict=True) if kind != "string"]
+    return {**outer, "anyOf": kept} if len(kept) > 1 else {**kept[0], **outer}
 
 
 Rule = Callable[[dict[str, Any]], dict[str, Any]]
@@ -253,6 +296,8 @@ def relaxations(schema: dict[str, Any]) -> list[str]:
             found.add("nullable-array-anyof")
         if "oneOf" in node:
             found.add("oneof-anyof")
+        if DECIMAL_MARKER in node:
+            found.add("decimal-number-only")
     return [name for name in RELAXATIONS if name in found]
 
 
@@ -534,7 +579,9 @@ RELAXATIONS_BASIS = (
     "nullable-enum is named by shape: wherever the sent schema has an enum under a type that "
     "admits null (strict_copy already builds that shape); const-to-enum, drop-length, "
     "nullable-array-anyof and oneof-anyof are named where the strict copy had const, "
-    "minLength or maxLength, a type: [array, null] node with items, or oneOf"
+    "minLength or maxLength, a type: [array, null] node with items, or oneOf; "
+    f"decimal-number-only where it had a {DECIMAL_MARKER} node (a Decimal amount, sent as a "
+    "JSON number only)"
 )
 
 

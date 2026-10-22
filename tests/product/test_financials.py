@@ -1,6 +1,7 @@
 """New boundary regressions; all evidence here is explicitly synthetic."""
 
 import hashlib
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -799,3 +800,30 @@ def test_sourced_issuance_date_applies_to_every_observation_of_the_facility() ->
     inconsistent = facility("Q1")
     value = value.model_copy(update={"facilities": (inconsistent, dated)})
     assert any("balance precedes issuance" in issue for issue in book_issues(value))
+
+
+# --- task 7.0d: the sent schema states the account metric vocabulary as an enum ---------------
+
+
+def test_the_sent_financials_schema_lists_exactly_the_account_metrics() -> None:
+    from deploy_vii.cp1_workflow import FinancialSubmission
+    from deploy_vii.financial_contracts import ACCOUNT_IDS
+    from deploy_vii.live.schema import strict_schema
+
+    sent = strict_schema(FinancialSubmission)
+    metric = sent["$defs"]["AccountObservation"]["properties"]["metric_id"]
+    assert metric["enum"] == sorted(ACCOUNT_IDS)
+    assert len(metric["enum"]) == 36
+    assert metric["type"] == "string"  # required and not nullable: no null type, no null member
+    assert "metric_id" in sent["$defs"]["AccountObservation"]["required"]
+    # The Identifier pattern stays beside the enum and admits every member: no contradiction.
+    assert all(re.fullmatch(metric["pattern"], value) for value in metric["enum"])
+    # The other metric ids are not this vocabulary and stay free strings.
+    for owner in ("ProFormaObservation", "AuditBasisExplanation"):
+        assert "enum" not in sent["$defs"][owner]["properties"]["metric_id"], owner
+
+
+def test_an_unknown_account_metric_is_still_refused_by_the_validator() -> None:
+    with pytest.raises(ValidationError, match="unknown CP-1 account metric"):
+        AccountObservation(metric_id="restricted_cash", period_id="Q1", value=observed("bad"))
+    assert AccountObservation(metric_id="revenue", period_id="Q1", value=observed("ok"))
