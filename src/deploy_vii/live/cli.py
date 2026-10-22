@@ -93,6 +93,9 @@ REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
 CP0_STEPS = ("source_readiness",)
 CP1_CHAIN = ("source_context", "financials", "narrative", "readiness")
 FULL_CHAIN = CP0_STEPS + CP1_CHAIN
+# Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
+# step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.
+CP1A_CHAIN = (*CP0_STEPS, "business_context")
 PROBE_STEPS = ("source_readiness", "source_context", "financials")
 SEED_SEARCH_LIMIT = 100_000
 BATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -399,7 +402,7 @@ def seeds_for(pool: PinnedPool, slugs: Sequence[str], start: int) -> list[int]:
 
 def _module_cells(module_arg: str, seed: int) -> list[Cell]:
     module = canonical(module_arg)
-    steps = {"CP-0": CP0_STEPS, "CP-1": FULL_CHAIN}.get(module)
+    steps = {"CP-0": CP0_STEPS, "CP-1": FULL_CHAIN, "CP-1A": CP1A_CHAIN}.get(module)
     if steps is None:
         supported = ", ".join(sorted({definition.module_id for definition in STEPS.values()}))
         raise CliError(f"{module} has no live step contract; supported: {supported}")

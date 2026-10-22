@@ -35,6 +35,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
+from deploy_vii.business_context import BusinessContextSubmission, submit_cp1a_step
 from deploy_vii.contracts import Contract
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_workflow import FinancialSubmission, submit_cp1_step
@@ -136,6 +137,9 @@ STEPS: Mapping[str, StepDef] = {
     "financials": StepDef("CP-1", FinancialSubmission),
     "narrative": StepDef("CP-1", NarrativeReview),
     "readiness": StepDef("CP-1", DownstreamReview),
+    # Task 7.2: the stored shape is the submission itself; Python composes the registers as the
+    # step output (`business_context.submit_cp1a_step`), so no composer is needed here.
+    "business_context": StepDef("CP-1A", BusinessContextSubmission),
 }
 
 
@@ -322,6 +326,9 @@ def submit_model_payload(
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
+    if step.module_id == "CP-1A":
+        journal = submit_cp1a_step(store, ticket_id, step_id, normalised)
+        return Submitted(journal, normalised, resolved, None)
     if step_id != "source_readiness":
         journal = submit_cp1_step(store, ticket_id, step_id, normalised)
         return Submitted(journal, normalised, resolved, None)

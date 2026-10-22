@@ -13,7 +13,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from deploy_vii.execution import Execution
+from deploy_vii.business_context import REQUIRED_REGISTERS
+from deploy_vii.execution import Execution, NotAuthorized
 from deploy_vii.live import prompts, runner, submission
 from deploy_vii.live.catalog import Catalog, ModelSelection, PinnedPool, parse_selection
 from deploy_vii.live.client import ChatClient, Response, TransportError, urllib_transport
@@ -36,7 +37,12 @@ from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
 from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source
-from deploy_vii.readiness import ReadinessReview, extraction_coverage, live_consumers
+from deploy_vii.readiness import (
+    ReadinessReview,
+    build_readiness,
+    extraction_coverage,
+    live_consumers,
+)
 from tests.product.live_support import (
     FAKE_KEY,
     SECOND_FAKE_KEY,
@@ -48,7 +54,8 @@ from tests.product.live_support import (
     make_rtf_key,
     ok,
 )
-from tests.product.test_execution import fixture_store
+from tests.product.test_business_context import submission_fixture
+from tests.product.test_execution import accept_cp0, fixture_store
 from tests.product.test_live_client import (
     UPSTREAM_502,
     TricklingReply,
@@ -1978,3 +1985,102 @@ def test_an_unreadable_schema_check_record_fails_closed(tmp_path: Path, content:
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError, match="schema-check record"):
         schema_rejections(tmp_path)
+
+
+# --- 7.2: CP-1A business_context, one step after CP-0 ---------------------------------------
+
+CP1A_STEP = StepSpec("business_context", "case-cp1a", ("filing",), max_tokens=4000)
+
+
+def cp1a_rig(tmp_path: Path, submission: str | None = None) -> Rig:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)  # CP-0's T8 command for CP-1A is `Run CP-1A`
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    return Rig(
+        store=store,
+        ticket_id=store.begin("CP-1A").ticket_id,
+        ledger=Ledger(tmp_path / "ledger" / "l.jsonl", Decimal("5"), clock=lambda: NOW),
+        pool=fixture_pool("batch-a"),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(keys),
+        review=readiness_fixture()[1],
+        root=tmp_path,
+        submission=submission or submission_fixture().model_dump_json(),
+    )
+
+
+def test_a_business_context_dispatch_settles_cp1a_with_its_four_statuses(tmp_path: Path) -> None:
+    rig = cp1a_rig(tmp_path)
+    transport = FakeTransport(reply(rig))
+    result = rig.run(ChatClient(transport), step=CP1A_STEP)
+    assert result.status == "accepted", result.issues
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1A")
+    assert head.status == "restricted"  # own gaps restrict it (M4 rules)
+    assert head.qualification is not None
+    assert head.qualification.implementation == "implemented"
+    assert head.qualification.analytical_qualification == "unrun"
+    module = rig.store.head_module(head)
+    assert {t.table_id for t in module.tables} >= set(REQUIRED_REGISTERS)
+    body = json.loads((transport.requests[0].body or b"{}").decode())
+    assert body["response_format"]["json_schema"]["name"] == "business_context"
+    system, user = (message["content"] for message in body["messages"])
+    assert prompts.CP1A_METHOD.strip() in system and prompts.CP1A_CONSUMER_RULE in system
+    assert "no figure may be referenced" in user  # CP-1 is not accepted in this journal
+    request = load(attempt_dir(result) / "request.json")
+    bound = runner.prompt_token_bound(request["body"], BYTES_PER_TOKEN)
+    assert result.prompt_tokens_upper_bound == bound
+    assert bound < 20_000  # one invented line: the method, rules and schema dominate
+
+
+def test_a_rejected_business_context_finishes_the_attempt_and_the_repair_carries_it(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(submission_fixture().model_dump_json())
+    document["gaps"][0]["action"] = "Raise 11,456 of new equity"
+    rig = cp1a_rig(tmp_path, json.dumps(document))
+    first = rig.run(ChatClient(FakeTransport(reply(rig))), step=CP1A_STEP)
+    assert first.status == "rejected"
+    assert "gaps[0].action: Bare figure: 11,456" in first.issues
+    assert not [h for h in rig.store.read().heads if h.module_id == "CP-1A"]
+    repair = rig.store.begin("CP-1A")
+    assert repair.number == 1 and runner.expected_step(repair, "CP-1A") == "business_context"
+    rig.ticket_id = repair.ticket_id
+    rig.submission = submission_fixture().model_dump_json()
+    transport = FakeTransport(reply(rig))
+    second = rig.run(ChatClient(transport), step=CP1A_STEP)
+    assert second.status == "accepted", second.issues
+    user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
+    assert "- gaps[0].action: Bare figure: 11,456" in user
+
+
+def test_a_valid_step_whose_shape_the_journal_refuses_is_rejected_not_accepted(
+    tmp_path: Path,
+) -> None:
+    rig = cp1a_rig(tmp_path, '{"sources": []}')
+    result = rig.run(ChatClient(FakeTransport(reply(rig))), step=CP1A_STEP)
+    assert result.status == "rejected"
+    assert any(issue.startswith("company: Field required") for issue in result.issues)
+
+
+def test_cp1a_is_not_dispatched_when_cp0_does_not_authorise_it(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    _, review = readiness_fixture()
+    conditional = review.model_copy(
+        update={
+            "consumers": tuple(
+                c.model_copy(
+                    update={"readiness": "CONDITIONAL", "missing_source": "Ownership filings"}
+                )
+                if c.module_id == "CP-1A"
+                else c
+                for c in review.consumers
+            )
+        }
+    )
+    ticket = store.begin("CP-0")
+    candidate = build_readiness(store.pack(), conditional)
+    store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+    with pytest.raises(NotAuthorized) as refused:
+        store.begin("CP-1A")
+    assert refused.value.module_id == "CP-1A" and refused.value.commands == ("DO NOT RUN",)

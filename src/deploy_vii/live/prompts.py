@@ -23,10 +23,14 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from importlib.resources import files
 from typing import Any
 
 from pydantic import BaseModel
 
+from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
+from deploy_vii.business_context import context_block
+from deploy_vii.contracts import Fact
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import extraction_coverage, live_consumers
@@ -98,6 +102,43 @@ CONTEXT_STEP_RULE = (
     "`context_step_sha256` must equal the sha256 shown on the step:source_context block."
 )
 DECLARED_PERIOD_RULE = "Every `period_id` an entry uses must be declared in its book's `periods`."
+# Task 7.2: the rules `business_context.validate_business_context` holds CP-1A to, each stated
+# once; the method prose (`methods/cp1a.md`) rides above them in the system message.
+CP1A_METHOD = files("deploy_vii").joinpath("methods", "cp1a.md").read_text(encoding="utf-8")
+CP1A_RUN_TEXT_RULE = (
+    "Every text field is run text: digits only in period labels (`FY2025`, `Q3 2025`), filing "
+    "and section labels (`10-K`, `Item 7A`, `page:12`) and the issuer's name. A figure is "
+    "written only as `{ref|unit}` with a `ref` and `unit` listed under `cp1_facts` in the "
+    "CONTEXT block; with no `cp1_facts`, write no figure at all. Never a bare number, never a "
+    "`[ref]` chip; a figure belongs in a citation's quote, not in the text."
+)
+CP1A_CATEGORY_RULE = (
+    "Every fact row carries one `category`: Documentary Fact, Management Language or Analyst "
+    "Interpretation rows cite located evidence; an Insufficient Information row states its "
+    "`limitation` and may cite nothing. Every credit translation cites its evidence unless its "
+    "confidence is Insufficient Information (then it states its limitation)."
+)
+CP1A_CONFLICT_RULE = (
+    "`conflicts`: when sources disagree, one entry quotes each conflicting span (at least two "
+    "citations); it is logged, not reconciled. A `conflict_id` is letters with `_` `.` `:` or "
+    "`-`; a credit translation's `countervailing_conflict_ids` name logged conflicts only."
+)
+CP1A_PROHIBITED_RULE = (
+    "No peer ranking, no instrument recommendation and no recovery conclusion in any text "
+    "field (for example: ranks above peers, we recommend, expected recovery); recovery "
+    "prospects as a credit mechanic are allowed."
+)
+CP1A_CONSUMER_RULE = (
+    "`consumers`: exactly one judgment for each module id listed under `consumers` in the "
+    "CONTEXT block, and no other; its title and purpose there say what it needs from CP-1A."
+)
+CP1A_ROW_RULES = (
+    "`company` states business_description, country and sector once each. A behaviour flag "
+    "states `behaviour_type`, `amount_funding_source` and `legal_capacity_link`; a governance "
+    "topic leaves them null and is never Extraction-Oriented. An operating driver's `measure` "
+    "is null exactly when its status is Not disclosed. At least one credit translation "
+    "populates evidence, risk mechanic and credit implication."
+)
 
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
@@ -152,6 +193,21 @@ STEP_CONTRACTS: Mapping[str, str] = {
         "the supplied spans."
     ),
     "readiness": "Review downstream readiness from the supplied inputs only.",
+    "business_context": (
+        f"{CP1A_METHOD.strip()}\n"
+        "Return judgments and verbatim quotes only: Python fills every hash, identifier, "
+        "register, score and figure.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {SOURCES_ONCE_RULE}\n"
+        f"b. {CITATION_RULE}\n"
+        f"c. {COVERAGE_RULE} This holds for every text field.\n"
+        f"d. {CP1A_RUN_TEXT_RULE}\n"
+        f"e. {CP1A_CATEGORY_RULE}\n"
+        f"f. {CP1A_CONFLICT_RULE}\n"
+        f"g. {CP1A_PROHIBITED_RULE}\n"
+        f"h. {CP1A_CONSUMER_RULE}\n"
+        f"i. {CP1A_ROW_RULES}"
+    ),
 }
 
 
@@ -201,8 +257,9 @@ def _source_body(pack: PreparedPack, source_id: str) -> tuple[str, str]:
     return source.sha256, "\n".join(lines)
 
 
-def _context_body(step_id: str, pack: PreparedPack) -> str:
-    """Python-stated facts about the pack; for source_readiness also the consumer list."""
+def _context_body(step_id: str, pack: PreparedPack, cp1_facts: Sequence[Fact] = ()) -> str:
+    """Python-stated facts about the pack; for source_readiness also the consumer list; for
+    business_context the CP-1A consumers and the CP-1 facts a figure may reference (task 7.2)."""
     body: dict[str, object] = {
         "note": (
             "This CONTEXT block is not a source and cannot be cited. Locators are the "
@@ -233,6 +290,8 @@ def _context_body(step_id: str, pack: PreparedPack) -> str:
             }
             for module_id in live_consumers(pack)
         ]
+    if step_id == BUSINESS_CONTEXT:
+        body.update(context_block(pack, cp1_facts))
     return json.dumps(body, indent=1, sort_keys=True)
 
 
@@ -257,6 +316,7 @@ def build(
     *,
     upstream: Sequence[UpstreamInput] = (),
     repair_issues: Sequence[str] = (),
+    cp1_facts: Sequence[Fact] = (),
 ) -> list[Message]:
     contract = STEP_CONTRACTS.get(step_id)
     if contract is None:
@@ -279,7 +339,7 @@ def build(
             schema_text(schema),
         )
     )
-    context = _context_body(step_id, pack)
+    context = _context_body(step_id, pack, cp1_facts)
     blocks = [block("CONTEXT", PACK_BLOCK_ID, pack.content_hash(), context)]
     for source_id in dict.fromkeys(declared_inputs):
         digest, body = _source_body(pack, source_id)

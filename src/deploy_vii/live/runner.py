@@ -25,6 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
+from deploy_vii.business_context import cp1_context_facts
 from deploy_vii.cp1_workflow import CP1_STEPS
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
 from deploy_vii.live.catalog import PinnedCandidate, PinnedPool, utc_stamp
@@ -279,6 +281,10 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
         if attempt.steps:
             raise ValueError("CP-0 already retains its review step; resume it through the journal")
         return "source_readiness"
+    if module_id == "CP-1A":
+        if attempt.steps:
+            raise ValueError("CP-1A already retains its one step; resume it through the journal")
+        return BUSINESS_CONTEXT
     done = sum(1 for item in attempt.steps if item.status == "valid")
     if done >= len(CP1_STEPS):
         raise ValueError("every CP-1 step is already retained")
@@ -363,6 +369,8 @@ def _plan(
         step.schema,
         upstream=_upstream(store, attempt),
         repair_issues=repair.issues,
+        # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
+        cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
     )
     chat = ChatRequest(
         model=candidate.slug,
@@ -464,7 +472,9 @@ def _record_response(plan: _Plan, writer: AttemptWriter, run: _Run) -> None:
 def journal_outcome(
     store: Execution, step_id: str, journal: Attempt
 ) -> tuple[str, tuple[str, ...]]:
-    if step_id == "source_readiness":
+    # A step that settles its module (CP-0's review, CP-1A's one step) is accepted only when the
+    # settled module is: a valid step whose candidate fails the journal's check is rejected.
+    if step_id in {"source_readiness", BUSINESS_CONTEXT}:
         accepted = journal.result_sha256 is not None and store.result(
             journal.result_sha256
         ).status in {"accepted", "restricted"}

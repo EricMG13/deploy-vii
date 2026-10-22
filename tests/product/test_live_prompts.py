@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from deploy_vii.business_context import BusinessContextSubmission, cp1a_consumers
+from deploy_vii.contracts import Fact
 from deploy_vii.live import prompts
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
@@ -19,6 +21,7 @@ from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
+from tests.product.test_business_context import cp1_fact
 from tests.product.test_live_submission import paged_pack
 from tests.product.test_readiness import as_submission, readiness_fixture
 
@@ -263,3 +266,110 @@ def test_the_sign_rule_matches_what_the_validator_and_python_do_with_the_convent
     assert "repeat the value's citation in `sign_citations`" in rule
     assert "read as -abs(amount)" in rule and "use `signed` for a negative figure" in rule
     assert "balance-sheet" in rule
+
+
+# --- 7.2: the CP-1A business_context step ---------------------------------------------------
+
+CP1A_RULES = (
+    prompts.SOURCES_ONCE_RULE,
+    prompts.CITATION_RULE,
+    prompts.COVERAGE_RULE,
+    prompts.CP1A_RUN_TEXT_RULE,
+    prompts.CP1A_CATEGORY_RULE,
+    prompts.CP1A_CONFLICT_RULE,
+    prompts.CP1A_PROHIBITED_RULE,
+    prompts.CP1A_CONSUMER_RULE,
+)
+
+
+def cp1a_prompt(pack: PreparedPack, cp1_facts: tuple[Fact, ...] = ()) -> tuple[str, str]:
+    system, user = (
+        m.content
+        for m in prompts.build(
+            "business_context",
+            pack,
+            ("filing",),
+            STEPS["business_context"].schema,
+            cp1_facts=cp1_facts,
+        )
+    )
+    return system, user
+
+
+def context_of(user: str) -> dict[str, Any]:
+    body = user.split("<<<CONTEXT id=prepared-pack", 1)[1].split(">>>\n", 1)[1]
+    document: dict[str, Any] = json.loads(body.split("\n<<<END>>>", 1)[0])
+    return document
+
+
+def test_the_business_context_step_is_cp1a_with_its_thin_contract() -> None:
+    assert STEPS["business_context"].module_id == "CP-1A"
+    assert STEPS["business_context"].schema is BusinessContextSubmission
+
+
+def test_the_business_context_step_states_each_validator_rule_once() -> None:
+    pack, _ = readiness_fixture()
+    system, _ = cp1a_prompt(pack)
+    for rule in CP1A_RULES:
+        assert rule in prompts.STEP_CONTRACTS["business_context"], rule
+        assert system.count(rule) == 1, rule
+    assert "logged, not reconciled" in prompts.CP1A_CONFLICT_RULE
+    for phrase in ("peer ranking", "instrument recommendation", "recovery conclusion"):
+        assert phrase in prompts.CP1A_PROHIBITED_RULE
+    for category in ("Documentary Fact", "Management Language", "Analyst Interpretation"):
+        assert category in prompts.CP1A_CATEGORY_RULE
+    for step_id in ("source_readiness", "source_context", "financials"):
+        assert prompts.CP1A_CONSUMER_RULE not in composed(step_id)
+    # Every label the run-text rule shows is one the validator allows (the CONTEXT key aside).
+    assert bare_figures(prompts.CP1A_RUN_TEXT_RULE.replace("`cp1_facts`", "")) == ()
+
+
+def test_the_method_prose_rides_in_the_system_prompt_and_states_no_figure() -> None:
+    brief = files("deploy_vii").joinpath("methods", "cp1a.md").read_text(encoding="utf-8")
+    assert len(brief.splitlines()) < 90
+    for anchor in ("Reader question", "decision drivers", "Evidence (a located quote)"):
+        assert anchor in brief
+    assert bare_figures(brief) == ()  # labels only (r14, CP-1A, CP-2C)
+    pack, _ = readiness_fixture()
+    system, _ = cp1a_prompt(pack)
+    assert brief.strip() in system
+
+
+def test_the_context_lists_the_cp1a_consumers_and_says_no_figure_without_cp1() -> None:
+    pack, _ = readiness_fixture()
+    _, user = cp1a_prompt(pack)
+    context = context_of(user)
+    registry = {item.module_id: item for item in modules()}
+    assert [c["module_id"] for c in context["consumers"]] == list(cp1a_consumers(pack))
+    assert all(c["title"] == registry[c["module_id"]].title for c in context["consumers"])
+    assert context["cp1_facts"] == []
+    assert "no figure may be referenced" in context["cp1_facts_note"]
+    assert "sources" in context and "run" in context  # the pack facts stay
+
+
+def test_the_context_offers_only_referencable_cp1_facts_with_python_spellings() -> None:
+    pack, _ = readiness_fixture()
+    figure = cp1_fact(pack)
+    text_fact = figure.model_copy(
+        update={"fact_id": "T4.10.note", "amount": None, "text": "a note", "unit": None}
+    )
+    _, user = cp1a_prompt(pack, (figure, text_fact))
+    context = context_of(user)
+    assert context["cp1_facts"] == [
+        {
+            "ref": "T4.10.liquidity.FY2025",
+            "label": "Liquidity",
+            "period": "FY2025",
+            "unit": "US$ m",
+            "shown": "1,100 US$ m",
+        }
+    ]
+    assert "{ref|unit}" in context["cp1_facts_note"]
+
+
+def test_the_cp1_facts_never_appear_in_another_steps_context() -> None:
+    pack, _ = readiness_fixture()
+    user = prompts.build(
+        "source_readiness", pack, ("filing",), ReadinessSubmission, cp1_facts=(cp1_fact(pack),)
+    )[1].content
+    assert "cp1_facts" not in user and "T4.10.liquidity" not in user

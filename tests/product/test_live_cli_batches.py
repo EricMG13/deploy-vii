@@ -40,6 +40,7 @@ from tests.product.live_support import (
     make_rtf_key,
     ok,
 )
+from tests.product.test_business_context import submission_fixture
 from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
 from tests.product.test_narrative import draft
@@ -262,6 +263,52 @@ def test_unsupported_module_fails_before_spending(rig: Rig) -> None:
     responder = Responder(rig.review)
     assert rig.run(rig.argv("module", "--module", "CP-2"), responder) == cli.EXIT_FAILED
     assert responder.requests == [] and not (rig.reports / "live-b1.md").exists()
+
+
+class StepResponder(Responder):
+    """Answers each chat call with the content for its step (the response_format name)."""
+
+    def __init__(self, contents: dict[str, str]) -> None:
+        super().__init__("")
+        self.contents = contents
+
+    def __call__(self, request: Request) -> Response:
+        if request.url != KEY_URL:
+            step = json.loads(request.body or b"{}")["response_format"]["json_schema"]["name"]
+            self.content = self.contents[step]
+        return super().__call__(request)
+
+
+def test_module_cp1a_runs_cp0_then_its_one_step(rig: Rig) -> None:
+    """Task 7.2: `module --module CP-1A` (or its alias CP-2C) is CP-0, then business_context."""
+    contents = {
+        "source_readiness": rig.review,
+        "business_context": submission_fixture().model_dump_json(),
+    }
+    responder = StepResponder(contents)
+    assert rig.run(rig.argv("module", "--module", "CP-2C"), responder) == 0
+    rows = step_lines(rig.report(), "module-00")
+    assert [(r[1], r[2], r[6]) for r in rows] == [
+        ("cp-1a", "source_readiness", "accepted"),
+        ("cp-1a", "business_context", "accepted"),
+    ]
+    assert len(responder.requests) == 2
+
+
+def test_module_cp1a_records_a_cp0_that_does_not_authorise_it(rig: Rig) -> None:
+    document = json.loads(rig.review)
+    for consumer in document["consumers"]:
+        if consumer["module_id"] == "CP-1A":
+            consumer["readiness"] = "CONDITIONAL"
+            consumer["missing_source"] = "Ownership filings"
+    responder = StepResponder({"source_readiness": json.dumps(document)})
+    assert rig.run(rig.argv("module", "--module", "CP-1A"), responder) == 0
+    rows = step_lines(rig.report(), "module-00")
+    assert [(r[2], r[6]) for r in rows] == [
+        ("source_readiness", "accepted"),
+        ("business_context", "not-authorized"),
+    ]
+    assert len(responder.requests) == 1  # nothing was sent for CP-1A
 
 
 def test_probe_draws_each_eligible_model_and_stops_a_cell_on_rejection(rig: Rig) -> None:
