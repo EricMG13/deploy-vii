@@ -395,6 +395,9 @@ def test_a_404_whose_usage_delta_equals_the_other_costs_is_adjusted_to_zero(
     assert Decimal(evidence["other_attempts_measured_usd"]) == measured
     assert evidence["tolerance_usd"] == "0.000001"
     assert evidence["usage_recorded_by"] == ["deploy-vii live probe"] * 2
+    # The fresh reconcile-time reading equals the after-check: nothing was billed late.
+    assert evidence["usage_now_usd"] == evidence["usage_after_usd"]
+    assert evidence["usage_now_checked_at"]
     assert after.spent == before.spent - (held.charged_usd or 0)
     line = json.loads(ledger(rig).path.read_text(encoding="utf-8").splitlines()[-1])
     assert line["event"] == "adjust" and line["evidence"] == evidence
@@ -424,6 +427,23 @@ def test_a_404_without_a_matching_usage_delta_stays_unresolved(
     assert block["unreconciled"] is True
     assert "HTTP 404" in block["reconciliation"]["reason"]
     assert reason in block["reconciliation"]["reason"]
+
+
+def test_a_404_billed_after_the_after_check_stays_held(rig: Rig) -> None:
+    """The delta matched at the after-check, but the provider billed the 404'd call later: the
+    fresh reading at reconcile time is above the recorded after-figure, so no zero is written."""
+    responder = ProbeResponder(rig.review, unexplained="0")
+    run_probe(rig, responder)
+    lines = ledger(rig).path.read_bytes()
+    responder.generations = {responder.ids[0]: NOT_FOUND}
+    responder.usage += Decimal("0.004")
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines  # no adjust, the hold stands
+    block = load(deepseek_dir(rig) / "metrics.json")["ledger"]
+    assert block["unreconciled"] is True
+    reason = block["reconciliation"]["reason"]
+    assert "HTTP 404" in reason and "usage moved since the after-check" in reason
+    assert "a later reconcile may retry" in reason
 
 
 @pytest.mark.parametrize(

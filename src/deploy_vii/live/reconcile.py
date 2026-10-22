@@ -28,8 +28,11 @@ A residual below zero by more than US$0.000001, or above the attempt's reservati
 on the account, which the delta cannot tell apart), leaves it held with the reason; so do two or
 more held attempts, any charge that is not measured and a missing usage record. Attempts with a
 generation id are looked up first (`lookup_order`), so the outcome does not depend on the order
-the attempt directories sort in. A deadline hold is a client-side give-up, so the provider may
-bill it after the after-batch check: the adjust also needs a fresh `GET /api/v1/key` reading at
+the attempt directories sort in.
+
+Both usage-window rules (`generation-404+usage-delta` and `account-usage-delta`) assume the
+after-batch check already includes every charge of the batch, but the provider may bill a
+404'd or given-up call later. So either adjust also needs a fresh `GET /api/v1/key` reading at
 reconcile time equal to the recorded after-figure within the tolerance (`usage_unmoved`), else
 the attempt stays held ("usage moved since the after-check") and a later reconcile may retry.
 
@@ -366,10 +369,11 @@ def usage_unmoved(
     """A fresh `GET /api/v1/key` reading at reconcile time, as evidence that the account usage
     has not moved since the after-batch check, or None with why.
 
-    A deadline hold is a client-side give-up: the provider may bill the call after the
-    after-batch check, which the delta would then omit. The attribution therefore stands only
-    when the usage now equals the recorded after-figure within the tolerance (decision 0008
-    amendment, task 7.0); otherwise the attempt stays held and a later reconcile may retry.
+    The provider may bill a 404'd or given-up call after the after-batch check, which the delta
+    would then omit. A usage-window adjust (404 corroboration or deadline attribution) therefore
+    stands only when the usage now equals the recorded after-figure within the tolerance
+    (decision 0008 amendment, task 7.0); otherwise the attempt stays held and a later reconcile
+    may retry.
     A connection failure propagates (it stops the reconcile, as for every lookup)."""
     fetched = client.fetch_key_status()
     state = from_key_response(fetched.response, clock())
@@ -500,6 +504,10 @@ def reconcile_attempt(
     cost, reason = generation_cost(response, generation)
     if cost is None and response.status == 404:
         evidence, why = corroborate_404(attempt, tuple(records.values()), batch, usage)
+        window = usage[0]
+        if evidence is not None and window is not None:  # only once corroborated
+            now, unmoved = usage_unmoved(client, clock, window)
+            evidence, why = (None, unmoved) if now is None else ({**evidence, **now}, why)
         if evidence is None:
             reason = f"{reason}; {why}"
         else:

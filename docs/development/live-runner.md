@@ -733,7 +733,9 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   whose `id` is not the requested one ("generation id mismatch"), a missing or malformed
   recorded id, or a ledger that holds no unreconciled settlement leaves the attempt unreconciled
   with the reason in `metrics.json` and the report; no figure is inferred. A connection failure
-  stops the run (exit 2) after the report is written. A fixture holds the documented example
+  (a generation lookup or the fresh usage reading below) stops the run (exit 2) after the report
+  is written; adjustments already written in that run stay, and a rerun picks up the attempts
+  still held. A fixture holds the documented example
   record verbatim (`tests/product/fixtures/live/generation-documented-example.json`).
   `metrics.json` is the one retained file reconcile rewrites (atomic replace); the ledger line is
   the authority, and a rerun after an interrupted write re-synchronises metrics from it without a
@@ -780,15 +782,18 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   to look up; <reason>`. `live reconcile` looks up attempts with a generation id first
   (`reconcile.lookup_order`), so a hold that becomes the only one after those lookups is
   attributed in the same run whatever order the attempt directories sort in. Fail closed on the
-  safe side of the cap: the figure never exceeds the hold it replaces. The provider may bill a
-  given-up call after the after-batch check, which the delta would then omit, so the adjust also
-  needs a fresh `GET /api/v1/key` reading at reconcile time equal to the recorded after-figure
-  within US$0.000001 and read through the same key-file token (`reconcile.usage_unmoved`; the
-  evidence adds `usage_now_usd` and `usage_now_checked_at`). Otherwise the attempt stays held
-  with `usage moved since the after-check (<after> then, <now> now); not attributed; a later
-  reconcile may retry` (or that the usage now is not reported, or is read through another key
-  token). The `generation-404+usage-delta` rule keeps that exposure (decision 0008, task 7.0
-  amendment).
+  safe side of the cap: the figure never exceeds the hold it replaces.
+- **Usage unmoved since the after-check (task 7.0).** Both usage-window rules,
+  `generation-404+usage-delta` and `account-usage-delta`, assume the after-batch check already
+  includes every charge of the batch; the provider may bill a 404'd or given-up call later,
+  which the delta would then omit. So either adjust also needs a fresh `GET /api/v1/key` reading
+  at reconcile time, taken only once the rule's own conditions hold, equal to the recorded
+  after-figure within US$0.000001 and read through the same key-file token
+  (`reconcile.usage_unmoved`; the evidence adds `usage_now_usd` and `usage_now_checked_at`).
+  Otherwise the attempt stays held with `usage moved since the after-check (<after> then, <now>
+  now); not attributed; a later reconcile may retry` (or that the usage now is not reported, or
+  is read through another key token), after `HTTP 404 ...;` or `no provider_request_id
+  recorded; nothing to look up;` (decision 0008, task 7.0 amendment).
 
 ## Not covered here
 

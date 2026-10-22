@@ -33,9 +33,9 @@ What changed:
 - Ledger and reconcile: `account-usage-delta` adjust for a held attempt with no generation
   id that is the batch's only held attempt, every other charge measured; residual at most
   the reservation (rules in live-runner.md, Charge reconciliation). Holds with a generation
-  id are looked up first. The adjust also needs a fresh `GET /api/v1/key` reading at
-  reconcile time equal to the recorded after-figure within US$0.000001; otherwise the hold
-  stands with `usage moved since the after-check` and a later reconcile may retry (decision
+  id are looked up first. This adjust and the `generation-404+usage-delta` zero both need a
+  fresh `GET /api/v1/key` reading at reconcile time equal to the recorded after-figure within
+  US$0.000001; otherwise the hold stands with `usage moved since the after-check` and a later reconcile may retry (decision
   0008, task 7.0 amendment, which also records the 200-character quote bound).
 - Corpus: `find_case_pack` skips a case directory whose pack does not load under the current
   contract (a `run/1` preparation) with a logged warning, and returns the first that loads.
@@ -58,7 +58,11 @@ Not done, with the reason:
   the year-to-date periods of the period-engine fixture (`test_financial_periods.periods_case`,
   scopes labelled by period id, used by canonical gaps, period reconciliation and statement
   history tests); `report_view` already leaves a grid with an unclassified label ungrouped.
-  Neither set was widened and neither check landed.
+  Neither set was widened and neither check landed. Step 3 is withdrawn from task 7.0 by
+  coordinator ruling (22 October 2026: the periods are free text by design and the label set
+  would cut H1/9M coverage); the unapplied patch is retained outside the repository at
+  `/private/tmp/claude-501/-Users-ericguei-Documents-DEPLOY-VII--claude-worktrees-focused-cray-a5417d/bbc3f6f9-3db0-48bb-a291-6f454a3f0d88/scratchpad/period-label-check.patch`;
+  revisit with E1 evidence.
 - Rename `normalisation` to `quote_normalisation` (step 4d): no manifest field or stored
   record field has that name; the only uses are the issue label text and the function in
   `quotes.py`, which task 7.0 replaced by `explain`. Nothing renamed.

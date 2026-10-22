@@ -252,12 +252,11 @@ the round-3 schemas).
 Task 7.0 widened the quote shown in a citation issue from the first 60 characters to at most
 200, cut at a whole word, so the REPAIR prompt carries the clause the model must correct. It also
 adds the `account-usage-delta` adjust for a lone deadline hold that has no generation id. That
-rule and the `generation-404+usage-delta` rule above share one exposure: the provider may bill
-the call after the after-batch usage check, so the delta would omit its cost. For
-`account-usage-delta` the exposure is now closed: `live reconcile` takes a fresh
-`GET /api/v1/key` reading and adjusts only when it equals the recorded after-figure within
-US$0.000001; otherwise the attempt stays held with "usage moved since the after-check" and a
-later reconcile may retry. The 404 rule is unchanged by task 7.0.
+rule and the `generation-404+usage-delta` rule above share one exposure, now closed for both:
+the provider may bill the call after the after-batch usage check, so the delta would omit its
+cost, and therefore `live reconcile` takes a fresh `GET /api/v1/key` reading and makes either
+adjust only when it equals the recorded after-figure within US$0.000001; otherwise the attempt
+stays held with "usage moved since the after-check" and a later reconcile may retry.
 
 ## Evidence
 
