@@ -103,11 +103,13 @@ def shape_issues(error: ValidationError) -> tuple[str, ...]:
 
 def _echoes_item_error(item: ErrorDetails, errors: list[ErrorDetails]) -> bool:
     """A container min-length error beside an error inside that container (the items failed)."""
-    return item["msg"].startswith(
-        ("Tuple should have at least", "List should have at least")
-    ) and any(
-        len(other["loc"]) > len(item["loc"]) and other["loc"][: len(item["loc"])] == item["loc"]
-        for other in errors
+    return (
+        item["type"] == "too_short"
+        and item["msg"].startswith(("Tuple should have at least", "List should have at least"))
+        and any(
+            len(other["loc"]) > len(item["loc"]) and other["loc"][: len(item["loc"])] == item["loc"]
+            for other in errors
+        )
     )
 
 

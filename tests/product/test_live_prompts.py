@@ -260,5 +260,6 @@ def test_the_sign_rule_matches_what_the_validator_and_python_do_with_the_convent
     rule = prompts.SIGN_RULE
     assert "`sign_convention`" in rule and "`signed`" in rule and "`outflow_magnitude`" in rule
     assert "`sign_citations`" in rule and "at least one" in rule
-    assert "negative" in rule and "contradiction" in rule
+    assert "repeat the value's citation in `sign_citations`" in rule
+    assert "read as -abs(amount)" in rule and "use `signed` for a negative figure" in rule
     assert "balance-sheet" in rule

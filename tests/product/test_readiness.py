@@ -576,8 +576,8 @@ class _Holder(BaseModel):
     notes: list[str] = Field(min_length=1)
 
 
-def _detail(message: str, loc: tuple[str | int, ...]) -> InitErrorDetails:
-    return InitErrorDetails(type=PydanticCustomError("custom", message), loc=loc, input=None)
+def _detail(message: str, loc: tuple[str | int, ...], kind: str = "custom") -> InitErrorDetails:
+    return InitErrorDetails(type=PydanticCustomError(kind, message), loc=loc, input=None)
 
 
 def test_a_min_length_error_that_only_echoes_an_item_error_is_dropped() -> None:
@@ -586,9 +586,9 @@ def test_a_min_length_error_that_only_echoes_an_item_error_is_dropped() -> None:
     error = ValidationError.from_exception_data(
         "_Holder",
         [
-            _detail(TUPLE_EMPTY, ("financial", "books")),
+            _detail(TUPLE_EMPTY, kind="too_short", loc=("financial", "books")),
             _detail("sign evidence", ("financial", "books", 0)),
-            _detail(LIST_EMPTY, ("notes",)),
+            _detail(LIST_EMPTY, kind="too_short", loc=("notes",)),
             _detail("bad note", ("notes", 2)),
         ],
     )
@@ -606,6 +606,7 @@ def test_a_genuinely_empty_container_still_reports_its_min_length_error() -> Non
 
 def test_a_min_length_error_beside_an_unrelated_error_is_kept() -> None:
     error = ValidationError.from_exception_data(
-        "_Holder", [_detail(TUPLE_EMPTY, ("books",)), _detail("bad note", ("notes", 0))]
+        "_Holder",
+        [_detail(TUPLE_EMPTY, kind="too_short", loc=("books",)), _detail("bad note", ("notes", 0))],
     )
     assert shape_issues(error) == (f"books: {TUPLE_EMPTY}", "notes.0: bad note")

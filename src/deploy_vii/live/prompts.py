@@ -90,9 +90,9 @@ SIGN_RULE = (
     "the statement implies (an expense or outflow negative, a revenue or inflow positive); "
     "balance-sheet lines are always `signed`. Use `outflow_magnitude` only when the source prints "
     "an expense or outflow as a positive magnitude and you keep that presentation: then "
-    "`sign_citations` must hold at least one located span showing the printed presentation (the "
-    "value's own span qualifies), never empty. A negative amount under `outflow_magnitude` is a "
-    "contradiction: use `signed`."
+    "`sign_citations` must hold at least one located span showing the printed presentation (repeat "
+    "the value's citation in `sign_citations`), never empty. A negative amount under "
+    "`outflow_magnitude` is read as -abs(amount); use `signed` for a negative figure."
 )
 CONTEXT_STEP_RULE = (
     "`context_step_sha256` must equal the sha256 shown on the step:source_context block."

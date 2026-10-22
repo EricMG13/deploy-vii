@@ -314,6 +314,22 @@ def test_sign_and_observation_evidence_is_required() -> None:
     assert validate_financial_review(pack, review)
 
 
+def test_the_balance_movement_sign_message_names_its_remedy() -> None:
+    with pytest.raises(ValidationError) as caught:
+        BalanceMovement(
+            movement_id="dividend",
+            label="Dividend",
+            period_id="Q2",
+            role="distribution",
+            value=observed("dividend", "10"),
+            sign_convention="outflow_magnitude",
+        )
+    assert (
+        "requires source evidence: cite the span that prints the magnitude in `sign_citations`, "
+        "or use `sign_convention: signed`"
+    ) in str(caught.value)
+
+
 def test_arithmetic_precision_recomputation_and_input_immutability() -> None:
     value = bridge_case()
     pack, review = frozen(value)

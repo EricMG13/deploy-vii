@@ -377,7 +377,10 @@ class BalanceMovement(Contract):
     @model_validator(mode="after")
     def sign_evidence(self) -> Self:
         if self.sign_convention == "outflow_magnitude" and not self.sign_citations:
-            raise ValueError("balance movement outflow normalization requires source evidence")
+            raise ValueError(
+                "balance movement outflow normalization requires source evidence: cite the span "
+                "that prints the magnitude in `sign_citations`, or use `sign_convention: signed`"
+            )
         return self
 
 
