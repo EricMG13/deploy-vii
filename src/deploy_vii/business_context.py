@@ -437,16 +437,28 @@ PROHIBITED: Mapping[str, tuple[str, ...]] = {
 # Phrases that are a conclusion only about a creditor, claim or instrument: prohibited when an
 # instrument noun stands within four words ("the notes would recover"), never on their own
 # ("visitation will recover", "management would prefer the regional plan").
+# Entries here are regular expressions (word-bounded), not literal phrases.
 NEAR_INSTRUMENT: Mapping[str, tuple[str, ...]] = {
     "instrument recommendation": ("prefer the", "recommend", "recommendation"),
-    "recovery conclusion": ("full recovery", "will recover", "would recover"),
+    "recovery conclusion": (
+        "full recovery",
+        "will recover",
+        "would recover",
+        "expect(?:ed)? to recover",
+        "recover(?:y|ies)? (?:of|in full)",
+        "repaid in full",
+    ),
 }
 INSTRUMENT_NOUN = (
-    r"(?:creditors?|lenders?|noteholders?|bondholders?|holders?|claims?|bonds?|notes?|loans?|"
-    r"instruments?|debt|tranches?|securities)"
+    r"(?:creditors?|lenders?|noteholders?|bondholders?|holders?|investors|claims?|bonds?|notes?|"
+    r"loans?|instruments?|debts?|tranches?|securities|facility|revolver|lien)"
 )
 # r14 permits these as a labelled quote: a Management Language row may carry them.
 LABELLED_QUOTES = frozenset({"best-in-class", "best in class"})
+# A cited Documentary Fact or Management Language row may quote a recommendation (the board's
+# recommendation to holders in a consent solicitation is a documented fact, not CP-1A's call).
+QUOTED_KINDS = frozenset({"instrument recommendation"})
+QUOTING_CATEGORIES = frozenset({"Documentary Fact", "Management Language"})
 
 
 def _word(phrase: str) -> str:
@@ -454,8 +466,9 @@ def _word(phrase: str) -> str:
 
 
 def _near(phrase: str) -> str:
+    bounded = rf"(?<![A-Za-z])(?:{phrase})(?![A-Za-z])"
     gap = r"(?:\W+\w+){0,4}?\W+"
-    return rf"{_word(phrase)}{gap}{INSTRUMENT_NOUN}\b|\b{INSTRUMENT_NOUN}{gap}{_word(phrase)}"
+    return rf"{bounded}{gap}{INSTRUMENT_NOUN}\b|\b{INSTRUMENT_NOUN}{gap}{bounded}"
 
 
 _PROHIBITED = tuple(
@@ -534,13 +547,21 @@ def _populated(value: str) -> bool:
     return value.strip().casefold() not in _PLACEHOLDERS
 
 
-def prohibited_issues(path: str, text: str, *, labelled: bool = False) -> tuple[str, ...]:
+def prohibited_issues(path: str, text: str, *, quoted: str | None = None) -> tuple[str, ...]:
     """A text that states a prohibited CP-1A conclusion (`PROHIBITED`, `NEAR_INSTRUMENT`), one
-    issue per phrase; `labelled` (a Management Language row) admits `LABELLED_QUOTES`."""
+    issue per phrase. `quoted` is the category of a cited row: Management Language admits
+    `LABELLED_QUOTES`, and Documentary Fact or Management Language admits `QUOTED_KINDS`.
+    A guard over phrases, not a semantic review."""
+
+    def exempt(kind: str, phrase: str) -> bool:
+        if quoted == "Management Language" and phrase in LABELLED_QUOTES:
+            return True
+        return quoted in QUOTING_CATEGORIES and kind in QUOTED_KINDS
+
     return tuple(
         f'{path}: prohibited conclusion ({kind}): "{phrase}"'
         for kind, phrase, pattern in _PROHIBITED
-        if not (labelled and phrase in LABELLED_QUOTES) and pattern.search(text)
+        if not exempt(kind, phrase) and pattern.search(text)
     )
 
 
@@ -693,8 +714,9 @@ def validate_business_context(
                 issues.append(f"{where}: empty text")
                 continue
             issues.extend(f"{where}: {issue}" for issue in prose.issues(text, bound, names=names))
-            labelled = getattr(row, "category", None) == "Management Language"
-            issues.extend(prohibited_issues(where, text, labelled=labelled))
+            # Only a cited, labelled row quotes (fix round 2): its category names the speaker.
+            quoted = getattr(row, "category", None) if _quotes(row) else None
+            issues.extend(prohibited_issues(where, text, quoted=quoted))
             texts.append((text, scope))
     issues.extend(_shape_issues(submission))
     issues.extend(absence_issues(pack, texts))

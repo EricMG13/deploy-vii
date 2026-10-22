@@ -317,7 +317,8 @@ and is not implemented.
 
 CP-1A has one step, `business_context` (`business_context.CP1A_STEPS`), passed to
 `submit_step` by `submit_cp1a_step` like CP-0's `source_readiness`; `execution/5` and `module/5`
-are unchanged. Promotion is the accepted step, then the Python candidate
+are unchanged. Being one step, it is not in `WITHIN_ATTEMPT_REPAIR` (task 7.0g): a rejected
+`business_context` finishes the attempt, and the module-wide repair (`begin`) follows. Promotion is the accepted step, then the Python candidate
 (`cp1a_module(business_context(...))`) settled by `finish` when it equals the candidate trusted
 validation rebuilds: the step validator (`validate_business_context`: citations, run text,
 semantic rules, prohibited conclusions, consumers) has no issue, every claim's run text resolves

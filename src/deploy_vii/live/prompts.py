@@ -132,8 +132,9 @@ CP1A_PROHIBITED_RULE = (
     "No peer ranking, no instrument recommendation and no recovery conclusion in any text "
     "field (for example: ranks above peers, top quartile, we recommend, the notes would "
     "recover, expected recovery); recovery prospects as a credit mechanic and an operating "
-    "recovery (visitation will recover) are allowed, and a peer claim such as best-in-class "
-    "only as a quoted Management Language row."
+    "recovery (visitation will recover) are allowed, a recommendation only as a cited "
+    "Documentary Fact or Management Language row (the board's recommendation to holders), and "
+    "a peer claim such as best-in-class only as a cited Management Language row."
 )
 CP1A_CONSUMER_RULE = (
     "`consumers`: exactly one judgment for each module id listed under `consumers` in the "

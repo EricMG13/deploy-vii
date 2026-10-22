@@ -807,6 +807,43 @@ def test_operational_recovery_and_preferences_are_not_prohibited(text: str) -> N
     assert issues_of(translation_saying(text)) == ()
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Lenders expect to recover most of their claims",
+        "Recovery of the term loan is likely",
+        "The notes should be repaid in full",
+        "The revolver would recover in a sale",
+        "Investors expected to recover the principal",
+        "A recovery in full on the first lien is expected",
+    ],
+)
+def test_more_creditor_recovery_forms_are_rejected(text: str) -> None:
+    """Fix round 2: the five review false negatives (and a lien case) are recovery conclusions."""
+    found = issues_of(translation_saying(text))
+    assert any("prohibited conclusion (recovery conclusion)" in issue for issue in found), found
+
+
+CONSENT = "The board's recommendation to holders of the notes is to consent"
+
+
+def test_a_cited_documentary_recommendation_is_a_fact_not_a_conclusion() -> None:
+    """Fix round 2: a cited Documentary Fact or Management Language row may quote a
+    recommendation (a consent solicitation); unlabelled or uncited, it is a conclusion."""
+    base = submission_fixture()
+    event = base.events[0].model_copy(update={"event": CONSENT})
+    assert issues_of(changed(base, events=(event,))) == ()
+    quoted = event.model_copy(update={"category": "Management Language"})
+    assert issues_of(changed(base, events=(quoted,))) == ()
+    found = issues_of(translation_saying(CONSENT))  # a credit translation carries no label
+    assert any("prohibited conclusion (instrument recommendation)" in i for i in found), found
+    uncited = event.model_copy(
+        update={"category": "Insufficient Information", "citations": (), "limitation": "None"}
+    )
+    found = issues_of(changed(base, events=(uncited,)))
+    assert any("prohibited conclusion (instrument recommendation)" in i for i in found), found
+
+
 def test_best_in_class_is_allowed_only_as_labelled_management_language() -> None:
     base = submission_fixture()
     company = base.company[0].model_copy(
@@ -940,6 +977,12 @@ def test_only_gaps_and_empty_required_registers_are_own_limitations(tmp_path: Pa
     )
     assert validate_business_context(pack, required_only) == ()
     assert business_context(pack, required_only).limitations == ()
+    # Fix round 2: on the base fixture, an Insufficient Information row's limitation stays in
+    # its own register and out of the module's own limitations.
+    full = business_context(pack, base)
+    cells = {f.fact_id: f for f in full.facts}
+    assert cells["revenue_business_mix.r01.limitation"].text == "No segment table in the fixture"
+    assert not any("No segment table" in text for text in full.limitations)
     deliver_cp1a(pack, required_only, tmp_path / "accepted")
     receipt = json.loads((tmp_path / "accepted" / "complete.json").read_bytes())
     assert receipt["status"] == "accepted"

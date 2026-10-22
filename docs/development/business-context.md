@@ -51,11 +51,17 @@ CONTEXT list (`cp1a.downstream_modules_unique`); a consumer's flag topics name e
 behaviour flags; no prohibited conclusion. The prohibited check uses closed phrase lists
 matched on word boundaries. `PROHIBITED` holds peer ranking ("ranks among", "top quartile"
 and so on), instrument recommendation ("we recommend"...) and recovery conclusion ("expected
-recovery"...) phrases. `NEAR_INSTRUMENT` holds phrases that are a conclusion only within four
-words of a creditor, claim or instrument noun: "will recover", "would recover", "full
-recovery", "prefer the", "recommend", "recommendation". So "the notes would recover" is
-rejected and "visitation will recover" passes. "best-in-class" is allowed only in a
-Management Language row, as r14's labelled quote. Recovery as a credit mechanic is allowed.
+recovery"...) phrases. `NEAR_INSTRUMENT` holds patterns that are a conclusion only within four
+words of a creditor, claim or instrument noun (creditor, lender, holder, investors, claim, bond,
+note, loan, instrument, debt(s), tranche, securities, facility, revolver, lien). The patterns
+are "will recover", "would recover", "full recovery", "expect(ed) to recover", "recovery of",
+"recover(y) in full", "repaid in full", "prefer the", "recommend" and "recommendation". So
+"the notes would recover" is rejected and "visitation will recover" passes. Quotations are
+allowed only in a cited row, where the category names the speaker (fix round 2). A
+Documentary Fact or Management Language row may quote a recommendation, such as the board's
+recommendation to holders in a consent solicitation. A Management Language row may also quote
+"best-in-class", as r14's labelled quote. Recovery as a credit mechanic is allowed. The check
+is a guard over phrases, not a semantic review: semantic review remains required.
 After composition,
 `register_rule_issues` checks the four `cp1a.*` rules on the registers themselves.
 
@@ -137,6 +143,7 @@ unlineaged figure.
 - The drivers cannot continue the company rows in one list (the renderer places one register
   per tab). The prose block shows one line per cell, with no column label. A row header has
   no passport of its own; the row's other cells carry the row's citations.
-- The prohibited-conclusion check is a phrase list; semantic review remains required.
+- The prohibited-conclusion check is a guard over phrase lists, not a semantic review;
+  semantic review remains required (a paraphrase passes it).
 - The scoring rule reads the model's direction and dimension labels; it does not check them.
 - Live uptake (E1) and provider acceptance of the sent schema are the coordinator's to run.
