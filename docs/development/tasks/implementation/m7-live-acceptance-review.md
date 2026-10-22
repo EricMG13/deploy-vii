@@ -230,3 +230,30 @@ No `methodology-adaptation.md` row: validators, issues and acceptance are unchan
 execution-boundary change (decision 0005).
 
 Not verified: a live within-attempt repair (E1 batch 5).
+
+
+## 7.2 CP-1A business and transaction context
+
+CP-1A (alias CP-2C) is one live step, `business_context`, after CP-0 (decision 0008 MC-1). The
+model returns `BusinessContextSubmission`: judgments, closed-enum Five-Category tags and verbatim
+quotes only. Python validates it (`validate_business_context`: sources once, CP-0 citation and
+coverage rules, run text, category and row rules, conflicts logged not reconciled, prohibited
+conclusions, consumers exactly as listed) and composes the 22 r14 registers plus
+`cp1a.cp_model_snapshot_fields`, with T2D.8 scored and T2D.9 drawn from the credit translations
+by documented rules (`docs/development/business-context.md`, two `methodology-adaptation.md`
+rows). A settled CP-1 is bound as a context input of CP-1A (`execution.CONTEXT_PRODUCERS`), so
+CP-1A text may reference its figures as `{ref|unit}`; without one the CONTEXT block says no
+figure may be written. `module --module CP-1A` runs CP-0 then the step; promotion records the
+four statuses as 6.4. `bindings/cp1a.py` ships the Front Page and rail bindings; the FP 01
+fixture uses it in place of its synthetic CP-1A map, so both darwin pixel baselines were
+regenerated (the company block now shows Company and Operating model tabs with the Issuer,
+Business description, Country and Sector rows; the key-findings gap label moved from G20 to G74
+because CP-1A's unsettled cells take earlier `G#` numbers). `deliver_cp1a` publishes a
+standalone delivery like CP-0's.
+
+Sent schema (`strict_schema(BusinessContextSubmission)`): depth 6 (3 objects), 134 properties,
+14,954 bytes, no relaxation. Prompt bound on the fixture pack: 15,365 tokens (15,412 with one
+CP-1 fact offered).
+
+Not verified: live uptake (E1, the coordinator runs it) and provider acceptance of the sent
+schema (the coordinator runs `live schema-check --steps business_context`).

@@ -118,7 +118,7 @@
           "transaction_summary"
         ]
       },
-      "implementation": "unrun",
+      "implementation": "partial (contract, validator, bindings; T2D.8/T2D.9 derived in Python; live E1 pending)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"

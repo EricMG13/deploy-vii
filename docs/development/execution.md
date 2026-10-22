@@ -305,6 +305,28 @@ condition, so it consumes the attempt and its repair before CP-1 settles `blocke
 `blocked` settlement of a valid but QA-Blocked candidate would change the M4 settlement rule
 and is not implemented.
 
+### CP-1A promotion (task 7.2)
+
+CP-1A has one step, `business_context` (`business_context.CP1A_STEPS`), passed to
+`submit_step` by `submit_cp1a_step` like CP-0's `source_readiness`; `execution/5` and `module/5`
+are unchanged. Promotion is the accepted step, then the Python candidate
+(`cp1a_module(business_context(...))`) settled by `finish` when it equals the candidate trusted
+validation rebuilds: the step validator (`validate_business_context`: citations, run text,
+semantic rules, prohibited conclusions, consumers) has no issue, every claim's run text resolves
+(`candidate_issues`) and the composed registers pass the four `cp1a.*` rules. Settlement follows
+the M4 rules, so the fixture's own gaps make it `restricted`; the head records `implemented` and
+three `unrun` statuses (`business_context.PROMOTED`), as 6.4 does for CP-1. CP-1A's registry
+edge is CP-0 alone. A settled CP-1 is bound as a context input when present
+(`execution.CONTEXT_PRODUCERS`): `current_inputs` adds the CP-1 head (accepted or restricted;
+never required, a blocked or stale CP-1 is left out) after the required upstreams, so the CP-1
+figures CP-1A text references are lineage, CP-1A goes stale when CP-1 is rerun, and a CP-1
+settled after CP-1A changes the input set, which allows a CP-1A rerun with figures. Like any
+bound input, CP-1's limitations then show as CP-1A's inherited limitations (shown, not
+penalised). The
+referenced CP-1 facts are copied into CP-1A's `cp1_references` table. `deliver_cp1a` publishes
+a standalone delivery like `deliver_cp0` (receipt `cp1a-delivery/1`; a submission with any
+validator issue publishes `rejected` with those issues).
+
 CP-MODEL's artifact (decision 0006 DC-5) is the HTML Model destination plus the calculation
 JSON of the accepted CP-1 financial model; the r14 XLSX workbook export is deferred and
 recorded so in `docs/methodology/r14-coverage.json`. CP-MODEL requires accepted CP-1 (a

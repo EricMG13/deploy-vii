@@ -112,14 +112,16 @@ from a pinned pool:
   as one rejection did before; the module-wide repair (`Execution.begin`) is then the next
   line. Bound: two tries per step per attempt, two attempts per input set; with retries, a step
   can use up to 2 x (`max_retries` + 1) dispatches per attempt. CP-0's single
-  review and CP-1's `quality` promotion step keep the attempt-level repair only.
+  review, CP-1's `quality` promotion step and CP-1A's single `business_context` step (task
+  7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
 - **The `module` driver's repair loop (task 7.0e).** In `deploy-vii live module` (and only
   there; `probe`, `regression` and `canary` stay single-attempt) a step whose status is
   `rejected` with the attempt still pending is re-sent once, as the step's repair within the
   attempt (task 7.0g); if that try is accepted the cell goes on to the next step. A step whose
   status is `rejected` with the attempt finished (a journal verdict on a submitted payload) is
   followed by one `Execution.begin` on the same module: the repair attempt. It restarts the module at its first step
-  (`expected_step`: `source_readiness` for CP-0, `source_context` for CP-1) and runs the steps
+  (`expected_step`: `source_readiness` for CP-0, `source_context` for CP-1, `business_context`
+  for CP-1A) and runs the steps
   in order again, each with its own cap reservation; a CP-1 repair therefore re-sends
   `source_context` and costs one extra context call. At most one repair per module per cell: the
   cell ends at the first step that is not accepted, whether in the first attempt after its
@@ -262,7 +264,20 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
 - `probe`: per eligible model, `--draws-per-model` cells of CP-0, `source_context`, `financials`.
   `canary`: one cell per eligible model over CP-0 and the four CP-1 steps. `module --module`: one
   seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the four
-  steps; other modules have no live step contract and are refused before spending.
+  steps, CP-1A (alias CP-2C; task 7.2) runs CP-0 first then its one step `business_context`;
+  other modules have no live step contract and are refused before spending. A CP-0 that does not
+  write `Run CP-1A` for CP-1A ends the cell `not-authorized` before the step is sent.
+- **`business_context` (CP-1A, task 7.2).** One step; the model returns judgments and verbatim
+  quotes only (`BusinessContextSubmission`, decision 0008 MC-1) and Python composes the 22 r14
+  registers plus `cp1a.cp_model_snapshot_fields` (docs/development/business-context.md). The
+  system prompt is `methods/cp1a.md` plus the step contract (rules a to i: sources once,
+  citations, coverage, run text, categories, conflicts logged not reconciled, no prohibited
+  conclusion, consumers exactly as listed, row rules). The CONTEXT block adds `consumers` (CP-MODEL
+  and every selected consumer of CP-1A, registry order, `{module_id, title, purpose}`) and
+  `cp1_facts` (`ref`, label, period, unit, shown value) only when the journal binds a settled
+  (accepted or restricted) CP-1 head as an input of the ticket; otherwise `cp1_facts` is empty
+  and `cp1_facts_note` says no figure may be referenced. A valid step settles CP-1A at once
+  (`submit_cp1a_step`), with the four statuses in its head as 6.4 does.
   `regression`: cases `cp0` and `cp1`, every candidate once per case in an order shuffled by the
   seed; it refuses a pool with an ineligible arm.
 - The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
