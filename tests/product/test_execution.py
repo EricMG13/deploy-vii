@@ -1405,3 +1405,78 @@ def test_head_statuses_are_omitted_until_a_promotion_records_them() -> None:
         )
     )
     assert head_of(blocked, promoted).qualification is None
+
+
+# --- 7.0g: per-step repair within an attempt (decision 0008 MC-7 item 2) ---------------------
+
+
+def repair_entry(**update: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "step_id": "financials",
+        "inputs": [],
+        "payload_sha256": "b" * 64,
+        "status": "invalid",
+        "issues": ["(root): Invalid JSON"],
+    }
+    return {**entry, **update}
+
+
+def attempt_json(**update: object) -> str:
+    attempt: dict[str, object] = {"ticket_id": "t", "module_id": "CP-1", "inputs": [], "number": 0}
+    return json.dumps({**attempt, **update})
+
+
+def test_a_stored_snapshot_without_step_repairs_has_no_such_key(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    store.begin("CP-0")
+    raw = snapshot_bytes(store)
+    assert b'"attempts":[{' in raw and b"step_repairs" not in raw
+
+
+def test_an_attempt_without_step_repairs_keeps_its_execution_5_bytes() -> None:
+    """Attempts written before task 7.0g have no `step_repairs` key; one without a within-attempt
+    repair still serialises without it, so every stored execution/5 snapshot keeps its bytes and
+    hash and the schema is not bumped."""
+    raw = attempt_json()
+    attempt = Attempt.model_validate_json(raw)
+    assert attempt.step_repairs == ()
+    assert set(json.loads(attempt.model_dump_json())) == set(Attempt.model_fields) - {
+        "step_repairs"
+    }
+    repaired = Attempt.model_validate_json(attempt_json(step_repairs=[repair_entry()]))
+    assert json.loads(repaired.model_dump_json())["step_repairs"][0]["step_id"] == "financials"
+    assert Attempt.model_validate_json(repaired.model_dump_json()) == repaired
+
+
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    [
+        ([repair_entry(issues=[])], "Invalid step requires issues"),
+        ([repair_entry(status="pending", issues=[])], "A step repair retains an invalid try"),
+        (
+            [repair_entry(status="valid", issues=[], output_sha256="c" * 64)],
+            "A step repair retains an invalid try",
+        ),
+        ([repair_entry(), repair_entry()], "A step is repaired at most once per attempt"),
+    ],
+)
+def test_a_step_repair_entry_is_an_invalid_try_with_issues_once_per_step(
+    entries: list[dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Attempt.model_validate_json(attempt_json(step_repairs=entries))
+
+
+def test_a_generic_two_step_sequence_keeps_the_attempt_level_rule(tmp_path: Path) -> None:
+    """The within-attempt repair is CP-1's four model steps only: any other sequence (here CP-0
+    with two steps, as in the workflow tests) still finishes its attempt on the first invalid
+    step, with no `step_repairs` entry."""
+    store = fixture_store(tmp_path)
+    ticket = store.begin("CP-0")
+
+    def invalid(_pack: PreparedPack, _attempt: Attempt) -> StepValidation:
+        return StepValidation(issues=("bad",))
+
+    finished = store.submit_step(ticket.ticket_id, "CP-0", ("a", "b"), "a", "raw", invalid)
+    assert finished.status == "finished" and finished.step_repairs == ()
+    assert finished.issues == ("bad",)

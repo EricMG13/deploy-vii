@@ -110,6 +110,11 @@ class DispatchResult:
     `Execution.interrupt`. That consumes the input set's one repair: the next `begin` is the
     repair attempt, or, if this was already the repair, the module is blocked for these inputs.
     The manifest `retries` block records this. `ticket_interrupted` mirrors it.
+
+    A CP-1 step the journal rejects for the first time in its attempt leaves the attempt
+    pending (`attempt_pending`, task 7.0g): the same step is expected again, and its next
+    dispatch is the step's one repair within the attempt (`step_try` 2), with its own attempt
+    ids (`<ticket>-<step>-repair-<n>`) and its own retry budget.
     """
 
     attempt_id: str
@@ -124,6 +129,8 @@ class DispatchResult:
     issues: tuple[str, ...]
     ticket_interrupted: bool = False
     prompt_tokens_upper_bound: int | None = None  # the reservation's prompt bound (MC-10)
+    attempt_pending: bool = False  # the journal ticket is still pending after this dispatch
+    step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
 
 
 @cache
@@ -179,10 +186,15 @@ class RepairPrompt:
 def repair_prompt(snapshot: ExecutionSnapshot, attempt: Attempt, step_id: str) -> RepairPrompt:
     """The failing step's validator issues, on that step's prompt only.
 
-    The previous attempt's last invalid step is the failing step: its own issues go into the
-    REPAIR block of the same step on the repair ticket, and the other steps get none. When no
-    step failed validation (an interruption, or a module-level refusal after valid steps) there
-    is no step to scope to, so the module issues are carried on every step as before."""
+    Within an attempt first (task 7.0g): a step whose first try this attempt rejected gets that
+    try's issues (`Attempt.step_repairs`), and nothing from the previous attempt. Otherwise, on
+    a repair ticket, the previous attempt's last invalid step is the failing step: its own
+    issues go into the REPAIR block of the same step, and the other steps get none. When no step
+    failed validation (an interruption, or a module-level refusal after valid steps) there is
+    no step to scope to, so the module issues are carried on every step as before."""
+    own = next((item for item in attempt.step_repairs if item.step_id == step_id), None)
+    if own is not None:
+        return RepairPrompt(own.issues, "failing-step", step_id)
     if attempt.repair_of is None:
         return RepairPrompt((), "none", None)
     previous = next(item for item in snapshot.attempts if item.ticket_id == attempt.repair_of)
@@ -216,6 +228,7 @@ class _Plan:
     attempt_number: int
     max_retries: int
     repair: RepairPrompt
+    step_try: int
     pool_label: str
     misfit: str | None
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -285,6 +298,17 @@ def _upstream(store: Execution, attempt: Attempt) -> tuple[UpstreamInput, ...]:
     )
 
 
+def step_try(attempt: Attempt, step_id: str) -> int:
+    """2 when the journal kept this step's rejected first try for its repair within the attempt."""
+    return 2 if any(item.step_id == step_id for item in attempt.step_repairs) else 1
+
+
+def _tries(names: list[str], prefix: str) -> list[str]:
+    """The attempt ids `<prefix>-<n>` among `names`, in order (`<prefix>-repair-<n>` excluded)."""
+    pattern = re.compile(re.escape(prefix) + r"-[0-9]+")
+    return [name for name in names if pattern.fullmatch(name)]
+
+
 def next_attempt_id(
     ledger: Ledger, writer: AttemptWriter, base: AttemptLocator, prefix: str
 ) -> tuple[str, str | None]:
@@ -342,11 +366,14 @@ def _plan(
     )
     body = chat.body()
     tokens = prompt_token_bound(body, bytes_per_token)
-    prefix = f"{ticket_id}-{step.step_id}"
+    first_try = f"{ticket_id}-{step.step_id}"
+    current = step_try(attempt, step.step_id)
+    # The step's repair within the attempt has its own ids, so its retries are its own.
+    prefix = first_try if current == 1 else f"{first_try}-repair"
     base = AttemptLocator(pool.batch_id, step.case_id, candidate.slug, prefix)
     attempt_id, retry_of = next_attempt_id(ledger, writer, base, prefix)
     known = [item.attempt_id for item in ledger.state().attempts]
-    tries = sum(1 for name in known if name.startswith(prefix + "-"))  # refusals are not tries
+    tries = len(_tries(known, prefix))  # refusals are not tries
     if tries >= max_retries + 1:
         raise ValueError(
             f"{tries} attempts already used on this ticket step (max_retries={max_retries}); "
@@ -377,6 +404,10 @@ def _plan(
                 None,
             ),
             "retry_of_attempt_id": retry_of,
+            # The dispatched try the journal rejected; its issues are this try's REPAIR block.
+            "step_repair_of_attempt_id": (
+                next(reversed(_tries(known, first_try)), None) if current == 2 else None
+            ),
         },
         clock=clock,
         started_at=clock(),
@@ -384,6 +415,7 @@ def _plan(
         attempt_number=tries + 1,
         max_retries=max_retries,
         repair=repair,
+        step_try=current,
         pool_label=pool.pool_label,
         misfit=candidate.misfit(tokens, step.max_tokens),
         hashes={
@@ -428,8 +460,20 @@ def journal_outcome(
             journal.result_sha256
         ).status in {"accepted", "restricted"}
         return ("accepted" if accepted else "rejected"), journal.issues
-    submitted = next(item for item in reversed(journal.steps) if item.step_id == step_id)
+    # A first rejection repaired within the attempt is kept apart from `steps` (task 7.0g).
+    submitted = next(
+        (item for item in reversed(journal.steps) if item.step_id == step_id),
+        next((item for item in journal.step_repairs if item.step_id == step_id), None),
+    )
+    if submitted is None:
+        raise ValueError(f"the journal retains no {step_id} submission on this ticket")
     return ("accepted" if submitted.status == "valid" else "rejected"), submitted.issues
+
+
+def _pending(store: Execution, ticket_id: str) -> bool:
+    """Whether the journal ticket is still pending, read from the journal after the dispatch."""
+    attempt = next(item for item in store.read().attempts if item.ticket_id == ticket_id)
+    return attempt.status == "pending"
 
 
 def _interrupt_if_exhausted(plan: _Plan, store: Execution, run: _Run, why: str) -> None:
@@ -457,6 +501,7 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
         )
     return {
         "attempt_number": plan.attempt_number,
+        "step_try": plan.step_try,
         "max_retries": plan.max_retries,
         "exhausted": plan.exhausted,
         "ticket_interrupted": run.ticket_interrupted,
@@ -792,7 +837,7 @@ def dispatch(
         plan.locator, _request_record(plan)
     )  # the exact request is retained before sending
     plan.event("drawn", draw=plan.drawn.to_record(), effort=plan.effort)
-    if plan.attempt.repair_of is not None:
+    if plan.attempt.repair_of is not None or plan.step_try == 2:
         plan.event("repair_prompt", **plan.repair.to_record())
     if plan.misfit is not None:
         reason = f"ineligible: {plan.misfit}"
@@ -808,6 +853,8 @@ def dispatch(
             cost_usd=Decimal(0),
             issues=(),
             prompt_tokens_upper_bound=plan.prompt_tokens,
+            attempt_pending=True,  # nothing was sent, so the journal was not touched
+            step_try=plan.step_try,
         )
     try:
         ledger.reserve(plan.attempt_id, plan.reserve_usd)
@@ -850,6 +897,8 @@ def dispatch(
         issues=run.issues,
         ticket_interrupted=run.ticket_interrupted,
         prompt_tokens_upper_bound=plan.prompt_tokens,
+        attempt_pending=_pending(store, ticket_id),
+        step_try=plan.step_try,
     )
 
 

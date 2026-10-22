@@ -381,6 +381,7 @@ def test_dispatch_accepts_a_valid_review_and_retains_every_artifact(tmp_path: Pa
         "repair_of_ticket_id": None,
         "repair_of_attempt_id": None,
         "retry_of_attempt_id": None,
+        "step_repair_of_attempt_id": None,  # task 7.0g
     }
     request = load(directory / "request.json")
     assert request["body"]["model"] == LUNA and "tools" not in request["body"]
@@ -662,6 +663,7 @@ def test_fallback_then_retry_reuses_pending_ticket(tmp_path: Path) -> None:
     retries = load(attempt_dir(first) / "manifest.json")["retries"]
     assert retries == {
         "attempt_number": 1,
+        "step_try": 1,  # task 7.0g
         "max_retries": 2,
         "exhausted": False,
         "ticket_interrupted": False,
@@ -805,6 +807,10 @@ def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
     financials = StepSpec("financials", "case-cp1", sources)
     failed = rig.run(ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials)
     assert failed.status == "rejected" and failed.issues[0].startswith("(root): Invalid JSON")
+    # Task 7.0g: the step's one repair within the attempt is rejected too, which finishes it.
+    assert failed.attempt_pending
+    failed = rig.run(ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials)
+    assert failed.status == "rejected" and not failed.attempt_pending
     repair = rig.store.begin("CP-1")
     assert repair.number == 1 and repair.repair_issues == failed.issues
     rig.ticket_id = repair.ticket_id
@@ -830,6 +836,125 @@ def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
 
     assert scope(redo)["scope"] == "none" and scope(redo)["failing_step"] == "financials"
     assert scope(again)["scope"] == "failing-step" and scope(again)["issue_count"] == 1
+
+
+def cp1_spec(rig: Rig, step_id: str) -> StepSpec:
+    return StepSpec(step_id, "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+
+
+def user_prompt(transport: FakeTransport) -> str:
+    content: str = json.loads(transport.requests[0].body or b"{}")["messages"][1]["content"]
+    return content
+
+
+def repair_block(issues: tuple[str, ...]) -> str:
+    return "\n".join(f"- {issue}" for issue in issues)
+
+
+def events_of(result: DispatchResult, name: str) -> list[dict[str, Any]]:
+    lines = (result.directory / "events.jsonl").read_text().splitlines()
+    return [e for e in map(json.loads, lines) if e["event"] == name]
+
+
+def test_a_rejected_cp1_step_is_re_sent_within_its_attempt_with_its_own_issues(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0g: after a rejection the attempt stays pending, the same step is expected again
+    and its REPAIR block carries that step's own issues; the next step carries none."""
+    rig, extraction = cp1_rig(tmp_path)
+    financials = cp1_spec(rig, "financials")
+    failed = rig.run(ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials)
+    assert failed.status == "rejected" and failed.attempt_pending and failed.step_try == 1
+    assert failed.issues[0].startswith("(root): Invalid JSON")
+    ticket = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert [s.step_id for s in ticket.step_repairs] == ["financials"]
+    assert runner.expected_step(ticket, "CP-1") == "financials"
+    transport = FakeTransport(ok(extraction.model_dump_json(), model=LUNA))
+    fixed = rig.run(ChatClient(transport), step=financials)
+    assert fixed.status == "accepted" and fixed.attempt_pending and fixed.step_try == 2
+    user = user_prompt(transport)
+    assert user.count("<<<REPAIR id=prior-validation-issues") == 1
+    assert repair_block(failed.issues) in user
+    manifest = load(fixed.directory / "manifest.json")
+    assert manifest["links"]["step_repair_of_attempt_id"] == failed.attempt_id
+    assert manifest["links"]["repair_of_ticket_id"] is None
+    assert manifest["links"]["retry_of_attempt_id"] is None  # a repair try is not a retry
+    assert manifest["retries"]["step_try"] == 2 and manifest["retries"]["attempt_number"] == 1
+    assert load(fixed.directory / "metrics.json")["repair_count"] == 0  # the attempt number
+    first = load(failed.directory / "manifest.json")
+    assert first["retries"]["step_try"] == 1 and first["links"]["step_repair_of_attempt_id"] is None
+    (scope,) = events_of(fixed, "repair_prompt")
+    assert scope == {
+        **scope,
+        "scope": "failing-step",
+        "failing_step": "financials",
+        "issue_count": len(failed.issues),
+    }
+    assert not events_of(failed, "repair_prompt")
+    # The next step's request (retained before the eligibility check) carries no REPAIR block.
+    following = rig.run(ChatClient(FakeTransport()), step=cp1_spec(rig, "narrative"))
+    request = load(following.directory / "request.json")
+    assert "<<<REPAIR" not in request["body"]["messages"][1]["content"]
+
+
+def test_a_steps_own_issues_take_precedence_over_the_previous_attempts(tmp_path: Path) -> None:
+    """On the repair attempt the failing step's first try carries the previous attempt's
+    issues; its within-attempt repair carries only its own first try's issues, never both."""
+    rig, extraction = cp1_rig(tmp_path)
+    context_payload = rig.store.payload(rig.store.read().attempts[-1].steps[0].payload_sha256)
+    financials = cp1_spec(rig, "financials")
+    for content in ("not json", "[]"):  # attempt 0: rejected, and its step repair rejected
+        rig.run(ChatClient(FakeTransport(ok(content, model=LUNA))), step=financials)
+    previous = rig.store.read().attempts[-1]
+    assert previous.status == "finished" and len(previous.step_repairs) == 1
+    rig.ticket_id = rig.store.begin("CP-1").ticket_id
+    redo = rig.run(
+        ChatClient(FakeTransport(ok(context_payload, model=LUNA))),
+        step=cp1_spec(rig, "source_context"),
+    )
+    assert redo.status == "accepted", redo.issues
+    first = FakeTransport(ok("{}", model=LUNA))
+    one = rig.run(ChatClient(first), step=financials)
+    assert one.status == "rejected" and one.attempt_pending and one.step_try == 1
+    second = FakeTransport(ok(extraction.model_dump_json(), model=LUNA))
+    two = rig.run(ChatClient(second), step=financials)
+    assert two.status == "accepted" and two.step_try == 2
+    inherited, own = repair_block(previous.issues), repair_block(one.issues)
+    assert inherited != own
+    assert inherited in user_prompt(first) and own not in user_prompt(first)
+    assert own in user_prompt(second) and inherited not in user_prompt(second)
+    assert user_prompt(second).count("<<<REPAIR") == 1
+    manifest = load(two.directory / "manifest.json")
+    assert manifest["links"]["step_repair_of_attempt_id"] == one.attempt_id
+    assert manifest["links"]["repair_of_ticket_id"] == previous.ticket_id
+    assert load(two.directory / "metrics.json")["repair_count"] == 1
+
+
+def test_a_step_repair_try_has_its_own_retry_budget(tmp_path: Path) -> None:
+    """Retries (no model output) and the step's repair try are counted apart: a no-response on
+    the repair try is that try's first attempt, and its retry links to it."""
+    rig, extraction = cp1_rig(tmp_path)
+    financials = cp1_spec(rig, "financials")
+    failed = rig.run(
+        ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials, max_retries=1
+    )
+    lost = rig.run(ChatClient(FakeTransport(TimeoutError("slow"))), step=financials, max_retries=1)
+    assert lost.status == "no-response" and lost.step_try == 2 and not lost.ticket_interrupted
+    lost_manifest = load(lost.directory / "manifest.json")
+    assert lost_manifest["retries"]["attempt_number"] == 1
+    assert lost_manifest["links"]["retry_of_attempt_id"] is None
+    assert lost_manifest["links"]["step_repair_of_attempt_id"] == failed.attempt_id
+    again = rig.run(
+        ChatClient(FakeTransport(ok(extraction.model_dump_json(), model=LUNA))),
+        step=financials,
+        max_retries=1,
+    )
+    assert again.status == "accepted" and again.step_try == 2
+    manifest = load(again.directory / "manifest.json")
+    assert manifest["retries"]["attempt_number"] == 2
+    assert manifest["links"]["retry_of_attempt_id"] == lost.attempt_id
+    assert manifest["links"]["step_repair_of_attempt_id"] == failed.attempt_id
+    assert len({failed.attempt_id, lost.attempt_id, again.attempt_id}) == 3
 
 
 def test_a_repair_after_an_interruption_keeps_the_module_issues(tmp_path: Path) -> None:

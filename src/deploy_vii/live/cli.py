@@ -141,6 +141,7 @@ class Row:
     cohort: str = COHORT
     prompt_bound: int | None = None  # prompt tokens upper bound of the attempt (Pool table)
     repair: int = 0  # the journal's attempt number: 0 a first attempt, 1 the MC-7 repair
+    step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
 
     def cells(self) -> tuple[object, ...]:
         return (
@@ -157,8 +158,12 @@ class Row:
         )
 
     def step_cells(self) -> tuple[object, ...]:
-        """A batch-report Steps row: `cells()` and the Repair column (`-` for a first attempt)."""
-        return (*self.cells(), self.repair or "-")
+        """A batch-report Steps row: `cells()` and the Repair column: `-` a first try of the
+        first attempt, `step` the step's repair within its attempt, `1` the MC-7 repair attempt
+        and `1+step` a step's repair within that repair attempt."""
+        within = "step" if self.step_try == 2 else ""
+        attempt = str(self.repair) if self.repair else ""
+        return (*self.cells(), "+".join(filter(None, (attempt, within))) or "-")
 
 
 @dataclass
@@ -462,8 +467,10 @@ def _run_cell(
     repair: bool,
 ) -> None:
     """Run one cell's steps in order, module by module. With `repair` (the `module` driver) a
-    validator rejection is followed by the module's one MC-7 repair attempt, which restarts the
-    module from its first step; the cell ends at the first step that is not accepted."""
+    validator rejection that leaves the attempt pending is followed by that step's one repair
+    within the attempt (task 7.0g); a rejection that finishes the attempt is followed by the
+    module's one MC-7 repair attempt, which restarts the module from its first step. The cell
+    ends at the first step that is not accepted."""
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
 
@@ -499,6 +506,7 @@ def _run_cell(
                 len(result.issues),
                 prompt_bound=result.prompt_tokens_upper_bound,
                 repair=attempt.number,
+                step_try=result.step_try,
             )
         )
         return result
@@ -512,6 +520,10 @@ def _run_cell(
             result = send(step_id, attempt)
             if attempt.module_id == "CP-0":
                 cp0_attempt = result.attempt_id  # the attempt whose review holds the T8 commands
+            # A rejection the journal kept pending is the step's one repair within the attempt:
+            # re-send the same step once. Its second rejection finishes the attempt (journal).
+            if repair and result.status == "rejected" and result.attempt_pending:
+                result = send(step_id, attempt)
             if result.status != "accepted":
                 break
         return result
@@ -657,11 +669,18 @@ def _pool_cells(
     )
 
 
-def _repairs_dispatched(rows: Sequence[Row]) -> int:
-    """Repair attempts that sent at least one step: a repair stopped by the cap before its first
-    dispatch has no row, and an `ineligible` row was sealed unsent; neither is counted."""
-    sent = (row for row in rows if row.repair and row.status != "ineligible")
-    return len({(row.cell_id, STEPS[row.step_id].module_id) for row in sent})
+def _repairs_dispatched(rows: Sequence[Row]) -> str:
+    """Repairs that sent at least one step, both kinds: MC-7 repair attempts (per cell and
+    module) and steps repaired within their attempt (task 7.0g; per cell, attempt and step). A
+    repair stopped by the cap before its first dispatch has no row, and an `ineligible` row was
+    sealed unsent; neither is counted."""
+    sent = [row for row in rows if row.status != "ineligible"]
+    modules = {(row.cell_id, STEPS[row.step_id].module_id) for row in sent if row.repair}
+    steps = {(row.cell_id, row.repair, row.step_id) for row in sent if row.step_try == 2}
+    return (
+        f"{len(modules) + len(steps)} (module repair attempts {len(modules)}, "
+        f"within-attempt step repairs {len(steps)})"
+    )
 
 
 def render_report(

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from deploy_vii.canonical_tables import REGISTER_NOTE, CanonicalTables
-from deploy_vii.contracts import Module
+from deploy_vii.contracts import Input, Module
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
     PROMOTED,
@@ -21,7 +21,7 @@ from deploy_vii.cp1_workflow import (
 )
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.envelope import read_envelope
-from deploy_vii.execution import Attempt, Execution, NotAuthorized
+from deploy_vii.execution import Attempt, Execution, NotAuthorized, text_sha256
 from deploy_vii.quality import (
     ClaimAssessment,
     EvidenceLineage,
@@ -35,28 +35,34 @@ from tests.product.test_narrative import populated
 from tests.product.test_narrative_projection import supplied
 from tests.product.test_workflow import cp1_case
 
+SLIP = "not json"  # a payload every CP-1 step validator rejects ("(root): Invalid JSON")
 
-def staged(tmp_path: Path, *, partial: bool = False) -> tuple[Execution, Attempt]:
+
+def staged(
+    tmp_path: Path, *, partial: bool = False, slip: str | None = None
+) -> tuple[Execution, Attempt]:
     """A CP-1 attempt with its four stages valid and one finding; the ticket is pending.
 
     The full case cites a KPI (ceiling Calculated); the partial case has no KPI, cites an
-    observation and its narrative is blocked (its scope is data quality only).
+    observation and its narrative is blocked (its scope is data quality only). With `slip`, that
+    step is first rejected once and then repaired within the attempt (task 7.0g).
     """
     store, ticket, extraction = cp1_case(tmp_path, partial=partial)
-    financial = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+
+    def submit(step_id: str, payload: str) -> Attempt:
+        if step_id == slip:
+            assert submit_cp1_step(store, ticket.ticket_id, step_id, SLIP).status == "pending"
+        return submit_cp1_step(store, ticket.ticket_id, step_id, payload)
+
+    financial = submit("financials", extraction.model_dump_json())
     output = FinancialStage.model_validate_json(step_text(store, financial.steps[-1]))
-    narrative = submit_cp1_step(
-        store,
-        ticket.ticket_id,
+    narrative = submit(
         "narrative",
         (supplied if partial else populated)(output.narrative_inputs).model_dump_json(),
     )
     inputs = DownstreamInputs.model_validate_json(step_text(store, narrative.steps[-1]))
-    done = submit_cp1_step(
-        store,
-        ticket.ticket_id,
-        "readiness",
-        DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json(),
+    done = submit(
+        "readiness", DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
     )
     assert not done.issues and done.status == "pending"
     return store, done
@@ -166,6 +172,8 @@ def test_a_lineage_upgrade_never_promotes(journal: tuple[Execution, str, Quality
     assert finished.status == "finished"
     assert any("QA lineage upgrade rejected" in issue for issue in finished.issues)
     assert store.result(finished.result_sha256 or "").status == "rejected"
+    # Promotion settles the module, so `quality` keeps the attempt-level rule (task 7.0g).
+    assert finished.step_repairs == ()
     assert cp1_head(store) is None
 
 
@@ -365,3 +373,126 @@ def test_promotion_adds_no_limitation_beyond_a_non_passed_qa_line(
     assert _candidate(registers, attempt, passed).limitations == rest
     restricted = _candidate(registers, attempt, quality).limitations
     assert restricted[1:] == rest and restricted[0].startswith("CP-1 QA Restricted: confidence ")
+
+
+# --- 7.0g: one repair per step within the attempt (decision 0008 MC-7 item 2) ----------------
+
+
+def test_the_within_attempt_repair_covers_the_four_cp1_model_steps_only() -> None:
+    from deploy_vii.cp1_workflow import CP1_PROMOTION, CP1_STEPS
+    from deploy_vii.execution import WITHIN_ATTEMPT_REPAIR
+
+    assert WITHIN_ATTEMPT_REPAIR == {"CP-1": frozenset(CP1_STEPS)}
+    assert "quality" in CP1_PROMOTION and "quality" not in WITHIN_ATTEMPT_REPAIR["CP-1"]
+
+
+def files_of(store: Execution) -> set[Path]:
+    return {path for path in store.directory.rglob("*") if path.is_file()}
+
+
+def test_a_rejected_step_stays_pending_and_is_repaired_once_within_its_attempt(
+    tmp_path: Path,
+) -> None:
+    store, ticket, extraction = cp1_case(tmp_path)
+    heads = store.read().heads
+    slipped = submit_cp1_step(store, ticket.ticket_id, "financials", SLIP)
+    assert slipped.status == "pending" and slipped.number == 0
+    assert slipped.payload_sha256 is None and slipped.result_sha256 is None and not slipped.issues
+    assert [(s.step_id, s.status) for s in slipped.steps] == [("source_context", "valid")]
+    (entry,) = slipped.step_repairs
+    assert (entry.step_id, entry.status) == ("financials", "invalid")
+    assert entry.payload_sha256 == text_sha256(SLIP)
+    assert entry.issues[0].startswith("(root): Invalid JSON")
+    assert entry.inputs == (
+        *ticket.inputs,
+        Input(input_id="step:source_context", sha256=slipped.steps[0].content_hash()),
+    )
+    assert store.read().heads == heads  # nothing settled, no head written
+    with pytest.raises(ValueError, match="Submit the next module step in order"):
+        submit_cp1_step(store, ticket.ticket_id, "narrative", "{}")
+    repaired = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    assert repaired.status == "pending" and not repaired.issues
+    assert [(s.step_id, s.status) for s in repaired.steps] == [
+        ("source_context", "valid"),
+        ("financials", "valid"),
+    ]
+    assert repaired.step_repairs == slipped.step_repairs
+
+
+def test_a_second_rejection_of_the_step_finishes_the_attempt_and_a_third_try_is_refused(
+    tmp_path: Path,
+) -> None:
+    store, ticket, _ = cp1_case(tmp_path)
+    submit_cp1_step(store, ticket.ticket_id, "financials", SLIP)
+    finished = submit_cp1_step(store, ticket.ticket_id, "financials", "{}")
+    assert finished.status == "finished"
+    assert [(s.step_id, s.status) for s in finished.steps] == [
+        ("source_context", "valid"),
+        ("financials", "invalid"),
+    ]
+    assert finished.issues == finished.steps[-1].issues  # the second try's own issues
+    assert not any("Invalid JSON" in issue for issue in finished.issues)
+    assert [s.payload_sha256 for s in finished.step_repairs] == [text_sha256(SLIP)]
+    assert store.result(finished.result_sha256 or "").status == "rejected"
+    assert not [h for h in store.read().heads if h.module_id == "CP-1"]
+    before = files_of(store)
+    with pytest.raises(ValueError, match="absent, finished"):
+        submit_cp1_step(store, ticket.ticket_id, "financials", "{ }")
+    assert files_of(store) == before  # refused before any write
+    repair = store.begin("CP-1")  # the module-wide repair is the second line
+    assert repair.number == 1 and repair.repair_issues == finished.issues
+    assert repair.step_repairs == ()
+
+
+def test_a_crashed_repair_try_resumes_with_its_own_payload_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, ticket, extraction = cp1_case(tmp_path)
+    submit_cp1_step(store, ticket.ticket_id, "financials", SLIP)
+    payload = extraction.model_dump_json()
+
+    def crash(*_: object) -> object:
+        raise RuntimeError("Simulated validator crash")
+
+    monkeypatch.setattr("deploy_vii.cp1_workflow._validate_stage", crash)
+    with pytest.raises(RuntimeError, match="Simulated"):
+        submit_cp1_step(store, ticket.ticket_id, "financials", payload)
+    monkeypatch.undo()
+    pending = next(a for a in store.read().attempts if a.ticket_id == ticket.ticket_id)
+    assert [s.status for s in pending.steps] == ["valid", "pending"]
+    assert len(pending.step_repairs) == 1
+    with pytest.raises(ValueError, match="different response"):
+        submit_cp1_step(store, ticket.ticket_id, "financials", SLIP)
+    resumed = submit_cp1_step(store, ticket.ticket_id, "financials", payload)
+    assert [s.status for s in resumed.steps] == ["valid", "valid"]
+
+
+def test_an_interruption_while_a_step_awaits_its_repair_finishes_as_today(
+    tmp_path: Path,
+) -> None:
+    store, ticket, _ = cp1_case(tmp_path)
+    submit_cp1_step(store, ticket.ticket_id, "financials", SLIP)
+    finished = store.interrupt(ticket.ticket_id, "host stopped")
+    assert finished.status == "finished" and finished.issues == ("Interrupted: host stopped",)
+    assert [s.step_id for s in finished.steps] == ["source_context"]
+    assert len(finished.step_repairs) == 1
+    assert store.result(finished.result_sha256 or "").status == "rejected"
+    assert store.begin("CP-1").repair_issues == finished.issues
+
+
+@pytest.mark.parametrize("slip", ["financials", "readiness"])
+def test_a_step_repaired_within_the_attempt_promotes_exactly_as_one_never_rejected(
+    tmp_path: Path, slip: str
+) -> None:
+    """The rejected try is kept in `step_repairs`, outside the positional `steps` that every
+    CP-1 reader and the module's content hash use: the same final payloads give the same
+    `result_sha256` whether or not a step was repaired on the way."""
+    results = []
+    for name, step in (("clean", None), ("slipped", slip)):
+        store, attempt = staged(tmp_path / name, slip=step)
+        assert [s.step_id for s in attempt.step_repairs] == ([step] if step else [])
+        inputs = cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+        finished = promote_cp1(store, attempt.ticket_id, at_ceiling(inputs).model_dump_json())
+        assert finished.status == "finished" and not finished.issues
+        results.append((finished.result_sha256, [s.content_hash() for s in finished.steps]))
+    assert results[0] == results[1]

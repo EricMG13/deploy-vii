@@ -1190,7 +1190,9 @@ def test_a_400_that_does_not_name_the_schema_is_reported_and_never_blocks(rig: R
     assert row[10] == "no: the 400 does not name the schema"
     responder = Responder(rig.review)
     assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], responder) == 0
-    assert len(responder.requests) == 3  # CP-0, source_context, then its MC-7 repair
+    # CP-0, source_context and its step repair (task 7.0g), then the MC-7 repair attempt's
+    # source_context and its step repair: the responder answers every step with a CP-0 review.
+    assert len(responder.requests) == 5
     _, context = step_lines(rig.report(), "module-00")[:2]
     assert context[2] == "source_context" and context[6] != "ineligible"
 
@@ -1355,7 +1357,9 @@ def test_a_variant_that_cannot_be_built_is_reported_and_not_sent(
 
 # --- 7.0e: the module driver dispatches the one MC-7 repair -----------------------------------
 
-REPAIR_COLUMN = 10  # the Steps table's last column: `-` for a first attempt, `1` for the repair
+# The Steps table's last column: `-` a first try of the first attempt, `step` the step's repair
+# within that attempt (task 7.0g), `1` the MC-7 repair attempt and `1+step` a step repair in it.
+REPAIR_COLUMN = 10
 BAD = "not json"
 OUTAGE = "outage"
 CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness")
@@ -1454,67 +1458,121 @@ def run_chain(
     return rig, chain, rig.run(rig.argv("module", "--module", "CP-1", cap=cap), chain)
 
 
-def test_a_rejected_financials_step_is_repaired_once_and_the_cell_runs_on(tmp_path: Path) -> None:
-    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), *ok_steps(*CHAIN[1:])]
+def test_a_rejected_financials_step_is_repaired_within_its_attempt_and_the_cell_runs_on(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0g (a): the rejected step alone is re-sent with its own issues; the attempt goes on
+    to narrative and readiness and the module repair is not spent."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), *ok_steps(*CHAIN[2:])]
     rig, chain, status = run_chain(tmp_path, script)
-    assert status == 0
+    assert status == 0 and len(chain.requests) == len(script)
     rows = module_rows(rig)
     assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
         ("source_readiness", "accepted", "-"),
         ("source_context", "accepted", "-"),
         ("financials", "rejected", "-"),
+        ("financials", "accepted", "step"),
+        ("narrative", "accepted", "-"),
+        ("readiness", "accepted", "-"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 1 (module repair attempts 0, within-attempt step repairs 1)" in (
+        text
+    )
+    assert "- Stopped: no" in text and "| Issues | Repair |" in text
+    manifests = {m["attempt_id"]: m for m in retained_manifests(rig)}
+    links = manifests[rows[3][5]]["links"]
+    assert links["step_repair_of_attempt_id"] == rows[2][5]
+    assert links["repair_of_ticket_id"] is None and links["retry_of_attempt_id"] is None
+    assert manifests[rows[3][5]]["retries"]["step_try"] == 2
+    prompts = chain.user_prompts()
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, False]
+    assert "- (root): Invalid JSON" in prompts[3]
+
+
+def test_a_step_rejected_twice_falls_back_to_the_module_repair(tmp_path: Path) -> None:
+    """Task 7.0g (b): the step's own repair is rejected too, so the journal finishes the attempt
+    and the 7.0e module repair re-runs the whole module from its first step."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", BAD)]
+    script += ok_steps(*CHAIN[1:])
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
+        ("source_readiness", "accepted", "-"),
+        ("source_context", "accepted", "-"),
+        ("financials", "rejected", "-"),
+        ("financials", "rejected", "step"),
         ("source_context", "accepted", "1"),
         ("financials", "accepted", "1"),
         ("narrative", "accepted", "1"),
         ("readiness", "accepted", "1"),
     ]
     text = rig.report()
-    assert "- Repairs dispatched: 1" in text and "- Stopped: no" in text
-    assert "| Issues | Repair |" in text
+    assert "- Repairs dispatched: 2 (module repair attempts 1, within-attempt step repairs 1)" in (
+        text
+    )
     manifests = {m["attempt_id"]: m for m in retained_manifests(rig)}
-    assert manifests[rows[2][5]]["links"]["repair_of_ticket_id"] is None
-    assert manifests[rows[4][5]]["links"]["repair_of_ticket_id"] is not None
+    assert manifests[rows[5][5]]["links"]["repair_of_ticket_id"] is not None
+    assert manifests[rows[5][5]]["links"]["step_repair_of_attempt_id"] is None
     prompts = chain.user_prompts()
-    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 4 + [True, False, False]
-    assert "- (root): Invalid JSON" in prompts[4]
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, True, False, False]
 
 
 def test_a_second_rejection_ends_the_cell_without_a_third_attempt(tmp_path: Path) -> None:
-    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("source_context", "ok")]
-    script += [("financials", BAD)]
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", BAD)]
+    script += [("source_context", "ok"), ("financials", BAD), ("financials", BAD)]
     rig, chain, status = run_chain(tmp_path, script)
     assert status == 0 and len(chain.requests) == len(script)  # nothing is sent beyond it
     assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
         ("financials", "rejected", "-"),
+        ("financials", "rejected", "step"),
         ("source_context", "accepted", "1"),
         ("financials", "rejected", "1"),
+        ("financials", "rejected", "1+step"),
     ]
     text = rig.report()
-    assert "- Repairs dispatched: 1" in text and "- Stopped: no" in text
+    assert "- Repairs dispatched: 3 (module repair attempts 1, within-attempt step repairs 2)" in (
+        text
+    )
+    assert "- Stopped: no" in text
 
 
+@pytest.mark.parametrize(
+    ("sent", "unsent", "counted"),
+    [
+        (3, ("financials", "ineligible", "step"), "0 (module repair attempts 0, within-attempt "),
+        (4, ("source_context", "ineligible", "1"), "1 (module repair attempts 0, within-attempt "),
+    ],
+)
 def test_a_repair_whose_first_step_is_ineligible_is_not_counted_as_dispatched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sent: int,
+    unsent: tuple[str, str, str],
+    counted: str,
 ) -> None:
-    """An ineligible step is sealed unsent, so a repair that stops there sent nothing."""
+    """An ineligible step is sealed unsent, so a repair that stops there sent nothing: the
+    step's repair within the attempt (3 calls fit) or the module repair attempt (4 fit)."""
     original = PinnedCandidate.misfit
     calls: list[int] = []
 
-    def misfit_after_three(self: PinnedCandidate, prompt_bound: int, max_tokens: int) -> str | None:
+    def misfit_after(self: PinnedCandidate, prompt_bound: int, max_tokens: int) -> str | None:
         calls.append(prompt_bound)
-        if len(calls) > 3:  # CP-0, source_context, financials fit; the repair's first does not
+        if len(calls) > sent:  # the calls before the repair fit; the repair's first does not
             return "context too small (test)"
         return original(self, prompt_bound, max_tokens)
 
-    monkeypatch.setattr(PinnedCandidate, "misfit", misfit_after_three)
-    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD)]
+    monkeypatch.setattr(PinnedCandidate, "misfit", misfit_after)
+    script = [*ok_steps(*CHAIN[:2]), *[("financials", BAD)] * (sent - 2)]
     rig, chain, status = run_chain(tmp_path, script)
-    assert status == 0 and len(chain.requests) == 3
+    assert status == 0 and len(chain.requests) == sent
+    rejected = [("financials", "rejected", "-"), ("financials", "rejected", "step")]
     assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
-        ("financials", "rejected", "-"),
-        ("source_context", "ineligible", "1"),
+        *rejected[: sent - 2],
+        unsent,
     ]
-    assert "- Repairs dispatched: 0" in rig.report()
+    assert f"- Repairs dispatched: {counted}" in rig.report()
 
 
 def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
@@ -1559,9 +1617,9 @@ def test_a_refused_repair_fails_the_batch_loudly(
         return original(store, module_id)
 
     monkeypatch.setattr(Execution, "begin", refuse_second)
-    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD)]
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", BAD)]
     rig, chain, status = run_chain(tmp_path, script)
-    assert status == cli.EXIT_FAILED and len(chain.requests) == 3
+    assert status == cli.EXIT_FAILED and len(chain.requests) == 4
     assert "Stopped: aborted: ValueError" in rig.report()
 
 

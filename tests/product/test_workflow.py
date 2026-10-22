@@ -284,6 +284,14 @@ def test_source_first_cp1_full_stages_remain_unaccepted(tmp_path: Path, partial:
         )
 
 
+def rejected_twice(store: Execution, ticket_id: str, stage: str, payload: str) -> Attempt:
+    """Task 7.0g: a CP-1 step's first rejection is repaired within its attempt (the attempt stays
+    pending); the second rejection finishes the attempt as a single one did before."""
+    first = submit_cp1_step(store, ticket_id, stage, payload)
+    assert first.status == "pending" and first.step_repairs[-1].step_id == stage
+    return submit_cp1_step(store, ticket_id, stage, payload)
+
+
 @pytest.mark.parametrize("stage", ["financials", "narrative", "readiness"])
 def test_stale_stage_bindings_reject_and_retain_response(tmp_path: Path, stage: str) -> None:
     store, ticket, extraction = cp1_case(tmp_path)
@@ -298,7 +306,7 @@ def test_stale_stage_bindings_reject_and_retain_response(tmp_path: Path, stage: 
         if stage == "readiness":
             submit_cp1_step(store, ticket.ticket_id, "narrative", review.model_dump_json())
             payload = DownstreamReview(inputs_sha256="0" * 64).model_dump_json()
-    result = submit_cp1_step(store, ticket.ticket_id, stage, payload)
+    result = rejected_twice(store, ticket.ticket_id, stage, payload)
     assert settled(store, result).status == "rejected"
     assert (
         store.payload(result.steps[-1].payload_sha256) == payload
@@ -348,7 +356,7 @@ def test_malformed_response_at_every_cp1_stage_consumes_attempt(tmp_path: Path, 
                 "narrative",
                 draft(output.narrative_inputs).model_dump_json(),
             )
-    result = submit_cp1_step(store, ticket.ticket_id, stage, "malformed json")
+    result = rejected_twice(store, ticket.ticket_id, stage, "malformed json")
     assert result.issues and store.payload(result.steps[-1].payload_sha256) == "malformed json"
     assert result.status == "finished"
 
@@ -361,7 +369,9 @@ def test_financial_binding_error_is_a_targeted_repair_issue(tmp_path: Path) -> N
         }
     )
     result = submit_cp1_step(store, ticket.ticket_id, "financials", invalid.model_dump_json())
-    assert result.issues and result.steps[-1].status == "invalid"
+    # Task 7.0g: the first rejection is kept for the step's one repair within the attempt.
+    (retained,) = result.step_repairs
+    assert result.status == "pending" and retained.issues and retained.status == "invalid"
 
 
 def test_unassessed_source_gate_blocks_extraction(tmp_path: Path) -> None:
@@ -380,7 +390,7 @@ def test_unassessed_source_gate_blocks_extraction(tmp_path: Path) -> None:
             )
         }
     )
-    result = submit_cp1_step(store, repair.ticket_id, "source_context", empty.model_dump_json())
+    result = rejected_twice(store, repair.ticket_id, "source_context", empty.model_dump_json())
     assert result.issues and settled(store, result).status == "blocked"
     assert "source gate" in result.issues[0]
 
@@ -412,9 +422,11 @@ def test_execution_cli_runs_trusted_cp0_and_reads_stage_output(
         cli("step-output", "--ticket", ticket, "--step", "missing")
     next_ticket = json.loads(cli("begin", "CP-1"))["ticket_id"]
     raw.write_text("not json")
-    failed = json.loads(
-        cli("cp1-submit", "--ticket", next_ticket, "--step", "source_context", "--review", str(raw))
-    )
+    submit = ("cp1-submit", "--ticket", next_ticket, "--step", "source_context")
+    submit += ("--review", str(raw))
+    slipped = json.loads(cli(*submit))  # task 7.0g: kept for the step's one repair
+    assert slipped["status"] == "pending" and slipped["step_repairs"][0]["issues"]
+    failed = json.loads(cli(*submit))
     assert failed["issues"]
     repair = json.loads(cli("begin", "CP-1"))["ticket_id"]
     assert (
@@ -486,7 +498,7 @@ def test_source_stage_requires_exact_current_pack_and_consumer_aliases_are_retai
     )
     store.interrupt(ticket.ticket_id, "Fixture restart")
     repair = store.begin("CP-1")
-    failed = submit_cp1_step(
+    failed = rejected_twice(
         store,
         repair.ticket_id,
         "source_context",

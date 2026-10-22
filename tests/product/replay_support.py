@@ -38,6 +38,7 @@ from deploy_vii.live.corpus import (
     load_case_pack,
     real_pack_ticket,
 )
+from deploy_vii.live.runner import journal_outcome
 from deploy_vii.live.schema import normalise
 from deploy_vii.live.submission import submit_model_payload
 from deploy_vii.readiness import ReadinessReview
@@ -110,11 +111,13 @@ def _submit(
         if step_id == "source_readiness":
             payload, _ = normalise(ReadinessReview, payload)
             return list(submit_cp0_review(store, ticket.ticket_id, payload).issues)
-        return list(submit_cp1_step(store, ticket.ticket_id, step_id, payload).steps[-1].issues)
-    journal = submit_model_payload(store, ticket.ticket_id, step_id, payload).journal
-    if step_id == "source_readiness":
-        return list(journal.issues)
-    return list(journal.steps[-1].issues)
+        journal = submit_cp1_step(store, ticket.ticket_id, step_id, payload)
+    else:
+        journal = submit_model_payload(store, ticket.ticket_id, step_id, payload).journal
+        if step_id == "source_readiness":
+            return list(journal.issues)
+    # The step's own verdict: a first CP-1 rejection is kept in `step_repairs` (task 7.0g).
+    return list(journal_outcome(store, step_id, journal)[1])
 
 
 def replay_entry(path: Path, work: Path, *, repository: Path = REPOSITORY_ROOT) -> Verdict:
