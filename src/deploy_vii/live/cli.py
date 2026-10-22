@@ -658,9 +658,10 @@ def _pool_cells(
 
 
 def _repairs_dispatched(rows: Sequence[Row]) -> int:
-    """Repair attempts that sent at least one step: a repair begun but stopped by the cap before
-    its first dispatch has no row and is not counted."""
-    return len({(row.cell_id, STEPS[row.step_id].module_id) for row in rows if row.repair})
+    """Repair attempts that sent at least one step: a repair stopped by the cap before its first
+    dispatch has no row, and an `ineligible` row was sealed unsent; neither is counted."""
+    sent = (row for row in rows if row.repair and row.status != "ineligible")
+    return len({(row.cell_id, STEPS[row.step_id].module_id) for row in sent})
 
 
 def render_report(

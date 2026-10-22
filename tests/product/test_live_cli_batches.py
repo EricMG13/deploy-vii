@@ -16,6 +16,7 @@ from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live import cli
+from deploy_vii.live.catalog import PinnedCandidate
 from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import Ledger
@@ -1490,6 +1491,30 @@ def test_a_second_rejection_ends_the_cell_without_a_third_attempt(tmp_path: Path
     ]
     text = rig.report()
     assert "- Repairs dispatched: 1" in text and "- Stopped: no" in text
+
+
+def test_a_repair_whose_first_step_is_ineligible_is_not_counted_as_dispatched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ineligible step is sealed unsent, so a repair that stops there sent nothing."""
+    original = PinnedCandidate.misfit
+    calls: list[int] = []
+
+    def misfit_after_three(self: PinnedCandidate, prompt_bound: int, max_tokens: int) -> str | None:
+        calls.append(prompt_bound)
+        if len(calls) > 3:  # CP-0, source_context, financials fit; the repair's first does not
+            return "context too small (test)"
+        return original(self, prompt_bound, max_tokens)
+
+    monkeypatch.setattr(PinnedCandidate, "misfit", misfit_after_three)
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 3
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "-"),
+        ("source_context", "ineligible", "1"),
+    ]
+    assert "- Repairs dispatched: 0" in rig.report()
 
 
 def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
