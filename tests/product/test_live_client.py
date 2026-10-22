@@ -353,9 +353,48 @@ def test_probe2_luna_schema_refusal_stays_an_http_error() -> None:
     response, _ = fixture_response(PROBE_FIXTURES / "luna-400-invalid-json-schema.json")
     result = classify(response)
     assert result.classification == "http_error" and result.http_status == 400
-    assert result.error_detail == "HTTP 400: Provider returned error"
+    assert result.error_detail == (
+        "HTTP 400: Provider returned error; OpenAI invalid_json_schema: Invalid schema for "
+        "response_format 'source_readiness': In context=(), 'required' is required to be "
+        "supplied and to be an array including every key in properties. Missing 'limitation'."
+    )
     assert result.provider_request_id is None  # the body carries no generation id
     assert b"invalid_json_schema" in (result.raw or b"")
+
+
+def test_probe5b_sol_source_context_refusal_names_the_providers_own_message() -> None:
+    """Task 2.11: the provider's raw message (inside `metadata.raw`) reaches `error_detail`,
+    which is what `live schema-check` reports per (model, step)."""
+    path = PROBE_FIXTURES / "sol-400-invalid-json-schema-source-context.json"
+    response, fixture = fixture_response(path)
+    assert fixture["http_status"] == 400 and "user_REDACTED" in fixture["body_text"]
+    result = classify(response)
+    assert result.classification == "http_error" and result.http_status == 400
+    assert result.error_detail == (
+        "HTTP 400: Provider returned error; OpenAI invalid_json_schema: Invalid schema for "
+        "response_format 'source_context'. Please ensure it is a valid JSON Schema."
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata, detail",
+    [
+        ({"raw": "upstream said no"}, "HTTP 400: refused; upstream said no"),
+        ({"raw": '{"message": "flat"}'}, "HTTP 400: refused; flat"),
+        ({"raw": '{"error": {"message": 3}}'}, 'HTTP 400: refused; {"error": {"message": 3}}'),
+        ({"provider_name": "P", "raw": "  "}, "HTTP 400: refused"),
+        ({"provider_name": "P"}, "HTTP 400: refused"),
+        ({"raw": f"leak {FAKE_KEY}"}, "HTTP 400: refused; leak [REDACTED]"),
+        ("not an object", "HTTP 400: refused"),
+    ],
+    ids=["text", "flat-json", "non-text-message", "blank", "no-raw", "key", "bad-metadata"],
+)
+def test_the_provider_detail_is_taken_only_from_a_raw_text_and_scrubbed(
+    metadata: object, detail: str
+) -> None:
+    body = json.dumps({"error": {"code": 400, "message": "refused", "metadata": metadata}})
+    result = classify(Response(400, body.encode()))
+    assert result.classification == "http_error" and result.error_detail == detail
 
 
 @pytest.mark.parametrize(

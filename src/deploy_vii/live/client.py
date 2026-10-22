@@ -336,7 +336,8 @@ def _classify(request: ChatRequest, response: Response, key: str, latency: float
     if response.status == 402 or error.get("code") == 402:
         return _failed(failure, message or None, "insufficient_credit")
     if not success:
-        return _failed(failure, message or None)
+        provider = _provider_detail(error, key)
+        return _failed(failure, "; ".join(part for part in (message, provider) if part) or None)
     choices = document.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else None
     if not isinstance(choice, dict):
@@ -358,6 +359,35 @@ def _classify(request: ChatRequest, response: Response, key: str, latency: float
             error_detail=_choice_error_detail(choice_error, response.status, key),
         )
     return answer
+
+
+def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
+    """The upstream provider's own message from an OpenRouter error's `metadata.raw` (key
+    scrubbed), prefixed with `provider_name` and `provider_error_code` where they are text.
+
+    OpenRouter's `message` is generic ("Provider returned error"); the reason (probe-5b: "Invalid
+    schema for response_format 'source_context' ...") is only inside `raw`. A raw JSON text gives
+    its `error.message` (or `message`); any other raw text is kept as it is."""
+    metadata = _as_dict(error.get("metadata"))
+    raw = _text(metadata.get("raw"))
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    try:
+        document = _as_dict(json.loads(text))
+    except ValueError:
+        document = {}
+    inner = _as_dict(document.get("error")) or document
+    text = _text(inner.get("message")) or text
+    label = " ".join(
+        name
+        for name in (
+            _text(metadata.get("provider_name")),
+            _text(metadata.get("provider_error_code")),
+        )
+        if name
+    )
+    return redact(f"{label}: {text}" if label else text, key)
 
 
 def _choice_error_detail(error: object, status: int, key: str) -> str:
