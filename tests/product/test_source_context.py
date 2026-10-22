@@ -31,6 +31,12 @@ from deploy_vii.source_context import (
     validate_source_context_report,
 )
 from tests.product.test_financials import _C, book, freeze, observed, period
+from tests.product.test_live_submission import (
+    GLM_76FC5C95_LIMITATION,
+    GLM_F0391C45_LIMITATION,
+    LUNA_F136B227_LIMITATION,
+    paged_pack,
+)
 
 
 def case(
@@ -581,3 +587,128 @@ def test_financial_binding_checks_conflict_alternative_sources_not_just_settled_
     )
     issues = validate_financial_context(pack, context, financial, binding)
     assert any("Q1 S2" in issue and "No matching" in issue for issue in issues)
+
+
+# --- task 2.9 fix 3: the readiness rules apply to source_context -----------------------------
+
+
+def paged_context(**texts: str) -> tuple[PreparedPack, SourceContextReview]:
+    """A context review over a pack holding pages 1-195, with `texts` in its prose fields."""
+    pack = paged_pack(range(1, 196))
+    source = pack.sources[0]
+    assert source.sha256
+    cited = (
+        Citation(
+            source_id=source.source_id,
+            source_sha256=source.sha256,
+            locator="page:3",
+            quote=texts.get("quote", "Page 3 text"),
+        ),
+    )
+    scope = ReportingScope(
+        scope_id="FY2025",
+        entity_id="issuer",
+        period_label="FY2025",
+        period_kind="historical_duration",
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 12, 31),
+        currency="USD",
+        unit="MILLIONS",
+        entity_perimeter="Consolidated group",
+        accounting_basis="US GAAP",
+        citations=cited,
+        limitations=tuple(filter(None, (texts.get("scope"),))),
+    )
+    entity = EntityContext(
+        entity_id="issuer",
+        name="Caesars Entertainment, Inc.",
+        entity_type="group",
+        roles=("issuer",),
+        fiscal_year_end="31 December",
+        citations=cited,
+        limitations=tuple(filter(None, (texts.get("entity"),))),
+    )
+    context = SourceContext(
+        source_id=source.source_id,
+        classification="financial",
+        document_type="Form 10-K",
+        published_on=None,
+        evidence_class="audited_financial_statements",
+        evidence_rationale=texts.get("rationale", "Annual report on Form 10-K"),
+        analytical_use="Historical credit analysis",
+        citations=cited,
+        scopes=(scope,),
+        event_scan="unassessed",
+        event_scan_explanation=texts.get("scan", "Not assessed in this test"),
+        limitations=tuple(filter(None, (texts.get("source"),))),
+    )
+    review = SourceContextReview(
+        pack_sha256=pack.content_hash(),
+        entities=(entity,),
+        sources=(context,),
+        limitations=tuple(filter(None, (texts.get("review"),))),
+    )
+    return pack, review
+
+
+ABSENT_53_96 = (
+    "Absence claim contradicts extraction coverage: page:53 to page:96 retained in czr-2025-10k"
+)
+
+
+def test_a_clean_paged_context_has_no_issue() -> None:
+    assert validate_source_context(*paged_context()) == ()
+
+
+@pytest.mark.parametrize("field", ["source", "scope", "entity", "rationale", "scan", "review"])
+def test_every_prose_field_is_held_to_the_extraction_coverage(field: str) -> None:
+    # GLM f0391c45 (probe-3), verbatim: the pack retains pages 53-96.
+    pack, review = paged_context(**{field: GLM_F0391C45_LIMITATION})
+    assert validate_source_context(pack, review) == (ABSENT_53_96,)
+
+
+def test_negated_coverage_statements_pass_in_source_context() -> None:
+    pack, review = paged_context(source=LUNA_F136B227_LIMITATION, review=GLM_76FC5C95_LIMITATION)
+    assert validate_source_context(pack, review) == ()
+
+
+def test_an_absence_claim_stands_when_the_pack_lacks_the_pages() -> None:
+    pack, review = paged_context(source=GLM_F0391C45_LIMITATION)
+    holed = pack.sources[0].model_copy(
+        update={
+            "spans": tuple(
+                span for span in pack.sources[0].spans if not 53 <= int(span.locator[5:]) <= 96
+            )
+        }
+    )
+    pack = pack.model_copy(update={"sources": (holed,)})
+    review = review.model_copy(update={"pack_sha256": pack.content_hash()})
+    assert validate_source_context(pack, review) == ()
+
+
+def test_quoted_source_text_is_not_judged_as_a_claim() -> None:
+    pack, review = paged_context()
+    spans = list(pack.sources[0].spans)
+    spans[2] = spans[2].model_copy(update={"text": "pages 53-96 are absent in this draft"})
+    pack = pack.model_copy(
+        update={"sources": (pack.sources[0].model_copy(update={"spans": tuple(spans)}),)}
+    )
+    _, review = paged_context(quote="pages 53-96 are absent")
+    review = review.model_copy(update={"pack_sha256": pack.content_hash()})
+    assert validate_source_context(pack, review) == ()
+
+
+def test_source_context_quotes_use_the_layout_normalised_matcher() -> None:
+    pack, review = paged_context(quote="Page  3\ntext")
+    assert validate_source_context(pack, review) == ()
+    pack, review = paged_context(quote="Page 4 text")
+    issues = validate_source_context(pack, review)
+    # One issue per failing citation (entity, source and scope), each naming the quote.
+    assert (
+        issues
+        == (
+            "Quote/locator mismatch: quote not found under czr-2025-10k page:3 (normalised "
+            'whitespace, quote marks and dashes): "Page 4 text"',
+        )
+        * 3
+    )

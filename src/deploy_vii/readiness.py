@@ -1,5 +1,7 @@
 """CP-0: bind evidence-grounded readiness judgments to one frozen preparation pack."""
 
+import re
+from collections.abc import Iterable
 from typing import Literal, Self
 
 from pydantic import ValidationError, model_validator
@@ -17,21 +19,28 @@ from deploy_vii.contracts import (
     Text,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.quotes import normalisation, prefix, quoted
 from deploy_vii.registry import canonical, plan
 
 Readiness = Literal["READY", "READY_WITH_LIMITATIONS", "CONDITIONAL", "BLOCKED"]
+Authority = Literal[
+    "filed", "executed", "issuer", "management", "sponsor", "third_party", "unknown"
+]
+Fidelity = Literal["verified", "degraded", "blocked"]
+GapKind = Literal["source", "parse", "identity", "period", "conflict", "authority", "scope"]
+GapSeverity = Literal["critical", "material", "minor"]
+# Modules CP-0 does not assess: itself and the modules outside the live consumer set.
+NOT_CONSUMERS = frozenset({"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"})
 
 
 class SourceAssessment(Contract):
     source_id: Identifier
     document_family: Text
-    authority: Literal[
-        "filed", "executed", "issuer", "management", "sponsor", "third_party", "unknown"
-    ]
+    authority: Authority
     entity: str | None
     period: str | None
     version_relationship: Text
-    fidelity: Literal["verified", "degraded", "blocked"]
+    fidelity: Fidelity
     citations: tuple[Citation, ...]
     limitations: tuple[str, ...] = ()
 
@@ -57,8 +66,8 @@ class ConsumerReadiness(Contract):
 
 class ReadinessGap(Contract):
     gap_id: Identifier
-    kind: Literal["source", "parse", "identity", "period", "conflict", "authority", "scope"]
-    severity: Literal["critical", "material", "minor"]
+    kind: GapKind
+    severity: GapSeverity
     description: Text
     affected_modules: tuple[Identifier, ...]
     remediation: Text
@@ -77,9 +86,25 @@ class ReadinessReview(Contract):
     analysis: tuple[Claim, ...]
 
 
+def shape_issues(error: ValidationError) -> tuple[str, ...]:
+    """One issue per Pydantic error, short form `<field.path>: <message>`.
+
+    No library URL and no `input_value` repr: the text is stable across library upgrades (replay
+    compares it exactly) and small enough for a repair prompt. A whole-payload error (invalid
+    JSON) has the path `(root)`."""
+    return tuple(
+        f"{'.'.join(str(part) for part in item['loc']) or '(root)'}: {item['msg']}"
+        for item in error.errors(include_url=False, include_input=False, include_context=False)
+    )
+
+
 def citation_issues(
     citations: tuple[Citation, ...], sources: tuple[Source, ...]
 ) -> tuple[str, ...]:
+    """One issue per citation whose source, locator or quote does not hold in the pack.
+
+    The locator is matched exactly; the quote with `deploy_vii.quotes` (layout normalisation,
+    still a contiguous substring of that one span). The issue names the quote's prefix."""
     index = {source.source_id: source for source in sources}
     issues: list[str] = []
     for citation in citations:
@@ -88,9 +113,166 @@ def citation_issues(
             issues.append(f"Unavailable or changed source: {citation.source_id}")
             continue
         span = next((item for item in source.spans if item.locator == citation.locator), None)
-        if span is None or citation.quote not in span.text:
-            issues.append(f"Quote/locator mismatch: {citation.source_id} {citation.locator}")
+        where = f"{citation.source_id} {citation.locator}"
+        if span is None:
+            issues.append(
+                f"Quote/locator mismatch: no locator {citation.locator} in "
+                f'{citation.source_id}: "{prefix(citation.quote)}"'
+            )
+        elif not quoted(citation.quote, span.text):
+            issues.append(
+                f"Quote/locator mismatch: quote not found under {where} "
+                f"({normalisation(span.text)}): "
+                f'"{prefix(citation.quote)}"'
+            )
     return tuple(issues)
+
+
+def live_consumers(pack: PreparedPack) -> tuple[str, ...]:
+    """The consumers a readiness review assesses, in plan order (CP-0 and non-consumers out)."""
+    return tuple(item for item in plan(pack.run.requested_modules) if item not in NOT_CONSUMERS)
+
+
+_PAGE = re.compile(r"page:([0-9]+)")
+
+
+def page_numbers(source: Source) -> tuple[int, ...]:
+    """The `page:N` numbers among the source's located spans, in span order."""
+    return tuple(int(m.group(1)) for span in source.spans if (m := _PAGE.fullmatch(span.locator)))
+
+
+def _runs(numbers: list[int]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    for number in numbers:
+        if runs and number == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], number)
+        else:
+            runs.append((number, number))
+    return runs
+
+
+def extraction_coverage(source: Source) -> dict[str, object]:
+    """What the pack holds for one source, stated as facts for the prompt's CONTEXT block.
+
+    Counts, the first and last locator, coverage records that are not `retained`, and (for a
+    source located by `page:N` only) the page numbers missing between its first and last page."""
+    locators = [span.locator for span in source.spans]
+    record: dict[str, object] = {
+        "located_spans": len(locators),
+        "first_locator": locators[0] if locators else None,
+        "last_locator": locators[-1] if locators else None,
+        "coverage_not_retained": [
+            f"{item.locator}: {item.status}"
+            for item in source.coverage
+            if item.status != "retained"
+        ],
+    }
+    pages = page_numbers(source)
+    if pages and len(pages) == len(locators):
+        present = set(pages)
+        missing = [n for n in range(min(pages), max(pages) + 1) if n not in present]
+        record["pages_missing_between_first_and_last"] = [
+            f"page:{a}" if a == b else f"page:{a} to page:{b}" for a, b in _runs(missing)
+        ]
+    return record
+
+
+# A claim that pages are absent: a page range and an absence word in the same clause.
+_PAGE_RANGE = re.compile(
+    r"\bpages?\s*:?\s*([0-9]+)\s*(?:-|\u2013|\u2014|to|through)\s*(?:\[?pages?\s*:?\s*)?([0-9]+)",
+    re.IGNORECASE,
+)
+_ABSENT = re.compile(
+    r"\b(?:absent|missing|omitted|omits|omitting|unextracted|not (?:present|included|supplied|"
+    r"delivered|extracted|contained))\b",
+    re.IGNORECASE,
+)
+_CLAUSE = re.compile(r";|(?<=\.)\s+(?=[A-Z])")
+# Statements that pages are NOT absent (probe-3: "no pages missing between the first and last
+# locator", rule f followed): a negator, at most four words from a closed list, then the absence
+# word; or the CONTEXT coverage field restated as empty. The closed list keeps a positive claim
+# positive: "not complete with missing pages 53-96" and "pages 33-52 not present and also
+# missing" still claim absence; so does "none of pages 53-96 are missing" (a range in between).
+_FILLER = (
+    r"(?:pages?|locators?|spans?|located|content|text|material|other|further|additional|more|"
+    r"of|the|these|those|them|any|are|is|were|was|be|been|being|appear|appears|actually)"
+)
+_NEGATED = re.compile(
+    rf"\b(?:no|none|not|nothing|without|zero)\s+(?:{_FILLER}\s+){{0,4}}"
+    r"(?:missing|absent|omitted|unextracted)\b"
+    r"|\bpages?\s+missing\s+between\s+(?:the\s+)?first\s+and\s+last(?:\s+(?:locators?|pages?))?"
+    r"\s*[:=]\s*(?:none\b|nil\b|\[\s*\]|0\b)",
+    re.IGNORECASE,
+)
+# "missing from pages 40-60": the range says where content was looked for, on pages the claim
+# itself treats as present; that is a judgment about content, not an absence claim.
+_LOCATIVE = re.compile(r"\b(?:from|in|on|within)\s+(?:\S+\s+){0,2}$", re.IGNORECASE)
+
+
+def absent_page_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    """Page ranges `text` says are absent (`pages 33-52 not present`, `pages 12 to 180 ... are
+    absent`; en and em dashes too). A range with no absence word in its clause is not one, nor
+    is a range introduced by a locative preposition (`missing from pages 40-60`). A negated
+    absence (`no pages missing`, `none missing`, `not missing`) or the coverage field restated
+    as empty is not an absence word."""
+    found: list[tuple[int, int]] = []
+    for clause in _CLAUSE.split(text):
+        clause = _NEGATED.sub(" ", clause)
+        if _ABSENT.search(clause):
+            found += [
+                (int(m.group(1)), int(m.group(2)))
+                for m in _PAGE_RANGE.finditer(clause)
+                if int(m.group(1)) <= int(m.group(2)) and not _LOCATIVE.search(clause[: m.start()])
+            ]
+    return tuple(found)
+
+
+def absence_issues(
+    pack: PreparedPack, texts: Iterable[tuple[str, tuple[str, ...]]]
+) -> tuple[str, ...]:
+    """Texts that call a page range absent although the pack retains every page in it.
+
+    Each text comes with the sources it is about (empty: every ready paged source). It is a
+    contradiction only when every such source retains the whole range, so a claim that may
+    concern another source, or a source without page locators, is never flagged."""
+    paged = {
+        source.source_id: set(page_numbers(source))
+        for source in pack.sources
+        if source.status == "ready" and page_numbers(source)
+    }
+    issues: list[str] = []
+    for text, scope in texts:
+        targets = list(dict.fromkeys(scope)) if scope else list(paged)
+        if not targets or any(item not in paged for item in targets):
+            continue  # about a source without page locators: nothing to compare against
+        for first, last in absent_page_ranges(text):
+            pages = set(range(first, last + 1))
+            if all(pages <= paged[item] for item in targets):
+                issues.append(
+                    f"Absence claim contradicts extraction coverage: page:{first} to "
+                    f"page:{last} retained in {', '.join(targets)}"
+                )
+    return tuple(issues)
+
+
+def coverage_issues(pack: PreparedPack, review: ReadinessReview) -> tuple[str, ...]:
+    """Limitations that call a page range absent although the pack retains every page in it.
+
+    Each text is checked against the sources it is about: a source assessment's own source;
+    otherwise the sources an item attaches or cites; otherwise every ready paged source."""
+    texts: list[tuple[str, tuple[str, ...]]] = []
+    for assessment in review.sources:
+        texts += [(text, (assessment.source_id,)) for text in assessment.limitations]
+    for consumer in review.consumers:
+        scope = consumer.source_ids or tuple(item.source_id for item in consumer.citations)
+        texts += [(text, scope) for text in consumer.limitations]
+        texts += [(consumer.missing_source, scope)] if consumer.missing_source else []
+    for gap in review.gaps:
+        texts.append((gap.description, tuple(item.source_id for item in gap.citations)))
+    for claim in review.analysis:
+        scope = tuple(item.source_id for item in claim.citations)
+        texts += [(claim.limitation, scope)] if claim.limitation else []
+    return absence_issues(pack, texts)
 
 
 def validate_review(pack: PreparedPack, review: ReadinessReview) -> tuple[str, ...]:
@@ -98,7 +280,7 @@ def validate_review(pack: PreparedPack, review: ReadinessReview) -> tuple[str, .
         pack = PreparedPack.model_validate_json(pack.model_dump_json())
         review = ReadinessReview.model_validate_json(review.model_dump_json())
     except ValidationError as error:
-        return (f"Invalid readiness contract: {error}",)
+        return shape_issues(error)
 
     issues: list[str] = []
     if review.pack_sha256 != pack.content_hash():
@@ -108,7 +290,7 @@ def validate_review(pack: PreparedPack, review: ReadinessReview) -> tuple[str, .
         item.source_id for item in review.sources
     } != set(sources_by_id):
         issues.append("Assess every prepared source exactly once")
-    selected = set(plan(pack.run.requested_modules)) - {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}
+    selected = set(live_consumers(pack))
     if (
         len(review.consumers) != len(selected)
         or {item.module_id for item in review.consumers} != selected
@@ -192,6 +374,7 @@ def validate_review(pack: PreparedPack, review: ReadinessReview) -> tuple[str, .
             issues.append(f"Unsupported readiness claim: {claim.claim_id}")
         issues.extend(citation_issues(claim.citations, pack.sources))
 
+    issues.extend(coverage_issues(pack, review))
     return tuple(dict.fromkeys(issues))
 
 

@@ -3,7 +3,7 @@ phase = "development-tooling-and-product-implementation"
 product_runtime_implemented = false
 execution_journal_implemented = true
 product_shell_implemented = true
-live_model_runner_implemented = false
+live_model_runner_implemented = true
 
 [development]
 instruction_file = "CLAUDE.md"
@@ -43,6 +43,11 @@ evidence_root = "artifacts/context-policy"
 [model_tests]
 provider = "openrouter"
 credential_file = "~/Documents/op router.rtf"
+credential_token_index = 2
+# Reservation prompt bound: ceil(request bytes / this) + 64 (decision 0008, MC-10). Probe-2
+# measured 5.61 bytes per token (GLM 5.3 Flash: 867,481 request bytes, 154,609 prompt tokens);
+# 3.0 keeps a 1.9x margin over that measurement.
+prompt_bytes_per_token_lower_bound = 3.0
 credential_handling = "read-at-dispatch-in-memory-never-logged"
 selection = "uniform-random-among-eligible"
 record_selection_seed = true

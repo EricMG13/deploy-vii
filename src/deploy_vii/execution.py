@@ -136,6 +136,20 @@ class ExecutionSnapshot(Contract):
     heads: tuple[Head, ...] = ()
 
 
+class NotAuthorized(ValueError):
+    """CP-0's head does not authorize this consumer: its T8 `exact_command` is not `Run <id>`.
+
+    A ValueError like every other refusal here, so existing callers still fail closed. It is
+    typed because a CP-0 that judges a consumer CONDITIONAL or BLOCKED is a valid accepted
+    outcome (probe-4): the live batch runner records it as the step's result and ends the cell.
+    `commands` holds the T8 `exact_command` texts found (empty when CP-0 has no head)."""
+
+    def __init__(self, module_id: str, commands: tuple[str | None, ...]) -> None:
+        super().__init__("CP-0 has not authorized this consumer's source readiness")
+        self.module_id = module_id
+        self.commands = commands
+
+
 def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, ...]:
     graph = dependencies(snapshot.run.requested_modules)
     if module_id not in graph:
@@ -165,7 +179,7 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
             else tuple(item.text for item in readiness.commands if item.row_id == module_id)
         )
         if commands != (f"Run {module_id}",):
-            raise ValueError("CP-0 has not authorized this consumer's source readiness")
+            raise NotAuthorized(module_id, commands)
     return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream)
 
 

@@ -1,0 +1,49 @@
+{
+ "provenance": {
+  "batch_id": "probe-2",
+  "attempt_id": "d3497b71-cf39-4106-9751-e7a031ae3948-source_readiness-1",
+  "model": "z-ai/glm-5.3-flash",
+  "corpus_entry": "tests/product/replay/source_readiness/probe-2-glm-5.3-flash-1.json",
+  "note": "Verbatim limitation texts from the GLM draw-1 output, trimmed to the fields that assert page ranges absent; the pack retains every page 1-195 (probe-2 analysis 2C)."
+ },
+ "source_limitations": [
+  "Extraction flagged degraded by the pack manifest",
+  "Supplied text covers only pages 1-11 and 181-195; Item 1A, Item 7/7A, Item 8 financial statements, audit report, and notes are absent",
+  "Part III content incorporated by reference to a proxy statement not yet filed at the 10-K date",
+  "Exhibit 99.1 (pages 190-195) is present only partially and ends mid-exhibit"
+ ],
+ "consumers": {
+  "CP-1": {
+   "readiness": "BLOCKED",
+   "limitations": [
+    "Supplied excerpt contains no financial statements, audit report, or notes"
+   ],
+   "missing_source": "Item 8 financial statements, audit report, and notes (10-K pages 53-96 per table of contents) - absent from supplied extraction"
+  },
+  "CP-1A": {
+   "readiness": "BLOCKED",
+   "limitations": [
+    "MD&A pages 33-52 not present in supplied extraction"
+   ],
+   "missing_source": "Item 7 MD&A and Item 7A market-risk disclosures (10-K pages 33-52) - absent from supplied extraction"
+  },
+  "CP-5": {
+   "readiness": "CONDITIONAL",
+   "limitations": [
+    "Item 1A text absent from supplied extraction",
+    "Exhibit 99.1 present only partially (pages 190-195 of the source PDF; excerpt ends mid-exhibit)"
+   ],
+   "missing_source": "Item 1A Risk Factors (10-K pages 16-28) - absent from supplied extraction"
+  },
+  "CP-6": {
+   "readiness": "CONDITIONAL",
+   "limitations": [
+    "Proxy statement (Part III detail) not yet filed at 10-K date",
+    "Exhibit 97.1 clawback policy text is available in the excerpt (pages 186-189)"
+   ],
+   "missing_source": "Definitive proxy statement for the 2026 annual meeting (incorporated by reference into Part III) - not yet filed per 10-K page 2"
+  }
+ },
+ "gap_description": "The supplied extraction of the FY2025 Form 10-K (sha256 6840cafaafbd84b432c3c6eaeba5642c39b1a87c02f8236ee0ec3177e0c587f5) contains only pages 1-11 and 181-195; Item 1A Risk Factors (pages 16-28), Item 7 MD&A and Item 7A (pages 33-52), and Item 8 financial statements, audit report, and notes (pages 53-96) are absent, as are prior-period comparatives. The supplied text itself evidences this jump (page 12 is a mid-list fragment of the substrate exhibit list; page 181 begins Exhibit 23.1).",
+ "claim_limitation": "Whether pages 12-180 are merely absent from this excerpt or corrupted/unreadable cannot be determined from the supplied material."
+}

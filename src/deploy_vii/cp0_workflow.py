@@ -5,14 +5,14 @@ from pydantic import ValidationError
 from deploy_vii.contracts import Module
 from deploy_vii.execution import Attempt, Execution, StepValidation, text_sha256
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
+from deploy_vii.readiness import ReadinessReview, build_readiness, shape_issues, validate_review
 
 
 def _validate_review(store: Execution, pack: PreparedPack, attempt: Attempt) -> StepValidation:
     try:
         review = ReadinessReview.model_validate_json(store.payload(attempt.steps[0].payload_sha256))
     except ValidationError as error:
-        return StepValidation(issues=(f"Invalid CP-0 review: {error}",))
+        return StepValidation(issues=shape_issues(error))
     issues = validate_review(pack, review)
     if issues:
         return StepValidation(issues=issues)

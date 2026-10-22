@@ -30,6 +30,7 @@ from deploy_vii.narrative import (
     validate_narrative_review,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.readiness import shape_issues
 from deploy_vii.registry import plan
 from deploy_vii.source_context import SourceContextReview, source_context, validate_source_context
 from deploy_vii.statement_view import write_statement_preview
@@ -93,7 +94,7 @@ def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> S
         context = SourceContextReview.model_validate_json(text(0))
         financial = FinancialSubmission.model_validate_json(text(1))
     except ValidationError as error:
-        return StepValidation(issues=(f"Invalid CP-1 {step.step_id} submission: {error}",))
+        return StepValidation(issues=shape_issues(error))
     if step.step_id == "financials":
         if financial.context_step_sha256 != attempt.steps[0].content_hash():
             return StepValidation(
@@ -125,7 +126,7 @@ def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> S
             DownstreamReview.model_validate_json(text(-1)) if step.step_id == "readiness" else None
         )
     except ValidationError as error:
-        return StepValidation(issues=(f"Invalid CP-1 {step.step_id} submission: {error}",))
+        return StepValidation(issues=shape_issues(error))
     if step.step_id == "narrative":
         issues = validate_narrative_review(stage_inputs, narrative)
         if issues:

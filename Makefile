@@ -1,4 +1,4 @@
-.PHONY: setup check format types test coverage audit secrets diff dev-check dev-test product-check
+.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage audit secrets diff dev-check dev-test product-check
 
 setup:
 	uv sync --locked
@@ -55,3 +55,27 @@ secrets:
 diff:
 	git diff --stat origin/main
 	git diff --numstat origin/main
+
+# Live model tests (OpenRouter). The key comes from the DC-7 file in settings, never from make.
+# CAP is a required USD amount bound to the batch ledger; DIRECTORY is the execution journal.
+DIRECTORY ?= artifacts/execution
+LIVE = uv run --locked python -m deploy_vii live
+
+replay:
+	uv run --locked pytest tests/product/test_replay.py -q -rs
+
+live-probe:
+	test -n "$(CAP)" || { echo "CAP=<usd> is required"; exit 2; }
+	$(LIVE) probe --directory "$(DIRECTORY)" --cap "$(CAP)"
+
+live-module:
+	test -n "$(MODULE)" -a -n "$(CAP)" || { echo "MODULE=<id> and CAP=<usd> are required"; exit 2; }
+	$(LIVE) module --directory "$(DIRECTORY)" --module "$(MODULE)" --cap "$(CAP)"
+
+live-regression:
+	test -n "$(CAP)" || { echo "CAP=<usd> is required"; exit 2; }
+	$(LIVE) regression --directory "$(DIRECTORY)" --cap "$(CAP)"
+
+live-canary:
+	test -n "$(CAP)" || { echo "CAP=<usd> is required"; exit 2; }
+	$(LIVE) canary --directory "$(DIRECTORY)" --cap "$(CAP)"

@@ -4,17 +4,18 @@ Source readability is not analytical authority. This layer has no financial
 arithmetic and does not apply subsequent events to historical observations.
 """
 
+from collections.abc import Iterator
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Run, Text
 from deploy_vii.financial_contracts import Currency, Located, Unit
 from deploy_vii.financial_periods import _id
 from deploy_vii.financial_validation import records
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.readiness import citation_issues
+from deploy_vii.readiness import absence_issues, citation_issues
 
 EvidenceClass = Literal[
     "audited_financial_statements",
@@ -298,7 +299,35 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
                 issues.append(
                     f"Event evidence omitted by source scan: {source_id} {event.event_id}"
                 )
+    issues.extend(absence_issues(pack, _prose_scopes(review)))
     return tuple(issues)
+
+
+def _prose(item: BaseModel) -> Iterator[str]:
+    """Every text value of a contract outside its citations (a quote is source text, not a
+    claim), nested records included."""
+    for name in type(item).model_fields:
+        value = getattr(item, name)
+        for child in value if isinstance(value, tuple) else (value,):
+            if isinstance(child, Citation):
+                continue
+            if isinstance(child, BaseModel):
+                yield from _prose(child)
+            elif isinstance(child, str):
+                yield child
+
+
+def _prose_scopes(review: SourceContextReview) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """Each free text with the sources it is about, for the readiness absence rule (decision
+    0008, task 2.9): a source context (and its scopes) is about its source; an entity or event
+    about the sources it cites; the review's own limitations about every paged source."""
+    for assessment in review.sources:
+        yield from ((text, (assessment.source_id,)) for text in _prose(assessment))
+    records: tuple[EntityContext | SubsequentEvent, ...] = (*review.entities, *review.events)
+    for record in records:
+        cited = tuple(c.source_id for c in record.citations)
+        yield from ((text, cited) for text in _prose(record))
+    yield from ((text, ()) for text in review.limitations)
 
 
 def source_context(pack: PreparedPack, review: SourceContextReview) -> SourceContextReport:
