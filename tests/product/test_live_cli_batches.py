@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live import cli
 from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
@@ -26,6 +28,7 @@ from deploy_vii.live.schema import (
     strict_copy,
     strict_schema,
 )
+from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import modules
 from tests.product.live_support import (
     FAKE_KEY,
@@ -36,9 +39,11 @@ from tests.product.live_support import (
     make_rtf_key,
     ok,
 )
-from tests.product.test_execution import fixture_store
+from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
+from tests.product.test_narrative import draft
 from tests.product.test_readiness import as_submission, readiness_fixture
+from tests.product.test_workflow import cp1_case
 
 LUNA, GLM, DEEPSEEK = "openai/gpt-6-luna", "z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017"
 SETTINGS = """
@@ -676,7 +681,7 @@ def test_a_cp0_that_does_not_authorize_cp1_ends_each_cell_and_the_batch_goes_on(
     for gated, refused in zip(rows[::2], rows[1::2], strict=True):
         assert refused[3:5] == gated[3:5]  # the cell's drawn model and seed
         # No attempt, status not-authorized, class ok, USD 0, no issues.
-        assert refused[5:] == ["none", "not-authorized", "ok", "0", "0"]
+        assert refused[5:11] == ["none", "not-authorized", "ok", "0", "0", "-"]
     assert "- Stopped: no" in text
     assert "- Cells planned: 3; steps run: 3; not authorized by CP-0: 3" in text
     batch = rig.root / "artifacts" / "model-tests" / "b1"
@@ -1184,7 +1189,7 @@ def test_a_400_that_does_not_name_the_schema_is_reported_and_never_blocks(rig: R
     assert row[10] == "no: the 400 does not name the schema"
     responder = Responder(rig.review)
     assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], responder) == 0
-    assert len(responder.requests) == 2  # CP-0, then source_context was sent
+    assert len(responder.requests) == 3  # CP-0, source_context, then its MC-7 repair
     _, context = step_lines(rig.report(), "module-00")[:2]
     assert context[2] == "source_context" and context[6] != "ineligible"
 
@@ -1345,3 +1350,215 @@ def test_a_variant_that_cannot_be_built_is_reported_and_not_sent(
     sent = [schema for _, _, schema in responder.schemas()]
     assert all('"$ref"' in json.dumps(schema) for schema in sent)  # no inlined variant went out
     assert f"- {LUNA} readiness: none accepted" in text
+
+
+# --- 7.0e: the module driver dispatches the one MC-7 repair -----------------------------------
+
+REPAIR_COLUMN = 10  # the Steps table's last column: `-` for a first attempt, `1` for the repair
+BAD = "not json"
+OUTAGE = "outage"
+CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness")
+
+
+class Chain:
+    """Fake transport for one CP-1 `module` cell. `script` lists, per chat call in order, the
+    step the cell must ask for and whether to answer it validly, with `BAD` (a payload the
+    validator rejects) or `OUTAGE` (HTTP 500: no model output). Each valid payload is built
+    from the cell's own journal, so a step is accepted exactly as the validators would."""
+
+    def __init__(
+        self,
+        rig: Rig,
+        extraction: FinancialSubmission,
+        script: list[tuple[str, str]],
+        usage: str = "1.5",
+    ) -> None:
+        self.rig, self.extraction, self.script = rig, extraction, script
+        base = rig.store.read().attempts[-1]  # the case's CP-1 attempt: its source_context step
+        self.context = rig.store.payload(base.steps[0].payload_sha256)
+        self.requests: list[Request] = []
+        self.usage = Decimal(usage)
+
+    def payload(self, step: str) -> str:
+        journal = Execution(self.rig.store.directory / "live" / "b1" / "module-00")
+        valid = {s.step_id: s for s in journal.read().attempts[-1].steps if s.status == "valid"}
+        if step == "source_readiness":
+            return self.rig.review
+        if step == "source_context":
+            return self.context
+        if step == "financials":
+            context_hash = valid["source_context"].content_hash()
+            return self.extraction.model_copy(
+                update={"context_step_sha256": context_hash}
+            ).model_dump_json()
+        if step == "narrative":
+            stage = FinancialStage.model_validate_json(step_text(journal, valid["financials"]))
+            return draft(stage.narrative_inputs).model_dump_json()
+        inputs = DownstreamInputs.model_validate_json(step_text(journal, valid["narrative"]))
+        return DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL:
+            return key_status(format(self.usage, "f"))
+        step, verdict = self.script[len(self.requests)]  # a call beyond the script fails loudly
+        self.requests.append(request)
+        self.usage += Decimal("0.00033")
+        if verdict == OUTAGE:
+            return Response(500, b"upstream down")
+        model = json.loads(request.body or b"{}")["model"]
+        return ok(BAD if verdict == BAD else self.payload(step), model=model)
+
+    def user_prompts(self) -> list[str]:
+        return [json.loads(r.body or b"{}")["messages"][1]["content"] for r in self.requests]
+
+
+def chain_rig(tmp_path: Path) -> tuple[Rig, FinancialSubmission]:
+    """A rig whose pack is the CP-1 case that passes every validator (fake transport only)."""
+    (tmp_path / "rig").mkdir(parents=True)
+    rig = Rig(tmp_path / "rig")
+    # The synthetic CP-1 case is large (its narrative step is not context-eligible at the
+    # production 3 bytes per token bound); this changes only the ineligibility test, not a request.
+    rig.settings.write_text(
+        SETTINGS.format(key=rig.key).replace("lower_bound = 3.0", "lower_bound = 300.0"),
+        encoding="utf-8",
+    )
+    (tmp_path / "case").mkdir()
+    store, _, extraction = cp1_case(tmp_path / "case")
+    rig.store = store
+    review = ReadinessReview.model_validate_json(
+        store.payload(store.read().attempts[0].steps[0].payload_sha256)
+    )
+    rig.review = as_submission(review).model_dump_json()
+    return rig, extraction
+
+
+def ok_steps(*steps: str) -> list[tuple[str, str]]:
+    return [(step, "ok") for step in steps]
+
+
+def module_rows(rig: Rig) -> list[list[str]]:
+    return step_lines(rig.report(), "module-00")
+
+
+def retained_manifests(rig: Rig) -> list[dict[str, Any]]:
+    batch = rig.root / "artifacts" / "model-tests" / "b1"
+    return [json.loads(p.read_text(encoding="utf-8")) for p in batch.glob("*/*/*/manifest.json")]
+
+
+def run_chain(
+    tmp_path: Path, script: list[tuple[str, str]], cap: str = "5.00"
+) -> tuple[Rig, Chain, int]:
+    rig, extraction = chain_rig(tmp_path)
+    chain = Chain(rig, extraction, script)
+    return rig, chain, rig.run(rig.argv("module", "--module", "CP-1", cap=cap), chain)
+
+
+def test_a_rejected_financials_step_is_repaired_once_and_the_cell_runs_on(tmp_path: Path) -> None:
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), *ok_steps(*CHAIN[1:])]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
+        ("source_readiness", "accepted", "-"),
+        ("source_context", "accepted", "-"),
+        ("financials", "rejected", "-"),
+        ("source_context", "accepted", "1"),
+        ("financials", "accepted", "1"),
+        ("narrative", "accepted", "1"),
+        ("readiness", "accepted", "1"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 1" in text and "- Stopped: no" in text
+    assert "| Issues | Repair |" in text
+    manifests = {m["attempt_id"]: m for m in retained_manifests(rig)}
+    assert manifests[rows[2][5]]["links"]["repair_of_ticket_id"] is None
+    assert manifests[rows[4][5]]["links"]["repair_of_ticket_id"] is not None
+    prompts = chain.user_prompts()
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 4 + [True, False, False]
+    assert "- (root): Invalid JSON" in prompts[4]
+
+
+def test_a_second_rejection_ends_the_cell_without_a_third_attempt(tmp_path: Path) -> None:
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("source_context", "ok")]
+    script += [("financials", BAD)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)  # nothing is sent beyond it
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "-"),
+        ("source_context", "accepted", "1"),
+        ("financials", "rejected", "1"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 1" in text and "- Stopped: no" in text
+
+
+def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
+    """A no-response is no validator verdict: the journal ticket stays pending, so no repair
+    is begun, and the batch (here one cell) ends normally."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", OUTAGE)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 3
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "no-response", "-")
+    ]
+    assert "- Repairs dispatched: 0" in rig.report()
+
+
+def test_a_cap_that_cannot_cover_the_repair_ends_the_batch_without_a_partial_row(
+    tmp_path: Path,
+) -> None:
+    """The repair prompt carries the REPAIR block, so its reservation is above the first
+    attempt's. A cap equal to the first reservation covers that attempt, and after its charge
+    cannot cover the repair's: nothing is sent and the repair has no row."""
+    script = [("source_readiness", BAD), *ok_steps(*CHAIN)]
+    measured, _, _ = run_chain(tmp_path / "measure", script)  # same cell, ample cap
+    first, repair = ledger(measured).state().attempts[:2]
+    assert repair.reserved_usd > first.reserved_usd
+    rig, chain, status = run_chain(tmp_path / "capped", script, cap=format(first.reserved_usd, "f"))
+    assert status == cli.EXIT_CAP and len(chain.requests) == 1
+    text = rig.report()
+    assert "- Stopped: cap" in text and "- Repairs dispatched: 0" in text
+    assert [(r[2], r[6]) for r in module_rows(rig)] == [("source_readiness", "rejected")]
+
+
+def test_a_refused_repair_fails_the_batch_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = Execution.begin
+    calls: list[str] = []
+
+    def refuse_second(store: Execution, module_id: str) -> Attempt:
+        calls.append(module_id)
+        if calls.count("CP-1") == 3:  # the case's own begin, the cell's first, then the repair
+            raise ValueError("Input set is settled or its one repair has been consumed")
+        return original(store, module_id)
+
+    monkeypatch.setattr(Execution, "begin", refuse_second)
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == cli.EXIT_FAILED and len(chain.requests) == 3
+    assert "Stopped: aborted: ValueError" in rig.report()
+
+
+def test_a_cp0_accepted_on_repair_still_authorizes_cp1(tmp_path: Path) -> None:
+    script = [("source_readiness", BAD), *ok_steps(*CHAIN)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)] == [
+        ("source_readiness", "rejected", "-"),
+        ("source_readiness", "accepted", "1"),
+        ("source_context", "accepted", "-"),
+        ("financials", "accepted", "-"),
+        ("narrative", "accepted", "-"),
+        ("readiness", "accepted", "-"),
+    ]
+    assert "- Repairs dispatched: 1" in rig.report()
+    assert "<<<REPAIR" in chain.user_prompts()[1]
+
+
+def test_probe_cells_are_never_repaired(rig: Rig) -> None:
+    """Only the `module` driver spends the repair; a probe is one measured draw per cell."""
+    responder = Responder(rig.review, junk_after_first=True)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    assert len(responder.requests) == 4  # unchanged: one CP-0 call per cell, one extra step
+    assert "- Repairs dispatched: 0" in rig.report()

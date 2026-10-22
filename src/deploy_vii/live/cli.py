@@ -19,10 +19,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import partial
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
-from deploy_vii.execution import Execution, NotAuthorized
+from deploy_vii.execution import Attempt, Execution, NotAuthorized
 from deploy_vii.live.catalog import (
     USER_SELECTED,
     Catalog,
@@ -64,10 +65,12 @@ from deploy_vii.live.runner import (
     DEFAULT_MAX_TOKENS,
     SCHEMA_CHECK_MAX_TOKENS,
     STEPS,
+    DispatchResult,
     SchemaCheck,
     StepSpec,
     check_schema,
     dispatch,
+    expected_step,
     schema_rejections,
 )
 from deploy_vii.live.schema import (
@@ -137,6 +140,7 @@ class Row:
     issue_count: int
     cohort: str = COHORT
     prompt_bound: int | None = None  # prompt tokens upper bound of the attempt (Pool table)
+    repair: int = 0  # the journal's attempt number: 0 a first attempt, 1 the MC-7 repair
 
     def cells(self) -> tuple[object, ...]:
         return (
@@ -151,6 +155,10 @@ class Row:
             self.cost,
             "-" if self.status == NO_RESPONSE else self.issue_count,
         )
+
+    def step_cells(self) -> tuple[object, ...]:
+        """A batch-report Steps row: `cells()` and the Repair column (`-` for a first attempt)."""
+        return (*self.cells(), self.repair or "-")
 
 
 @dataclass
@@ -451,26 +459,19 @@ def _run_cell(
     evidence: Path,
     batch: Batch,
     rejections: Mapping[tuple[str, str, str], str],
+    repair: bool,
 ) -> None:
+    """Run one cell's steps in order, module by module. With `repair` (the `module` driver) a
+    validator rejection is followed by the module's one MC-7 repair attempt, which restarts the
+    module from its first step; the cell ends at the first step that is not accepted."""
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
-    ticket, current, cp0_attempt = "", "", None
-    for step_id in cell.steps:
-        module = STEPS[step_id].module_id
-        if module != current:
-            try:
-                ticket = store.begin(module).ticket_id
-            except NotAuthorized as refusal:
-                # CP-0 judged this consumer CONDITIONAL or BLOCKED: a valid accepted outcome,
-                # recorded as this step's result. Nothing is sent; the cell ends, the batch goes on.
-                record = _record_not_authorized(cell, step_id, refusal, pool, cp0_attempt, evidence)
-                batch.rows.append(not_authorized_row(record))
-                return
-            current = module
+
+    def send(step_id: str, attempt: Attempt) -> DispatchResult:
         result = dispatch(
             StepSpec(step_id, cell.case_id, sources, max_tokens=max_tokens, timeout_s=timeout_s),
             store=store,
-            ticket_id=ticket,
+            ticket_id=attempt.ticket_id,
             ledger=ledger,
             pool=pool,
             seed=cell.seed,
@@ -497,12 +498,46 @@ def _run_cell(
                 ),
                 len(result.issues),
                 prompt_bound=result.prompt_tokens_upper_bound,
+                repair=attempt.number,
             )
         )
-        if module == "CP-0":
-            cp0_attempt = result.attempt_id  # the attempt whose review holds the T8 commands
-        if result.status != "accepted":
+        return result
+
+    cp0_attempt = None
+
+    def play(steps: Sequence[str], attempt: Attempt) -> DispatchResult:
+        """Send the steps in order; the last result is the first non-accepted one, or the final."""
+        nonlocal cp0_attempt
+        for step_id in steps:
+            result = send(step_id, attempt)
+            if attempt.module_id == "CP-0":
+                cp0_attempt = result.attempt_id  # the attempt whose review holds the T8 commands
+            if result.status != "accepted":
+                break
+        return result
+
+    for module, run in groupby(cell.steps, key=lambda step_id: STEPS[step_id].module_id):
+        group = tuple(run)
+        try:
+            attempt = store.begin(module)
+        except NotAuthorized as refusal:
+            # CP-0 judged this consumer CONDITIONAL or BLOCKED: a valid accepted outcome,
+            # recorded as this step's result. Nothing is sent; the cell ends, the batch goes on.
+            record = _record_not_authorized(cell, group[0], refusal, pool, cp0_attempt, evidence)
+            batch.rows.append(not_authorized_row(record))
             return
+        steps = group
+        while True:
+            result = play(steps, attempt)
+            if result.status == "accepted":
+                break  # every step of the module is accepted: on to the next module
+            # Only a validator verdict (rejected) on a first attempt earns the module's one MC-7
+            # repair. A no-response or fallback leaves the ticket pending, and a repair already
+            # used is spent: either ends the cell. `begin` refuses a consumed repair loudly.
+            if not repair or result.status != "rejected" or attempt.number != 0:
+                return
+            attempt = store.begin(module)
+            steps = group[group.index(expected_step(attempt, module)) :]
 
 
 def _record_not_authorized(
@@ -622,6 +657,12 @@ def _pool_cells(
     )
 
 
+def _repairs_dispatched(rows: Sequence[Row]) -> int:
+    """Repair attempts that sent at least one step: a repair begun but stopped by the cap before
+    its first dispatch has no row and is not counted."""
+    return len({(row.cell_id, STEPS[row.step_id].module_id) for row in rows if row.repair})
+
+
 def render_report(
     command: str,
     batch_id: str,
@@ -677,6 +718,7 @@ def render_report(
         f"- Timeout: {timeout_s} s per call (every model)",
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
+        f"- Repairs dispatched: {_repairs_dispatched(batch.rows)}",
         f"- Stopped: {batch.stopped or 'no'}",
         "",
         "## Pool",
@@ -687,9 +729,9 @@ def render_report(
         "",
         "## Steps",
         "",
-        _row((*steps_header, "Issues")),
-        _row(("---",) * (len(steps_header) + 1)),
-        *(_row(r.cells()) for r in batch.rows if r.cohort == COHORT),
+        _row((*steps_header, "Issues", "Repair")),
+        _row(("---",) * (len(steps_header) + 2)),
+        *(_row(r.step_cells()) for r in batch.rows if r.cohort == COHORT),
         "",
     ]
     # Results are grouped by cohort and never merged: proxy cohorts (DC-8) get their own table
@@ -699,9 +741,9 @@ def render_report(
             lines += [
                 f"## Steps ({summary.cohort})",
                 "",
-                _row((*steps_header, "Issues")),
-                _row(("---",) * (len(steps_header) + 1)),
-                *(_row(r.cells()) for r in batch.rows if r.cohort == summary.cohort),
+                _row((*steps_header, "Issues", "Repair")),
+                _row(("---",) * (len(steps_header) + 2)),
+                *(_row(r.step_cells()) for r in batch.rows if r.cohort == summary.cohort),
                 "",
             ]
     lines += _held_footnote(batch.rows)
@@ -887,6 +929,7 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 evidence=root / batch_id,
                 batch=batch,
                 rejections=rejections,
+                repair=args.live_command == "module",
             )
     except CapExceeded as stop:
         batch.stopped = f"cap: {stop}"

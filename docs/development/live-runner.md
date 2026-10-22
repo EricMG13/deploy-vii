@@ -94,6 +94,22 @@ from a pinned pool:
   step's prompt; where no step failed validation (an interruption, a module-level refusal) the module issues are carried
   as before. A `repair_prompt` event records the scope (`failing-step`, `module` or `none`), the
   failing step and the issue count. The repair budget stays module-wide.
+- **The `module` driver's repair loop (task 7.0e).** In `deploy-vii live module` (and only
+  there; `probe`, `regression` and `canary` stay single-attempt) a step whose status is
+  `rejected`, a journal verdict on a submitted payload, is followed by one `Execution.begin` on
+  the same module: the repair attempt. It restarts the module at its first step
+  (`expected_step`: `source_readiness` for CP-0, `source_context` for CP-1) and runs the steps
+  in order again, each with its own cap reservation. At most one repair per module per cell: the
+  cell ends at the first step that is not accepted, whether in the first attempt after its
+  repair is spent, in the repair itself, or at its end. A `no-response` or withheld fallback is
+  no verdict (the ticket stays pending), so it ends the cell with no repair. A cap too small
+  for the repair's reservation raises `CapExceeded`, ends the batch with `Stopped: cap` and
+  leaves no row for the unsent step. A journal refusal of the repair ("...one repair has been
+  consumed") is not caught and fails the batch. A CP-0 accepted on repair authorizes the CP-1
+  steps that follow. The report's Steps table has a `Repair` column (`-` first attempt, `1`
+  the repair, the journal's attempt number) and the header counts `Repairs dispatched` (repairs
+  that sent at least one step). A repair that is accepted counts as accepted in the Cohorts
+  table, so first-pass validity is read from the `Repair` column, not from the cohort totals.
 - **Scrubbing.** Evidence and model output are only ever changed by the exact key and key-shaped
   tokens (`scrub_key`); text such as "Authorization: the board..." stays verbatim. The wider
   `redact`, which also rewrites `Authorization` header values, is applied to exception and error

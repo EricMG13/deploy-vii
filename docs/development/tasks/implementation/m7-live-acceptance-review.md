@@ -126,3 +126,11 @@ Evidence: batch `e1-cp1-2`: `financials` timed out at 600 s with a 64,000-token 
 reconciled at US$0 (the provider did not bill the abandoned generation).
 
 Not verified: a live call under a longer deadline (the coordinator reruns E1).
+
+## 7.0e The module driver dispatches the MC-7 repair
+
+Decision 0008 MC-7 gives each input set one repair, but `deploy-vii live module` ended a cell at its first rejected step, so no repair was ever dispatched. The driver now begins the repair attempt after a validator rejection (never after a no-response), reruns the module from its first step, and the batch report gains a `Repair` column and a `Repairs dispatched` header line. Only the `module` command repairs; `probe`, `regression` and `canary` stay one attempt per step.
+
+Evidence: E1 batches 1 to 3 (22 October 2026) each ended at the rejected `financials` step with `repair_count` 0.
+
+Not verified: a live repair (the coordinator runs E1 batch 4).
