@@ -61,6 +61,8 @@ ACCEPTED = (
     "Items 7/7A",
     "page 16",
     "pages 16-18",
+    "page:16",
+    "page:1 through page:195",
     "195-page",
     "all 195 pages located",
     "195 of 195",
@@ -85,6 +87,7 @@ REJECTED = (
     "195 located",
     "The notice period is 120 days.",
     "Items 7, 120 days",
+    "page:16, 120 days",
 )
 
 

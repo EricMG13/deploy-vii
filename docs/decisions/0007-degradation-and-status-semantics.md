@@ -34,7 +34,8 @@ removed CP-3, CP-5 and CP-6 from the report. Any inherited limitation also force
    `"Upstream <producer> blocked: <producer limitation>"`. Under a `block` edge the
    consumer is not runnable ("Required upstream is unrun, stale or blocked").
 3. **Unrun, stale and rejected producers** block every consumer regardless of rule: only a
-   settled `blocked` head degrades.
+   settled `blocked` head degrades. A requested but unrun CP-MODEL therefore holds CP-5
+   (CP-MODEL is a selected analyst in CP-5's fan-in).
 4. **Own status versus inherited limitations.** `Module.limitations` holds the module's own
    findings; `Module.inherited_limitations` holds limitations carried from inputs,
    de-duplicated by text. `own_status` derives from own findings only. The settled status

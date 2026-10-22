@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from deploy_vii.canonical_tables import REGISTER_NOTE
+from deploy_vii.canonical_tables import REGISTER_NOTE, CanonicalTables
+from deploy_vii.contracts import Module
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
     PROMOTED,
@@ -26,6 +27,7 @@ from deploy_vii.quality import (
     EvidenceLineage,
     QaFinding,
     QualityInputs,
+    QualityReport,
     QualityReview,
 )
 from tests.product.test_execution import step_text
@@ -242,8 +244,10 @@ def test_a_claim_that_does_not_resolve_never_promotes(
     store, ticket, inputs = journal
     original = cp1_workflow._candidate
 
-    def with_bare_figure(*args: object, **kwargs: object) -> object:
-        module = original(*args, **kwargs)  # type: ignore[arg-type]
+    def with_bare_figure(
+        registers: CanonicalTables, attempt: Attempt, quality: QualityReport
+    ) -> Module:
+        module = original(registers, attempt, quality)
         bare = Claim(claim_id="bare", text="Leverage is 5.2x", citations=())
         return module.model_copy(update={"claims": (*module.claims, bare)})
 

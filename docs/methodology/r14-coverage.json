@@ -72,7 +72,7 @@
           "T4.9"
         ]
       },
-      "implementation": "implemented (canonical envelope, handoff and promotion in task 6.4; Workbench bindings from the accepted envelope in task 6.5)",
+      "implementation": "partial (canonical envelope, handoff and promotion in task 6.4; Workbench bindings from the accepted envelope in task 6.5; pending: definition-alignment and extraction-completeness confirmation; live render M7 E1)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "partial (synthetic fixture; real output in M7)",
       "native_host_qualification": "unrun"
@@ -1364,6 +1364,7 @@
     "CP-L10 default product intake uses CP-0; record the source header/catalog discrepancy.",
     "Portfolio Fit is retained as a report responsibility; it is not a 26th r14 physical package.",
     "CP-OS is present in the manifest but not catalog modules; its scope comes from its SKILL.md.",
-    "CP-MODEL publishes the HTML Model destination and the calculation JSON of accepted CP-1 (decision 0006 DC-5); the r14 XLSX workbook export is deferred."
+    "CP-MODEL publishes the HTML Model destination and the calculation JSON of accepted CP-1 (decision 0006 DC-5); the r14 XLSX workbook export is deferred.",
+    "Statuses have two scopes: a row here describes the module as a whole; a journal Head.qualification describes one promoted artifact."
   ]
 }

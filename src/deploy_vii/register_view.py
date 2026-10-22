@@ -53,8 +53,9 @@ def write_register_preview(
     )
     sections = [
         "# CP-1 canonical register preview",
-        "Candidate only. Final canonical envelope, QA and Module acceptance "
-        "remain pending. This is not the final downstream Markdown handoff.",
+        "Candidate only. This is not the final downstream Markdown handoff: the promoted "
+        "canonical envelope is produced separately (`envelope --module CP-1`) once QA "
+        "and promotion settle CP-1.",
     ]
     sections.append("## Analysis")
     # Resolved run text (decision 0005 MC-2), as in the canonical envelope: never raw tokens.

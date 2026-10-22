@@ -7,7 +7,7 @@ from typing import Literal
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from deploy_vii.contracts import Citation, Claim, Fact, Input, Module
+from deploy_vii.contracts import PATHWAY_MODULES, Citation, Claim, Fact, Input, Module, PathwayId
 from deploy_vii.execution import (
     Attempt,
     Command,
@@ -522,10 +522,11 @@ def test_blocked_required_producer_under_restricted_rule_runs_limited(tmp_path: 
     assert any("Upstream CP-1A blocked" in text for text in cp2.inherited_limitations)
 
 
-def cp_model_store(tmp_path: Path) -> Execution:
+def cp_model_store(
+    tmp_path: Path, scope: tuple[str, ...] = ("CP-0", "CP-1", "CP-MODEL", "CP-5")
+) -> Execution:
     """A run that requests CP-MODEL and CP-5, with CP-0 readiness accepted for that scope."""
     pack, review = readiness_fixture()
-    scope = ("CP-0", "CP-1", "CP-MODEL", "CP-5")
     pack = pack.model_copy(update={"run": pack.run.model_copy(update={"requested_modules": scope})})
     consumers = tuple(
         review.consumers[0].model_copy(update={"module_id": module_id})
@@ -565,10 +566,20 @@ def test_blocked_cp_model_restricts_cp5(tmp_path: Path) -> None:
     assert cp5.status == "restricted"
 
 
-def test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run(tmp_path: Path) -> None:
-    """Decision 0009 (task 6.5): a preset that requests CP-MODEL makes it a CP-5 input."""
-    store = cp_model_store(tmp_path)
-    settle_module(store, "CP-1")
+@pytest.mark.parametrize(
+    "pathway",
+    [pid for pid, requested in PATHWAY_MODULES.items() if "CP-MODEL" in requested],
+)
+def test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run(
+    tmp_path: Path, pathway: PathwayId
+) -> None:
+    """Decision 0009 (task 6.5): in a preset that requests CP-MODEL it is a CP-5 input."""
+    scope = PATHWAY_MODULES[pathway]
+    store = cp_model_store(tmp_path, scope)
+    # Every other analyst CP-5 follows has settled; only CP-MODEL has never run.
+    analysts = [m for m in plan(scope) if m not in {"CP-0", "CP-MODEL", "CP-5", "CP-6", "CP-8"}]
+    for module_id in analysts:
+        settle_module(store, module_id)
     with pytest.raises(ValueError, match="upstream is unrun"):
         store.begin("CP-5")
     settle_module(store, "CP-MODEL")
@@ -1325,7 +1336,6 @@ def test_transition_meter_counts_new_and_changed_files_once(tmp_path: Path) -> N
 
 
 def test_every_view_entry_point_applies_the_pathway_scope(tmp_path: Path) -> None:
-    from deploy_vii.contracts import PATHWAY_MODULES
     from deploy_vii.delivery import cp0_view
     from deploy_vii.registry import dependencies, modules
     from deploy_vii.render import empty_view

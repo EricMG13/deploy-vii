@@ -47,8 +47,8 @@ hides work still owed.
    a MODEL-owned maturity wall, which has no spec yet). Consequence, asserted by
    `test_cp5_cannot_begin_while_a_requested_cp_model_has_never_run`: CP-5 follows every
    selected analyst, so in these presets `begin("CP-5")` is refused ("upstream is unrun")
-   until CP-MODEL has a head; CP-MODEL stays `unrun` until M8, so CP-5 cannot start under
-   them before then.
+   until CP-MODEL has a head; CP-MODEL stays `unrun` until plan task 7.1a (CP-MODEL deterministic
+   publication) gives it a head, so CP-5 cannot start under them before then.
 
    **Portfolio Fit is pending an owner (plan M10).** It is not a module of any Pathway;
    the `portfolio-fit` block exists in the compositions below and shows its honest state

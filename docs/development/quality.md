@@ -107,8 +107,9 @@ divergence from r14 was found.
 - one candidate claim per narrative finding, listing the distinct evidence IDs referenced across
   its evidence, risk and credit passages in first-appearance order;
 - source gate pass, partial or fail from candidate, restricted or any other context status;
-- module status `blocked` when the narrative is blocked, otherwise `restricted`, so a pre-handoff
-  CP-1 can never be Passed;
+- module status by the decision 0007 item 5 rule: `blocked` when the narrative is blocked,
+  `restricted` when the module has own limitations, otherwise `complete`, so a pre-handoff
+  CP-1 can be Passed;
 - one lineage ceiling per reference, from its register (`cp1_quality._lineage_basis`):
   - `citation` for source, entity, subsequent-event, source-period, definition and
     multi-figure-event records that carry a citation, and for observations and statement cells

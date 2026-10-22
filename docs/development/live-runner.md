@@ -433,6 +433,9 @@ artifacts).
   with `--revalidate --outcome-changed-by "task 2.9 (decision 0008 amendment, 22 Oct 2026)"`.
   Not added: GLM f0391c45 is a `source_context` attempt, which real-pack replay does not cover;
   its verbatim texts are unit fixtures (`test_live_submission.py`, `test_source_context.py`).
+- Task 6.2 added the `page:N` locator label to the prose rule, so
+  `probe-3-glm-5.3-flash-76fc5c95` stays `accepted` under it (its `outcome_changed_by` now
+  also names task 6.2); the interim coordinator revalidation `ae15823` is superseded.
 - Task 2.10 (hyphen-wrap) changed no entry: replayed against the main checkout's pack, every
   entry is still `ok` (no outcome or issue text moved; the spans the rejected Luna 8634aa17
   quotes cite have no hyphen line wrap). Probe-4 attempts were not added; the Sol 9594d016 spans

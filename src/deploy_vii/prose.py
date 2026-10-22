@@ -97,6 +97,7 @@ LABELS: Mapping[str, re.Pattern[str]] = MappingProxyType(
                     rf"[0-9]{{1,4}}[A-Z]?(?:\.[0-9]{{1,3}})*(?:\([a-z0-9]{{1,4}}\))*(?![0-9A-Za-z(])",
                     rf"{_B}Items {_ITEM}(?:{_ITEM_JOIN}{_ITEM})*{_E}",
                     rf"{_B}[Pp]ages? [0-9]{{1,4}}(?:(?:-|\u2013)[0-9]{{1,4}})?{_E}",
+                    rf"{_B}page:[0-9]{{1,4}}{_E}",
                     rf"{_B}[0-9]{{1,4}}-page{_E}",
                 )
             )

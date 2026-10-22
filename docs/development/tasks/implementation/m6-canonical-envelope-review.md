@@ -25,7 +25,7 @@ What changed:
   `CP-1 -> CP-MODEL`; implementation is `partial (artifact defined; destination
   rendering in M6.5/M8)`, the other three statuses unchanged.
 
-Pathways: no preset requests CP-MODEL (decision 0009 owns them, not edited). `plan()`
+Pathways: no preset requests CP-MODEL (decision 0009 owns them, not edited) (superseded by 6.5). `plan()`
 does not pull CP-MODEL in for CP-5 (CP-5 requires only CP-0, the fan-in applies only to
 selected modules), so CP-MODEL runs when requested explicitly. Asserted in
 `test_cp5_fan_in_includes_selected_cp_model_but_does_not_pull_it_in`.
@@ -184,7 +184,9 @@ were rejected on label gaps. `LABELS` now also has SEC file numbers (`001-36629`
 `195 pages`, `195 located spans`), which describe the Source Pack's structure, not the
 issuer. Durations (`120 days`) and other bare counts (`195 located`, `1,200`) stay figures.
 `test_probe_3_readiness_claims_pass_the_label_rule` pins the four probe texts; the table
-rows add the probe shapes and the boundary rejects.
+rows add the probe shapes and the boundary rejects. The pack's own `page:N` locator form is
+also a label (task 6.5 fix round); with the Caesars pack linked, `make replay` shows 63 `ok`,
+the seven real-pack entries included.
 
 Disclosures: (a) `deliver_cp0` raising at render is a deliberate backstop; the main path
 settles a bad claim `rejected` through `candidate_issues`. (b) A stored `[E1]`-style token
