@@ -309,6 +309,15 @@ def _tries(names: list[str], prefix: str) -> list[str]:
     return [name for name in names if pattern.fullmatch(name)]
 
 
+def step_repair_of(names: list[str], ticket_id: str, step_id: str) -> str | None:
+    """The last first try of this ticket step among the ledger ids `names`, from either cohort
+    (`<ticket>-<step>-<n>` or `proxy-<label>-<ticket>-<step>-<n>`): the try the journal rejected
+    and kept for the step's repair within the attempt (task 7.0g)."""
+    first = re.escape(f"{ticket_id}-{step_id}") + r"-[0-9]+"
+    pattern = re.compile(r"(?:proxy-[A-Za-z0-9_.-]+-)?" + first)
+    return next((name for name in reversed(names) if pattern.fullmatch(name)), None)
+
+
 def next_attempt_id(
     ledger: Ledger, writer: AttemptWriter, base: AttemptLocator, prefix: str
 ) -> tuple[str, str | None]:
@@ -406,7 +415,7 @@ def _plan(
             "retry_of_attempt_id": retry_of,
             # The dispatched try the journal rejected; its issues are this try's REPAIR block.
             "step_repair_of_attempt_id": (
-                next(reversed(_tries(known, first_try)), None) if current == 2 else None
+                step_repair_of(known, ticket_id, step.step_id) if current == 2 else None
             ),
         },
         clock=clock,

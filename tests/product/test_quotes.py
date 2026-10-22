@@ -324,7 +324,10 @@ def test_an_interleave_claim_is_true_of_the_span(words: list[str], cut: int) -> 
         return
     match = _OFFSET.search(explain(quote, text).hint)
     if match is None:
-        assert words != ["ab", "cd", "ef", "ab", "cd"]  # the example above is classified
+        # The example's quote is classified. Compare the built quote, not `words`: `cut` is
+        # transformed above, so the example list with another cut (2 builds "ab cd ef cd") has
+        # no interleaved reading and the classifier's None is honest.
+        assert quote != "ab cd ab cd"
         return
     needle, offset = normalise(quote), int(match.group(1))
     assert needle[offset] == " "

@@ -1383,9 +1383,10 @@ class Chain:
         self.context = rig.store.payload(base.steps[0].payload_sha256)
         self.requests: list[Request] = []
         self.usage = Decimal(usage)
+        self.cell = "module-00"  # the cell journal the valid payloads are built from
 
     def payload(self, step: str) -> str:
-        journal = Execution(self.rig.store.directory / "live" / "b1" / "module-00")
+        journal = Execution(self.rig.store.directory / "live" / "b1" / self.cell)
         valid = {s.step_id: s for s in journal.read().attempts[-1].steps if s.status == "valid"}
         if step == "source_readiness":
             return self.rig.review
@@ -1645,3 +1646,22 @@ def test_probe_cells_are_never_repaired(rig: Rig) -> None:
     assert rig.run(rig.argv("probe"), responder) == 0
     assert len(responder.requests) == 4  # unchanged: one CP-0 call per cell, one extra step
     assert "- Repairs dispatched: 0" in rig.report()
+
+
+def test_a_probe_cp1_rejection_leaves_the_attempt_pending_with_its_step_repair(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0g fix 1: a single-attempt driver never re-sends, so a first CP-1 rejection ends
+    the cell with the journal attempt pending and the try kept in `step_repairs` (the journal
+    no longer finishes it rejected)."""
+    rig, extraction = chain_rig(tmp_path)
+    chain = Chain(rig, extraction, [*ok_steps(*CHAIN[:2]), ("financials", BAD)])
+    chain.cell = "probe-00"
+    assert rig.run([*rig.argv("probe"), "--models", LUNA], chain) == 0
+    assert len(chain.requests) == 3  # no re-send
+    rows = step_lines(rig.report(), "probe-00")
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows][2:] == [("financials", "rejected", "-")]
+    journal = Execution(rig.store.directory / "live" / "b1" / "probe-00").read().attempts[-1]
+    assert journal.module_id == "CP-1" and journal.status == "pending"
+    assert [s.step_id for s in journal.step_repairs] == ["financials"]
+    assert [s.step_id for s in journal.steps] == ["source_context"]

@@ -25,7 +25,7 @@ from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.ledger import CapExceeded
 from deploy_vii.live.retention import RetentionError
 from deploy_vii.live.runner import COHORT, DispatchResult, StepSpec, dispatch
-from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, FakeTransport, make_rtf_key
+from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, FakeTransport, make_rtf_key, ok
 from tests.product.test_live_runner import (
     BYTES_PER_TOKEN,
     CP0,
@@ -33,6 +33,7 @@ from tests.product.test_live_runner import (
     SEED_FOR,
     Rig,
     attempt_dir,
+    cp1_rig,
     load,
     make_rig,
     reply,
@@ -462,3 +463,55 @@ def test_proxy_after_a_cap_overrun_is_refused_by_the_zero_reservation(tmp_path: 
     # Only an incomplete attempt remains (request.json, no manifest), and no ledger line.
     assert not list((rig.root / "artifacts").rglob("manifest.json"))
     assert [a.attempt_id for a in rig.ledger.state().attempts] == ["earlier"]
+
+
+def cp1_proxy(rig: Rig, step_id: str, payload: str) -> ProxyResult:
+    sources = tuple(s.source_id for s in rig.store.pack().sources)
+    return accept_proxy_payload(
+        StepSpec(step_id, "case-cp1", sources),
+        payload,
+        "claude-agent",
+        store=rig.store,
+        ticket_id=rig.ticket_id,
+        ledger=rig.ledger,
+        writer=rig.writer,
+        batch_id=rig.pool.batch_id,
+        clock=lambda: NOW,
+    )
+
+
+def test_a_proxy_step_repair_is_linked_as_a_repair_not_a_retry(tmp_path: Path) -> None:
+    """Task 7.0g fix 1: a proxy payload submitted again after the journal kept the step's first
+    rejection pending is that step's repair try: its own `-repair-<n>` id, a null
+    `retry_of_attempt_id`, `step_try` 2 and a link to the rejected try."""
+    rig, extraction = cp1_rig(tmp_path)
+    failed = cp1_proxy(rig, "financials", "not json")
+    assert failed.status == "rejected" and failed.journal is not None
+    assert failed.journal.status == "pending" and len(failed.journal.step_repairs) == 1
+    first = load(failed.directory / "manifest.json")
+    assert first["retries"] == {"step_try": 1}
+    assert first["links"]["step_repair_of_attempt_id"] is None
+    fixed = cp1_proxy(rig, "financials", extraction.model_dump_json())
+    assert fixed.status == "accepted", fixed.issues
+    assert fixed.attempt_id.startswith(f"proxy-claude-agent-{rig.ticket_id}-financials-repair-")
+    manifest = load(fixed.directory / "manifest.json")
+    assert manifest["retries"] == {"step_try": 2}
+    assert manifest["links"] == {
+        "retry_of_attempt_id": None,
+        "step_repair_of_attempt_id": failed.attempt_id,
+    }
+
+
+def test_a_proxy_repair_of_a_pool_rejection_links_the_pool_try(tmp_path: Path) -> None:
+    rig, extraction = cp1_rig(tmp_path)
+    sources = tuple(s.source_id for s in rig.store.pack().sources)
+    pooled = rig.run(
+        ChatClient(FakeTransport(ok("not json", model=LUNA))),
+        step=StepSpec("financials", "case-cp1", sources),
+    )
+    assert pooled.status == "rejected" and pooled.attempt_pending
+    fixed = cp1_proxy(rig, "financials", extraction.model_dump_json())
+    assert fixed.status == "accepted", fixed.issues
+    manifest = load(fixed.directory / "manifest.json")
+    assert manifest["links"]["step_repair_of_attempt_id"] == pooled.attempt_id
+    assert manifest["links"]["retry_of_attempt_id"] is None

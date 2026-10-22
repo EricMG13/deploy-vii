@@ -300,7 +300,9 @@ try in a new `Attempt.step_repairs` (the invalid submission with its payload has
 outside the positional `steps`, so the CP-1 workflow and envelope readers and the module's
 content hash are unchanged: the same final payloads give the same `result_sha256` with or
 without a repaired step. An empty `step_repairs` is omitted from the JSON, so stored
-`execution/5` snapshots keep their bytes and the schema is not bumped. Analytical meaning is
+`execution/5` snapshots keep their bytes and the schema is not bumped. A reader older than this
+amendment fails on a snapshot that holds `step_repairs` (an unexpected field, not the schema
+message); no older reader is deployed. Analytical meaning is
 unchanged: the same validators decide, the same issues are carried and acceptance semantics are
 untouched. A REPAIR block comes from the step's own prior try (within the attempt, first) or from
 the previous attempt, never both. CP-0's single review and CP-1's `quality` promotion step keep

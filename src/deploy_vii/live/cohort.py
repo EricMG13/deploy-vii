@@ -34,6 +34,8 @@ from deploy_vii.live.runner import (
     expected_step,
     journal_outcome,
     next_attempt_id,
+    step_repair_of,
+    step_try,
 )
 from deploy_vii.live.submission import submit_model_payload
 
@@ -148,9 +150,20 @@ def accept_proxy_payload(
         raise ValueError(f"{step.step_id} is not the next step for this ticket")
     luna = native_luna or native_luna_check(clock=clock)
     cohort = PROXY_PREFIX + agent_label
-    prefix = f"proxy-{agent_label}-{ticket_id}-{step.step_id}"
+    first_try = f"proxy-{agent_label}-{ticket_id}-{step.step_id}"
+    # A step the journal kept pending after its first rejection: this payload is its repair try
+    # (task 7.0g), with its own ids, so it is never labelled a retry of the rejected try.
+    current = step_try(attempt, step.step_id)
+    prefix = first_try if current == 1 else f"{first_try}-repair"
     base = AttemptLocator(batch_id, step.case_id, cohort, prefix)
     attempt_id, retry_of = next_attempt_id(ledger, writer, base, prefix)
+    known = [item.attempt_id for item in ledger.state().attempts]
+    links = {
+        "retry_of_attempt_id": retry_of,
+        "step_repair_of_attempt_id": (
+            step_repair_of(known, ticket_id, step.step_id) if current == 2 else None
+        ),
+    }
     locator = AttemptLocator(batch_id, step.case_id, cohort, attempt_id)
     started = clock()
     events: list[dict[str, Any]] = []
@@ -225,7 +238,8 @@ def accept_proxy_payload(
                     status,
                     issues,
                     error,
-                    retry_of,
+                    links,
+                    current,
                     started,
                     clock(),
                     payload,
@@ -272,7 +286,8 @@ def _manifest(
     status: str,
     issues: tuple[str, ...],
     error: str | None,
-    retry_of: str | None,
+    links: dict[str, str | None],
+    current: int,
     started: str,
     finished: str,
     payload: str,
@@ -314,7 +329,8 @@ def _manifest(
             "caller_supplied_payload": True,
             "native_luna": luna.to_record(),
         },
-        "links": {"retry_of_attempt_id": retry_of},
+        "links": links,
+        "retries": {"step_try": current},
         "validator": {"outcome": status, "issues": list(issues)},
         "credential": {"recorded": False, "response_scrubbed": False},
         "credit": credit.to_record() if credit else None,

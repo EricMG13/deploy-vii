@@ -105,10 +105,13 @@ from a pinned pool:
   attempt's, never both. The repair try has its own attempt ids (`<ticket>-<step>-repair-<n>`)
   and so its own retry budget (`max_retries`; `retry_of_attempt_id` links its retries, not the
   rejected try), and its manifest `links.step_repair_of_attempt_id` names the rejected try's
-  attempt id (null on a first try). `repair_count` keeps its meaning (the attempt number). Each
+  attempt id, a pool or proxy try (null on a first try); a proxy payload (`accept_proxy_payload`)
+  on a step-repair try gets the same `-repair-<n>` id, links and `retries.step_try`.
+  `repair_count` keeps its meaning (the attempt number). Each
   dispatch reserves and settles on its own. A second rejection of the step finishes the attempt
   as one rejection did before; the module-wide repair (`Execution.begin`) is then the next
-  line. Bound: two tries per step per attempt, two attempts per input set. CP-0's single
+  line. Bound: two tries per step per attempt, two attempts per input set; with retries, a step
+  can use up to 2 x (`max_retries` + 1) dispatches per attempt. CP-0's single
   review and CP-1's `quality` promotion step keep the attempt-level repair only.
 - **The `module` driver's repair loop (task 7.0e).** In `deploy-vii live module` (and only
   there; `probe`, `regression` and `canary` stay single-attempt) a step whose status is
@@ -301,6 +304,9 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
 - For `probe`, `canary` and `regression` the seed of each cell is the first seed at or after the
   base seed whose recorded draw selects the intended model, so coverage is guaranteed and the draw
   record stays honest. A cell stops at its first step that is not accepted (no automatic repair).
+  Since task 7.0g a first rejection of a CP-1 model step no longer finishes the attempt: these
+  single-attempt drivers never re-send, so the cell ends with the cell journal's attempt still
+  pending and that try kept as one `step_repairs` entry (not settled `rejected`).
 - CP-0 gate outcome (task 2.10). An accepted CP-0 whose T8 `exact_command` for the next module is
   not `Run <id>` (a CONDITIONAL or BLOCKED consumer) makes `Execution.begin` raise
   `execution.NotAuthorized`, a `ValueError` subclass; `_run_cell` catches exactly that type around
