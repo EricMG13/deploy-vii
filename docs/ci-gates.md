@@ -69,6 +69,12 @@ memory-heavy bindings tests peak near 2.3 GiB, so a single pytest process was ki
 (exit 137) in a 3.8 GiB Docker VM; give the VM more memory or run one process per test
 file with `--cov-append`.
 
+**Parallel execution.** `make coverage` runs `pytest -n auto --dist loadfile` (decision
+[0011](decisions/0011-parallel-test-execution.md)): one worker per CPU, all tests of a file on
+one worker. The 90% floor applies to the single combined TOTAL report. Debug serially with
+`-n 0` (or `PYTEST_XDIST_AUTO_NUM_WORKERS=1`); cap workers with `--maxprocesses N` where memory
+is short (the heaviest tests peak near 2.3 GiB per worker).
+
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and
 provider credentials outside hosted CI. The old tool pins in decision 0001 are

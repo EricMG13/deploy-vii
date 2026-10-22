@@ -11,6 +11,7 @@ from deploy_vii.delivery import deliver_cp0
 from deploy_vii.preparation import PreparationRequest, SourceRequest
 from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import dependencies
+from tests.product.evidence import evidence_path
 from tests.product.oracle import front_blocks
 from tests.product.test_readiness import readiness_fixture
 
@@ -120,7 +121,7 @@ def test_cp0_actual_fields_browser_evidence_and_offline_report(
     tmp_path: Path, width: int, height: int
 ) -> None:
     pack, review = readiness_fixture()
-    evidence = Path("artifacts/rendering/cp0") / tmp_path.parent.name / tmp_path.name
+    evidence = evidence_path("cp0", tmp_path)
     accepted_path = deliver_cp0(pack, review, evidence).resolve()
     (evidence / "pack.json").write_text(pack.model_dump_json(indent=2))
     errors: list[str] = []

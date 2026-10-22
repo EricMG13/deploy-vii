@@ -149,7 +149,7 @@ edit `execution.py`. M6 needs the M2 evidence, the M3 view model and the M4 stat
 
 ---
 
-## M1. FFO interest coverage and DCF (review W9; decision 0006 DC-4)
+## M1. FFO interest coverage and DCF (review W9; decision 0006 DC-4) (merged a97bf77)
 
 Scoped brief: [m1-kpi-definitions-brief.md](m1-kpi-definitions-brief.md).
 Route: `dv-sensitive`.
@@ -160,19 +160,19 @@ false limitation text is removed. DCF computes as FCF − dividends paid and DCF
 DCF / canonical total debt, each Not Calculable when an operand is missing; no KPI stays
 undefined. I1 passes. Tournament: `_canonical_frame` (financial calculation).
 
-## M2. Model runner, replay corpus and capped live probe (review C1; MC-1, MC-7, MC-10)
+## M2. Model runner, replay corpus and capped live probe (review C1; MC-1, MC-7, MC-10) (merged 5a8d36c)
 
 **Editable:** `src/deploy_vii/live/` (new), `src/deploy_vii/execution_cli.py`, `Makefile`
 (`replay`, `live-module`, `live-regression`, `live-canary`), `tests/product/test_live_*.py`,
 `tests/product/replay/` (new), `docs/development/live-runner.md`,
 `settings/project.toml` (`live_model_runner_implemented`).
 
-- [ ] **2.1 Coordinator.** Fetch the current OpenRouter API documentation through
+- [x] **2.1 Coordinator.** Fetch the current OpenRouter API documentation through
   Context7 into the brief: chat completions, usage and cost fields, the reasoning-effort
   parameter, provider routing and fallback controls, and the key/credit endpoint. Keep
   project detail out of the query. Confirm the decision 0006 DC-7 credential file exists
   without reading its value. Resolve eligibility and pricing for the three candidates.
-- [ ] **2.2 `dv-sensitive`: runner core.** Build:
+- [x] **2.2 `dv-sensitive`: runner core.** Build:
   - a credential loader that reads the DC-7 key file at dispatch time (RTF → text via
     `textutil`, whitespace stripped, `sk-or-` prefix checked) and holds it in memory only;
   - eligibility resolution;
@@ -196,25 +196,25 @@ undefined. I1 passes. Tournament: `_canonical_frame` (financial calculation).
   `test_same_seed_reproduces_draw`, `test_missing_usage_is_null_with_reason` and
   `test_credential_never_appears_in_records_or_errors`.
   Tournament: the ledger (artifact state).
-- [ ] **2.3 `dv-feature`: CLI and Make targets.** `deploy-vii live
+- [x] **2.3 `dv-feature`: CLI and Make targets.** `deploy-vii live
   {probe,module,regression,canary}` dispatches through the existing journal (`begin` /
   `submit_step` / `finish`), so payloads meet the same validators. Add the four Make
   targets from the testing regime. `regression` runs the matched three-model comparison
   in randomized order.
-- [ ] **2.4 `dv-feature`: replay (I2).** `make replay` re-validates every corpus entry
+- [x] **2.4 `dv-feature`: replay (I2).** `make replay` re-validates every corpus entry
   under `tests/product/replay/` (extracted payload, the input hashes it binds, expected
   validator outcome) offline. Test `test_replay_detects_changed_validator_outcome`.
-- [ ] **2.5 `dv-feature`: backup cohort.** Detect when credit is exhausted, check native
+- [x] **2.5 `dv-feature`: backup cohort.** Detect when credit is exhausted, check native
   Luna availability, and otherwise accept a payload produced by a coordinator-dispatched
   Claude-agent proxy (decision 0006 DC-8) through the same journal validators. Record it
   as a separate `proxy:<agent>` cohort that never pools with pool results and never
   counts as qualification. Do not substitute silently.
-- [ ] **2.6 Coordinator: probe (the first E-tier batch).** CP-0 plus the CP-1
+- [x] **2.6 Coordinator: probe (the first E-tier batch).** CP-0 plus the CP-1
   `source_context` and `financials` steps on the frozen Caesars pack, three draws per
   eligible model, cap US$10. Write `live-probe-1.md` with `dv-research`: first-pass
   validity per step and model, issue classes, cost, tokens and latency. Seed the replay
   corpus from the probe.
-- [ ] **2.7 Decision 0008 and `dv-sensitive`: contract shape.** Use the probe evidence to
+- [x] **2.7 Decision 0008 and `dv-sensitive`: contract shape.** Use the probe evidence to
   apply:
   - MC-1: Python pre-fills mechanical fields; the model returns judgments and evidence
     references only;
@@ -231,7 +231,7 @@ undefined. I1 passes. Tournament: `_canonical_frame` (financial calculation).
 - Spend: at most US$10, and the ledger reconciles to provider usage.
 - No further CP-1 contract change merges without citing the probe.
 
-## M3. Design-system re-baseline, A′ (review C3, F1–F6, W6, N4)
+## M3. Design-system re-baseline, A′ (review C3, F1–F6, W6, N4) (merged 5fe525e)
 
 **Editable:** `design/reference/`, `src/deploy_vii/assets/`, `src/deploy_vii/render.py`,
 `src/deploy_vii/display.py` (new), `src/deploy_vii/report_view.py` (new),
@@ -240,47 +240,47 @@ undefined. I1 passes. Tournament: `_canonical_frame` (financial calculation).
 `tests/product/test_{display,report_view,bindings,charts,browser,render}.py`,
 `docs/frontend-direction-c.md`.
 
-- [ ] **3.1 Coordinator (MCP-only): reference snapshots.** The design-system file is
+- [x] **3.1 Coordinator (MCP-only): reference snapshots.** The design-system file is
   already snapshotted (decision 0004). Obtain the bytes of `RBOT FP 01`–`06`,
   `RBOT Report.dc.html` and `lib/{shell,vm,vm-fp,charts}.js`, from a user export or an
   MCP read verified against the listed size and etag. Render reference screenshots of
   FP 01 and FP 02 at 1440×900 with claude-design `render_preview` into
   `design/reference/screens/`.
-- [ ] **3.2 `dv-scaffold`: tokens and fonts.** Replace `tokens.css` with the DS-01
+- [x] **3.2 `dv-scaffold`: tokens and fonts.** Replace `tokens.css` with the DS-01
   `--rb-*` block verbatim and point `app.css` at it. Embed Red Hat Display 600/700,
   Text 400/500/600 and Mono 500/600 (OFL, with recorded provenance and hashes). Remove the
   `local()` faces.
-- [ ] **3.3 `dv-feature`: display formatter.** In `display.py`, implement
+- [x] **3.3 `dv-feature`: display formatter.** In `display.py`, implement
   `format_value(amount: Decimal | None, unit_class: UnitClass, state: CellState) -> str`
   using decision 0004's precision and state table. Test
   `test_display_oracle_matches_design_system_examples` uses an independent table of
   expected strings from DS-04 and DS-07. Add a Hypothesis property: the sign and
   magnitude of the displayed value round-trip to the source at the stated precision.
-- [ ] **3.4 `dv-feature`: report view model and bindings.** In `report_view.py`, define
+- [x] **3.4 `dv-feature`: report view model and bindings.** In `report_view.py`, define
   the typed `Pathway`, `CallItem`, `Line`/`Run`, `Block`, `Cell`, `Passport` and
   `ChartSpec` (with table twin). Use report-wide `C#`/`K#`/`G#` IDs with a reverse index.
   Per-module binding maps in `bindings/` map Fact coordinates to Block/Cell.
   `validate_bindings(view, maps) -> tuple[str, ...]` rejects unbound and doubly bound
   facts. Map statuses to the design's words. Tournament: the binding validator
   (provenance).
-- [ ] **3.5 Decision 0009 and `dv-sensitive`: Pathway presets.** Define the six Pathways
+- [x] **3.5 Decision 0009 and `dv-sensitive`: Pathway presets.** Define the six Pathways
   (Credit Snapshot, Earnings Update, Relative Value, Covenant & Refinancing, Distressed &
   Restructuring, Portfolio Decision). Each maps to its requested modules and Front Page
   composition. Add `not_in_pathway` as a status distinct from `unrun`, and bump the Run
   schema to `run/2`.
-- [ ] **3.6 `dv-feature`: shell.** Build the rail (six destinations), the navigator
+- [x] **3.6 `dv-feature`: shell.** Build the rail (six destinations), the navigator
   (tally, family bars, outline, "/" search), the sticky call band in its three states,
   typed inspector passports with table twin, block anatomy and states, and dense,
   key/value and period-grid tables. Use `textContent` only and keep the CSP unchanged.
   Derive counts from the registry.
-- [ ] **3.7 `dv-feature`: charts.** Generate static SVG in Python for the kinds FP 01
+- [x] **3.7 `dv-feature`: charts.** Generate static SVG in Python for the kinds FP 01
   needs (line strip, grouped and stacked columns, waterfall, debt stack, n/a frame).
   Each has focusable marks naming series, value and provenance, plus a table twin. Add
   other kinds when an owner needs them.
-- [ ] **3.8 `dv-feature`: Credit Snapshot Front Page.** Populate it from a SYNTHETIC
+- [x] **3.8 `dv-feature`: Credit Snapshot Front Page.** Populate it from a SYNTHETIC
   fixture plus today's CP-1 candidate registers where bound. Every other block shows its
   honest state.
-- [ ] **3.9 `dv-feature`: acceptance (I3 browser).** Cover:
+- [x] **3.9 `dv-feature`: acceptance (I3 browser).** Cover:
   - structural comparison with the reference FP (block order, heads, marks, states);
   - reviewed screenshot baselines at 1440×900 (fold) and 1280×800;
   - zoom at 125% and 200%;
@@ -296,21 +296,21 @@ undefined. I1 passes. Tournament: `_canonical_frame` (financial calculation).
 **Acceptance:** rendering acceptance for the shell and the synthetic Credit Snapshot.
 Analytical: n/a.
 
-## M4. Degradation and status semantics (review C2, W1; MC-3, MC-4)
+## M4. Degradation and status semantics (review C2, W1; MC-3, MC-4) (merged c66a238)
 
 **Editable:** `src/deploy_vii/registry.py`, `src/deploy_vii/methodology.json`,
 `src/deploy_vii/execution.py`, `src/deploy_vii/contracts.py` (`Input`, `Module`),
 `src/deploy_vii/cp1_quality.py`, `tests/product/test_execution.py`,
 `tests/product/test_registry*.py`, `docs/development/execution.md`.
 
-- [ ] **4.1 `dv-research`: edge rules.** From the pinned r14 `SKILL.md` texts
+- [x] **4.1 `dv-research`: edge rules.** From the pinned r14 `SKILL.md` texts
   (`bd71346`), classify each required and optional edge: block the consumer, or continue
   restricted. Start from `methodology-adaptation.md:39-41` (CP-1A → CP-2).
-- [ ] **4.2 Decision 0007.** A blocked optional producer reaches its consumer as a
+- [x] **4.2 Decision 0007.** A blocked optional producer reaches its consumer as a
   status-carrying input with an inherited limitation. A blocked required producer
   follows its edge rule. CP-5 always runs over the selected set and reports blocked
   analysts as findings. Status separates `own_status` from inherited limitations.
-- [ ] **4.3 `dv-sensitive`: implementation.** `Input` gains `status`. `current_inputs`
+- [x] **4.3 `dv-sensitive`: implementation.** `Input` gains `status`. `current_inputs`
   admits blocked inputs per edge rule. Derive status from own findings plus material
   inherited gaps. Derive `cp1_quality` `module_status` from `own_status`. Test
   `test_blocked_optional_producer_does_not_halt_core_report` reproduces the review
@@ -321,41 +321,41 @@ Analytical: n/a.
 
 **Acceptance:** both tests pass, and decision 0007 is recorded with the per-edge table.
 
-## M5. Content-addressed journal storage (review W4)
+## M5. Content-addressed journal storage (review W4) (merged 4705995)
 
 **Editable:** `src/deploy_vii/execution.py`, `tests/product/test_execution.py`,
 `docs/development/execution.md`.
 
-- [ ] **5.1 `dv-sensitive`.** Store the pack and each payload once as blobs named by
+- [x] **5.1 `dv-sensitive`.** Store the pack and each payload once as blobs named by
   their SHA-256. Snapshots reference them by hash; parent hashes cover the small
   snapshot. Use schema `execution/5`, and reject older stores (current policy).
   Tournament: `_write`/`read` (artifact state).
-- [ ] **5.2 Coordinator measurement.** Use the hash-pinned Caesars filing to record bytes
+- [x] **5.2 Coordinator measurement.** Use the hash-pinned Caesars filing to record bytes
   written and wall time per `begin`/`submit_step`/`finish`, before and after.
 
 **Acceptance:** bytes per transition do not grow with the number of attempts, and the
 measurements are recorded.
 
-## M6. CP-1 canonical envelope and handoff (review W2, W5, W10; MC-2, MC-5)
+## M6. CP-1 canonical envelope and handoff (review W2, W5, W10; MC-2, MC-5) (merged 2e5a050)
 
-- [ ] **6.1 `dv-feature`: CP-MODEL artifact (decision 0006 DC-5).** Encode the HTML Model
+- [x] **6.1 `dv-feature`: CP-MODEL artifact (decision 0006 DC-5).** Encode the HTML Model
   destination plus the calculation JSON in `methodology.json` and the coverage map, with
   the r14 XLSX export marked deferred. CP-MODEL requires accepted CP-1 and joins CP-5's
   scope.
-- [ ] **6.2 `dv-sensitive`: shared prose runs (MC-2).** Replace free `Claim.text` with
+- [x] **6.2 `dv-sensitive`: shared prose runs (MC-2).** Replace free `Claim.text` with
   runs: text plus `{ref|unit}` figure references and `[G#]` gap references, resolved and
   formatted by Python. Numeric tokens must be resolved references. Labels for periods,
   filings and instruments are allowed, which relaxes `narrative.py:40-43`. Test
   `test_prose_runs_allow_labels_reject_bare_figures`. Tournament: the resolver
   (provenance). I2 replay shows the outcome changes on the probe corpus.
-- [ ] **6.3 `dv-sensitive`: QA lineage ceiling (MC-5).** Python derives each evidence
+- [x] **6.3 `dv-sensitive`: QA lineage ceiling (MC-5).** Python derives each evidence
   ID's maximum lineage class from its producing register; the model may only downgrade
   it. Test `test_model_cannot_upgrade_lineage`. Tournament (provenance).
-- [ ] **6.4 `dv-sensitive`: envelope and handoff.** Build the canonical Markdown envelope
+- [x] **6.4 `dv-sensitive`: envelope and handoff.** Build the canonical Markdown envelope
   (r14 ordered sections, `null` retained in the transport only), handoff verification
   and the reader. Promote CP-1 under the M4 status rules and the decision 0008 contract
   shape.
-- [ ] **6.5 `dv-feature`: CP-1 bindings.** Bind the envelope to the Model destination and
+- [x] **6.5 `dv-feature`: CP-1 bindings.** Bind the envelope to the Model destination and
   the Credit Snapshot blocks (Financials and credit metrics, capital structure, EBITDA
   adjustments, metric strip).
 

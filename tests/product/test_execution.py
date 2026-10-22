@@ -25,6 +25,7 @@ from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
 from deploy_vii.registry import _NOT_CP5_FAN_IN, plan
 from deploy_vii.render import render
+from tests.product.evidence import evidence_path
 from tests.product.test_readiness import readiness_fixture
 
 
@@ -369,7 +370,7 @@ def test_cumulative_accepted_view_suppresses_stale_facts_offline(
 ) -> None:
     store = fixture_store(tmp_path)
     ticket = accept_cp0(store)
-    evidence = Path("artifacts/rendering/execution") / tmp_path.parent.name / tmp_path.name
+    evidence = evidence_path("execution", tmp_path)
     evidence.mkdir(parents=True)
     for mode, view in (("candidate", store.view(ticket)), ("accepted", store.view())):
         (evidence / f"{mode}.json").write_text(view.model_dump_json(indent=2))

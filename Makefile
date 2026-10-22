@@ -36,7 +36,7 @@ test:
 	uv run --locked pytest tests/product -m 'not live and not private'
 
 coverage:
-	uv run --locked pytest tests/product -m 'not live and not private' --cov=deploy_vii --cov-branch --cov-report=term-missing
+	uv run --locked pytest tests/product -m 'not live and not private' -n auto --dist loadfile --cov=deploy_vii --cov-branch --cov-report=term-missing
 
 audit:
 	mkdir -p artifacts/dependency-audit

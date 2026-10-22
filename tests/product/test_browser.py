@@ -36,6 +36,7 @@ from tests.product.credit_snapshot import (
     credit_snapshot_fixture,
     credit_snapshot_view,
 )
+from tests.product.evidence import evidence_path
 from tests.product.oracle import expected_display, parity_record
 from tests.product.png import decode, different_fraction, encode
 from tests.product.test_charts import mark, twin_for
@@ -51,7 +52,7 @@ def test_offline_shell_parity_keyboard_provenance_and_reflow(
     view = synthetic_view()
     html = tmp_path / "candidate.html"
     html.write_text(render(view), encoding="utf-8")
-    evidence = Path("artifacts/rendering/shell") / tmp_path.parent.name / tmp_path.name
+    evidence = evidence_path("shell", tmp_path)
     evidence.mkdir(parents=True, exist_ok=False)
     (evidence / "candidate.html").write_bytes(html.read_bytes())
     (evidence / "view.json").write_text(view.model_dump_json(indent=2), encoding="utf-8")

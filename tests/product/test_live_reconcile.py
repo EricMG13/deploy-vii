@@ -11,7 +11,14 @@ from typing import Any
 import pytest
 
 from deploy_vii.live import cli
-from deploy_vii.live.client import CHAT_URL, GENERATION_URL, KEY_URL, Request, Response
+from deploy_vii.live.client import (
+    CHAT_URL,
+    GENERATION_URL,
+    KEY_URL,
+    Request,
+    Response,
+    TransportError,
+)
 from deploy_vii.live.ledger import AttemptRecord, Ledger
 from deploy_vii.live.reconcile import RetainedAttempt, generation_cost
 from tests.product.live_support import FAKE_KEY, ok
@@ -671,3 +678,38 @@ def test_a_deadline_hold_is_attributed_after_the_other_holds_are_looked_up(
     usage = next(a for a in state.attempts if a.adjustment and a.adjustment.generation_id is None)
     assert usage.charged_usd == Decimal("0.0123")
     assert all(a.actual_usd is not None for a in state.attempts)
+
+
+class KeyDownResponder(DeadlineResponder):
+    """The reconcile-time account-usage reading (the third `GET /api/v1/key`, after the
+    batch's before and after checks) fails at the connection level."""
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL and self.key_checks >= 2:
+            raise TransportError(f"connection reset {FAKE_KEY}")
+        return super().__call__(request)
+
+
+def test_a_connection_failure_in_the_fresh_usage_reading_stops_the_run_and_keeps_adjustments(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The lookup of the attempt with a generation id settles first and is written; the
+    deadline hold then needs the fresh usage reading, which fails: exit 2 after the report is
+    written, the hold stands and the earlier adjustment stays in the ledger."""
+    responder = KeyDownResponder(rig.review, unexplained="0.002")
+    assert rig.run(rig.argv("probe", "--draws-per-model", "2"), responder) == 0
+    (looked_up,) = responder.ids
+    responder.generations = {looked_up: generation(0.002, generation_id=looked_up)}
+    before = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == cli.EXIT_FAILED
+    state = ledger(rig).state()
+    adjusted = [a for a in state.attempts if a.adjustment is not None]
+    assert [a.adjustment.source for a in adjusted if a.adjustment] == ["generation-endpoint"]
+    assert ledger(rig).path.read_bytes().startswith(before)  # appended to, never rewritten
+    assert len(ledger(rig).path.read_bytes()) > len(before)
+    assert [a for a in state.attempts if a.actual_usd is None]  # the deadline hold stands
+    assert (rig.reports / "live-b1-reconciled.md").exists()
+    out = capsys.readouterr().out
+    assert "live reconcile failed: TransportError:" in out
+    assert "connection reset [REDACTED]" in out
+    assert "TESTONLY" not in out

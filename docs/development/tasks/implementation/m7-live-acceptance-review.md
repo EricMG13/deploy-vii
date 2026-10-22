@@ -75,6 +75,45 @@ Not verified: live model uptake of the new prompt rules and mismatch text (E1 an
 how long the account-usage counter takes to settle (the reconcile-time recheck refuses, it
 does not wait).
 
+## 7.0b Parallel product suite (decision 0011)
+
+`pytest-xdist` 3.8.0 (dev group) and `make coverage` run `-n auto --dist loadfile`; the
+`fail_under = 90` floor is unchanged and is evaluated on the one combined TOTAL line.
+Measured on one 10-CPU, 64 GB Mac in the same hour (19:00 to 21:00 BST, 22 October 2026) while
+a live E1 batch ran elsewhere on the machine, so the times are contended and relative:
+
+| Run | Wall time | Tests | Coverage |
+| --- | --- | --- | --- |
+| serial, `-n 0` (final tree) | 27m22s | 2208 passed, 14 skipped | 97.49% |
+| parallel, 10 workers, run 1 | 11m33s | 2208 passed, 14 skipped | 97.49% |
+| parallel, 10 workers, run 2 | 11m23s | 2208 passed, 14 skipped | 97.49% |
+
+An earlier serial run on the tree before the new tests (2205 passed, 26m43s) and a first
+parallel run (2206 passed, 10m58s) gave the same 97.49%. Speed-up about 2.4x on 10 workers; the
+tail is a few long files (`loadfile` cannot split a file), so `loadscope` would not help.
+Peak RSS per worker was not measured. The 14 skips are the seven `pack-absent` replay entries
+and the other counted skips, identical in both modes.
+
+Worker safety: the first second-run attempt failed 9 browser tests with `FileExistsError`.
+Cause: rendering evidence was named `<group>/<tmp_path parent>/<test>`; under xdist the parent is
+`popen-gw<n>`, which repeats on every run. Fixed at the tests (no serial marker):
+`tests/product/evidence.py` `evidence_path` names the directory by the run number, worker and
+test, used by the eight evidence sites (`test_browser`, `test_delivery`, `test_execution`,
+`test_interface_view`, `test_narrative_projection`, `test_register_view`, `test_report_tables`
+twice) and tested in `test_evidence.py`. `conftest.py` is unchanged (its session fixture uses
+`tmp_path_factory`, which is per worker). `ci.yml` is unchanged; the budget stays 40 minutes.
+
+Carried test (7.0 re-review gap A): `test_a_connection_failure_in_the_fresh_usage_reading_stops_the_run_and_keeps_adjustments`
+(`test_live_reconcile.py`). A `TransportError` on the reconcile-time `GET /api/v1/key` ends the
+run with exit 2 after the report is written; the generation-endpoint adjustment already written
+stays in the ledger (the file is appended to, never rewritten) and the deadline hold stands.
+No production change was needed.
+
+Plan: the 26 tasks of M1 to M6 are ticked and each milestone heading carries its merge sha.
+
+Not verified: the hosted run time (the next PR shows it); `-n auto` resolving to 4 on the
+hosted runner; worker memory on a 4 GiB VM (the parity script runs per file and is unaffected).
+
 ## 7.0c Configurable request deadline
 
 E1 batch `e1-cp1-2` lost the CP-1 `financials` call to the fixed 600-second request deadline,
