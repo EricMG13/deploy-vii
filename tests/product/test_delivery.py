@@ -221,6 +221,24 @@ def test_cp1a_candidate_and_accepted_delivery_are_distinct_and_hashed(tmp_path: 
         deliver_cp1a(pack, submission, target)
 
 
+def test_standalone_cp1a_delivery_takes_no_cp1_figures(tmp_path: Path) -> None:
+    """Fix round 1: only the journal binds CP-1, so a standalone delivery records no figure
+    without lineage; a figure reference there is unresolved and settles rejected."""
+    import inspect
+
+    from deploy_vii.delivery import deliver_cp1a
+    from tests.product.test_business_context import pack_fixture, submission_fixture
+
+    assert "cp1_facts" not in inspect.signature(deliver_cp1a).parameters
+    base = submission_fixture()
+    text = "Liquidity was {T4.10.liquidity.FY2025|US$ m} at FY2025."
+    rows = (base.credit_translations[0].model_copy(update={"evidence": text}),)
+    target = tmp_path / "figure"
+    deliver_cp1a(pack_fixture(), base.model_copy(update={"credit_translations": rows}), target)
+    rejected = json.loads((target / "rejected.json").read_bytes())
+    assert any("Unresolved reference: T4.10.liquidity.FY2025" in i for i in rejected["limitations"])
+
+
 def test_a_cp1a_submission_with_validator_issues_settles_rejected(tmp_path: Path) -> None:
     from deploy_vii.delivery import deliver_cp1a
     from tests.product.test_business_context import pack_fixture, submission_fixture

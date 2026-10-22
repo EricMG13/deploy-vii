@@ -4,6 +4,7 @@ registers. Synthetic data only: the fixture pack is one invented text line."""
 import json
 import random
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from deploy_vii.business_context import (
     NOT_SCORABLE,
     REGISTERS,
     REQUIRED_REGISTERS,
+    UNKEYED_REGISTERS,
     BusinessContextReport,
     BusinessContextSubmission,
     BusinessLine,
@@ -232,8 +234,10 @@ def submission_fixture(pack: PreparedPack | None = None) -> BusinessContextSubmi
                 why_it_matters="Frames the credit synthesis",
                 gap="Segment and transaction gaps",
                 required_action="Carry the CP-1A gaps forward",
+                citations=(QUOTE,) if index == 0 else (),
+                flag_topics=("Distributions",) if index == 0 else (),
             )
-            for module_id in cp1a_consumers(pack)
+            for index, module_id in enumerate(cp1a_consumers(pack))
         ),
     )
 
@@ -275,8 +279,8 @@ def test_a_valid_submission_composes_every_r14_register_with_its_columns() -> No
     assert set(REQUIRED_REGISTERS) <= tables.keys()
     assert "cp1a.cp_model_snapshot_fields" in tables  # r14's conditional table, every run
     assert tables["company_description"].rows[0].row_id == "company"
+    assert tables["T2D.6"].row_header == "Acquisition / Period"  # the first column (R1)
     assert [c.label for c in tables["T2D.6"].columns] == [
-        "Acquisition / Period",
         "Source-Supported Fact",
         "Funding Mix",
         "EBITDA / Pro Forma Basis",
@@ -317,12 +321,12 @@ def test_python_owns_ids_names_and_dates_and_categories_label_the_fact_cells() -
     assert cells["company_description.company.country"].text == (
         "Not stated in the source [Insufficient Information]"
     )
-    assert cells["ownership_register.r01.owner_class"].text == (
-        "Public shareholders [Management Language]"
-    )
+    owners = next(t for t in report.tables if t.table_id == "ownership_register")
+    assert owners.rows[0].label == "Public shareholders [Management Language]"
     assert cells["T2D.1.r01.source_document_name"].text == pack.sources[0].name
     assert cells["conflict_log.none.resolution"].status == "not_applicable"  # none logged
-    assert cells["T2D.5.none.capital_allocation_item"].status == "missing"  # an explicit gap
+    # R2 (fix round 1): a fact class the filing may lack is "none", not a gap or a limitation.
+    assert cells["T2D.5.none.source_supported_fact"].status == "not_applicable"
     assert cells["operating_model.r01.measure"].status == "missing"  # r14: null, never 0
     snapshot = {
         fact.row_id: fact for fact in report.facts if fact.table_id.startswith("cp1a.") and
@@ -332,7 +336,7 @@ def test_python_owns_ids_names_and_dates_and_categories_label_the_fact_cells() -
     assert snapshot["country"].text == "GAP"  # an Insufficient Information row is not located
     assert snapshot["sector"].text == "READY"
     assert cells["cp1a.cp_model_snapshot_fields.sector.as_of"].text == "2026-10-21"
-    assert "No capital allocation risk table rows in the CP-1A submission" in report.limitations
+    assert not any("capital allocation" in text for text in report.limitations)
     assert "Gap (Material): No business segment disclosure" in report.limitations
 
 
@@ -652,6 +656,8 @@ QUALITIES = ("High", "Medium", "Low", "Insufficient")
     ),
     st.randoms(use_true_random=False),
 )
+# No deadline: the default 200 ms fails under a loaded machine (as 7.0f did for a model test).
+@settings(deadline=None)
 def test_the_score_is_order_free_and_the_composite_is_the_worst_scored_dimension(
     specs: list[tuple[Any, str, str]], rng: random.Random
 ) -> None:
@@ -759,3 +765,211 @@ def test_every_enum_of_the_contract_reaches_the_sent_schema() -> None:
     ):
         assert f'"{value}"' in sent
     assert REGISTERS["T2D.8"].columns[5] == ("score", "Score")
+
+
+# --- fix round 1 ------------------------------------------------------------------------------
+
+
+def translation_saying(text: str) -> BusinessContextSubmission:
+    base = submission_fixture()
+    row = base.credit_translations[0].model_copy(update={"credit_implication": text})
+    return changed(base, credit_translations=(row,))
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("Noteholders would recover most of their claims", "recovery conclusion"),
+        ("A full recovery for the secured lenders is likely", "recovery conclusion"),
+        ("The term loan will recover in a sale", "recovery conclusion"),
+        ("We prefer the secured notes", "instrument recommendation"),
+        ("Analysts recommend the term loan", "instrument recommendation"),
+        ("A recommendation on the bonds is outside scope", "instrument recommendation"),
+        ("The issuer ranks among the strongest operators", "peer ranking"),
+        ("Margins sit in the top quartile", "peer ranking"),
+    ],
+)
+def test_creditor_and_instrument_conclusions_are_rejected(text: str, kind: str) -> None:
+    found = issues_of(translation_saying(text))
+    assert any(f"prohibited conclusion ({kind})" in issue for issue in found), found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Visitation will recover after the renovation",
+        "A full recovery in regional demand is not evidenced",
+        "Management would prefer the regional strategy",
+        "Weaker recovery prospects raise loss given default",
+    ],
+)
+def test_operational_recovery_and_preferences_are_not_prohibited(text: str) -> None:
+    assert issues_of(translation_saying(text)) == ()
+
+
+def test_best_in_class_is_allowed_only_as_labelled_management_language() -> None:
+    base = submission_fixture()
+    company = base.company[0].model_copy(
+        update={"text": "Management calls its casinos best-in-class"}
+    )
+    quoted = changed(
+        base, company=(company.model_copy(update={"category": "Management Language"}),
+                       *base.company[1:])
+    )  # fmt: skip
+    assert issues_of(quoted) == ()
+    interpreted = changed(base, company=(company, *base.company[1:]))
+    assert any("prohibited conclusion (peer ranking)" in i for i in issues_of(interpreted))
+
+
+def _unavailable_pack() -> PreparedPack:
+    pack = pack_fixture()
+    later = pack.sources[0].model_copy(
+        update={
+            "source_id": "later",
+            "status": "missing",
+            "sha256": None,
+            "spans": (),
+            "coverage": (),
+            "extraction_status": "blocked",
+            "limitation": "Not retrieved",
+        }
+    )
+    return PreparedPack.model_validate_json(
+        pack.model_copy(update={"sources": (*pack.sources, later)}).model_dump_json()
+    )
+
+
+def _rule_case(case: str) -> tuple[PreparedPack, BusinessContextSubmission]:
+    base = submission_fixture()
+    pack = pack_fixture()
+    translation = base.credit_translations[0]
+    if case == "translation-cites":
+        return pack, changed(base, credit_translations=(translation.model_copy(
+            update={"citations": ()}),))  # fmt: skip
+    if case == "translation-limitation":
+        return pack, changed(base, credit_translations=(translation.model_copy(
+            update={"confidence": "Insufficient Information", "citations": ()}),))  # fmt: skip
+    if case == "disclosure":
+        item = base.disclosure_items[0].model_copy(update={"available": "Partial"})
+        return pack, changed(base, disclosure_items=(item,))
+    if case == "source-cites":
+        return pack, changed(base, sources=(base.sources[0].model_copy(update={"citations": ()}),))
+    if case == "driver-measure":
+        driver = base.operating_drivers[0].model_copy(update={"status": "Disclosed"})
+        return pack, changed(base, operating_drivers=(driver,))
+    if case == "conflict-id":
+        two = (QUOTE, QUOTE.model_copy(update={"quote": "cash"}))
+        conflict = Conflict(conflict_id="9-bad", conflict="Two spans differ",
+                            materiality="Minor", downstream_impact="None for CP-1",
+                            citations=two)  # fmt: skip
+        return pack, changed(base, conflicts=(conflict,))
+    unavailable = _unavailable_pack()
+    later = base.sources[0].model_copy(update={"source_id": "later", "quality": "Low"})
+    if case == "unavailable-quality":
+        return unavailable, changed(base, sources=(base.sources[0], later))
+    assert case == "own-source"
+    other = later.model_copy(update={"quality": "Insufficient", "citations": (QUOTE,)})
+    return unavailable, changed(base, sources=(base.sources[0], other))
+
+
+@pytest.mark.parametrize(
+    ("case", "issue"),
+    [
+        ("translation-cites", "credit_translations[0]: a credit translation cites its evidence "
+         "(source and locator)"),
+        ("translation-limitation", "credit_translations[0]: an Insufficient Information "
+         "translation states its limitation"),
+        ("disclosure", "disclosure_items[0]: an available disclosure item cites where it is "
+         "disclosed"),
+        ("source-cites", "sources[0]: a source assessed above Insufficient cites its content"),
+        ("driver-measure", "operating_drivers[0]: measure is null exactly when the driver is Not "
+         "disclosed"),
+        ("unavailable-quality", "sources[1]: an unavailable source has Insufficient quality"),
+        ("own-source", "sources[1]: a source assessment cites another source"),
+        ("conflict-id", "conflicts[0]: conflict_id is letters, '_', '.', ':' or '-'"),
+    ],
+)  # fmt: skip
+def test_each_row_rule_rejects_with_its_exact_issue(case: str, issue: str) -> None:
+    pack, submission = _rule_case(case)
+    assert issue in validate_business_context(pack, submission)
+
+
+def test_a_register_row_header_is_its_first_cell_and_not_repeated_as_a_column() -> None:
+    report = business_context(pack_fixture(), submission_fixture())
+    facts = {f.fact_id: f for f in report.facts}
+    for table in report.tables:
+        if table.table_id == "cp1_references" or table.table_id in UNKEYED_REGISTERS:
+            continue
+        register = REGISTERS[table.table_id]
+        assert table.row_header == register.columns[0][1], table.table_id
+        assert [c.field for c in table.columns] == [f for f, _ in register.columns[1:]]
+        for row in table.rows:
+            assert f"{table.table_id}.{row.row_id}.{register.columns[0][0]}" not in facts
+    owners = next(t for t in report.tables if t.table_id == "ownership_register")
+    assert owners.rows[0].label == "Public shareholders [Management Language]"
+    assert facts["ownership_register.r01.control"].text == "No controlling holder is disclosed"
+    assert register_rule_issues(report) == ()
+
+
+def test_only_gaps_and_empty_required_registers_are_own_limitations(tmp_path: Path) -> None:
+    from deploy_vii.delivery import deliver_cp1a
+
+    pack, base = pack_fixture(), submission_fixture()
+    company = tuple(
+        c.model_copy(update={"category": "Documentary Fact", "citations": (QUOTE,),
+                             "text": "Synthetic country", "limitation": None})
+        if c.aspect == "country" else c
+        for c in base.company
+    )  # fmt: skip
+    required_only = BusinessContextSubmission(
+        sources=base.sources,
+        company=company,
+        business_lines=(),
+        owners=(),
+        operating_drivers=(),
+        transactions=(),
+        events=(),
+        governance_and_sponsor=(),
+        capital_allocation=(),
+        acquisitions=(),
+        disclosure_items=(),
+        credit_translations=base.credit_translations,
+        conflicts=(),
+        gaps=(),
+        consumers=tuple(c.model_copy(update={"flag_topics": ()}) for c in base.consumers),
+    )
+    assert validate_business_context(pack, required_only) == ()
+    assert business_context(pack, required_only).limitations == ()
+    deliver_cp1a(pack, required_only, tmp_path / "accepted")
+    receipt = json.loads((tmp_path / "accepted" / "complete.json").read_bytes())
+    assert receipt["status"] == "accepted"
+    gapped = changed(required_only, gaps=base.gaps)
+    assert business_context(pack, gapped).limitations == (
+        "Gap (Material): No business segment disclosure",
+    )
+
+
+def test_a_handoff_links_the_sources_and_flags_that_back_it() -> None:
+    base = submission_fixture()
+    report = business_context(pack_fixture(), base)
+    cells = {f.fact_id: f for f in report.facts}
+    assert cells["T2D.10.r01.source_flag_link"].text == (
+        "Sources: filing line:1; Flags: CP-2C-FLAG-001"
+    )
+    assert cells["T2D.10.r02.source_flag_link"].text == (
+        "No source or behaviour flag backs this handoff row"
+    )
+    unknown = base.consumers[0].model_copy(update={"flag_topics": ("Buybacks",)})
+    found = issues_of(changed(base, consumers=(unknown, *base.consumers[1:])))
+    assert "consumers[0]: no behaviour flag has the topic Buybacks" in found
+
+
+def test_snapshot_values_keep_their_category_label() -> None:
+    report = business_context(pack_fixture(), submission_fixture())
+    cells = {f.fact_id: f for f in report.facts}
+    assert cells["cp1a.cp_model_snapshot_fields.shareholders.value"].text == (
+        "Public shareholders [Management Language]"
+    )
+    assert cells["cp1a.cp_model_snapshot_fields.sector.value"].text == (
+        "Synthetic test sector [Analyst Interpretation]"
+    )

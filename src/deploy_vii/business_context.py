@@ -296,6 +296,10 @@ class Consumer(Contract):
     why_it_matters: str
     gap: str
     required_action: str
+    # What backs the handoff (T2D.10 Source / Flag Link): located spans and the `topic` of each
+    # behaviour flag it carries forward; either may be empty.
+    citations: tuple[Quote, ...]
+    flag_topics: tuple[str, ...]
 
 
 class BusinessContextSubmission(Contract):
@@ -388,15 +392,17 @@ _PLACEHOLDERS = frozenset(
     | {"unavailable"}
 )
 # The r14 prohibited conclusions of CP-1A ("No peer ranking, instrument recommendation, or
-# recovery conclusion"), as a closed phrase list matched on word boundaries, case-insensitively.
+# recovery conclusion"), as closed phrase lists matched on word boundaries, case-insensitively.
 # A mention of recovery prospects as a credit mechanic is permitted; a recovery outcome is not.
 PROHIBITED: Mapping[str, tuple[str, ...]] = {
     "peer ranking": (
         "peer ranking",
         "ranks above",
         "ranks below",
+        "ranks among",
         "ranked first",
         "ranked last",
+        "top quartile",
         "best-in-class",
         "best in class",
         "outperforms peers",
@@ -417,7 +423,6 @@ PROHIBITED: Mapping[str, tuple[str, ...]] = {
         "overweight",
         "underweight",
         "preferred instrument",
-        "prefer the",
         "instrument recommendation",
     ),
     "recovery conclusion": (
@@ -426,15 +431,37 @@ PROHIBITED: Mapping[str, tuple[str, ...]] = {
         "recovery rate",
         "recovery estimate",
         "recovery value of",
-        "full recovery",
         "recover par",
-        "would recover",
-        "will recover",
     ),
 }
+# Phrases that are a conclusion only about a creditor, claim or instrument: prohibited when an
+# instrument noun stands within four words ("the notes would recover"), never on their own
+# ("visitation will recover", "management would prefer the regional plan").
+NEAR_INSTRUMENT: Mapping[str, tuple[str, ...]] = {
+    "instrument recommendation": ("prefer the", "recommend", "recommendation"),
+    "recovery conclusion": ("full recovery", "will recover", "would recover"),
+}
+INSTRUMENT_NOUN = (
+    r"(?:creditors?|lenders?|noteholders?|bondholders?|holders?|claims?|bonds?|notes?|loans?|"
+    r"instruments?|debt|tranches?|securities)"
+)
+# r14 permits these as a labelled quote: a Management Language row may carry them.
+LABELLED_QUOTES = frozenset({"best-in-class", "best in class"})
+
+
+def _word(phrase: str) -> str:
+    return rf"(?<![A-Za-z]){re.escape(phrase)}(?![A-Za-z])"
+
+
+def _near(phrase: str) -> str:
+    gap = r"(?:\W+\w+){0,4}?\W+"
+    return rf"{_word(phrase)}{gap}{INSTRUMENT_NOUN}\b|\b{INSTRUMENT_NOUN}{gap}{_word(phrase)}"
+
+
 _PROHIBITED = tuple(
-    (kind, phrase, re.compile(rf"(?<![A-Za-z]){re.escape(phrase)}(?![A-Za-z])", re.IGNORECASE))
-    for kind, phrases in PROHIBITED.items()
+    (kind, phrase, re.compile(pattern(phrase), re.IGNORECASE))
+    for table, pattern in ((PROHIBITED, _word), (NEAR_INSTRUMENT, _near))
+    for kind, phrases in table.items()
     for phrase in phrases
 )
 
@@ -507,12 +534,13 @@ def _populated(value: str) -> bool:
     return value.strip().casefold() not in _PLACEHOLDERS
 
 
-def prohibited_issues(path: str, text: str) -> tuple[str, ...]:
-    """A text that states a prohibited CP-1A conclusion (`PROHIBITED`), one issue per phrase."""
+def prohibited_issues(path: str, text: str, *, labelled: bool = False) -> tuple[str, ...]:
+    """A text that states a prohibited CP-1A conclusion (`PROHIBITED`, `NEAR_INSTRUMENT`), one
+    issue per phrase; `labelled` (a Management Language row) admits `LABELLED_QUOTES`."""
     return tuple(
         f'{path}: prohibited conclusion ({kind}): "{phrase}"'
         for kind, phrase, pattern in _PROHIBITED
-        if pattern.search(text)
+        if not (labelled and phrase in LABELLED_QUOTES) and pattern.search(text)
     )
 
 
@@ -592,7 +620,21 @@ def _consumer_issues(pack: PreparedPack, submission: BusinessContextSubmission) 
         issues.append(
             "Judge exactly the consumers listed in the CONTEXT block: " + ", ".join(expected)
         )
+    topics = flag_ids(submission)
+    for index, item in enumerate(submission.consumers):
+        for topic in item.flag_topics:
+            if topic not in topics:
+                issues.append(f"consumers[{index}]: no behaviour flag has the topic {topic}")
     return issues
+
+
+def flag_ids(submission: BusinessContextSubmission) -> dict[str, list[str]]:
+    """The T2D.4 Flag IDs (`CP-2C-FLAG-001`, in submission order) of each behaviour flag topic."""
+    flags = [g for g in submission.governance_and_sponsor if g.kind == "behaviour_flag"]
+    ids: dict[str, list[str]] = {}
+    for index, flag in enumerate(flags, 1):
+        ids.setdefault(flag.topic, []).append(f"CP-2C-FLAG-{index:03d}")
+    return ids
 
 
 def _shape_issues(submission: BusinessContextSubmission) -> list[str]:
@@ -651,7 +693,8 @@ def validate_business_context(
                 issues.append(f"{where}: empty text")
                 continue
             issues.extend(f"{where}: {issue}" for issue in prose.issues(text, bound, names=names))
-            issues.extend(prohibited_issues(where, text))
+            labelled = getattr(row, "category", None) == "Management Language"
+            issues.extend(prohibited_issues(where, text, labelled=labelled))
             texts.append((text, scope))
     issues.extend(_shape_issues(submission))
     issues.extend(absence_issues(pack, texts))
@@ -789,19 +832,14 @@ class Register:
     table_id: str
     title: str
     columns: tuple[tuple[str, str], ...]  # (field, r14 column label)
-    # An empty register is one row of unsettled cells: `missing` (a gap, and a module
-    # limitation) or `not_applicable` ("none logged": the conflict log and the gap ledgers).
-    empty: Literal["missing", "not_applicable"] = "missing"
 
 
-def _register(
-    table_id: str, title: str, columns: str, empty: Literal["missing", "not_applicable"] = "missing"
-) -> Register:
+def _register(table_id: str, title: str, columns: str) -> Register:
     """A register from its r14 column labels, `|`-separated; each field is the label in
     snake case."""
     labels = columns.split("|")
     fields = [re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_") for label in labels]
-    return Register(table_id, title, tuple(zip(fields, labels, strict=True)), empty)
+    return Register(table_id, title, tuple(zip(fields, labels, strict=True)))
 
 
 REGISTERS: Mapping[str, Register] = {
@@ -851,13 +889,11 @@ REGISTERS: Mapping[str, Register] = {
             "gaps_ledger",
             "Gaps ledger",
             "Gap|Affected analysis|Severity|Action|Status",
-            "not_applicable",
         ),
         _register(
             "conflict_log",
             "Conflict log",
             "Conflict|Sources|Materiality|Resolution|Downstream impact",
-            "not_applicable",
         ),
         _register(
             "downstream_readiness",
@@ -931,7 +967,6 @@ REGISTERS: Mapping[str, Register] = {
             "Governance gaps ledger",
             "Gap ID|Missing Data|Why It Matters|Affected Section / Flag / Export Record|"
             "Consequence for Confidence|Required Follow-Up Source",
-            "not_applicable",
         ),
         _register(
             "cp1a.cp_model_snapshot_fields",
@@ -940,14 +975,32 @@ REGISTERS: Mapping[str, Register] = {
         ),
     )
 }
+# Registers a valid submission always fills (fix round 1, R2): empty, each is a `missing` gap
+# and an own limitation. Any other register may be empty because the filing lacks that fact
+# class (acquisitions, behaviour flags, events, conflicts...): one `not_applicable` row, no
+# limitation.
+NONEMPTY_REGISTERS = frozenset(
+    {
+        "source_classification",
+        "company_description",
+        "credit_translation",
+        "downstream_readiness",
+        "T2D.1",
+        "T2D.10",
+    }
+)
+# Every register's first r14 column is its row header (R1) except these, whose first cell must
+# stay a fact: the single issuer row of `company_description` is shown as key/value facts
+# (Issuer first); a credit translation's Evidence is where a CP-1 figure reference resolves to
+# its passport; the transactions and events are prose lines of `transaction-summary`, one line
+# per fact, so a header would vanish from it. Their rows are labelled by title and position.
+UNKEYED_REGISTERS = frozenset(
+    {"company_description", "credit_translation", "transaction_summary", "events_timeline"}
+)
 # The r14 required registers (the conditional CP-MODEL snapshot table is emitted on every run).
 REQUIRED_REGISTERS = tuple(key for key in REGISTERS if key != "cp1a.cp_model_snapshot_fields")
 CP1_REFERENCES = "cp1_references"
 COMPANY_ROW = "company"
-# Front Page and rail destinations of CP-1A's registers (bindings/cp1a.py), for T2D.10.
-DESTINATIONS = (
-    "company-operating-model; company-profile; transaction-summary; evidence; limitations"
-)
 
 
 @dataclass(frozen=True)
@@ -1012,19 +1065,27 @@ class _Composer:
         return "; ".join(dict.fromkeys(self.text(value) for value in values))
 
     def table(self, register: Register, rows: Sequence[tuple[str, Sequence[Cell]]]) -> None:
+        # The first r14 column is the row header: its cell labels the row and is not repeated
+        # as a column (fix round 1, R1); the row's other cells carry the row's citations.
+        keyed = register.table_id not in UNKEYED_REGISTERS
+        columns = register.columns[1:] if keyed else register.columns
         if not rows:
             title = register.title.lower()
-            if register.empty == "missing":
-                reason = f"No {title} rows in the CP-1A submission"
-                self.limitations.append(reason)
+            if register.table_id in NONEMPTY_REGISTERS:
+                cell = Cell(
+                    None, reason=f"No {title} rows in the CP-1A submission", status="missing"
+                )
+                self.limitations.append(str(cell.reason))
             else:
-                reason = f"None logged in the CP-1A submission ({title})"
-            cell = Cell(None, reason=reason, status=register.empty)
-            rows = (("none", tuple(cell for _ in register.columns)),)
+                reason = f"None in the CP-1A submission ({title})"
+                cell = Cell(None, reason=reason, status="not_applicable")
+            header = (Cell("None"),) if keyed else ()
+            rows = (("none", (*header, *(cell for _ in columns))),)
         table_rows: list[TableRow] = []
-        for row_id, cells in rows:
+        for position, (row_id, all_cells) in enumerate(rows, 1):
+            cells = all_cells[1:] if keyed else all_cells
             ids: list[str] = []
-            for (field, label), cell in zip(register.columns, cells, strict=True):
+            for (field, label), cell in zip(columns, cells, strict=True):
                 fact_id = f"{register.table_id}.{row_id}.{field}"
                 self.facts.append(
                     Fact(
@@ -1041,15 +1102,15 @@ class _Composer:
                     )
                 )
                 ids.append(fact_id)
-            label = cells[0].text or register.columns[0][1]
+            label = (all_cells[0].text if keyed else None) or f"{register.title} {position}"
             table_rows.append(TableRow(row_id=row_id, label=label, fact_ids=tuple(ids)))
         self.tables.append(
             ReportTable(
                 table_id=register.table_id,
                 title=register.title,
-                columns=tuple(TableColumn(field=f, label=label) for f, label in register.columns),
+                columns=tuple(TableColumn(field=f, label=label) for f, label in columns),
                 rows=tuple(table_rows),
-                row_header=register.columns[0][1],
+                row_header=register.columns[0][1] if keyed else None,
             )
         )
 
@@ -1382,7 +1443,6 @@ def _score_registers(submission: BusinessContextSubmission, out: _Composer) -> N
         )
     else:
         rule = "Fewer than four dimensions are scored, so no composite is calculated"
-        out.limitations.append(f"Sponsor / Governance Risk Level Insufficient Information: {rule}")
     rows.append(
         (
             "composite",
@@ -1434,6 +1494,16 @@ def _handoff_registers(submission: BusinessContextSubmission, out: _Composer) ->
             for c in consumers
         ),
     )
+    flags = flag_ids(submission)
+
+    def link(consumer: Consumer) -> Cell:
+        """T2D.10 Source / Flag Link (fix round 1, R3): the sources and flags backing the row."""
+        cited = out.binding.of(consumer)
+        named = [i for topic in consumer.flag_topics for i in flags.get(topic, [])]
+        parts = [f"Sources: {_trace(cited)}"] if cited else []
+        parts += [f"Flags: {', '.join(dict.fromkeys(named))}"] if named else []
+        return Cell("; ".join(parts) or "No source or behaviour flag backs this handoff row", cited)
+
     out.table(
         REGISTERS["T2D.10"],
         _numbered(
@@ -1443,7 +1513,7 @@ def _handoff_registers(submission: BusinessContextSubmission, out: _Composer) ->
                 out.said(c.handoff_item),
                 out.said(c.why_it_matters),
                 out.said(c.required_action),
-                Cell(DESTINATIONS),
+                link(c),
                 out.said(c.gap),
             )
             for c in consumers
@@ -1478,17 +1548,14 @@ def _snapshot_rows(
     as_of = out.pack.run.as_of.isoformat()
     company = {item.aspect: item for item in submission.company}
 
-    supplied: dict[str, tuple[tuple[str, ...], tuple[BaseModel, ...]]] = {
-        "sector": ((company["sector"].text,), (company["sector"],)),
-        "country": ((company["country"].text,), (company["country"],)),
-        "shareholders": (tuple(o.owner for o in submission.owners), submission.owners),
-        "transaction_summary": (
-            tuple(t.transaction for t in submission.transactions),
-            submission.transactions,
-        ),
+    # (text, row) pairs; each value keeps its row's category label, as the fact registers do.
+    supplied: dict[str, tuple[tuple[str, BaseModel], ...]] = {
+        "sector": ((company["sector"].text, company["sector"]),),
+        "country": ((company["country"].text, company["country"]),),
+        "shareholders": tuple((o.owner, o) for o in submission.owners),
+        "transaction_summary": tuple((t.transaction, t) for t in submission.transactions),
         "business_description": (
-            (company["business_description"].text,),
-            (company["business_description"],),
+            (company["business_description"].text, company["business_description"]),
         ),
     }
     rows: list[tuple[str, Sequence[Cell]]] = [
@@ -1504,8 +1571,9 @@ def _snapshot_rows(
             ),
         )
     ]
-    for field, (texts, sources) in supplied.items():
-        cited = tuple(dict.fromkeys(c for row in sources for c in out.binding.of(row)))
+    for field, pairs in supplied.items():
+        texts = [out.tagged(text, row).text or "" for text, row in pairs]
+        cited = tuple(dict.fromkeys(c for _, row in pairs for c in out.binding.of(row)))
         if not texts or not cited:
             gap = _gap(f"CP-1A has no located {field.replace('_', ' ')}")
             rows.append((field, (Cell(field), gap, Cell("GAP"), gap, gap, Cell(as_of))))
@@ -1515,7 +1583,7 @@ def _snapshot_rows(
                 field,
                 (
                     Cell(field),
-                    Cell(out.joined(texts), cited, judged=True),
+                    Cell("; ".join(dict.fromkeys(texts)), cited, judged=True),
                     Cell("READY"),
                     Cell(", ".join(dict.fromkeys(c.source_id for c in cited))),
                     Cell("; ".join(dict.fromkeys(c.locator for c in cited))),
@@ -1536,9 +1604,9 @@ def business_context(
     pack = PreparedPack.model_validate_json(pack.model_dump_json())
     submission = BusinessContextSubmission.model_validate_json(submission.model_dump_json())
     out = _Composer(pack, _bind(pack, submission), prose.bind(referencable(cp1_facts)))
-    for _, row in _rows(submission):
-        if getattr(row, "category", None) == "Insufficient Information":
-            out.limitations.append(out.text(str(getattr(row, "limitation", ""))))
+    # Own limitations (fix round 1, R2): the model's gaps rows and, in `_Composer.table`, an
+    # empty required register. An Insufficient Information row keeps its limitation in its
+    # register; a validator defect never composes.
     out.limitations.extend(f"Gap ({g.severity}): {out.text(g.gap)}" for g in submission.gaps)
     for compose in (
         _source_registers,
@@ -1609,9 +1677,10 @@ def register_rule_issues(report: BusinessContextReport) -> tuple[str, ...]:
     tables = {table.table_id: table for table in report.tables}
 
     def column(table_id: str, field: str) -> list[str | None]:
-        table = tables[table_id]
-        position = [c.field for c in table.columns].index(field)
-        return [facts[row.fact_ids[position]].text for row in table.rows]
+        rows = tables[table_id].rows
+        if field == REGISTERS[table_id].columns[0][0] and table_id not in UNKEYED_REGISTERS:
+            return [row.label for row in rows]  # the row header (R1)
+        return [facts[f"{table_id}.{row.row_id}.{field}"].text for row in rows]
 
     issues: list[str] = []
     for rule, table_id, field in (

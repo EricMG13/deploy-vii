@@ -118,6 +118,11 @@ CP1A_CATEGORY_RULE = (
     "`limitation` and may cite nothing. Every credit translation cites its evidence unless its "
     "confidence is Insufficient Information (then it states its limitation)."
 )
+CP1A_EVIDENCE_RULES = (
+    "A source assessed above Insufficient cites its content. An unavailable source is assessed "
+    "Insufficient. A source assessment cites only its own source. An available (Yes or Partial) "
+    "disclosure item cites where it is disclosed."
+)
 CP1A_CONFLICT_RULE = (
     "`conflicts`: when sources disagree, one entry quotes each conflicting span (at least two "
     "citations); it is logged, not reconciled. A `conflict_id` is letters with `_` `.` `:` or "
@@ -125,12 +130,16 @@ CP1A_CONFLICT_RULE = (
 )
 CP1A_PROHIBITED_RULE = (
     "No peer ranking, no instrument recommendation and no recovery conclusion in any text "
-    "field (for example: ranks above peers, we recommend, expected recovery); recovery "
-    "prospects as a credit mechanic are allowed."
+    "field (for example: ranks above peers, top quartile, we recommend, the notes would "
+    "recover, expected recovery); recovery prospects as a credit mechanic and an operating "
+    "recovery (visitation will recover) are allowed, and a peer claim such as best-in-class "
+    "only as a quoted Management Language row."
 )
 CP1A_CONSUMER_RULE = (
     "`consumers`: exactly one judgment for each module id listed under `consumers` in the "
-    "CONTEXT block, and no other; its title and purpose there say what it needs from CP-1A."
+    "CONTEXT block, and no other; its title and purpose there say what it needs from CP-1A. "
+    "Its `citations` quote what backs the handoff and its `flag_topics` name the `topic` of each "
+    "behaviour flag it carries forward (either may be empty)."
 )
 CP1A_ROW_RULES = (
     "`company` states business_description, country and sector once each. A behaviour flag "
@@ -202,7 +211,7 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"b. {CITATION_RULE}\n"
         f"c. {COVERAGE_RULE} This holds for every text field.\n"
         f"d. {CP1A_RUN_TEXT_RULE}\n"
-        f"e. {CP1A_CATEGORY_RULE}\n"
+        f"e. {CP1A_CATEGORY_RULE} {CP1A_EVIDENCE_RULES}\n"
         f"f. {CP1A_CONFLICT_RULE}\n"
         f"g. {CP1A_PROHIBITED_RULE}\n"
         f"h. {CP1A_CONSUMER_RULE}\n"

@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 
 from deploy_vii.business_context import (
@@ -11,7 +11,7 @@ from deploy_vii.business_context import (
     cp1a_module,
     validate_business_context,
 )
-from deploy_vii.contracts import Fact, Input, Module, ModuleView, View
+from deploy_vii.contracts import Input, Module, ModuleView, View
 from deploy_vii.execution import bounded_issues
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import prose_issues
@@ -189,12 +189,12 @@ def deliver_cp0(pack: PreparedPack, review: ReadinessReview, destination: Path) 
 
 
 def deliver_cp1a(
-    pack: PreparedPack,
-    submission: BusinessContextSubmission,
-    destination: Path,
-    cp1_facts: Sequence[Fact] = (),
+    pack: PreparedPack, submission: BusinessContextSubmission, destination: Path
 ) -> Path:
     """CP-1A as CP-0: the Python candidate composed from a valid submission, then published.
+
+    No CP-1 facts: only the journal binds a settled CP-1 as an input, so a standalone delivery
+    never records a figure without its lineage (a figure reference here is unresolved).
 
     A submission with any validator issue (citations, run text, rules, consumers) settles the
     delivery `rejected` with those issues, as the journal does; nothing is composed from it.
@@ -207,7 +207,7 @@ def deliver_cp1a(
     }
     inputs = (Input(input_id="prepared-pack", sha256=pack.content_hash()),)
     retained = ("submission.json", submission.model_dump_json(indent=2))
-    if issues := validate_business_context(pack, submission, cp1_facts):
+    if issues := validate_business_context(pack, submission):
         run = pack.run
         rejected = Module(
             run_id=run.run_id,
@@ -220,7 +220,7 @@ def deliver_cp1a(
         )
         payloads = {"rejected.json": rejected.model_dump_json(indent=2), retained[0]: retained[1]}
         return _deliver_rejected(pack, rejected, payloads, head, destination)
-    candidate = cp1a_module(business_context(pack, submission, cp1_facts), inputs, 0)
+    candidate = cp1a_module(business_context(pack, submission), inputs, 0)
     status = "restricted" if candidate.limitations else "accepted"
     selected = Module.model_validate_json(
         candidate.model_copy(update={"status": status}).model_dump_json()

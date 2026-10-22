@@ -313,12 +313,18 @@ def test_cp1_places_the_adjustment_bridge_and_kpi_register_twice_by_pathway() ->
 def test_cp1a_map_binds_every_register_and_names_its_destinations() -> None:
     from deploy_vii.bindings.cp1a import CP1A
     from deploy_vii.bindings.shipped import SHIPPED_MAPS
-    from deploy_vii.business_context import CP1_REFERENCES, DESTINATIONS, REGISTERS
+    from deploy_vii.business_context import CP1_REFERENCES, REGISTERS
 
     assert CP1A in SHIPPED_MAPS
     bound = [e.fact_coord.table_id for e in CP1A.entries]
     assert sorted(map(str, bound)) == sorted({*REGISTERS, CP1_REFERENCES})
-    assert "; ".join(dict.fromkeys(e.block_id for e in CP1A.entries)) == DESTINATIONS
+    assert list(dict.fromkeys(e.block_id for e in CP1A.entries)) == [
+        "company-operating-model",
+        "company-profile",
+        "transaction-summary",
+        "evidence",
+        "limitations",
+    ]
     by_table = {e.fact_coord.table_id: e for e in CP1A.entries}
     assert by_table["company_description"].fact_coord.row_id == "company"  # key/value rows
     assert by_table["company_description"].block_id == "company-operating-model"

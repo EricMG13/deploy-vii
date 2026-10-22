@@ -580,7 +580,10 @@ def test_collapsed_blocks_show_one_line_of_summary() -> None:
     assert blocks["relative-value"].summary == "Secured 2032s preferred."
     # Task 7.2: the shipped CP-1A map; a keyvalue row is its register row label and cells.
     profile = blocks["company-profile"].summary or ""
-    assert profile.startswith("Public shareholders [Management Language]: Public shareholders")
+    # Fix round 1 (R1): the owner is the row header and is not repeated as a cell.
+    assert profile.startswith(
+        "Public shareholders [Management Language]: No controlling holder is disclosed"
+    )
     assert all(b.summary is None for b in blocks.values() if b.state == "populated")
 
 

@@ -318,6 +318,16 @@ def test_the_business_context_step_states_each_validator_rule_once() -> None:
         assert phrase in prompts.CP1A_PROHIBITED_RULE
     for category in ("Documentary Fact", "Management Language", "Analyst Interpretation"):
         assert category in prompts.CP1A_CATEGORY_RULE
+    # Fix round 1: the four evidence rules the validator enforces, each stated once.
+    for rule in (
+        "A source assessed above Insufficient cites its content.",
+        "An unavailable source is assessed Insufficient.",
+        "A source assessment cites only its own source.",
+        "An available (Yes or Partial) disclosure item cites where it is disclosed.",
+    ):
+        assert system.count(rule) == 1, rule
+    assert "`flag_topics`" in prompts.CP1A_CONSUMER_RULE
+    assert "Management Language" in prompts.CP1A_PROHIBITED_RULE  # the labelled-quote allowance
     for step_id in ("source_readiness", "source_context", "financials"):
         assert prompts.CP1A_CONSUMER_RULE not in composed(step_id)
     # Every label the run-text rule shows is one the validator allows (the CONTEXT key aside).

@@ -57,6 +57,14 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
   restricted inputs' own and inherited lists), but only a blocked ancestor
   downgrades the status; other inherited text never does. A candidate must bind each
   input's hash and status exactly. CP-1 QA derives `module_status` from own findings.
+  What counts as an own finding is the module's rule. For CP-1A (task 7.2, fix round 1), own
+  limitations are only the model's `gaps` rows and an empty required register (company,
+  source classification, credit translation, consumers). Validator defects reject before
+  anything settles. An empty register for a fact class the filing may legitimately lack
+  (acquisitions, behaviour flags, events, conflicts and so on) is one `not_applicable` row, not
+  a limitation. An Insufficient Information row keeps its limitation in its own register. A
+  CP-1A that fills only its required registers therefore settles `accepted`
+  ([business context](business-context.md)).
 - `view()` returns a cumulative accepted View. Stale and blocked heads expose
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
@@ -325,7 +333,12 @@ bound input, CP-1's limitations then show as CP-1A's inherited limitations (show
 penalised). The
 referenced CP-1 facts are copied into CP-1A's `cp1_references` table. `deliver_cp1a` publishes
 a standalone delivery like `deliver_cp0` (receipt `cp1a-delivery/1`; a submission with any
-validator issue publishes `rejected` with those issues).
+validator issue publishes `rejected` with those issues). It takes no CP-1 facts: only the
+journal binds CP-1, so a standalone delivery cannot record a figure without its lineage.
+CP-1A settled before CP-1 binds nothing of CP-1 and stays current when CP-1 settles later;
+`begin("CP-1A")` then opens a new input set with CP-1 as context. A CP-1 finish stales a
+CP-1A that bound it (`invalidate`). Through the public journal that state needs an upstream
+change, because a settled CP-1 is not rerun on unchanged inputs.
 
 CP-MODEL's artifact (decision 0006 DC-5) is the HTML Model destination plus the calculation
 JSON of the accepted CP-1 financial model; the r14 XLSX workbook export is deferred and

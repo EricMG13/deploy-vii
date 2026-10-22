@@ -1505,6 +1505,23 @@ def test_cp1a_binds_a_settled_cp1_as_context_and_goes_stale_with_it(tmp_path: Pa
     assert next(head for head in heads if head.module_id == "CP-1A").status == "stale"
 
 
+def test_cp1a_settled_without_cp1_stays_current_and_may_be_refreshed(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    first = store.begin("CP-1")
+    store.finish(first.ticket_id, "not json", lambda _: ())  # rejected: CP-1 has no head
+    ticket = store.begin("CP-1A")
+    assert [item.input_id for item in ticket.inputs] == ["prepared-pack", "CP-0"]
+    store.finish(ticket.ticket_id, candidate_for(store, "CP-1A").model_dump_json(), lambda _: ())
+    repair = store.begin("CP-1")
+    store.finish(repair.ticket_id, candidate_for(store, "CP-1", 1).model_dump_json(), lambda _: ())
+    heads = {head.module_id: head for head in store.read().heads}
+    assert heads["CP-1"].status == "restricted"
+    assert heads["CP-1A"].status == "restricted"  # not stale: it did not bind CP-1
+    refresh = store.begin("CP-1A")  # a new input set: the settled CP-1 is now context
+    assert refresh.number == 0 and refresh.inputs[-1].input_id == "CP-1"
+
+
 def test_a_blocked_cp1_is_not_cp1a_context(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
     accept_cp0(store)

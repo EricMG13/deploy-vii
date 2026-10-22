@@ -20,7 +20,8 @@ topic leaves them null), `capital_allocation` (T2D.5), `acquisitions` (T2D.6),
 `disclosure_items` (T2D.7, `available` is r14's Yes / No / Partial / Insufficient Information),
 `credit_translations` (theme, evidence, risk mechanic, credit implication, confidence, the
 conflict ids that counter it), `conflicts` (an id and at least two citations; logged, never
-reconciled), `gaps`, `consumers` (exactly the CONTEXT list). Fact rows carry the Five
+reconciled), `gaps`, `consumers` (exactly the CONTEXT list; each with the `citations` and
+behaviour-flag `flag_topics` that back its handoff, either may be empty). Fact rows carry the Five
 Categories as a closed enum (`Documentary Fact`, `Management Language`, `Analyst
 Interpretation`, `Insufficient Information`); evidence quality, confidence, severity,
 statuses and directions are closed enums too. Citations are `{source_id, locator, quote}`
@@ -30,7 +31,7 @@ Additions beyond the plan's field list, each needed to fill an r14 column withou
 value: `sources` (source_classification, T2D.1), the category on fact rows, the owner's
 evidence quality, credit mechanic and implication (T2D.2), the acquisition period, risk
 mechanic and implication (T2D.6), the gap's why-it-matters (T2D.11), the consumer's handoff
-item and why-it-matters (T2D.10), the translation theme and countervailing conflict ids
+item, why-it-matters, citations and flag topics (T2D.10), the translation theme and countervailing conflict ids
 (T2D.9), the conflict id, and the governance row's dimension (T2D.8).
 
 ## Validator (`validate_business_context`)
@@ -46,9 +47,16 @@ limitation); a credit translation above Insufficient cites its evidence; a confl
 spans; an available disclosure cites where; company aspects exactly once; conflict ids unique,
 well formed and the only ones a translation may name; at least one fully evidenced credit
 translation (`cp1a.credit_translation_has_evidenced_row`); consumers unique and exactly the
-CONTEXT list (`cp1a.downstream_modules_unique`); no prohibited conclusion (`PROHIBITED`: peer
-ranking, instrument recommendation, recovery conclusion, a closed phrase list matched on word
-boundaries; recovery as a credit mechanic is allowed). After composition,
+CONTEXT list (`cp1a.downstream_modules_unique`); a consumer's flag topics name existing
+behaviour flags; no prohibited conclusion. The prohibited check uses closed phrase lists
+matched on word boundaries. `PROHIBITED` holds peer ranking ("ranks among", "top quartile"
+and so on), instrument recommendation ("we recommend"...) and recovery conclusion ("expected
+recovery"...) phrases. `NEAR_INSTRUMENT` holds phrases that are a conclusion only within four
+words of a creditor, claim or instrument noun: "will recover", "would recover", "full
+recovery", "prefer the", "recommend", "recommendation". So "the notes would recover" is
+rejected and "visitation will recover" passes. "best-in-class" is allowed only in a
+Management Language row, as r14's labelled quote. Recovery as a credit mechanic is allowed.
+After composition,
 `register_rule_issues` checks the four `cp1a.*` rules on the registers themselves.
 
 ## Registers (Python)
@@ -57,17 +65,30 @@ boundaries; recovery as a credit mechanic is allowed). After composition,
 ids and column labels plus the conditional `cp1a.cp_model_snapshot_fields`, and a
 `cp1_references` table copying each CP-1 fact the text references (with its citations). A fact
 row's main cell carries its category tag (` [Management Language]` and so on); a Source Trace
-is Python's `source_id locator` list. An empty register is one row of unsettled cells:
-`missing` (a gap and a module limitation) or, for the conflict log and the two gap ledgers,
-`not_applicable` ("none logged"). Python-owned values: the issuer name (run identity), the
+is Python's `source_id locator` list. The first r14 column of a register is its row header: its
+cell labels the row and is not repeated as a column (fix round 1). Four registers are
+excepted (`UNKEYED_REGISTERS`) and labelled by title and position instead.
+`company_description` keeps Issuer as a fact for the key/value rows. `credit_translation`
+keeps Evidence as a fact, where a CP-1 figure reference resolves to its passport.
+`transaction_summary` and `events_timeline` are prose lines, one per fact, so a header would
+vanish from the block. An empty register is one row: `missing` (a gap and an own
+limitation) only for the registers a valid submission always fills (`NONEMPTY_REGISTERS`:
+source classification, T2D.1, company, credit translation, downstream readiness, T2D.10).
+Every other register is `not_applicable` ("None in the CP-1A submission"), because the filing
+may lack that fact class. Python-owned values: the issuer name (run identity), the
 revenue-mix status (from the category), the gaps-ledger status (`Open`), the conflict
 resolution (`Logged, not reconciled`), T2D.4 flag ids (`CP-2C-FLAG-001`), T2D.10 tags
-(`CP-2C-HANDOFF-<module>`) and destinations, T2D.11 gap ids (`CP-1A-GAP-001`) and consequence
+(`CP-2C-HANDOFF-<module>`) and Source / Flag Link (`Sources: <source_id locator>; Flags:
+CP-2C-FLAG-001`, from the consumer's citations and flag topics, else "No source or behaviour
+flag backs this handoff row"), T2D.11 gap ids (`CP-1A-GAP-001`) and consequence
 for confidence (Critical High, Material Medium, Minor Low), and the snapshot fields (READY only
-where a located row supplies them, else GAP with unsettled value and source cells).
+where a located row supplies them, else GAP with unsettled value and source cells; a value keeps
+its row's category label).
 Claims: one per credit translation, `<evidence> Risk mechanic: ... Credit implication: ...`,
-as run text. Limitations: each Insufficient row's limitation, each gap (`Gap (<severity>):`),
-each empty `missing` register, and an Insufficient risk level.
+as run text. Own limitations (fix round 1) are only each gap (`Gap (<severity>):`) and each
+empty required register; a validator defect rejects. An Insufficient Information row keeps its
+limitation in its register, and an Insufficient risk level is stated in T2D.8. A submission
+filling only the required registers settles `accepted`.
 
 ### T2D.8: governance and sponsor score (derived, not asked of the model)
 
@@ -107,13 +128,15 @@ description, Country, Sector) and `operating_model` as a second tab of
 `transaction-summary` (owner code `Primary`); the credit translation, T2D.8, T2D.9, the
 conflict log and the remaining registers in Evidence; the gaps ledger, downstream readiness and
 T2D.11 in Limitations. `delivery.deliver_cp1a` publishes a standalone candidate and accepted
-page with receipt `cp1a-delivery/1`, or a `rejected` delivery carrying the validator issues.
+page with receipt `cp1a-delivery/1`, or a `rejected` delivery carrying the validator issues. It
+takes no CP-1 facts: only the journal binds CP-1, so a standalone delivery records no
+unlineaged figure.
 
 ## Limits
 
-- The keyvalue renderer joins a multi-column row's cells after its label, so a whole register
-  in a keyvalue tab repeats its first cell; the drivers cannot continue the company rows in one
-  list (one register per tab). The prose block shows one line per cell, with no column label.
+- The drivers cannot continue the company rows in one list (the renderer places one register
+  per tab). The prose block shows one line per cell, with no column label. A row header has
+  no passport of its own; the row's other cells carry the row's citations.
 - The prohibited-conclusion check is a phrase list; semantic review remains required.
 - The scoring rule reads the model's direction and dimension labels; it does not check them.
 - Live uptake (E1) and provider acceptance of the sent schema are the coordinator's to run.

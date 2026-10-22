@@ -251,9 +251,27 @@ Business description, Country and Sector rows; the key-findings gap label moved 
 because CP-1A's unsettled cells take earlier `G#` numbers). `deliver_cp1a` publishes a
 standalone delivery like CP-0's.
 
-Sent schema (`strict_schema(BusinessContextSubmission)`): depth 6 (3 objects), 134 properties,
-14,954 bytes, no relaxation. Prompt bound on the fixture pack: 15,365 tokens (15,412 with one
-CP-1 fact offered).
+Sent schema (`strict_schema(BusinessContextSubmission)`), after fix round 1: depth 6 (3
+objects), 136 properties, 15,141 bytes, no relaxation. Prompt bound on the fixture pack:
+15,690 tokens, or 15,737 with one CP-1 fact offered. Before the fix it was 134 properties,
+14,954 bytes and 15,365 tokens.
+
+Fix round 1 (review), in six parts:
+- A register's first r14 column is its row header and is not repeated as a cell. Four
+  registers keep it as a fact: the company row, the credit translation's Evidence (where
+  figures resolve) and the transactions and events (prose lines).
+- Own limitations are only the model's gaps and an empty required register. A legitimately
+  empty fact class is "None" (`not_applicable`), so a submission filling only the required
+  registers settles `accepted`.
+- T2D.10 Source / Flag Link carries the consumer's cited sources and behaviour-flag ids (new
+  `citations` and `flag_topics` on each consumer).
+- The prohibited phrases are narrowed to creditor and instrument forms ("visitation will
+  recover" passes; "the notes would recover" fails), with "ranks among" and "top quartile"
+  added and "best-in-class" allowed in a Management Language row.
+- The prompt states the four evidence rules it omitted.
+- `deliver_cp1a` takes no CP-1 facts.
+
+The pixel baselines did not shift: both screenshots are within tolerance.
 
 Not verified: live uptake (E1, the coordinator runs it) and provider acceptance of the sent
 schema (the coordinator runs `live schema-check --steps business_context`).
