@@ -102,6 +102,25 @@ the live probe (2.6) and decision 0008 (2.7) are the coordinator's and have not 
   id) cannot be adjusted by the current ledger, so it stands; the probe-3 reconcile and the two
   analyses copied, the probe-4 analysis linked from decision 0008. Round-1 gates are in the task
   report.
+- Task 2.11 (offline only, no model call; decision 0008 amendment, probe-5): OpenAI's HTTP 400 on
+  the `source_context` schema (Sol 5ae16ef9, pre-existing since the stored contract) is met by
+  relaxing the sent copy only (`schema.relax`: nullable enums without a null member,
+  `const` as a one-value `enum`, no `minLength`/`maxLength`; manifest `schema_relaxations`,
+  `schema_sha256` of the sent schema; Pydantic validation unchanged). `deploy-vii live
+  schema-check --models ... [--steps ...]` sends one 16-token strict call per (model, step) with no
+  reasoning parameter, reserved and settled under a US$0.05 default cap, evidence under
+  `<root>/<batch>/schema-check/`, nothing submitted; a recorded HTTP 400 for the exact (model,
+  step, sent schema hash) makes that step `ineligible: schema rejected by provider (<batch>)` in
+  later batches before any reservation. An HTTP error's detail now carries the upstream
+  provider's own message (`metadata.raw`). The seven real-pack replay entries were re-keyed to
+  the `run/2` pack 77395ae0… (`artifacts/public-case/czr-fy2025-v2`; outcomes and issues
+  unchanged). Records: probe-5 and probe-5b reports, reconciles and analysis. Gates on cae6bd1
+  with the main checkout's packs visible: `make product-check` exit 0 (1916 passed, 0 skipped,
+  coverage 98 %), `make replay` 63 passed, 0 skipped; `make check` and `make secrets` passed.
+  Confidence review: one defect fixed (the schema-check key was read after the reservation, so a
+  refused credential left it open). Tournaments (inline): the relaxation pass, the rejection
+  lookup, and `execution.current_inputs`/`NotAuthorized` and `runner.journal_outcome` as
+  adapted to `execution/5`: incumbent holds in each.
 
 Not verified: account entitlement and funded credit; live acceptance of `xhigh` or of the
 strict JSON schemas; whether a native Luna agent is entitled when `codex` is on PATH.
