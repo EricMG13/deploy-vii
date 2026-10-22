@@ -23,6 +23,7 @@ from deploy_vii.live.schema import (
     bisect_variant,
     nullable_array_fields,
     schema_shape,
+    strict_copy,
     strict_schema,
 )
 from deploy_vii.registry import modules
@@ -964,7 +965,9 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     )
     others = [rows[key] for key in rows if key != (LUNA, "source_context")]
     assert [row[2:6] for row in others] == [["accepted", "truncated", "200", "0.0000123"]] * 3
-    assert rows[(GLM, "source_context")][8] == "nullable-enum, const-to-enum, drop-length"
+    assert rows[(GLM, "source_context")][8] == (
+        "nullable-enum, const-to-enum, drop-length, nullable-array-anyof"
+    )
     readiness = rows[(GLM, "source_readiness")]
     assert readiness[8] == "none" and readiness[10:] == ["-", "-"]
     # The Keywords column: every JSON-Schema keyword of the sent schema, annotations left out.
@@ -989,7 +992,12 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     record = manifests[(LUNA, "source_context")]
     assert record["schema"] == "schema-check-attempt/1" and record["status"] == "http_error"
     assert record["http_status"] == 400 and record["hashes"]["schema_sha256"] == digest
-    assert record["schema_relaxations"] == ["nullable-enum", "const-to-enum", "drop-length"]
+    assert record["schema_relaxations"] == [
+        "nullable-enum",
+        "const-to-enum",
+        "drop-length",
+        "nullable-array-anyof",
+    ]
     assert record["journal"] == "none: schema-check submits nothing"
     # Nothing was submitted: no journal copy, the execution journal is unchanged.
     assert not (rig.store.directory / "live").exists()
@@ -1087,32 +1095,37 @@ def bisect_rows(text: str) -> list[list[str]]:
     return step_lines(section, "openai/")
 
 
-def has_one_of(model: str, step: str, schema: dict[str, Any]) -> bool:
-    return '"oneOf"' in json.dumps(schema)
+def has_pattern(model: str, step: str, schema: dict[str, Any]) -> bool:
+    return '"pattern"' in json.dumps(schema)
 
 
 def test_bisect_stops_at_the_first_accepted_variant_and_never_feeds_a_real_run(rig: Rig) -> None:
-    responder = SchemaResponder(has_one_of)
+    responder = SchemaResponder(has_pattern)
     argv = check_argv(rig, "--models", LUNA, "--steps", "narrative", "--bisect")
     assert rig.run(argv, responder) == 0
     sent = [schema for _, _, schema in responder.schemas()]
     plain = strict_schema(cli.STEPS["narrative"].schema)
-    assert sent == [plain, bisect_variant("one-of-to-any-of", plain)]  # then it stopped
+    assert sent == [plain, bisect_variant("drop-pattern", plain)]  # then it stopped
     text = rig.report("s1")
     (plain_row,) = check_rows(text).values()
     assert plain_row[2:5] == ["http_error", "http_error", "400"]
-    (row,) = bisect_rows(text)
-    assert row[1:6] == ["narrative", "one-of-to-any-of", "accepted", "truncated", "200"]
+    *unsent, row = bisect_rows(text)
+    # Since round 3 the sent narrative schema has no oneOf and no format: nothing to rewrite.
+    assert [r[2:4] for r in unsent] == [
+        ["one-of-to-any-of", "not applicable"],
+        ["drop-format", "not applicable"],
+    ]
+    assert row[1:6] == ["narrative", "drop-pattern", "accepted", "truncated", "200"]
     digest = hashlib.sha256(
         json.dumps(sent[1], sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     assert row[8] == digest
-    assert f"- {LUNA} narrative: first accepted variant: one-of-to-any-of" in text
+    assert f"- {LUNA} narrative: first accepted variant: drop-pattern" in text
     assert "- Bisect: yes" in text
     root = rig.root / "artifacts" / "model-tests"
     (variant_manifest,) = (root / "s1" / "schema-bisect").rglob("manifest.json")
     record = json.loads(variant_manifest.read_text())
-    assert record["schema"] == "schema-bisect-attempt/1" and record["variant"] == "one-of-to-any-of"
+    assert record["schema"] == "schema-bisect-attempt/1" and record["variant"] == "drop-pattern"
     # Round-1 re-review: the relaxations named are the base schema's, and the record says so.
     plain_digest = hashlib.sha256(schema_text(cli.STEPS["narrative"].schema).encode()).hexdigest()
     assert record["variant_base_schema_sha256"] == plain_digest
@@ -1138,19 +1151,30 @@ def test_bisect_reports_none_accepted_and_skips_variants_that_change_nothing(rig
         ("open-object", "not applicable"),
         ("any-of-null-to-type-union", "http_error"),
         ("split-mixed-types", "not applicable"),
-        ("nullable-array-to-anyof", "http_error"),
-        ("nullable-array-required", "http_error"),
+        # Round 3 sends nullable arrays as `anyOf`: these two have nothing left to change.
+        ("nullable-array-to-anyof", "not applicable"),
+        ("nullable-array-required", "not applicable"),
         ("anyof-enum-null-to-type-union", "http_error"),
         ("strip-titles", "http_error"),
         ("inline-refs", "http_error"),
         ("all", "http_error"),
     ]
-    assert len(responder.requests) == 11  # the plain check and ten variants
+    assert len(responder.requests) == 9  # the plain check and eight variants
     assert f"- {LUNA} source_context: none accepted" in text
-    # The last column names the fields a variant that changes the reply's meaning touches.
-    touches = {r[2]: r[10] for r in bisect_rows(text)}
-    fields = nullable_array_fields(strict_schema(cli.STEPS["source_context"].schema))
-    assert "SourceContext.event_scan_citations" in fields
+
+
+def test_the_touches_column_names_the_fields_that_dropping_null_changes(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Touches column on a base schema that still has `type: [array, null]` nodes (as
+    before round 3): the bisect's base is swapped for the unrelaxed strict copy."""
+    monkeypatch.setattr(cli, "strict_schema", strict_copy)
+    responder = SchemaResponder({(LUNA, "source_context")})
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context", "--bisect")
+    assert rig.run(argv, responder) == 0
+    touches = {r[2]: r[10] for r in bisect_rows(rig.report("s1"))}
+    fields = nullable_array_fields(strict_copy(cli.STEPS["source_context"].schema))
+    assert "SourceContext.event_scan_citations" in fields and len(fields) == 8
     assert touches["nullable-array-required"] == ", ".join(fields)
     assert {value for name, value in touches.items() if name != "nullable-array-required"} == {"-"}
 

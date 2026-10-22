@@ -545,6 +545,25 @@ pass over the strict copy (`strict_schema = relax(strict_copy)`):
 | `nullable-enum` | `{"type": ["string", "null"], "enum": ["a", "b", null]}` | `{"type": ["string", "null"], "enum": ["a", "b"]}` (OpenAI's documented shape) |
 | `const-to-enum` | `{"const": "v", "type": "string"}` | `{"enum": ["v"], "type": "string"}` |
 | `drop-length` | `minLength` / `maxLength` | dropped |
+| `nullable-array-anyof` (round 3) | `{"type": ["array", "null"], "items": X, "maxItems": n}` | `{"anyOf": [{"type": "array", "items": X, "maxItems": n}, {"type": "null"}]}` (annotations stay outside) |
+| `oneof-anyof` (round 3) | `{"oneOf": [...], "discriminator": {...}}` | `{"anyOf": [...]}` (no discriminator) |
+
+Round 3 rests on two live bisects of the sent schema (`schema-check --bisect`, batches
+`schema-2026-10-22-bisect` and `schema-2026-10-22-bisect2`). OpenAI (GPT-6.1 Sol) accepted
+`narrative` only once `oneOf` + `discriminator` became `anyOf` ("'oneOf' is not permitted"). It
+rejected `source_context`, `financials` and `readiness` under every first-round variant, `all`
+included. It accepted all three under `nullable-array-to-anyof` and rejected every other second-round
+variant. So OpenAI refuses a nullable array written as a `type` union inside a strict schema and
+accepts the same array as an `anyOf` with a null branch. Both rewrites are lossless. All 31
+nullable arrays in the CP-1 step schemas are fields whose stored default is `[]` (`normalise`
+turns a null back into `[]`). The reply is validated by the stored Pydantic contract, whose
+discriminated unions are unchanged. A tag stays a required one-value enum in each branch, so an
+`anyOf` branch is still unambiguous. A node with both `oneOf` and `anyOf` cannot be relaxed and
+raises `ValueError`. Records:
+[live-schema-2026-10-22-bisect.md](tasks/implementation/live-schema-2026-10-22-bisect.md),
+[live-schema-2026-10-22-bisect2.md](tasks/implementation/live-schema-2026-10-22-bisect2.md).
+Since round 3, the bisect variants `one-of-to-any-of`, `nullable-array-to-anyof` and
+`nullable-array-required` find nothing to change in the sent schemas, and are `not applicable`.
 
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. A shape the pass cannot
 express (a null `const`, `const` beside `enum`, a null enum member whose type does not admit null)
@@ -555,8 +574,8 @@ computed on the sent schema (so it no longer names `const`, `minLength` or `maxL
 `schema_sha256` hashes the sent schema, which the prompt prints. Validation is unchanged:
 `normalise` walks the original schema and the Pydantic contracts enforce every length, constant
 and enum on the reply, so a dropped constraint is still a validator issue (and MC-7 repair input).
-The model no longer reads the length limits in the schema text. Whether OpenAI accepts the relaxed
-schema, and which construct it refused, is what `live schema-check` (below) answers.
+The model no longer reads the length limits in the schema text. A plain `live schema-check` on
+Sol for every step (below) confirms whether the round-3 schema is accepted.
 
 ## Errors inside a 200 body (task 2.7a)
 

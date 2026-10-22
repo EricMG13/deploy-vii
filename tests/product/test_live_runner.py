@@ -1281,7 +1281,12 @@ def test_manifest_records_the_relaxations_and_hashes_the_schema_actually_sent(
     result = rig.run(ChatClient(transport), step=step)
     assert result.status == "accepted", result.issues
     manifest = load(result.directory / "manifest.json")
-    assert manifest["schema_relaxations"] == ["nullable-enum", "const-to-enum", "drop-length"]
+    assert manifest["schema_relaxations"] == [
+        "nullable-enum",
+        "const-to-enum",
+        "drop-length",
+        "nullable-array-anyof",
+    ]
     unverified = manifest["schema_keywords_unverified"]
     assert unverified and not {"const", "minLength", "maxLength"} & set(unverified)
     sent = json.loads(transport.requests[0].body or b"{}")["response_format"]["json_schema"]

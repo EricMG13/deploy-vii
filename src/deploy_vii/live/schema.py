@@ -15,6 +15,10 @@ keyword named) while accepting the readiness schema, and the three constructs on
 one carried are rewritten on the way out: a nullable enum lists its values without null and is
 nullable through its `type` (OpenAI's documented shape; "nullable-enum"), `const: v` becomes
 `enum: [v]` ("const-to-enum"), and `minLength`/`maxLength` are dropped ("drop-length").
+Round 3 (bisects schema-2026-10-22-bisect and -bisect2, OpenAI): a nullable array is sent as
+`anyOf: [{type: "array", items, ...bounds}, {"type": "null"}]` instead of a `type` union
+("nullable-array-anyof"), and `oneOf` + `discriminator` as `anyOf` ("oneof-anyof"); both are
+lossless, because every such array defaults to `[]` and the stored contract keeps its tags.
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
 widens what the provider is asked to enforce: the reply is still validated by the unchanged
 Pydantic contract, so every dropped constraint is still enforced on the way in.
@@ -57,7 +61,13 @@ UNVERIFIED = frozenset(
 )
 _REF = "#/$defs/"
 # Relaxations of the sent copy, in the order the manifest lists them (see the module docstring).
-RELAXATIONS = ("nullable-enum", "const-to-enum", "drop-length")
+RELAXATIONS = (
+    "nullable-enum",
+    "const-to-enum",
+    "drop-length",
+    "nullable-array-anyof",
+    "oneof-anyof",
+)
 _LENGTH = frozenset({"minLength", "maxLength"})
 # Keys whose values are data (names, constants, defaults), never schema nodes.
 _DATA = frozenset({"enum", "const", "required", "default", "discriminator"})
@@ -179,7 +189,11 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
         if not _nullable_enum(node):
             raise ValueError(f"schema node cannot be relaxed (null enum, no null type): {node}")
         node["enum"] = [value for value in node["enum"] if value is not None]
-    return node
+    if "oneOf" in node and "anyOf" in node:
+        raise ValueError(f"schema node cannot be relaxed (oneOf beside anyOf): {node}")
+    # Round 3 (bisects schema-2026-10-22-bisect and -bisect2): OpenAI refuses a nullable array
+    # written as a type union and accepts the `anyOf` form; it refuses `oneOf` ("narrative").
+    return _array_to_any_of(_one_of_to_any_of(node))
 
 
 Rule = Callable[[dict[str, Any]], dict[str, Any]]
@@ -235,6 +249,10 @@ def relaxations(schema: dict[str, Any]) -> list[str]:
             found.add("const-to-enum")
         if _LENGTH & set(node):
             found.add("drop-length")
+        if _nullable_array(node):
+            found.add("nullable-array-anyof")
+        if "oneOf" in node:
+            found.add("oneof-anyof")
     return [name for name in RELAXATIONS if name in found]
 
 
@@ -514,8 +532,9 @@ def schema_shape(schema: dict[str, Any]) -> str:
 
 RELAXATIONS_BASIS = (
     "nullable-enum is named by shape: wherever the sent schema has an enum under a type that "
-    "admits null (strict_copy already builds that shape); const-to-enum and drop-length are "
-    "named where the strict copy had const, minLength or maxLength"
+    "admits null (strict_copy already builds that shape); const-to-enum, drop-length, "
+    "nullable-array-anyof and oneof-anyof are named where the strict copy had const, "
+    "minLength or maxLength, a type: [array, null] node with items, or oneOf"
 )
 
 

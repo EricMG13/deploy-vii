@@ -77,7 +77,12 @@ def test_defaulted_fields_become_nullable_and_required_fields_do_not() -> None:
     }
     assert root["pack_sha256"]["type"] == "string"  # required: not made nullable
     consumer = transformed["$defs"]["ConsumerReadiness"]["properties"]
-    assert consumer["limitations"]["type"] == ["array", "null"]
+    # The strict copy makes a defaulted array nullable through its type; the sent copy says the
+    # same as an `anyOf` (task 2.11 round 3, OpenAI's accepted form).
+    copied = strict.strict_copy(ReadinessReview)["$defs"]["ConsumerReadiness"]["properties"]
+    assert copied["limitations"]["type"] == ["array", "null"]
+    assert consumer["limitations"]["anyOf"][1] == {"type": "null"}
+    assert consumer["limitations"]["anyOf"][0]["type"] == "array"
     assert consumer["missing_source"]["anyOf"].count({"type": "null"}) == 1
     claim = transformed["$defs"]["Claim"]["properties"]
     assert {"type": "null"} in claim["limitation"]["anyOf"]
@@ -167,6 +172,7 @@ def test_source_context_sent_schema_keeps_every_other_constraint() -> None:
         "nullable-enum",
         "const-to-enum",
         "drop-length",
+        "nullable-array-anyof",
     ]
 
 
@@ -188,6 +194,54 @@ def test_relaxation_is_idempotent_and_pure(step: str) -> None:
     assert json.dumps(strict_copy, sort_keys=True) == snapshot  # the input is not mutated
     assert strict.relax(once) == once == strict.strict_schema(model)
     assert model.model_json_schema() == before
+
+
+# --- round 3: the forms the bisects showed OpenAI accepts (schema-2026-10-22-bisect, -bisect2)
+
+
+@pytest.mark.parametrize("step", sorted(SCHEMAS))
+def test_sent_schemas_have_no_nullable_array_type_union_and_no_one_of(step: str) -> None:
+    sent = strict.strict_schema(SCHEMAS[step])
+    assert not [n for n in nodes(sent) if isinstance(n.get("type"), list) and "array" in n["type"]]
+    assert not {"oneOf", "discriminator"} & sent_keys(sent)
+    assert strict.relax(sent) == sent
+
+
+def test_relaxations_name_the_nullable_array_and_one_of_rewrites() -> None:
+    assert strict.RELAXATIONS == (
+        "nullable-enum",
+        "const-to-enum",
+        "drop-length",
+        "nullable-array-anyof",
+        "oneof-anyof",
+    )
+    assert strict.schema_relaxations(SCHEMAS["narrative"]) == [
+        "const-to-enum",
+        "drop-length",
+        "nullable-array-anyof",
+        "oneof-anyof",
+    ]
+    assert "nullable-array-anyof" in strict.schema_relaxations(SCHEMAS["readiness"])
+    assert "nullable-array-anyof" in strict.schema_relaxations(SCHEMAS["financials"])
+
+
+def test_a_nullable_array_is_sent_as_an_any_of_and_one_of_without_discriminator() -> None:
+    node = {"type": ["array", "null"], "items": {"type": "string"}, "maxItems": 3, "title": "A"}
+    assert strict.relax(node) == {
+        "title": "A",
+        "anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 3}, {"type": "null"}],
+    }
+    assert strict.relaxations(node) == ["nullable-array-anyof"]
+    union = {
+        "oneOf": [{"$ref": "#/$defs/A"}, {"$ref": "#/$defs/B"}],
+        "discriminator": {"propertyName": "kind", "mapping": {"a": "#/$defs/A"}},
+        "title": "U",
+    }
+    assert strict.relax(union) == {
+        "anyOf": [{"$ref": "#/$defs/A"}, {"$ref": "#/$defs/B"}],
+        "title": "U",
+    }
+    assert strict.relaxations(union) == ["oneof-anyof"]
 
 
 def test_a_nullable_enum_that_still_lists_null_loses_it_and_the_rest_is_kept() -> None:
@@ -237,7 +291,7 @@ def test_bisect_variants_run_in_the_coordinators_order() -> None:
 
 
 def test_the_one_of_variant_sends_the_narrative_unions_as_any_of_without_discriminator() -> None:
-    sent = strict.strict_schema(SCHEMAS["narrative"])
+    sent = strict.strict_copy(SCHEMAS["narrative"])  # what was sent before round 3
     snapshot = json.dumps(sent, sort_keys=True)
     variant = strict.bisect_variant("one-of-to-any-of", sent)
     keywords = set(strict.schema_keywords(sent))
@@ -382,7 +436,7 @@ def test_the_nullable_array_variant_sends_an_any_of_with_the_array_bounds_inside
     assert out["s"] == nullable_arrays()["properties"]["s"]  # not an array
     assert out["b"] == nullable_arrays()["properties"]["b"]  # not nullable
     sent = strict.bisect_variant(
-        "nullable-array-to-anyof", strict.strict_schema(SCHEMAS["source_context"])
+        "nullable-array-to-anyof", strict.strict_copy(SCHEMAS["source_context"])
     )
     assert not [n for n in nodes(sent) if isinstance(n.get("type"), list) and "array" in n["type"]]
 
@@ -392,7 +446,8 @@ def test_the_required_array_variant_drops_null_and_names_the_fields_it_touches()
     assert out["a"] == {"type": "array", "items": {"type": "string"}, "maxItems": 3, "title": "A"}
     assert out["s"] == nullable_arrays()["properties"]["s"]
     assert strict.nullable_array_fields(nullable_arrays()) == ["(root).a"]
-    readiness = strict.strict_schema(SCHEMAS["readiness"])
+    readiness = strict.strict_copy(SCHEMAS["readiness"])  # what was sent before round 3
+    assert strict.nullable_array_fields(strict.strict_schema(SCHEMAS["readiness"])) == []
     assert set(strict.nullable_array_fields(readiness)) == {
         "(root).consumers",
         "ConsumerAssessment.requirements",

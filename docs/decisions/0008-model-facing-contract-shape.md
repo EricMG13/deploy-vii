@@ -219,7 +219,17 @@ found OpenAI `narrative` accepted once `oneOf` became `anyOf`, Google `source_co
 nullable arrays (as an `anyOf`, or required), enum-or-null unions, titles and inlined references,
 and reports each schema's resolved depth (`financials` 12 nodes, 7 objects) and property count.
 Under the user's 22 October 2026 instruction, the relaxation finally chosen must be accepted by
-OpenAI (GPT-6.1 Sol); the Grok and Google rows are information only. Every pool change is to be
+OpenAI (GPT-6.1 Sol); the Grok and Google rows are information only. The second bisect
+(schema-2026-10-22-bisect2, US$0.0175,
+[live-schema-2026-10-22-bisect2.md](../development/tasks/implementation/live-schema-2026-10-22-bisect2.md))
+found that OpenAI accepts `source_context`, `financials` and `readiness` only under
+`nullable-array-to-anyof`, and rejects every other variant. OpenAI refuses a nullable array
+written as a `type` union (`type: ["array", "null"]`) inside a strict schema, and accepts the
+same array as `anyOf: [{type: "array", items, minItems/maxItems}, {type: "null"}]`. Round 3
+therefore adds two relaxations to the sent copy: `nullable-array-anyof` (that rewrite) and
+`oneof-anyof` (`oneOf` + `discriminator` sent as `anyOf`, the narrative case). Both are lossless.
+Every nullable array in these schemas defaults to `[]`, and `normalise` maps null back to `[]`.
+Replies are validated by the stored contract, whose discriminated unions keep their tags. Every pool change is to be
 checked this way before a CP-0 call. M7 backlog from the analysis (§6): a page-boundary hint for
 a quote that continues on the next page; the 60-character truncation in quote-mismatch text;
 the `hyphen-wrap` label printed only when the wrap is relevant; a check on free-text `period`
@@ -230,8 +240,8 @@ fields; a no-response column in the cohort tables. Records:
 [live-probe-5b-reconciled.md](../development/tasks/implementation/live-probe-5b-reconciled.md)
 and the analysis,
 [live-probe-5-analysis.md](../development/tasks/implementation/live-probe-5-analysis.md). Not
-verified: which construct OpenAI refuses in the relaxed `source_context`, `financials` and
-`readiness` schemas; the coordinator's round-2 `--bisect` run is to answer it.
+verified: OpenAI's acceptance of the round-3 sent schemas as a whole (the coordinator's plain
+`schema-check` on Sol for every step is to confirm it).
 
 ## Evidence
 
