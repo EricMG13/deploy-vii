@@ -52,7 +52,8 @@ credential_handling = "read-at-dispatch-in-memory-never-logged"
 selection = "uniform-random-among-eligible"
 record_selection_seed = true
 default_effort = "high"
-complex_effort = "xhigh"
+# Decision 0005 amendment (user decision, 22 Oct 2026): every run uses GPT-6.1 Sol at high.
+complex_effort = "high"
 unsupported_xhigh = "use-supported-high-and-record-mapping"
 unavailable_route = "record-ineligible-before-draw"
 retries = "same-model-new-attempt"
@@ -70,21 +71,14 @@ recurring_caps_usd = { e1_per_case = 3, e2_per_milestone = 15, e3_per_week = 3 }
 cumulative_ceiling_usd = 200
 no_credit_fallback = "native-luna-else-labelled-claude-agent-proxy-cohort"
 
+# The catalog-rule pool (used when `--models` is absent) is the user-named set of decision 0005
+# (amendment, 22 Oct 2026): currently GPT-6.1 Sol alone, so the draw is trivial. The earlier
+# Luna / GLM 5.3 Flash / latest-DeepSeek pool is superseded; its stored outputs are retained.
 [[model_tests.candidates]]
-key = "luna"
-model_id = "openai/gpt-6-luna"
+key = "sol"
+model_id = "openai/gpt-6.1-sol"
 resolution = "explicit-version"
-
-[[model_tests.candidates]]
-key = "glm"
-model_id = "z-ai/glm-5.3-flash"
-resolution = "explicit-version"
-
-[[model_tests.candidates]]
-key = "deepseek"
-model_id = "deepseek/deepseek-v4.1-flash-1017"
-resolution = "refresh-latest-suitable-deepseek-before-batch"
-catalog_checked = "2026-10-20"
+catalog_checked = "2026-10-21"
 
 [frontend]
 direction = "C-Workbench"

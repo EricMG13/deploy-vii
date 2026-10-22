@@ -12,7 +12,7 @@ import pytest
 from deploy_vii.live.catalog import Catalog, CatalogError, resolve_effort
 from deploy_vii.live.client import Request, Response
 from deploy_vii.live.draw import NoEligibleModel, draw
-from tests.product.live_support import CANDIDATES, FIXTURES, fixture_pool
+from tests.product.live_support import CANDIDATES, FIXTURES, fixture_catalog, fixture_pool
 
 DEEPSEEK_RULE_WORDS = ("newest", "created", ":batch", "exp", "reasoning")
 PINNED_INDEXES = [1, 0, 0, 0, 0, 2, 2, 1]  # random.Random(seed).randrange(3), seeds 0..7
@@ -153,6 +153,21 @@ def test_same_seed_reproduces_draw() -> None:
     assert draw(pool, 1) != draw(pool, 2) or draw(pool, 1) != draw(pool, 3)
     with pytest.raises(KeyError, match="not in the pinned pool"):
         pool.candidate("unknown/model")
+
+
+def test_a_single_model_pool_draws_trivially_and_says_so() -> None:
+    """Decision 0005 amendment: the random draw applies only to a pool of more than one model;
+    with one, every seed selects it and the record names the draw trivial."""
+    pool = fixture_catalog().pin("b", CANDIDATES[:1])
+    records = [draw(pool, seed).to_record() for seed in (0, 1, 20261022)]
+    assert {record["slug"] for record in records} == {"openai/gpt-6-luna"}
+    assert {record["algorithm"] for record in records} == {"trivial-single-model-pool"}
+    assert [record["seed"] for record in records] == [0, 1, 20261022]  # still recorded
+    assert all(
+        record["index"] == 0 and record["pool"] == ["openai/gpt-6-luna"] for record in records
+    )
+    # Two or more models: the seeded draw, unchanged.
+    assert draw(fixture_catalog().pin("b", CANDIDATES[:2]), 0).algorithm == "python-random-MT19937"
 
 
 def test_draw_with_no_eligible_model_blocks() -> None:

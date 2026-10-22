@@ -7,6 +7,9 @@ from typing import Any
 from deploy_vii.live.catalog import PinnedPool
 
 ALGORITHM = "python-random-MT19937"
+# Decision 0005 amendment (22 Oct 2026): the random draw applies only to a pool of more than one
+# model; a one-model pool selects that model for every seed and records the draw as trivial.
+TRIVIAL = "trivial-single-model-pool"
 
 
 class NoEligibleModel(Exception):
@@ -36,11 +39,14 @@ class Draw:
 
 
 def draw(pool: PinnedPool, seed: int) -> Draw:
-    """Pick one eligible member with equal probability; record everything before dispatch."""
+    """Pick one eligible member with equal probability; record everything before dispatch.
+
+    A pool of one model is not drawn from (`TRIVIAL`); the seed is still recorded."""
     eligible = tuple(item.slug for item in pool.eligible)
     if not eligible:
         raise NoEligibleModel("no eligible model in the pinned pool; the test stays blocked")
-    index = random.Random(seed).randrange(len(eligible))
+    trivial = len(pool.candidates) == 1
+    index = 0 if trivial else random.Random(seed).randrange(len(eligible))
     return Draw(
         pool=tuple(item.slug for item in pool.candidates),
         eligible=eligible,
@@ -49,7 +55,7 @@ def draw(pool: PinnedPool, seed: int) -> Draw:
             for item in pool.candidates
             if not item.eligible
         ),
-        algorithm=ALGORITHM,
+        algorithm=TRIVIAL if trivial else ALGORITHM,
         seed=seed,
         index=index,
         slug=eligible[index],

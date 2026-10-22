@@ -353,9 +353,15 @@ def test_scrub_key_never_alters_words_that_merely_contain_the_key_prefix() -> No
 
 def test_project_settings_declare_the_runner_contract() -> None:
     settings = load_settings(Path("settings/project.toml"))
-    assert [item.key for item in settings.candidates] == ["luna", "glm", "deepseek"]
-    assert settings.candidates[2].resolution == "refresh-latest-suitable-deepseek-before-batch"
-    assert settings.default_effort == "high" and settings.complex_effort == "xhigh"
+    # Decision 0005 amendment (user decision, 22 Oct 2026): the pool is the user-named set,
+    # currently GPT-6.1 Sol alone, at high for every step.
+    (sol,) = settings.candidates
+    assert (sol.key, sol.model_id, sol.resolution) == (
+        "sol",
+        "openai/gpt-6.1-sol",
+        "explicit-version",
+    )
+    assert settings.default_effort == "high" and settings.complex_effort == "high"
     assert str(settings.caps.cumulative_ceiling) == "200"
     assert str(settings.caps.e1_per_case) == "3"
     assert settings.artifact_root.name == "model-tests"

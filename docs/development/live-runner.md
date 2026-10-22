@@ -35,7 +35,7 @@ from a pinned pool:
 | `settings.py` | Reads `[model_tests]` from `settings/project.toml` with `tomllib` (candidates, caps, artifact root, `credential_file`, `credential_token_index`: an integer >= 1, default 1 when absent; 0, negatives, booleans, floats and strings are refused; `prompt_bytes_per_token_lower_bound`: required, a positive finite number, no default). |
 | `credential.py` | `load_key` (wraps `load_key_with_note`, which returns a `LoadedKey`): RTF to text with `textutil` (fails closed without it), then keeps one whole `sk-or-` token from any surrounding label, prose, quotes, blank lines, BOM or CRLF; a repeated token counts once. `load_key_with_note(path, index=1)` returns the distinct token at that 1-based position in the converted text's order; `index` is `[model_tests].credential_token_index`, passed as a parameter through `dispatch(..., key_index=)` and `ChatClient(..., key_index=)`. An index beyond the distinct tokens fails closed ("credential_token_index N but only M key-shaped tokens"; a repeated token is one), and an index that is not an integer >= 1 is refused before the file is read. A refused key (for example a 401) is never retried with another token: there is no automatic fallback. `LoadedKey.note()` gives `{"key_tokens_found": M, "key_token_used": N}`, which the runner adds to the manifest's `credential` block and the key-status probe to the credit record (`key_file`), only when M > 1. Refuses an empty file or no token ("no key-shaped token among N non-empty lines"); messages and notes carry counts only, never file text; a `textutil` failure, timeout or non-UTF-8 output is a `CredentialError` with no chained cause. Documented fail-open: a key broken inside by an invisible format character or a line break yields a truncated token, which is sent (a 401 or a refused key check follows; nothing leaks or is spent). `scrub_key`, `redact`. |
 | `catalog.py` | `Catalog` (fetch or file), `pin` to a `PinnedPool`, DeepSeek resolution, `resolve_effort`. |
-| `draw.py` | `draw(pool, seed)`, algorithm `python-random-MT19937`. |
+| `draw.py` | `draw(pool, seed)`, algorithm `python-random-MT19937`; a one-model pool is not drawn from (algorithm `trivial-single-model-pool`, index 0, seed still recorded; decision 0005 amendment, 22 Oct 2026). |
 | `ledger.py` | `Ledger`: append-only JSON lines (`reserve`, `settle`, `adjust`), atomic replace, derived `.state.json`. |
 | `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block. |
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
@@ -183,6 +183,11 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   steps; other modules have no live step contract and are refused before spending.
   `regression`: cases `cp0` and `cp1`, every candidate once per case in an order shuffled by the
   seed; it refuses a pool with an ineligible arm.
+- The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
+  with `default_effort`/`complex_effort`. Since the decision 0005 amendment (user decision,
+  22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone at `high`, so every cell's draw is
+  trivial and `regression` runs one arm per case. The earlier Luna / GLM 5.3 Flash / DeepSeek
+  pool is superseded, and its stored outputs and replay entries are retained.
 - `--models ID[@EFFORT],ID[@EFFORT],...` (task 2.8; `probe`, `module`, `regression`, `canary`)
   replaces the settings pool with the user's models, in the given order, and labels the pool
   `user-selected` in the report header (`Pool: user-selected (coordinator ruling 22 October 2026)`;

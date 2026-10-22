@@ -9,6 +9,15 @@ and verify the runner before claiming that selection or retention is operational
 
 ## Selection and reasoning
 
+Amendment, 22 Oct 2026 (user decision,
+[decision 0005](decisions/0005-methodology-changes-and-regular-testing.md)): the pool is the
+user-named set, currently GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at **high** for every step,
+including cases predefined as difficult. The random draw below applies only to a pool of more
+than one model. With one model, the draw is recorded as trivial, and the pool, exclusions and
+seed are still recorded. The Luna / GLM 5.3 Flash / DeepSeek table and the xhigh rule below
+describe the superseded pool. They are kept for the stored outputs and for a future pool of more
+than one model.
+
 Choose randomly, with equal probability, from the eligible members of this pool
 for each new logical test case. Record the ordered pool, exclusions, RNG algorithm,
 seed and draw before dispatch. Keep the selected model for that case's retries;
@@ -116,8 +125,9 @@ stale or outside scope. A rendering pass does not qualify analytical correctness
   responses, run on every change to a model-facing contract, validator or prompt. I3
   runs at each milestone.
 - **External tiers (this pool, via OpenRouter).** E1 is a module qualification case.
-  E2 is the milestone regression with a matched three-model comparison. E3 is a weekly
-  drift canary.
+  E2 is the milestone regression on GPT-6.1 Sol alone. The matched comparison is dormant
+  until the user adds models. E3 is one Sol draw per week against the last E2, still a
+  provider and model drift canary (decision 0005 amendment, 22 Oct 2026).
 
 Each batch writes a summary without raw data, and its validated responses join the
 replay corpus. Beyond the first US$50 batch, the recurring caps and the US$200
