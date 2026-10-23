@@ -35,7 +35,7 @@ from deploy_vii.live.schema import strict_schema
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import extraction_coverage, live_consumers
 from deploy_vii.registry import modules
-from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS
+from deploy_vii.statement_validation import ACCOUNT_LINKS, OPTIONAL_ITEMS, REQUIRED_ITEMS
 
 DELIMITERS = ("<<<SOURCE", "<<<CONTEXT", "<<<REPAIR", "<<<END>>>")
 PACK_BLOCK_ID = "prepared-pack"
@@ -113,10 +113,14 @@ LINE_IDENTITY_RULE = (
     "A statement line is one row per period under one `line_id` and one `display_priority`: "
     "every period's row for it repeats the same `statement`, `item_id`, `label` and `line_kind`, "
     'and a period is never its own `line_id`. For example `line_id` "is-net-revenues" has a '
-    "row for FY2025 and a row for FY2024, both at `display_priority` 1. `display_priority` is "
-    "unique within a statement (two lines of one statement never share a number); addbacks "
-    "(`addback_id`) and segments (`segment_id`) follow the same rule: one id and one "
-    "`display_priority` across all periods, never repeated for another id."
+    "row for FY2025 and a row for FY2024, both at `display_priority` 1. An `item_id` is used by "
+    "one line per statement (one `other:` id per issuer-detail line, never reused). "
+    "`display_priority` is unique within a statement across all periods (two lines of one "
+    "statement never share a number). Addbacks (`addback_id`), segments (`segment_id`) and KPIs "
+    "(`kpi_id`) follow the same rule: one id and one `display_priority` across all periods, "
+    "never repeated for another id, and every period's row repeats the same `addback_label` and "
+    "`classification` (addbacks), `segment_name` and `segment_type` (segments), or `kpi_label`, "
+    "`business_unit`, `definition`, `unit` and `value_type` (KPIs)."
 )
 
 
@@ -130,22 +134,33 @@ def _statement_items_rule() -> str:
         "A statement line's `item_id` is one of the ids listed for its own `statement` below; "
         "an id listed for one statement is not admitted on another unless that statement lists "
         "it too. A line the filing prints that is not in its statement's list takes an "
-        "`other:` id (for example `other:` plus a short name), never another statement's id.\n"
-        + "\n".join(lines)
+        "`other:` id (for example `other:deferred_revenue`; letters, digits and `_.:-` only, no "
+        "spaces), never another statement's id.\n" + "\n".join(lines)
+    )
+
+
+def _renamed_links() -> str:
+    """Statement items whose linked account metric has another name, from `ACCOUNT_LINKS`."""
+    return ", ".join(
+        f"{statement} `{item}` is the `{metric}` account"
+        for (statement, item), metric in ACCOUNT_LINKS.items()
+        if item != metric
     )
 
 
 STATEMENT_ITEMS_RULE = _statement_items_rule()
 CONFLICT_RULE = (
-    "An `accounts` entry and the statement line linked to it (the same metric and `period_id`, "
-    "for example the IS income-tax line and the `income_tax_expense` account) must carry the same "
-    "amount, "
-    "an outflow compared as a negative number. When the source gives two values, write the "
-    "disagreement explicitly: set that observation's `status` to `conflicting` with a null "
-    "`amount`, a `reason` and at least two distinct located `alternatives` (each with an "
-    "`amount`, `citations` and an `explanation`), never two silent values. A statement line whose "
-    "`status` is `conflicting` leaves the matching `accounts` amount null (`conflicting` or "
-    "`missing`), never a canonical value."
+    "An `accounts` entry and the statement line linked to it (the same metric and `period_id`; "
+    "a line is usually linked to the account named like its `item_id`; the renamed links are: "
+    + _renamed_links()
+    + ") must carry "
+    "the same amount, an outflow compared as a negative number (for example the IS "
+    "`income_tax_total` line and the `income_tax_expense` account). When the source gives two "
+    "values, write the disagreement explicitly: set that observation's `status` to "
+    "`conflicting` with a null `amount`, a `reason` and at least two distinct located "
+    "`alternatives` (each with an `amount`, `citations` and an `explanation`), never two silent "
+    "values. A statement line whose `status` is `conflicting` leaves the matching `accounts` "
+    "amount null (`conflicting` or `missing`), never a canonical value."
 )
 SEGMENT_ALLOCATION_RULE = (
     "`segment_allocation` places every `segment_id` exactly once: each segment appears in "

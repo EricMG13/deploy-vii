@@ -9,7 +9,13 @@ import pytest
 
 from deploy_vii.business_context import BusinessContextSubmission, cp1a_consumers
 from deploy_vii.contracts import Fact
-from deploy_vii.financial_contracts import FinancialBook, StatementLine
+from deploy_vii.financial_contracts import (
+    FinancialBook,
+    SegmentAllocation,
+    SegmentObservation,
+    StatementLine,
+)
+from deploy_vii.financial_validation import book_issues
 from deploy_vii.live import prompts
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
@@ -22,9 +28,14 @@ from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
-from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS, statement_issues
+from deploy_vii.statement_validation import (
+    ACCOUNT_LINKS,
+    OPTIONAL_ITEMS,
+    REQUIRED_ITEMS,
+    statement_issues,
+)
 from tests.product.test_business_context import cp1_fact
-from tests.product.test_financials import book, conflict, observed
+from tests.product.test_financials import _C, book, conflict, observed
 from tests.product.test_live_submission import paged_pack
 from tests.product.test_readiness import as_submission, readiness_fixture
 
@@ -484,6 +495,12 @@ def test_the_line_identity_rule_matches_the_validator_checks() -> None:
         "one `line_id`",
         "one `display_priority`",
         "same `statement`, `item_id`, `label` and `line_kind`",
+        "one line per statement",
+        "across all periods",
+        "`kpi_id`",
+        "`addback_label` and `classification`",
+        "`segment_name` and `segment_type`",
+        "`kpi_label`, `business_unit`, `definition`, `unit` and `value_type`",
         "never its own `line_id`",
         "`addback_id`",
         "`segment_id`",
@@ -510,7 +527,8 @@ def test_the_statement_item_lines_are_rendered_from_the_validators_tables() -> N
         listed = line.removeprefix(f"{statement}: ").rstrip(".").split(", ")
         assert listed == [*REQUIRED_ITEMS[statement], *OPTIONAL_ITEMS[statement]]
     assert prompts.STATEMENT_ITEMS_RULE in composed("financials")
-    assert "`other:`" in prompts.STATEMENT_ITEMS_RULE
+    assert "`other:deferred_revenue`" in prompts.STATEMENT_ITEMS_RULE
+    assert "letters, digits and `_.:-` only, no spaces" in prompts.STATEMENT_ITEMS_RULE
     source = files("deploy_vii").joinpath("live", "prompts.py").read_text(encoding="utf-8")
     for items in (*REQUIRED_ITEMS.values(), *OPTIONAL_ITEMS.values()):
         for item_id in items:
@@ -521,6 +539,11 @@ def test_the_conflict_rule_names_the_contract_mechanism_and_the_validator_accept
     rule = prompts.CONFLICT_RULE
     for phrase in ("`status`", "`conflicting`", "`alternatives`", "null `amount`", "`reason`"):
         assert phrase in rule, phrase
+    renamed = {(st, it): m for (st, it), m in ACCOUNT_LINKS.items() if it != m}
+    assert len(renamed) >= 4
+    for (statement, item), metric in renamed.items():
+        assert f"{statement} `{item}` is the `{metric}` account" in rule
+    assert rule.count(" is the `") == len(renamed)
     silent = register_book(shared_line_id=True, line_amount="90")
     assert any(
         i.startswith("Statement/account disagreement requires explicit conflict")
@@ -544,6 +567,32 @@ def test_the_segment_allocation_rule_matches_the_validator_message() -> None:
     rule = prompts.SEGMENT_ALLOCATION_RULE
     for phrase in ("`segment_allocation`", "every `segment_id`", "exactly once", "presentation"):
         assert phrase in rule, phrase
+
+
+def test_an_omitted_segment_is_rejected_with_the_message_the_rule_describes() -> None:
+    base = book()
+    segment = SegmentObservation(
+        segment_id="digital",
+        segment_name="Digital",
+        segment_type="OPERATING_SEGMENT",
+        display_priority=1,
+        period_id="Q1",
+        revenue=observed("segment", "40"),
+        classification_citations=(_C,),
+    )
+    disclosure = base.segment_disclosure.model_copy(update={"status": "partial"})
+    omitted = base.model_copy(
+        update={"segments": (segment,), "segment_allocation": (), "segment_disclosure": disclosure}
+    )
+    assert any(i.startswith("Allocate every segment exactly once") for i in book_issues(omitted))
+    placed = SegmentAllocation(
+        slot_id="DIVISION_1",
+        slot_label="Digital",
+        component_segment_ids=("digital",),
+        rationale="Same business",
+    )
+    ok = omitted.model_copy(update={"segment_allocation": (placed,)})
+    assert not any(i.startswith("Allocate every segment") for i in book_issues(ok))
 
 
 def test_the_register_rules_stay_inside_the_financials_prompt_budget() -> None:

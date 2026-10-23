@@ -315,3 +315,5 @@ The `financials` contract now states, as step rules e to h, the register facts `
 Evidence: E1 batch 6 (DC-8 proxy cohort, 23 October 2026): the first `financials` submission past shape and binding validation drew 98 semantic issues (91 duplicate statement display priorities, 2 wrong-statement ids, 2 silent account/statement disagreements, 2 addback/segment duplicate priorities, 1 segment allocation).
 
 Not verified: live uptake (the proxy module repair and the next pool batch).
+
+Fix round 1: the rules also state the renamed statement/account links (rendered from `ACCOUNT_LINKS`), the stable fields of addbacks, segments and KPIs, one line per `item_id` per statement and the `other:` id spelling. The segment-priority sentence is stricter than the validator, which checks operating segments only; that is safe because a corporate/elimination segment given a distinct priority is accepted too.
