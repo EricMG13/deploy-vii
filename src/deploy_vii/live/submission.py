@@ -587,7 +587,12 @@ class _Resolver:
             if id(book) not in self.dimensions:
                 self.dimensions[id(book)] = self._dimensions(item, book)
             strings = self.dimensions[id(book)].get(id(item.holder))
-            return None if strings is None else strings[SCOPE_DIMENSIONS.index(item.name)]
+            value = None if strings is None else strings[SCOPE_DIMENSIONS.index(item.name)]
+            if strings is not None and value is None:
+                # The bound scope states no such dimension: the contract's own message, kept
+                # visible (`_validate_unbound` drops "Field required" of other unset fields).
+                self.unbound.append((item.path, f"{item.path}: Field required"))
+            return value
         if kind == "facility":
             return self._facility(item, book)
         if kind in {"annual-observation", "quarter-observations"}:

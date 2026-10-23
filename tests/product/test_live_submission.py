@@ -1208,6 +1208,29 @@ def test_a_scope_without_a_currency_leaves_the_currency_to_the_validators_messag
         assert (item["unit"], item["entity_perimeter"]) == ("MILLIONS", SCOPE_PERIMETER)
 
 
+def test_a_null_scope_currency_stays_named_beside_a_disagreement_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confidence review: the batch-14 shape has both causes (a perimeter that differs by
+    period and a null currency). The disagreement routes the step through `_validate_unbound`,
+    which drops the "Field required" of unset marked fields; the null currency is a cause of
+    its own, so its message stays."""
+
+    def batch_14(scope: ReportingScope) -> ReportingScope:
+        update: dict[str, object] = {"currency": None}
+        if scope.scope_id == "Q1":
+            update["entity_perimeter"] = PARAPHRASE
+        return scope.model_copy(update=update)
+
+    store, ticket_id, value, _ = scoped_journal(tmp_path, monkeypatch, batch_14)
+    payload, _ = without_bindings(FinancialSubmission, value)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0].startswith("Bound source scopes disagree on entity_perimeter: ")
+    assert "financial.books.0.periods.1.currency: Field required" in rejected.issues
+    assert "financial.books.0.currency: Field required" not in rejected.issues  # disagreement
+
+
 @pytest.mark.parametrize(
     ("rows", "issue"),
     [
