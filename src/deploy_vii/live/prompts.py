@@ -35,6 +35,7 @@ from deploy_vii.live.schema import strict_schema
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import extraction_coverage, live_consumers
 from deploy_vii.registry import modules
+from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS
 
 DELIMITERS = ("<<<SOURCE", "<<<CONTEXT", "<<<REPAIR", "<<<END>>>")
 PACK_BLOCK_ID = "prepared-pack"
@@ -106,6 +107,51 @@ SIGN_RULE = (
     "`outflow_magnitude` is read as -abs(amount); use `signed` for a negative figure."
 )
 DECLARED_PERIOD_RULE = "Every `period_id` an entry uses must be declared in its book's `periods`."
+# Task 7.0j (E1 batch 6, proxy cohort: 98 semantic issues the prompt never stated): the register
+# rules `statement_validation.statement_issues` and `financial_validation._series_issues` apply.
+LINE_IDENTITY_RULE = (
+    "A statement line is one row per period under one `line_id` and one `display_priority`: "
+    "every period's row for it repeats the same `statement`, `item_id`, `label` and `line_kind`, "
+    'and a period is never its own `line_id`. For example `line_id` "is-net-revenues" has a '
+    "row for FY2025 and a row for FY2024, both at `display_priority` 1. `display_priority` is "
+    "unique within a statement (two lines of one statement never share a number); addbacks "
+    "(`addback_id`) and segments (`segment_id`) follow the same rule: one id and one "
+    "`display_priority` across all periods, never repeated for another id."
+)
+
+
+def _statement_items_rule() -> str:
+    """Per statement, the `item_id`s `statement_issues` admits, rendered from its own tables."""
+    lines = [
+        f"{statement}: {', '.join((*required, *OPTIONAL_ITEMS.get(statement, ())))}"
+        for statement, required in REQUIRED_ITEMS.items()
+    ]
+    return (
+        "A statement line's `item_id` is one of the ids listed for its own `statement` below; "
+        "an id listed for one statement is not admitted on another unless that statement lists "
+        "it too. A line the filing prints that is not in its statement's list takes an "
+        "`other:` id (for example `other:` plus a short name), never another statement's id.\n"
+        + "\n".join(lines)
+    )
+
+
+STATEMENT_ITEMS_RULE = _statement_items_rule()
+CONFLICT_RULE = (
+    "An `accounts` entry and the statement line linked to it (the same metric and `period_id`, "
+    "for example the IS income-tax line and the `income_tax_expense` account) must carry the same "
+    "amount, "
+    "an outflow compared as a negative number. When the source gives two values, write the "
+    "disagreement explicitly: set that observation's `status` to `conflicting` with a null "
+    "`amount`, a `reason` and at least two distinct located `alternatives` (each with an "
+    "`amount`, `citations` and an `explanation`), never two silent values. A statement line whose "
+    "`status` is `conflicting` leaves the matching `accounts` amount null (`conflicting` or "
+    "`missing`), never a canonical value."
+)
+SEGMENT_ALLOCATION_RULE = (
+    "`segment_allocation` places every `segment_id` exactly once: each segment appears in "
+    "exactly one slot's `component_segment_ids`, no segment is left out or listed twice, and "
+    "each keeps its own presentation row in `segments`. A `slot_id` is used at most once."
+)
 # Task 7.2: the rules `business_context.validate_business_context` holds CP-1A to, each stated
 # once; the method prose (`methods/cp1a.md`) rides above them in the system message.
 CP1A_METHOD = files("deploy_vii").joinpath("methods", "cp1a.md").read_text(encoding="utf-8")
@@ -196,7 +242,11 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"a. {AMOUNT_RULE}\n"
         f"b. {ACCOUNT_METRIC_RULE}\n"
         f"c. {DECLARED_PERIOD_RULE}\n"
-        f"d. {SIGN_RULE}"
+        f"d. {SIGN_RULE}\n"
+        f"e. {LINE_IDENTITY_RULE}\n"
+        f"f. {STATEMENT_ITEMS_RULE}\n"
+        f"g. {CONFLICT_RULE}\n"
+        f"h. {SEGMENT_ALLOCATION_RULE}"
     ),
     # Task 7.0i: the model supplies no hash. Every CP-1 hash binding is pre-filled by Python
     # (`live.submission.prefill`) and left out of the sent schema, so no rule asks for one.

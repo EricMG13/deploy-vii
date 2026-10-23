@@ -307,3 +307,11 @@ Behind that check, the payload still bound the model's own `FinancialReview` by 
 Not verified: provider acceptance of the changed CP-1 sent schemas (the coordinator runs
 `live schema-check --steps source_context,financials,narrative,readiness`) and live uptake (E1
 batch 7).
+
+## 7.0j The financials prompt states the statement-register rules
+
+The `financials` contract now states, as step rules e to h, the register facts `statement_validation` and `financial_validation` enforce: a statement line is one row per period under one `line_id` and one `display_priority`; each statement admits only its own `item_id`s (listed from `REQUIRED_ITEMS` and `OPTIONAL_ITEMS`, never hand-copied, else `other:`); an account and its linked statement line carry one amount or an explicit `conflicting` observation; every segment is allocated exactly once. Tests hold each rule to the validator (the accepted shape passes, the batch-6 shape raises the same issue text) and the item lists to the tables. No validator, contract or methodology change (decision 0005).
+
+Evidence: E1 batch 6 (DC-8 proxy cohort, 23 October 2026): the first `financials` submission past shape and binding validation drew 98 semantic issues (91 duplicate statement display priorities, 2 wrong-statement ids, 2 silent account/statement disagreements, 2 addback/segment duplicate priorities, 1 segment allocation).
+
+Not verified: live uptake (the proxy module repair and the next pool batch).

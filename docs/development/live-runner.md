@@ -693,6 +693,16 @@ located `sign_citations` span showing the printed positive magnitude; a negative
 `outflow_magnitude` is a contradiction. The two `StatementLine.sign_evidence` messages now name
 their remedy; the validator's semantics are unchanged.
 
+Task 7.0j (E1 batch 6, proxy cohort): the `financials` contract carries four more step rules (e to
+h), each the validator's own fact: `LINE_IDENTITY_RULE` (one `line_id` and one `display_priority`
+across periods, the same `statement`, `item_id`, `label` and `line_kind` in every row; likewise
+`addback_id` and `segment_id`), `STATEMENT_ITEMS_RULE` (the admitted `item_id`s per statement,
+rendered from `statement_validation.REQUIRED_ITEMS` and `OPTIONAL_ITEMS`, otherwise `other:`),
+`CONFLICT_RULE` (an account and its linked statement line carry one amount, else the observation
+is `conflicting` with `alternatives`; a conflicting line leaves the account amount null) and
+`SEGMENT_ALLOCATION_RULE` (every segment allocated exactly once, keeping its presentation row).
+Prompt text only; no validator or contract change.
+
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:
 - `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;

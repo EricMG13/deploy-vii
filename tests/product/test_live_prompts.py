@@ -9,6 +9,7 @@ import pytest
 
 from deploy_vii.business_context import BusinessContextSubmission, cp1a_consumers
 from deploy_vii.contracts import Fact
+from deploy_vii.financial_contracts import FinancialBook, StatementLine
 from deploy_vii.live import prompts
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
@@ -21,7 +22,9 @@ from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
+from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS, statement_issues
 from tests.product.test_business_context import cp1_fact
+from tests.product.test_financials import book, conflict, observed
 from tests.product.test_live_submission import paged_pack
 from tests.product.test_readiness import as_submission, readiness_fixture
 
@@ -206,7 +209,7 @@ FINANCIAL_RULES = (
 )
 
 
-def test_the_financials_step_asks_for_no_hash_and_letters_its_four_rules() -> None:
+def test_the_financials_step_asks_for_no_hash_and_keeps_rules_a_to_d() -> None:
     """Task 7.0i: Python fills `context_step_sha256`, so neither the step text nor the schema
     printed below it names the field (E1 batch 5 copied the wrong 64-hex value three times)."""
     contract = prompts.STEP_CONTRACTS["financials"]
@@ -216,7 +219,7 @@ def test_the_financials_step_asks_for_no_hash_and_letters_its_four_rules() -> No
         assert "sha256" not in prompts.STEP_CONTRACTS[step_id], step_id
         assert "sha256" not in composed(step_id).split("JSON Schema:")[1], step_id
     rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
-    assert rules == ["a. ", "b. ", "c. ", "d. "]
+    assert rules[:4] == ["a. ", "b. ", "c. ", "d. "]
     assert f"c. {prompts.DECLARED_PERIOD_RULE}" in contract
     assert f"d. {prompts.SIGN_RULE}" in contract
 
@@ -407,3 +410,141 @@ def test_every_step_states_the_compact_output_rule_once() -> None:
     for step_id in STEPS:
         assert composed(step_id).count(rule) == 1, step_id
         assert rule not in prompts.STEP_CONTRACTS[step_id], step_id
+
+
+# --- 7.0j: the financials step states the statement-register rules the validator enforces ------
+
+
+def statement_line(name: str, item: str, amount: str, priority: int, pid: str) -> StatementLine:
+    return StatementLine.model_validate(
+        {
+            "line_id": name,
+            "statement": "IS",
+            "item_id": item,
+            "label": "Synthetic " + item,
+            "period_id": pid,
+            "display_priority": priority,
+            "line_kind": "detail",
+            "value": observed(f"{name}.{pid}", amount),
+        }
+    )
+
+
+def register_book(
+    *, shared_line_id: bool, line_amount: str = "100", conflicting: bool = False
+) -> FinancialBook:
+    """Revenue and cogs lines for Q1 and Q2: one line_id per line, or the batch-6 shape."""
+    base = book()
+    lines = [
+        statement_line(
+            f"is-{item}" if shared_line_id else f"is-{item}-{pid}", item, amount, priority, pid
+        )
+        for item, amount, priority in (("revenue", line_amount, 1), ("cogs", "-30", 2))
+        for pid in ("Q1", "Q2")
+    ]
+    accounts = base.accounts
+    if conflicting:
+        lines = [
+            row.model_copy(update={"value": conflict("revenue.line.conflict")})
+            if (row.item_id, row.period_id) == ("revenue", "Q2")
+            else row
+            for row in lines
+        ]
+        accounts = tuple(
+            a.model_copy(update={"value": conflict("revenue.conflict")})
+            if (a.metric_id, a.period_id) == ("revenue", "Q2")
+            else a
+            for a in accounts
+        )
+    return base.model_copy(update={"statement_lines": tuple(lines), "accounts": accounts})
+
+
+REGISTER_RULES = (
+    prompts.LINE_IDENTITY_RULE,
+    prompts.STATEMENT_ITEMS_RULE,
+    prompts.CONFLICT_RULE,
+    prompts.SEGMENT_ALLOCATION_RULE,
+)
+
+
+def test_the_financials_step_letters_the_register_rules_e_to_h_once_each() -> None:
+    contract = prompts.STEP_CONTRACTS["financials"]
+    rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
+    assert rules == ["a. ", "b. ", "c. ", "d. ", "e. ", "f. ", "g. ", "h. "]
+    for letter, rule in zip("efgh", REGISTER_RULES, strict=True):
+        assert f"{letter}. {rule}" in contract
+        assert composed("financials").count(rule) == 1, rule
+    for step_id in ("source_readiness", "source_context", "narrative", "readiness"):
+        assert not [rule for rule in REGISTER_RULES if rule in composed(step_id)], step_id
+
+
+def test_the_line_identity_rule_matches_the_validator_checks() -> None:
+    rule = prompts.LINE_IDENTITY_RULE
+    for phrase in (
+        "one `line_id`",
+        "one `display_priority`",
+        "same `statement`, `item_id`, `label` and `line_kind`",
+        "never its own `line_id`",
+        "`addback_id`",
+        "`segment_id`",
+        '"is-net-revenues"',
+        "FY2025",
+        "FY2024",
+    ):
+        assert phrase in rule, phrase
+    assert statement_issues(register_book(shared_line_id=True)) == ()
+    assert any(
+        i.startswith("Duplicate statement display priority")
+        for i in statement_issues(register_book(shared_line_id=False))
+    )
+
+
+def test_the_statement_item_lines_are_rendered_from_the_validators_tables() -> None:
+    lines = {
+        line.split(": ", 1)[0]: line
+        for line in prompts.STATEMENT_ITEMS_RULE.splitlines()
+        if line.split(": ", 1)[0] in REQUIRED_ITEMS
+    }
+    assert set(lines) == {"IS", "CFS", "BS"}
+    for statement, line in lines.items():
+        listed = line.removeprefix(f"{statement}: ").rstrip(".").split(", ")
+        assert listed == [*REQUIRED_ITEMS[statement], *OPTIONAL_ITEMS[statement]]
+    assert prompts.STATEMENT_ITEMS_RULE in composed("financials")
+    assert "`other:`" in prompts.STATEMENT_ITEMS_RULE
+    source = files("deploy_vii").joinpath("live", "prompts.py").read_text(encoding="utf-8")
+    for items in (*REQUIRED_ITEMS.values(), *OPTIONAL_ITEMS.values()):
+        for item_id in items:
+            assert f'"{item_id}"' not in source, item_id
+
+
+def test_the_conflict_rule_names_the_contract_mechanism_and_the_validator_accepts_it() -> None:
+    rule = prompts.CONFLICT_RULE
+    for phrase in ("`status`", "`conflicting`", "`alternatives`", "null `amount`", "`reason`"):
+        assert phrase in rule, phrase
+    silent = register_book(shared_line_id=True, line_amount="90")
+    assert any(
+        i.startswith("Statement/account disagreement requires explicit conflict")
+        for i in statement_issues(silent)
+    )
+    both = statement_issues(register_book(shared_line_id=True, conflicting=True))
+    assert not [i for i in both if "disagreement" in i or "source statement conflict" in i]
+    # A conflicting statement line beside a canonical account amount is the other rejection.
+    plain = register_book(shared_line_id=True)
+    lines = tuple(
+        row.model_copy(update={"value": conflict("revenue.line.conflict")})
+        if (row.item_id, row.period_id) == ("revenue", "Q2")
+        else row
+        for row in plain.statement_lines
+    )
+    stale = statement_issues(plain.model_copy(update={"statement_lines": lines}))
+    assert any(i.startswith("Unresolved source statement conflict") for i in stale)
+
+
+def test_the_segment_allocation_rule_matches_the_validator_message() -> None:
+    rule = prompts.SEGMENT_ALLOCATION_RULE
+    for phrase in ("`segment_allocation`", "every `segment_id`", "exactly once", "presentation"):
+        assert phrase in rule, phrase
+
+
+def test_the_register_rules_stay_inside_the_financials_prompt_budget() -> None:
+    assert sum(len(rule) for rule in REGISTER_RULES) < 4500  # characters, about 1,100 tokens
