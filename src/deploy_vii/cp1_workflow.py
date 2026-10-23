@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from deploy_vii.canonical_audit import DefinitionReview, validate_definition_review
 from deploy_vii.canonical_tables import REGISTER_NOTE, CanonicalTables, canonical_tables
@@ -39,7 +39,7 @@ from deploy_vii.execution import (
     current_inputs,
     text_sha256,
 )
-from deploy_vii.financial_contracts import FinancialReview
+from deploy_vii.financial_contracts import PREFILLED_MARKER, FinancialReview
 from deploy_vii.financial_model import ModelReport, model_report
 from deploy_vii.interface_view import write_interface_preview
 from deploy_vii.narrative import (
@@ -62,7 +62,8 @@ CP1_PROMOTION = (*CP1_STEPS, "quality")
 
 class FinancialSubmission(Contract):
     schema_version: Literal["cp1-financial-submission/1"] = "cp1-financial-submission/1"
-    context_step_sha256: Hash
+    # Task 7.0i: Python fills it from the retained source step (`live.submission`); never sent.
+    context_step_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: True})
     financial: FinancialReview
     definition: DefinitionReview
     binding: FinancialContextBinding

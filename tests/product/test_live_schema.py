@@ -224,6 +224,7 @@ def test_relaxations_name_the_nullable_array_and_one_of_rewrites() -> None:
         "oneof-anyof",
         "decimal-number-only",
         "prefixed-enum",
+        "drop-prefilled",
     )
     assert strict.schema_relaxations(SCHEMAS["narrative"]) == [
         "const-to-enum",
@@ -842,7 +843,7 @@ def test_the_other_pattern_accepts_exactly_what_identifier_and_the_prefix_rule_a
 
 
 def test_prefixed_enum_is_named_where_it_applied_and_marked_nodes_of_another_shape_fail() -> None:
-    assert strict.RELAXATIONS[-1] == "prefixed-enum"
+    assert strict.RELAXATIONS[-2] == "prefixed-enum"  # task 7.0i appended drop-prefilled
     assert "prefixed-enum" in strict.schema_relaxations(SCHEMAS["financials"])
     for step in sorted(set(SCHEMAS) - {"financials"}):
         assert "prefixed-enum" not in strict.schema_relaxations(SCHEMAS[step]), step
@@ -858,3 +859,76 @@ def test_prefixed_enum_is_named_where_it_applied_and_marked_nodes_of_another_sha
     ):
         with pytest.raises(ValueError, match="cannot be relaxed"):
             strict.relax({"properties": {"x": node}})
+
+
+# --- task 7.0i: a field Python fills is left out of the sent schema ("drop-prefilled") --------
+
+
+def test_the_financials_sent_schema_leaves_out_the_context_step_binding() -> None:
+    """E1 batch 5: the model copied the wrong 64-hex value three times; it is no longer asked."""
+    model = SCHEMAS["financials"]
+    sent = strict.strict_schema(model)
+    assert "context_step_sha256" not in sent["properties"]
+    assert "context_step_sha256" not in sent["required"]
+    assert sent["required"] == list(sent["properties"])  # still strict-valid
+    assert sent["additionalProperties"] is False
+    assert strict.PREFILLED_MARKER not in json.dumps(sent)  # the marker is consumed
+    # The stored contract is unchanged: the field is still a required, marked Hash.
+    stored = model.model_json_schema()
+    assert "context_step_sha256" in stored["required"]
+    assert stored["properties"]["context_step_sha256"][strict.PREFILLED_MARKER] is True
+    assert stored["properties"]["context_step_sha256"]["pattern"] == "^[0-9a-f]{64}$"
+
+
+def test_drop_prefilled_is_named_for_financials_only_and_other_steps_carry_no_marker() -> None:
+    assert strict.RELAXATIONS[-2:] == ("prefixed-enum", "drop-prefilled")
+    assert "drop-prefilled" in strict.schema_relaxations(SCHEMAS["financials"])
+    assert "drop-prefilled" in strict.RELAXATIONS_BASIS
+    assert strict.PREFILLED_MARKER in strict.RELAXATIONS_BASIS
+    for step in sorted(set(SCHEMAS) - {"financials"}):
+        assert "drop-prefilled" not in strict.schema_relaxations(SCHEMAS[step]), step
+        # The rule rewrites marked nodes only, so with no marker these sent schemas are unchanged.
+        assert strict.PREFILLED_MARKER not in json.dumps(SCHEMAS[step].model_json_schema()), step
+    # Reported on the strict copy only: the sent copy no longer carries the marker.
+    sent = strict.strict_schema(SCHEMAS["financials"])
+    assert "drop-prefilled" not in strict.relaxations(sent)
+
+
+def test_a_marked_property_is_dropped_with_its_required_entry_and_nothing_else() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "h": {"type": "string", "pattern": "^x$", strict.PREFILLED_MARKER: True},
+            "b": {"type": "integer"},
+        },
+        "required": ["a", "h", "b"],
+        "additionalProperties": False,
+    }
+    expected = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+        "required": ["a", "b"],
+        "additionalProperties": False,
+    }
+    assert strict.relax(schema) == expected
+    assert strict.relax(expected) == expected  # idempotent
+    assert strict.relaxations(schema) == ["drop-prefilled"]
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string", strict.PREFILLED_MARKER: True},
+        {"type": "array", "items": {"type": "string", strict.PREFILLED_MARKER: True}},
+        {"anyOf": [{"type": "string", strict.PREFILLED_MARKER: True}, {"type": "null"}]},
+        {"$defs": {"H": {"type": "string", strict.PREFILLED_MARKER: True}}},
+        {"properties": {"h": {"type": "string", strict.PREFILLED_MARKER: False}}},
+    ],
+    ids=["root", "array-item", "union-branch", "definition", "marker-not-true"],
+)
+def test_a_marker_that_is_not_on_an_object_property_fails_closed(schema: dict[str, Any]) -> None:
+    """Only a property can be left out (its object drops it); a marker anywhere else would reach
+    the provider, so nothing is sent for it."""
+    with pytest.raises(ValueError, match="cannot be relaxed"):
+        strict.relax(schema)

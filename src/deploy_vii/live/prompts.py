@@ -105,9 +105,6 @@ SIGN_RULE = (
     "the value's citation in `sign_citations`), never empty. A negative amount under "
     "`outflow_magnitude` is read as -abs(amount); use `signed` for a negative figure."
 )
-CONTEXT_STEP_RULE = (
-    "`context_step_sha256` must equal the sha256 shown on the step:source_context block."
-)
 DECLARED_PERIOD_RULE = "Every `period_id` an entry uses must be declared in its book's `periods`."
 # Task 7.2: the rules `business_context.validate_business_context` holds CP-1A to, each stated
 # once; the method prose (`methods/cp1a.md`) rides above them in the system message.
@@ -199,10 +196,11 @@ STEP_CONTRACTS: Mapping[str, str] = {
         "Step rules (the schema or the validator enforces each one):\n"
         f"a. {AMOUNT_RULE}\n"
         f"b. {ACCOUNT_METRIC_RULE}\n"
-        f"c. {CONTEXT_STEP_RULE}\n"
-        f"d. {DECLARED_PERIOD_RULE}\n"
-        f"e. {SIGN_RULE}"
+        f"c. {DECLARED_PERIOD_RULE}\n"
+        f"d. {SIGN_RULE}"
     ),
+    # Task 7.0i: `context_step_sha256` is pre-filled by Python (`live.submission.prefill`) and
+    # left out of the sent schema, so no rule asks the model for it.
     # The narrative and readiness hash bindings are not model-computable from the step hash
     # alone; Python pre-fills them in the contract-shape work (plan 2.7, MC-1).
     "narrative": (
@@ -363,6 +361,8 @@ def build(
         digest, body = _source_body(pack, source_id)
         blocks.append(block("SOURCE", source_id, digest, body))
     for item in upstream:
+        # Kept (task 7.0i, R4): `readiness` binds `inputs_sha256` to the step:narrative output,
+        # whose hash this line alone shows; the header is the step's own content hash.
         body = f"step_output_sha256={item.output_sha256}\n{item.text}"
         blocks.append(block("SOURCE", item.input_id, item.sha256, body))
     if repair_issues:

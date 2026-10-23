@@ -26,6 +26,18 @@ input set's repair is consumed exactly as for any other invalid response.
 The CP-1 steps keep their stored contract as the model-facing shape for now (their MC-1 skeletons
 are M6 work); `STEPS` is the hook: a step whose schema differs from its stored contract gets its
 own composer here.
+
+Task 7.0i (E1 batch e1-cp1-5): the `financials` step's `context_step_sha256` is a binding Python
+fills (`PREFILLED`), so its sent schema leaves it out (`live.schema`, "drop-prefilled"). After
+null resolution the payload's top-level `context_step_sha256` is set to the content hash of the
+ticket's retained valid `source_context` step, the value `cp1_workflow._validate_stage` binds and
+the step:source_context block header prints. A value the payload carries is overwritten. A
+payload already holding that exact value is kept byte for byte and nothing is recorded; any other
+JSON object is rewritten (`live.schema.exact_json`, numbers keep their digits) and the field is
+recorded in `Submitted.prefilled`. A payload that is not a JSON object, or whose rewrite could not
+be stored as UTF-8 (a lone surrogate escape, which Pydantic refuses as invalid JSON), is handed on
+as received, so its shape rejection is unchanged. No valid `source_context` step raises
+ValueError before anything is written. The validator's binding check is unchanged.
 """
 
 import json
@@ -41,7 +53,7 @@ from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_workflow import FinancialSubmission, submit_cp1_step
 from deploy_vii.downstream_readiness import DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepValidation
-from deploy_vii.live.schema import normalise
+from deploy_vii.live.schema import exact_json, json_object, normalise
 from deploy_vii.narrative import NarrativeReview
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import (
@@ -141,6 +153,10 @@ STEPS: Mapping[str, StepDef] = {
     # step output (`business_context.submit_cp1a_step`), so no composer is needed here.
     "business_context": StepDef("CP-1A", BusinessContextSubmission),
 }
+# Task 7.0i: per step, the top-level fields Python fills before the journal validates; each is
+# marked `PREFILLED_MARKER` on its contract, so the sent schema leaves it out.
+CONTEXT_STEP_BINDING = "context_step_sha256"
+PREFILLED: Mapping[str, tuple[str, ...]] = {"financials": (CONTEXT_STEP_BINDING,)}
 
 
 @dataclass(frozen=True)
@@ -301,11 +317,42 @@ def _validate_uncomposable(
     return StepValidation(issues=issues)
 
 
+def context_step_sha256(store: Execution, ticket_id: str) -> str:
+    """The content hash of the ticket's retained valid `source_context` step (its first step):
+    what `financials` binds (`cp1_workflow._validate_stage`) and the block header shows."""
+    attempt = next((a for a in store.read().attempts if a.ticket_id == ticket_id), None)
+    first = attempt.steps[0] if attempt is not None and attempt.steps else None
+    if first is None or first.step_id != "source_context" or first.status != "valid":
+        raise ValueError(f"Ticket {ticket_id} retains no valid source_context step to bind")
+    return first.content_hash()
+
+
+def prefill(payload: str, values: Mapping[str, str]) -> tuple[str, tuple[str, ...]]:
+    """`payload` with each top-level field of `values` set to its value, and the fields that
+    changed. Unchanged (same string, no fields) when every value is already there or the payload
+    is not a JSON object; the validator then decides on what was received."""
+    document = json_object(payload)
+    if document is None:
+        return payload, ()
+    changed = tuple(name for name, value in values.items() if document.get(name) != value)
+    if not changed:
+        return payload, ()
+    text = exact_json({**document, **{name: values[name] for name in changed}})
+    try:
+        text.encode()
+    except UnicodeEncodeError:
+        # A lone surrogate escape decoded by `json` cannot be stored; Pydantic refuses the
+        # received text as invalid JSON, so it is handed on as received for that rejection.
+        return payload, ()
+    return text, changed
+
+
 @dataclass(frozen=True)
 class Submitted:
     journal: Attempt
-    payload: str  # what the journal step retains: the composed review, or the payload as received
+    payload: str  # what the journal step retains: composed, pre-filled or as received
     nulls_resolved: tuple[str, ...]
+    prefilled: tuple[str, ...]  # top-level fields Python set (`PREFILLED`), task 7.0i
     composition: Composition | None  # source_readiness only
 
 
@@ -321,22 +368,27 @@ def submit_model_payload(
 
     Nulls standing for omitted defaults are resolved first (`live.schema.normalise`, against the
     model-facing schema). `on_normalised` sees the resolved paths before the journal does, so a
-    caller can record them even if validation raises."""
+    caller can record them even if validation raises. Then `financials` gets its pre-filled
+    binding (`prefill`; see the module docstring)."""
     step = STEPS[step_id]
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
     if step.module_id == "CP-1A":
         journal = submit_cp1a_step(store, ticket_id, step_id, normalised)
-        return Submitted(journal, normalised, resolved, None)
+        return Submitted(journal, normalised, resolved, (), None)
     if step_id != "source_readiness":
+        filled: tuple[str, ...] = ()
+        if step_id == "financials":
+            binding = {CONTEXT_STEP_BINDING: context_step_sha256(store, ticket_id)}
+            normalised, filled = prefill(normalised, binding)
         journal = submit_cp1_step(store, ticket_id, step_id, normalised)
-        return Submitted(journal, normalised, resolved, None)
+        return Submitted(journal, normalised, resolved, filled, None)
     composition = compose_payload(store.pack(), normalised)
     if composition.review is not None and not composition.issues:
         retained = composition.review.model_dump_json()
         return Submitted(
-            submit_cp0_review(store, ticket_id, retained), retained, resolved, composition
+            submit_cp0_review(store, ticket_id, retained), retained, resolved, (), composition
         )
     journal = store.submit_step(
         ticket_id,
@@ -346,4 +398,4 @@ def submit_model_payload(
         normalised,
         lambda pack, current: _validate_uncomposable(store, pack, current),
     )
-    return Submitted(journal, normalised, resolved, composition)
+    return Submitted(journal, normalised, resolved, (), composition)

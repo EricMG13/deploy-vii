@@ -30,6 +30,11 @@ Fix round 1: an id node marked `PREFIXED_ENUM_MARKER` (`StatementLine.item_id`,
 `BalanceMovementBridge.balance_item_id`) is replaced whole by `anyOf` [{type: string, enum},
 {type: string, pattern}] from the marker's lists ("prefixed-enum"): a listed r14 statement item
 or an `other:` id. The flat list is a superset per statement; Python still enforces the split.
+Task 7.0i (E1 batch e1-cp1-5: three `financials` attempts copied a wrong 64-hex
+`context_step_sha256`): a property marked `PREFILLED_MARKER` (`FinancialSubmission.
+context_step_sha256`) is left out of its object's `properties` and `required` ("drop-prefilled"),
+because Python fills it before the journal validates (`live.submission.prefill`). A marker
+anywhere but on an object's property raises ValueError, so it never reaches the provider.
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
 widens what the provider is asked to enforce: the reply is still validated by the unchanged
 Pydantic contract, so every dropped constraint is still enforced on the way in.
@@ -52,6 +57,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from deploy_vii.financial_contracts import DECIMAL_MARKER as DECIMAL_MARKER
+from deploy_vii.financial_contracts import PREFILLED_MARKER as PREFILLED_MARKER
 from deploy_vii.financial_contracts import PREFIXED_ENUM_MARKER as PREFIXED_ENUM_MARKER
 
 ANNOTATIONS = ("title", "description")
@@ -83,6 +89,7 @@ RELAXATIONS = (
     "oneof-anyof",
     "decimal-number-only",
     "prefixed-enum",
+    "drop-prefilled",
 )
 _LENGTH = frozenset({"minLength", "maxLength"})
 # The keywords a Decimal union's branches may carry (`_kind`); a later Pydantic may add a
@@ -215,7 +222,28 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"schema node cannot be relaxed (oneOf beside anyOf): {node}")
     # Round 3 (bisects schema-2026-10-22-bisect and -bisect2): OpenAI refuses a nullable array
     # written as a type union and accepts the `anyOf` form; it refuses `oneOf` ("narrative").
-    return _prefixed_enum(_number_only(_array_to_any_of(_one_of_to_any_of(node))))
+    return _drop_prefilled(_prefixed_enum(_number_only(_array_to_any_of(_one_of_to_any_of(node)))))
+
+
+def _drop_prefilled(node: dict[str, Any]) -> dict[str, Any]:
+    """An object node without its `PREFILLED_MARKER` properties and their `required` entries
+    ("drop-prefilled"); any other node is returned as it is. Children are relaxed first, so a
+    marked property still carries its marker here; one left anywhere else is refused by
+    `relax`."""
+    properties = node.get("properties")
+    if not isinstance(properties, dict):
+        return node
+    kept = {
+        name: child
+        for name, child in properties.items()
+        if not (isinstance(child, dict) and child.get(PREFILLED_MARKER) is True)
+    }
+    if len(kept) == len(properties):
+        return node
+    out = {**node, "properties": kept}
+    if isinstance(node.get("required"), list):
+        out["required"] = [name for name in node["required"] if name in kept]
+    return out
 
 
 def _prefixed_enum(node: dict[str, Any]) -> dict[str, Any]:
@@ -306,7 +334,11 @@ def relax(schema: dict[str, Any]) -> dict[str, Any]:
     A shape the relaxation cannot express (a null `const`, a null enum member whose type does
     not admit null, `const` beside `enum`) raises ValueError, so nothing is sent for it."""
     drop = _without(_LENGTH)
-    return _map_schema(schema, lambda node: _relaxed_node(drop(node)))
+    sent = _map_schema(schema, lambda node: _relaxed_node(drop(node)))
+    left = [node for node in _nodes(sent) if PREFILLED_MARKER in node]
+    if left:
+        raise ValueError(f"schema node cannot be relaxed (prefilled marker off a property): {left}")
+    return sent
 
 
 def relaxations(schema: dict[str, Any]) -> list[str]:
@@ -332,6 +364,8 @@ def relaxations(schema: dict[str, Any]) -> list[str]:
             found.add("decimal-number-only")
         if PREFIXED_ENUM_MARKER in node:
             found.add("prefixed-enum")
+        if node.get(PREFILLED_MARKER) is True:
+            found.add("drop-prefilled")
     return [name for name in RELAXATIONS if name in found]
 
 
@@ -616,7 +650,9 @@ RELAXATIONS_BASIS = (
     "minLength or maxLength, a type: [array, null] node with items, or oneOf; "
     f"decimal-number-only where it had a {DECIMAL_MARKER} node (a Decimal amount, sent as a "
     f"JSON number only); prefixed-enum where it had a {PREFIXED_ENUM_MARKER} node (an id sent as "
-    "a listed value or a prefixed id, e.g. a statement item or other:<id>)"
+    "a listed value or a prefixed id, e.g. a statement item or other:<id>); drop-prefilled where "
+    f"it had a {PREFILLED_MARKER} property (a field Python fills before validation, so the "
+    "model is not asked for it)"
 )
 
 
@@ -690,12 +726,22 @@ class _Walker:
                 self.fill(chosen, value, path)
 
 
-def _dump(value: object) -> str:
+def json_object(payload: str) -> dict[str, Any] | None:
+    """`payload` parsed as a JSON object, floats as Decimal (`exact_json` keeps their digits);
+    None for anything else: invalid or truncated JSON, NaN or Infinity, or a non-object."""
+    try:
+        document = json.loads(payload, parse_float=Decimal, parse_constant=_refuse_constant)
+    except ValueError:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def exact_json(value: object) -> str:
     """JSON text that keeps every parsed number's exact digits (floats were parsed as Decimal)."""
     if isinstance(value, dict):
-        return "{" + ",".join(f"{json.dumps(k)}:{_dump(v)}" for k, v in value.items()) + "}"
+        return "{" + ",".join(f"{json.dumps(k)}:{exact_json(v)}" for k, v in value.items()) + "}"
     if isinstance(value, list):
-        return "[" + ",".join(_dump(item) for item in value) + "]"
+        return "[" + ",".join(exact_json(item) for item in value) + "]"
     if isinstance(value, Decimal):
         return str(value)
     return json.dumps(value, ensure_ascii=False)
@@ -706,14 +752,11 @@ def normalise(model: type[BaseModel], payload: str) -> tuple[str, tuple[str, ...
 
     Unchanged (same string, no paths) when nothing needed resolving or the text is not a JSON
     object; Pydantic then reports whatever is wrong with it."""
-    try:
-        document = json.loads(payload, parse_float=Decimal, parse_constant=_refuse_constant)
-    except ValueError:
-        return payload, ()
-    if not isinstance(document, dict):
+    document = json_object(payload)
+    if document is None:
         return payload, ()
     walker = _Walker(model.model_json_schema())
     walker.fill(model.model_json_schema(), document, "")
     if not walker.paths:
         return payload, ()
-    return _dump(document), tuple(walker.paths)
+    return exact_json(document), tuple(walker.paths)

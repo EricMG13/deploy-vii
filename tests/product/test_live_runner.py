@@ -14,6 +14,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from deploy_vii.business_context import REQUIRED_REGISTERS
+from deploy_vii.cp1_workflow import FinancialStage, submit_cp1_step
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Execution, NotAuthorized
 from deploy_vii.live import prompts, runner, submission
 from deploy_vii.live.catalog import Catalog, ModelSelection, PinnedPool, parse_selection
@@ -55,13 +57,14 @@ from tests.product.live_support import (
     ok,
 )
 from tests.product.test_business_context import cp1_fact, submission_fixture
-from tests.product.test_execution import accept_cp0, candidate_for, fixture_store
+from tests.product.test_execution import accept_cp0, candidate_for, fixture_store, step_text
 from tests.product.test_live_client import (
     UPSTREAM_502,
     TricklingReply,
     choice_error_body,
     install,
 )
+from tests.product.test_narrative import draft
 from tests.product.test_readiness import as_submission, readiness_fixture
 from tests.product.test_workflow import cp1_case
 
@@ -1062,6 +1065,33 @@ def test_cp1_step_dispatch_carries_the_retained_step_as_upstream_data(tmp_path: 
     assert idle.requests == [] and rig.ledger.state().lines == before
 
 
+def test_the_step_output_line_is_the_only_place_the_readiness_binding_is_shown(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0i, R4: the `step_output_sha256=` body line has a consumer, so it stays. The
+    `readiness` step's `DownstreamReview.inputs_sha256` must equal the content hash of the
+    `DownstreamInputs` the narrative step retained as its output, which is that step's
+    `output_sha256`; the block header shows the step's own content hash, a different value."""
+    store, ticket, extraction = cp1_case(tmp_path)
+    finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    stage = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
+    narrative = submit_cp1_step(
+        store, ticket.ticket_id, "narrative", draft(stage.narrative_inputs).model_dump_json()
+    )
+    assert [s.status for s in narrative.steps] == ["valid", "valid", "valid"]
+    held = narrative.steps[-1]
+    required = DownstreamInputs.model_validate_json(step_text(store, held)).content_hash()
+    assert held.output_sha256 == required != held.content_hash()
+    upstream = runner._upstream(store, narrative)
+    sources = tuple(s.source_id for s in store.pack().sources)
+    user = prompts.build("readiness", store.pack(), sources, DownstreamReview, upstream=upstream)[
+        1
+    ].content
+    assert f"<<<SOURCE id=step:narrative sha256={held.content_hash()}>>>" in user
+    assert f"step_output_sha256={required}" in user
+    assert user.count(required) == 1
+
+
 def _keys(tmp_path: Path) -> Path:
     keys = tmp_path / "keys"
     keys.mkdir(exist_ok=True)
@@ -1464,6 +1494,7 @@ def test_manifest_records_the_relaxations_and_hashes_the_schema_actually_sent(
         "nullable-array-anyof",
         "decimal-number-only",  # task 7.0d: amounts sent as JSON numbers only
         "prefixed-enum",  # task 7.0d fix 1: statement item ids
+        "drop-prefilled",  # task 7.0i: context_step_sha256 is filled by Python
     ]
     unverified = manifest["schema_keywords_unverified"]
     assert unverified and not {"const", "minLength", "maxLength"} & set(unverified)
@@ -1566,6 +1597,33 @@ def test_a_payload_without_nulls_reaches_the_journal_byte_for_byte(tmp_path: Pat
     assert result.status == "accepted"
     assert rig.store.payload(rig.store.read().attempts[-1].steps[-1].payload_sha256) == raw
     assert "payload_nulls_resolved" not in (result.directory / "events.jsonl").read_text()
+    assert "payload_prefilled" not in (result.directory / "events.jsonl").read_text()
+
+
+def test_the_prefilled_context_binding_is_recorded_beside_the_raw_output(tmp_path: Path) -> None:
+    """Task 7.0i: the model is not asked for `context_step_sha256`; Python fills it before the
+    journal validates, and the attempt's events say so (output.md keeps the raw content)."""
+    rig, extraction = cp1_rig(tmp_path)
+    document = json.loads(extraction.model_dump_json())
+    del document["context_step_sha256"]
+    raw = json.dumps(document)
+    step = StepSpec("financials", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    transport = FakeTransport(ok(raw, model=LUNA))
+    result = rig.run(ChatClient(transport), step=step)
+    assert result.status == "accepted", result.issues
+    assert (result.directory / "output.md").read_text(encoding="utf-8") == raw
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    attempt = rig.store.read().attempts[-1]
+    kept = rig.store.payload(attempt.steps[-1].payload_sha256)
+    assert filled["paths"] == ["context_step_sha256"]
+    assert filled["retained_payload_sha256"] == attempt.steps[-1].payload_sha256
+    assert json.loads(kept)["context_step_sha256"] == attempt.steps[0].content_hash()
+    # The model was never asked: neither the schema nor the step text names the field.
+    system = json.loads((transport.requests[0].body or b"{}").decode())["messages"][0]["content"]
+    assert "context_step_sha256" not in system
 
 
 def test_a_pre_0008_review_shaped_payload_is_rejected_and_retained_as_received(

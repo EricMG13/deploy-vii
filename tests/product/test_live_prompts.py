@@ -202,9 +202,21 @@ def test_a_bare_figure_the_rule_forbids_is_rejected() -> None:
 FINANCIAL_RULES = (
     prompts.AMOUNT_RULE,
     prompts.ACCOUNT_METRIC_RULE,
-    prompts.CONTEXT_STEP_RULE,
     prompts.DECLARED_PERIOD_RULE,
 )
+
+
+def test_the_financials_step_asks_for_no_hash_and_letters_its_four_rules() -> None:
+    """Task 7.0i: Python fills `context_step_sha256`, so neither the step text nor the schema
+    printed below it names the field (E1 batch 5 copied the wrong 64-hex value three times)."""
+    contract = prompts.STEP_CONTRACTS["financials"]
+    assert not hasattr(prompts, "CONTEXT_STEP_RULE")
+    assert "context_step_sha256" not in composed("financials")
+    assert "sha256" not in contract
+    rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
+    assert rules == ["a. ", "b. ", "c. ", "d. "]
+    assert f"c. {prompts.DECLARED_PERIOD_RULE}" in contract
+    assert f"d. {prompts.SIGN_RULE}" in contract
 
 
 def test_the_financials_step_states_each_rule_once_and_no_longer_asks_for_printed_amounts() -> None:

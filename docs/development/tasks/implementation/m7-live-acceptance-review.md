@@ -287,3 +287,20 @@ step's preamble also asks for compact JSON, `live regression` gains the `cp1a` c
 Evidence: batch 5 `financials` was cut at 64,000 completion tokens twice (US$2.21 on the cuts),
 and the module repair cost about US$1.6 more. Not verified: a live truncation under the guard and
 the compact rule's live effect (E1 batch 6).
+
+## 7.0i Python pre-fills the financials context binding
+
+The `financials` model is no longer asked for `context_step_sha256`: the sent schema leaves it
+out (`drop-prefilled`, marker `x-deploy-vii-prefilled`), and rule c and `CONTEXT_STEP_RULE` are
+gone. Python sets it after null resolution from the ticket's valid retained `source_context`
+step, overwriting any value, and records the fields in `Submitted.prefilled` and the
+`payload_prefilled` event (decision 0008 amendment "23 Oct 2026 (task 7.0i)"). The stored
+contract and the validator's binding check are unchanged, and the `step_output_sha256=` line
+stays because `readiness` binds its `inputs_sha256` to it.
+
+Evidence: E1 batch `e1-cp1-5` (23 October 2026, Sol) lost three `financials` attempts (about
+US$3) to the binding; the last (46,020 tokens, 587 s, US$0.90, no shape issue) copied the
+block's `step_output_sha256` (`fc55f2…`) where the header's `f56a66…` was required.
+
+Not verified: provider acceptance of the changed `financials` sent schema (the coordinator runs
+`live schema-check --steps financials`) and live uptake (E1 batch 7).

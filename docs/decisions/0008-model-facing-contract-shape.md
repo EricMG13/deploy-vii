@@ -310,6 +310,31 @@ the attempt-level repair only. The runner records `step_try` (1 or 2) and
 `links.step_repair_of_attempt_id`; `repair_count` stays the attempt number. Not verified: a live
 within-attempt repair (E1 batch 5).
 
+## Amendment, 23 Oct 2026 (task 7.0i)
+
+E1 batch `e1-cp1-5` (Sol) lost three `financials` attempts (about US$3) to one 64-hex copy.
+The retained-step block showed two hashes: the header `sha256=` (the step's content hash,
+`f56a66…`, which the validator binds) and the body line `step_output_sha256=` (its output hash,
+`fc55f2…`). Rule c said only "the sha256 shown on the step:source_context block". The three
+attempts wrote three values, none of them the header's; the last (46,020 completion tokens,
+587 s, US$0.90, 85 statement lines, 55 observations, no shape issue) was rejected on one issue
+alone, "Financial extraction does not bind the retained source step". MC-1 now covers this
+binding. `FinancialSubmission.context_step_sha256` carries the marker `x-deploy-vii-prefilled`.
+The new `drop-prefilled` relaxation leaves a marked property out of the sent schema's
+`properties` and `required`, and a marker anywhere else raises `ValueError`. Rule c and
+`CONTEXT_STEP_RULE` are removed. After null resolution, `live.submission.submit_model_payload`
+sets the field to the content hash of the ticket's valid retained `source_context` step and
+overwrites any value the payload carries. The journal retains that pre-filled payload, rewritten
+with every number's digits kept; output.md keeps the raw reply. A payload that already holds
+the value is kept byte for byte. A payload that is not a JSON object is handed on as received.
+No valid source step raises before any write. The overwrite is recorded in `Submitted.prefilled`
+and in the attempt's `payload_prefilled` event (`paths`, `retained_payload_sha256`). The stored
+contract, the validator's binding check and its message are unchanged, so analytical meaning is
+unchanged (decision 0005). The `step_output_sha256=` body line stays because `readiness` binds
+`DownstreamReview.inputs_sha256` to the narrative step's output hash, which only that line shows.
+Not verified: provider acceptance of the changed `financials` sent schema (`live schema-check`)
+and live uptake (E1 batch 7).
+
 ## Evidence
 
 - [live-probe-2.md](../development/tasks/implementation/live-probe-2.md): batch report and

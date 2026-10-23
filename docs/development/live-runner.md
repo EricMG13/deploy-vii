@@ -42,8 +42,8 @@ from a pinned pool:
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts. |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `submit_model_payload` (decision 0008). |
-| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `unverified_keywords`. |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED` and `prefill` (the `financials` binding Python fills, task 7.0i), `submit_model_payload` (decision 0008). |
+| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
 
 ## Rules and where they are enforced
@@ -684,6 +684,7 @@ pass over the strict copy (`strict_schema = relax(strict_copy)`):
 | `oneof-anyof` (round 3) | `{"oneOf": [...], "discriminator": {...}}` | `{"anyOf": [...]}` (no discriminator) |
 | `decimal-number-only` (task 7.0d) | a `Number` amount: `{"anyOf": [{"type": "number", ...bounds}, {"type": "string"}], "x-deploy-vii-decimal": true}` (null joins when nullable) | `{"type": "number", ...bounds}`, or `{"anyOf": [{"type": "number", ...bounds}, {"type": "null"}]}` |
 | `prefixed-enum` (task 7.0d fix 1) | an id: `{"type": "string", "pattern": P, "x-deploy-vii-prefixed-enum": {"enum": [...], "pattern": "^other:..."}}` | `{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern": "^other:..."}]}` |
+| `drop-prefilled` (task 7.0i) | a property Python fills: `{"type": "string", "pattern": "^[0-9a-f]{64}$", "x-deploy-vii-prefilled": true}` under `properties`, named in `required` | left out of `properties` and `required` (a marker anywhere else raises `ValueError`) |
 
 Task 7.0f (E1 batch `e1-cp1-4`): the `financials` contract carries a fifth step rule
 (`prompts.SIGN_RULE`): `sign_convention` is `signed` when the amount carries the statement's
@@ -691,6 +692,19 @@ arithmetic sign (balance-sheet lines always), and `outflow_magnitude` only with 
 located `sign_citations` span showing the printed positive magnitude; a negative amount under
 `outflow_magnitude` is a contradiction. The two `StatementLine.sign_evidence` messages now name
 their remedy; the validator's semantics are unchanged.
+
+Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the `financials`
+model is no longer asked for `context_step_sha256`. The sent schema leaves it out
+(`drop-prefilled`) and the step rules are four: a amounts, b account metrics, c declared
+periods, d sign convention (`CONTEXT_STEP_RULE` is gone). `submission.submit_model_payload`
+fills the field after null resolution with the content hash of the ticket's valid retained
+`source_context` step, the value on that block's header, and overwrites any value the reply
+carries. The journal retains the pre-filled payload; output.md keeps the raw reply. A reply that
+already holds the value is kept byte for byte, and a reply that is not a JSON object is handed on
+as received. The fields set are in `Submitted.prefilled` and in a `payload_prefilled` event
+(`paths`, `retained_payload_sha256`). `cp1_workflow` still rejects a mismatched binding. The
+block's `step_output_sha256=` line stays: `readiness` binds `inputs_sha256` to the narrative
+step's output hash, which only that line shows.
 
 Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
 `"(211)"`), which the stored contract refused, and the sent schema allowed them. The

@@ -34,6 +34,10 @@ Number = Annotated[
 # states that as `anyOf` [enum, pattern] (`live.schema`, "prefixed-enum"). Python keeps deciding,
 # including the per-statement split the flat enum does not state.
 PREFIXED_ENUM_MARKER = "x-deploy-vii-prefixed-enum"
+# Task 7.0i: marks a property Python fills before the journal validates (`live.submission`
+# `PREFILLED`); the sent copy leaves it out (`live.schema`, "drop-prefilled"). The stored contract
+# still requires it, so the validator still checks the value Python wrote.
+PREFILLED_MARKER = "x-deploy-vii-prefilled"
 # Exactly what `Identifier` (^[A-Za-z0-9][A-Za-z0-9_.:-]*$) accepts that `startswith("other:")`:
 # the leading "o" satisfies its first class and every later character its second.
 OTHER_ITEM_PATTERN = r"^other:[A-Za-z0-9_.:-]*$"
