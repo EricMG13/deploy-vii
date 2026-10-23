@@ -208,7 +208,7 @@ def test_every_corpus_envelope_hashes_its_json_bytes_like_content_hash(
         verdict = replay_entry(path, tmp_path / str(number))
         assert verdict.passed or verdict.status == replay_support.SKIPPED, str(verdict)
     quality = [name for name in checked if name.startswith("quality/")]
-    assert quality and all("envelope" in checked[name] for name in quality), checked
+    assert quality and all({"envelope", "registers"} <= set(checked[name]) for name in quality)
     assert mismatched == []
 
 
