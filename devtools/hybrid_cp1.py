@@ -5,18 +5,20 @@ Sonnet (experiment only: evidence, not adoption; decision 0005 names Sol at high
 Each cell (model, provider, effort) runs `source_context` -> `financials` -> `narrative` ->
 `readiness` (`CP1_STEPS`, the runner's order) on its own copy of one frozen, accepted CP-0
 journal (hybrid-cp0-1 hybrid-2); CP-0 is never re-run. A step's prompt is the runner's
-(`prompts.build` with no SOURCE inputs and the `step:` upstream blocks `_upstream` offers), with
-rule 5 replaced as in hybrid CP-0; its tools are `search_pack`, `read_pages` and
-`submit_<step_id>`, whose input schema is the step's model-facing schema. Every submit is judged
-on the runner's path (`submit_model_payload`, `journal_outcome`) in a fresh copy of the cell's
-journal, because an invalid step finishes the attempt; an accepted copy is the journal the next
-step starts from. A step that does not end accepted stops its cell.
+(`prompts.build` with no SOURCE inputs and the bounded `step:` projections M7's
+`_upstream(store, attempt, step_id)` offers), with rule 5 replaced as in hybrid CP-0; its tools
+are `search_pack`, `read_pages` and `submit_<step_id>`, whose input schema is the step's sent
+schema (`strict_schema`: M7 leaves out every hash binding Python pre-fills). Every submit is
+judged on the runner's path (`submit_model_payload`, which pre-fills the bindings, then
+`journal_outcome`) in a fresh copy of the step's starting journal, so each submit is judged as a
+first try (M7 would keep a rejected one as the step's repair within the attempt); an accepted
+copy is the journal the next step starts from. A step that does not end accepted stops its cell.
 
 Providers: OpenRouter through the product `ChatClient` (as hybrid CP-0), and Anthropic's
 Messages API over the same stdlib `urllib_transport`. Anthropic reports no cost: it is computed
 from usage at list prices and recorded as `computed-from-list-prices`. Anthropic replies are
-parsed with Decimal numbers and bodies re-serialised with `schema._dump`, so tool inputs and the
-assistant content sent back keep their exact digits.
+parsed with Decimal numbers and bodies re-serialised with `schema.exact_json`, so tool inputs
+and the assistant content sent back keep their exact digits.
 
 Money: one ledger per provider. Every call commits a reservation first: OpenRouter as hybrid
 CP-0; Anthropic as the prompt-token bound at the higher of the input and 5-minute cache-write
@@ -86,7 +88,7 @@ from deploy_vii.live.runner import (  # type: ignore[import-untyped]
     reservation_usd,
     schema_shaped,
 )
-from deploy_vii.live.schema import _dump, strict_schema  # type: ignore[import-untyped]
+from deploy_vii.live.schema import exact_json, strict_schema  # type: ignore[import-untyped]
 from deploy_vii.live.settings import DEFAULT_SETTINGS, load_settings  # type: ignore[import-untyped]
 from deploy_vii.live.submission import STEPS, submit_model_payload  # type: ignore[import-untyped]
 from deploy_vii.preparation import PreparedPack  # type: ignore[import-untyped]
@@ -147,11 +149,11 @@ PRICES = {
     "claude-opus-5-5": Prices(
         Decimal("4.00"), Decimal("5.00"), Decimal("8.00"), Decimal("0.20"), Decimal("20.00")
     ),
-    # The brief's table gives 0.10 for Sonnet 5.5 cache reads; the claude-api reference lists
-    # 0.20 (models.md, model-migration.md: 0.1x the $2 input price). The higher price is used,
-    # so the computed cost cannot understate what the cap is checked against.
+    # Cache reads at 0.10: Anthropic release note of 7 October 2026, which lowered them from
+    # 0.20 (coordinator, fetched 23 Oct 2026 via Context7; the bundled claude-api reference
+    # still lists 0.20).
     "claude-sonnet-5-5": Prices(
-        Decimal("2.00"), Decimal("2.50"), Decimal("4.00"), Decimal("0.20"), Decimal("10.00")
+        Decimal("2.00"), Decimal("2.50"), Decimal("4.00"), Decimal("0.10"), Decimal("10.00")
     ),
 }
 
@@ -346,6 +348,7 @@ def openrouter_reply(candidate: PinnedCandidate, result: ChatResult) -> Reply:
             "served_provider": result.served_provider,
             "identity_verified": result.identity_verified,
             "provider_error_code": result.provider_error_code,
+            "retry_after": result.retry_after,
         },
     )
 
@@ -402,7 +405,7 @@ class Anthropic:
         tools: Sequence[Tool],
         timeout_s: float,
     ) -> Prepared:
-        payload = _dump(self.body(cell, system, conversation, tools)).encode()
+        payload = exact_json(self.body(cell, system, conversation, tools)).encode()
         bound = token_bound(len(payload), self.bytes_per_token)
         needed = bound + MAX_TOKENS
         return Prepared(
@@ -538,8 +541,10 @@ def anthropic_reply(model: str, status: int, body: bytes, key: str, latency: flo
 def _tool_use(item: Mapping[str, Any]) -> ToolCall:
     ident, name, value = item.get("id"), item.get("name"), item.get("input")
     if not isinstance(ident, str) or not isinstance(name, str) or not isinstance(value, dict):
-        return ToolCall("", "", _dump(dict(item)), "malformed tool_use block (id, name or input)")
-    return ToolCall(ident, name, _dump(value))
+        return ToolCall(
+            "", "", exact_json(dict(item)), "malformed tool_use block (id, name or input)"
+        )
+    return ToolCall(ident, name, exact_json(value))
 
 
 def anthropic_usage(
@@ -820,7 +825,7 @@ def run_step(harness: Harness, cell: Cell, step: StepRun, base: Path, ticket: st
     if expected_step(attempt, "CP-1") != step.step_id:
         raise ValueError(f"{step.step_id} is not the journal's next CP-1 step")
     pack = store.pack(snapshot)
-    system, user = hybrid_prompt(step.step_id, pack, _upstream(store, attempt))
+    system, user = hybrid_prompt(step.step_id, pack, _upstream(store, attempt, step.step_id))
     step.tools = cp0.PackTools(pack)
     tools = step_tools(step.step_id)
     conversation: list[dict[str, Any]] = [{"role": "user", "content": user}]
@@ -1137,8 +1142,66 @@ def cp1_start(journal: Path) -> tuple[PreparedPack, str, str]:
         if step != CP1_STEPS[0]:
             raise ValueError(f"a fresh CP-1 ticket expects {step}, not {CP1_STEPS[0]}")
         pack = store.pack()
-        system, user = hybrid_prompt(step, pack, _upstream(store, attempt))
+        system, user = hybrid_prompt(step, pack, _upstream(store, attempt, step))
     return pack, system, user
+
+
+def step_prompts(
+    journal: Path,
+    payload_for: Callable[[str], str],
+    providers: Mapping[str, Provider],
+    cells: Sequence[Cell],
+) -> list[dict[str, Any]]:
+    """Each step's first-call prompt size and reservation per cell, on a scratch copy of the
+    frozen CP-0 journal into which `payload_for(step)` (representative retained payloads) is
+    entered on the runner's path after each step is measured. Stops at the first payload the
+    journal does not accept. Nothing is sent."""
+    rows: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory() as scratch:
+        copy = Path(scratch) / "journal"
+        shutil.copytree(journal, copy)
+        store = Execution(copy)
+        ticket = store.begin("CP-1").ticket_id
+        for step_id in CP1_STEPS:
+            attempt = next(item for item in store.read().attempts if item.ticket_id == ticket)
+            upstream = _upstream(store, attempt, step_id)
+            system, user = hybrid_prompt(step_id, store.pack(), upstream)
+            conversation = [{"role": "user", "content": user}]
+            tools = step_tools(step_id)
+            per_cell = {}
+            for cell in cells:
+                prepared = providers[cell.provider].prepare(
+                    cell, system, conversation, tools, DEFAULT_TIMEOUT_SECONDS
+                )
+                per_cell[cell.cell_id] = {
+                    "request_bytes": len(prepared.payload),
+                    "prompt_tokens_upper_bound": prepared.bound,
+                    "reserved_usd": prepared.reserve,
+                    "misfit": prepared.misfit,
+                }
+            payload = payload_for(step_id)
+            submitted = submit_model_payload(store, ticket, step_id, payload)
+            outcome, issues = journal_outcome(store, step_id, submitted.journal)
+            rows.append(
+                {
+                    "step_id": step_id,
+                    "system_chars": len(system),
+                    "user_chars": len(user),
+                    "upstream": [
+                        {"input_id": u.input_id, "projection": u.projection, "chars": len(u.text)}
+                        for u in upstream
+                    ],
+                    "first_call_per_cell": per_cell,
+                    "representative_payload": {
+                        "chars": len(payload),
+                        "outcome": outcome,
+                        "issues": list(issues),
+                    },
+                }
+            )
+            if outcome != "accepted":
+                break
+    return rows
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1154,6 +1217,10 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--artifact-root", type=Path, default=cp0.ARTIFACT_ROOT)
     command.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
     command.add_argument("--catalog", type=Path, help="saved models JSON; else fetched (public)")
+    command.add_argument(
+        "--upstream-from",
+        help="measure every step's prompt with retained payloads: PREFIX-<step>-1/output.md",
+    )
     return command
 
 
@@ -1280,6 +1347,16 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
         },
         "retention": batch_directory,
     }
+    if args.upstream_from:
+        prefix = args.upstream_from
+
+        def retained(step_id: str) -> str:
+            return Path(f"{prefix}-{step_id}-1", "output.md").read_text(encoding="utf-8")
+
+        plan["step_prompts"] = {
+            "upstream_from": prefix,
+            "steps": step_prompts(args.cp0_journal, retained, providers, order),
+        }
     print(cp0._json(plan), end="")
     if args.dry_run:
         return 0

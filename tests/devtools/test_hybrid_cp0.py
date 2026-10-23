@@ -581,14 +581,14 @@ def test_the_command_refuses_a_model_without_tools(
 
 
 def unknown_adjust(seq: int, **changes: object) -> dict[str, object]:
-    """An `adjust` from a source this code's ledger cannot replay (M7's account-usage-delta)."""
+    """An `adjust` from a source the ledger cannot replay."""
     line: dict[str, object] = {
         "seq": seq,
         "event": "adjust",
         "attempt_id": "a",
         "previous_charged_usd": "1",
         "reconciled_usd": "0",
-        "source": "account-usage-delta",
+        "source": "unknown-future-source",
         "generation_id": "gen-x",
         "checked_at": "2026-10-23T00:00:00Z",
         "at": "2026-10-23T00:00:00Z",
@@ -629,7 +629,7 @@ def test_an_unknown_adjust_counts_at_its_pre_adjust_charge_and_is_logged(tmp_pat
             "ledger": "newer.jsonl",
             "seq": 6,
             "attempt_id": "a",
-            "source": "account-usage-delta",
+            "source": "unknown-future-source",
             "previous_charged_usd": "1",
         },
     )
@@ -677,7 +677,7 @@ def test_the_dry_run_starts_and_prints_the_worst_case_lines(
     plan = json.loads(captured.out)
     assert plan["money"]["prior_committed_usd"] == "1.75"
     assert plan["money"]["prior_worst_case_adjusts"][0]["seq"] == 6
-    assert "worst case: newer.jsonl seq 6 attempt a source account-usage-delta" in captured.err
+    assert "worst case: newer.jsonl seq 6 attempt a source unknown-future-source" in captured.err
     assert not (tmp_path / "root" / "hybrid-cp0-1").exists()
 
 

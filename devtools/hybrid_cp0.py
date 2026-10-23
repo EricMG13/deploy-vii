@@ -25,7 +25,7 @@ held in memory and never written, printed or logged.
 
 Prior spend (user decision, 23 Oct 2026): the cumulative-ceiling check sums every prior ledger
 as `committed_elsewhere` does. A ledger this code cannot replay only because it holds `adjust`
-lines from a source this code does not know (M7's `account-usage-delta`) is replayed without
+lines from a source this code does not know (on M7 none of the recorded ones) is replayed without
 those lines, so each such attempt counts at its pre-adjust charge (worst case); each line is
 printed and recorded. Anything else unreadable still refuses the batch.
 """
@@ -47,7 +47,6 @@ from typing import Any
 from deploy_vii.contracts import Span  # type: ignore[import-untyped]
 from deploy_vii.execution import Execution  # type: ignore[import-untyped]
 from deploy_vii.live.catalog import Catalog, CatalogError, ModelSelection, PinnedCandidate  # type: ignore[import-untyped]
-from deploy_vii.live.cli import open_ledger  # type: ignore[import-untyped]
 from deploy_vii.live.client import (  # type: ignore[import-untyped]
     DEFAULT_TIMEOUT_SECONDS,
     ChatClient,
@@ -66,6 +65,7 @@ from deploy_vii.live.ledger import (  # type: ignore[import-untyped]
     Settlement,
 )
 from deploy_vii.live.prompts import PromptError, block, build  # type: ignore[import-untyped]
+from deploy_vii.live.reconcile import open_ledger  # type: ignore[import-untyped]
 from deploy_vii.live.runner import (  # type: ignore[import-untyped]
     journal_outcome,
     prompt_token_bound,

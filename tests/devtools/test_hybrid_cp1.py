@@ -77,32 +77,45 @@ def case(tmp_path_factory: pytest.TempPathFactory) -> Case:
     return Case(root / "frozen", context, extraction)
 
 
-def step_block(user: str, step_id: str) -> tuple[str, str]:
-    """(sha256, step output text) of the `step:<step_id>` block of a user prompt."""
-    match = re.search(
-        rf"<<<SOURCE id=step:{step_id} sha256=([0-9a-f]+)>>>\n"
-        r"step_output_sha256=[0-9a-f]+\n(.*?)\n<<<END>>>",
-        user,
-        re.DOTALL,
-    )
-    assert match, f"no step:{step_id} block"
-    return match.group(1), match.group(2)
+class Model:
+    """A perfect model for one cell. It keeps its own copy of the frozen CP-0 journal, enters each
+    step's correct payload there to learn the next step's inputs, and submits that payload with
+    every hash binding left out, as M7's sent schemas do (Python pre-fills them)."""
 
+    def __init__(self, case: Case, directory: Path, model: str = OPUS) -> None:
+        shutil.copytree(case.frozen, directory)
+        self.case, self.model, self.store = case, model, Execution(directory)
+        self.ticket = self.store.begin("CP-1").ticket_id
 
-def correct_payload(case: Case, step_id: str, user: str) -> str:
-    """What a perfect model submits, read only from the step's own prompt."""
-    if step_id == "source_context":
-        return case.context
-    if step_id == "financials":
-        digest, _ = step_block(user, "source_context")
-        return case.extraction.model_copy(update={"context_step_sha256": digest}).model_dump_json()
-    if step_id == "narrative":
-        _, text = step_block(user, "financials")
-        stage = FinancialStage.model_validate_json(text)
-        return populated(stage.narrative_inputs).model_dump_json()
-    _, text = step_block(user, "narrative")
-    inputs = DownstreamInputs.model_validate_json(text)
-    return DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+    def output(self, index: int) -> str:
+        attempt = next(a for a in self.store.read().attempts if a.ticket_id == self.ticket)
+        return self.store.step_output(attempt.steps[index].output_sha256)
+
+    def payload(self, step_id: str) -> str:
+        if step_id == "source_context":
+            return self.case.context
+        if step_id == "financials":
+            document = json.loads(self.case.extraction.model_dump_json())
+            del document["context_step_sha256"]
+        elif step_id == "narrative":
+            stage = FinancialStage.model_validate_json(self.output(1))
+            document = json.loads(populated(stage.narrative_inputs).model_dump_json())
+            del document["inputs_sha256"]
+        else:
+            inputs = DownstreamInputs.model_validate_json(self.output(2))
+            review = DownstreamReview(inputs_sha256=inputs.content_hash())
+            document = json.loads(review.model_dump_json())
+            del document["inputs_sha256"]
+        return json.dumps(document)
+
+    def __call__(self, request: Request) -> Response:
+        step_id, _ = asked(request)
+        payload = self.payload(step_id)
+        entered = submit_model_payload(self.store, self.ticket, step_id, payload).journal
+        assert entered.steps[-1].status == "valid", entered.steps[-1].issues
+        if request.url == cp1.ANTHROPIC_URL:
+            return ant_reply(("t1", f"submit_{step_id}", payload), model=self.model)
+        return reply(("c1", f"submit_{step_id}", payload))
 
 
 def body_of(request: Request) -> dict[str, Any]:
@@ -145,17 +158,6 @@ def ant_reply(
     for n, (_, _, raw) in enumerate(calls):
         text = text.replace(json.dumps(f"@INPUT{n}@"), raw)
     return Response(200, text.encode())
-
-
-def solver(case: Case, model: str = OPUS) -> Callable[[Request], Response]:
-    def answer(request: Request) -> Response:
-        step_id, user = asked(request)
-        payload = correct_payload(case, step_id, user)
-        if request.url == cp1.ANTHROPIC_URL:
-            return ant_reply(("t1", f"submit_{step_id}", payload), model=model)
-        return reply(("c1", f"submit_{step_id}", payload))
-
-    return answer
 
 
 def make_harness(
@@ -215,7 +217,8 @@ def test_the_step_prompt_is_the_runner_prompt_with_its_upstream_blocks(
     ticket = store.begin("CP-1").ticket_id
     submit_model_payload(store, ticket, "source_context", case.context)
     attempt = next(a for a in store.read().attempts if a.ticket_id == ticket)
-    upstream = _upstream(store, attempt)
+    upstream = _upstream(store, attempt, "financials")
+    assert [(u.input_id, u.projection) for u in upstream] == [("step:source_context", "full")]
     pack = store.pack()
     system, user = cp1.hybrid_prompt("financials", pack, upstream)
     one_shot = build("financials", pack, (), STEPS["financials"].schema, upstream=upstream)
@@ -289,7 +292,7 @@ def test_assistant_content_goes_back_unmodified_with_one_tool_result_message(
         ("t1", "search_pack", '{"query": "statement", "max_hits": 2}'),
         ("t2", "read_pages", '{"source_id": "nope", "first_page": 1, "last_page": 1}'),
     )
-    transport = FakeTransport(first, solver(case))
+    transport = FakeTransport(first, Model(case, tmp_path / "model"))
     harness = make_harness(tmp_path, transport, case.frozen)
     anthropic = harness.providers["anthropic"]
     assert isinstance(anthropic, cp1.Anthropic)
@@ -322,7 +325,7 @@ def test_numbers_in_assistant_content_and_tool_input_keep_their_digits() -> None
     response = ant_reply(("t1", "submit_financials", raw))
     parsed = cp1.anthropic_reply(OPUS, 200, response.body, ANT_KEY, 0.1)
     assert parsed.tool_calls[0].arguments == '{"amount":1.50,"scale":1E+3,"count":7}'
-    resent = cp1._dump(list(parsed.turn))
+    resent = cp1.exact_json(list(parsed.turn))
     assert '"amount":1.50' in resent and '"scale":1E+3' in resent
 
 
@@ -338,7 +341,8 @@ def test_the_cost_is_computed_from_usage_at_list_prices() -> None:
     }
     assert not missing
     _, _, sonnet, _ = cp1.anthropic_usage(ANT_USAGE, cp1.PRICES[SONNET])
-    assert sonnet == Decimal("0.0116")
+    # 1,000 x 2 + 2,000 x 2.50 + 3,000 x 0.10 (7 October 2026 price) + 400 x 10, per million.
+    assert sonnet == Decimal("0.0113")
     no_split = {k: v for k, v in ANT_USAGE.items() if k != "cache_creation"}
     _, _, conservative, why = cp1.anthropic_usage(no_split, cp1.PRICES[OPUS])
     assert conservative == Decimal("0.0286") and "1-hour rate" in why
@@ -431,16 +435,11 @@ def test_the_anthropic_key_is_the_one_sk_ant_token_and_only_counts_are_noted() -
 # --- chaining and stops --------------------------------------------------------------------
 
 
-def test_four_steps_chain_on_a_copy_of_the_frozen_cp0_journal(
-    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The synthetic narrative and readiness prompts carry the full upstream step outputs
-    # (about 10 and 20 MB); the window and caps are lifted so the chain itself is tested.
-    monkeypatch.setattr(cp1, "CONTEXT_TOKENS", 10**9)
+def test_four_steps_chain_on_a_copy_of_the_frozen_cp0_journal(case: Case, tmp_path: Path) -> None:
     before = tree_digest(case.frozen)
-    transport = FakeTransport(TOOL_CHOICE_400, *[solver(case)] * 4, *[solver(case, SONNET)] * 4)
-    caps = {"openrouter": Decimal(8), "anthropic": Decimal(1000)}
-    harness = make_harness(tmp_path, transport, case.frozen, caps=caps)
+    opus, sonnet = Model(case, tmp_path / "m1"), Model(case, tmp_path / "m2", SONNET)
+    transport = FakeTransport(TOOL_CHOICE_400, *[opus] * 4, *[sonnet] * 4)
+    harness = make_harness(tmp_path, transport, case.frozen)
     cells = runs(harness, "opus-medium", "sonnet-max")
     summary = cp1.run_batch(harness, cells, seed=3)
     assert [run.verdict for run in cells] == ["accepted", "accepted"]
@@ -451,15 +450,19 @@ def test_four_steps_chain_on_a_copy_of_the_frozen_cp0_journal(
     assert summary["tool_choice_fallback"]["cell"] == "opus-medium"
     first = cells[0].steps[0].calls[0]
     assert first.settlement is not None and first.settlement.charged == 0
-    # Each step sees exactly the accepted upstream steps, as the runner offers them.
+    # Each step sees the accepted upstream steps as M7's runner projects them.
     users = [asked(r)[1] for r in transport.requests[1:5]]
-    seen = [re.findall(r"<<<SOURCE id=step:(\S+)", user) for user in users]
+    seen = [re.findall(r"<<<SOURCE id=step:(\S+) sha256=\S+ projection=(\S+)>>>", u) for u in users]
     assert seen == [
         [],
-        ["source_context"],
-        ["source_context", "financials"],
-        list(cp1.CP1_STEPS[:3]),
+        [("source_context", "full")],
+        [("financials", "narrative-evidence")],
+        [("narrative", "readiness-inputs")],
     ]
+    # The model left every hash binding out; Python pre-filled it.
+    sent = [json.loads(step.final_payload or "{}") for step in cells[0].steps]
+    assert "context_step_sha256" not in sent[1]
+    assert "inputs_sha256" not in sent[2] and "inputs_sha256" not in sent[3]
     assert tree_digest(case.frozen) == before
     # The final journal holds all four valid steps on a pending CP-1 ticket.
     last = cells[0].steps[-1].accepted_journal
@@ -474,23 +477,25 @@ def test_four_steps_chain_on_a_copy_of_the_frozen_cp0_journal(
 
 
 def test_a_prompt_beyond_the_context_window_is_not_sent_and_stops_the_cell(
-    case: Case, tmp_path: Path
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    transport = FakeTransport(TOOL_CHOICE_400, *[solver(case)] * 2)
+    window = cp1.MAX_TOKENS + 1_000  # below any synthetic step's bound plus MAX_TOKENS
+    monkeypatch.setattr(cp1, "CONTEXT_TOKENS", window)
+    transport = FakeTransport()  # any call would fail on an empty queue
     harness = make_harness(tmp_path, transport, case.frozen)
     [run] = runs(harness, "opus-high")
     cp1.run_batch(harness, [run], seed=1)
-    assert run.verdict.startswith("stopped at narrative: not sent: misfit")
-    assert run.steps[2].verdict_reason is not None
-    assert run.steps[2].verdict_reason.startswith("context 1000000 < bound")
-    assert not run.steps[2].calls and len(transport.requests) == 3
-    state = harness.ledgers["anthropic"].state()
-    assert len(state.attempts) == 3 and state.reserved == 0  # nothing reserved for narrative
+    assert run.verdict.startswith("stopped at source_context: not sent: misfit")
+    assert run.steps[0].verdict_reason is not None
+    assert run.steps[0].verdict_reason.startswith(f"context {window} < bound")
+    assert not run.steps[0].calls and not transport.requests
+    assert not harness.ledgers["anthropic"].state().attempts  # nothing reserved
 
 
 def test_a_rejected_step_stops_its_cell_and_the_next_cell_runs(case: Case, tmp_path: Path) -> None:
     bad = ant_reply(("t1", "submit_source_context", "{}"))
-    transport = FakeTransport(TOOL_CHOICE_400, bad, bad, bad, *[solver(case, SONNET)] * 2)
+    sonnet = Model(case, tmp_path / "m", SONNET)
+    transport = FakeTransport(TOOL_CHOICE_400, bad, bad, bad, *[sonnet] * 4)
     harness = make_harness(tmp_path, transport, case.frozen)
     cells = runs(harness, "opus-high", "sonnet-xhigh")
     cp1.run_batch(harness, cells, seed=5)
@@ -499,8 +504,7 @@ def test_a_rejected_step_stops_its_cell_and_the_next_cell_runs(case: Case, tmp_p
     assert stopped.stopped_at == "source_context" and len(stopped.steps) == 1
     assert len(stopped.steps[0].submits) == 3
     assert not (stopped.directory / "financials").exists()
-    # The next cell runs on; at this base its narrative prompt is beyond the window.
-    assert [s.verdict for s in cells[1].steps[:2]] == ["accepted", "accepted"]
+    assert cells[1].verdict == "accepted"
 
 
 def test_a_provider_schema_error_stops_only_its_cell(case: Case, tmp_path: Path) -> None:
@@ -517,13 +521,14 @@ def test_a_provider_schema_error_stops_only_its_cell(case: Case, tmp_path: Path)
             }
         ).encode(),
     )
-    transport = FakeTransport(solver(case), schema_400, TOOL_CHOICE_400, *[solver(case)] * 2)
+    sol, opus = Model(case, tmp_path / "m1"), Model(case, tmp_path / "m2")
+    transport = FakeTransport(sol, schema_400, TOOL_CHOICE_400, *[opus] * 4)
     harness = make_harness(tmp_path, transport, case.frozen)
     cells = runs(harness, "sol-high", "opus-medium")
     summary = cp1.run_batch(harness, cells, seed=9)
     assert cells[0].verdict == "stopped at financials: provider-schema-error"
     assert "Invalid schema" in (cells[0].steps[1].verdict_reason or "")
-    assert [s.verdict for s in cells[1].steps[:2]] == ["accepted", "accepted"]
+    assert cells[1].verdict == "accepted"
     assert summary["stopped_providers"] == {}
     sol = body_of(transport.requests[0])
     assert sol["tool_choice"] == "required" and sol["reasoning"] == {"effort": "high"}
@@ -533,14 +538,14 @@ def test_a_provider_schema_error_stops_only_its_cell(case: Case, tmp_path: Path)
 def test_a_cap_stops_that_provider_and_the_other_provider_goes_on(
     case: Case, tmp_path: Path
 ) -> None:
-    transport = FakeTransport(*[solver(case)] * 2)
+    transport = FakeTransport(*[Model(case, tmp_path / "m")] * 4)
     caps = {"openrouter": Decimal(8), "anthropic": Decimal("0.10")}
     harness = make_harness(tmp_path, transport, case.frozen, caps=caps)
     cells = runs(harness, "opus-medium", "sonnet-max", "sol-medium")
     summary = cp1.run_batch(harness, cells, seed=2)
     assert cells[0].verdict.startswith("stopped at source_context: opus-medium-source_context-")
     assert cells[1].verdict == "not run: anthropic stopped"
-    assert [s.verdict for s in cells[2].steps[:2]] == ["accepted", "accepted"]
+    assert cells[2].verdict == "accepted"
     assert set(summary["stopped_providers"]) == {"anthropic"}
     assert all(r.url != cp1.ANTHROPIC_URL for r in transport.requests)
     assert body_of(transport.requests[0])["reasoning"] == {"effort": "medium"}
@@ -647,3 +652,33 @@ def test_a_journal_that_cannot_start_cp1_is_refused(
     args = cli(tmp_path, tmp_path / "unaccepted", "--dry-run")
     assert cp1.main(args, transport=unexpected_send) == 2
     assert "cannot start CP-1" in capsys.readouterr().err
+
+
+def test_the_dry_run_measures_every_step_with_retained_payloads(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    model = Model(case, tmp_path / "model")
+    for step_id in cp1.CP1_STEPS:  # retained payloads laid out as PREFIX-<step>-1/output.md
+        payload = model.payload(step_id)
+        submit_model_payload(model.store, model.ticket, step_id, payload)
+        (tmp_path / f"e1-{step_id}-1").mkdir()
+        (tmp_path / f"e1-{step_id}-1" / "output.md").write_text(payload, encoding="utf-8")
+    before = tree_digest(case.frozen)
+    args = cli(tmp_path, case.frozen, "--dry-run", "--upstream-from", str(tmp_path / "e1"))
+    assert cp1.main(args, transport=unexpected_send) == 0
+    steps = json.loads(capsys.readouterr().out)["step_prompts"]["steps"]
+    assert [s["step_id"] for s in steps] == list(cp1.CP1_STEPS)
+    assert [s["representative_payload"]["outcome"] for s in steps] == ["accepted"] * 4
+    assert [[u["projection"] for u in s["upstream"]] for s in steps] == [
+        [],
+        ["full"],
+        ["narrative-evidence"],
+        ["readiness-inputs"],
+    ]
+    narrative = steps[2]["first_call_per_cell"]["opus-high"]
+    assert Decimal(narrative["reserved_usd"]) == cp1.anthropic_reservation(
+        cp1.PRICES[OPUS], narrative["prompt_tokens_upper_bound"]
+    )
+    assert all(c["misfit"] is None for s in steps for c in s["first_call_per_cell"].values())
+    assert tree_digest(case.frozen) == before and not (tmp_path / "root").exists()
