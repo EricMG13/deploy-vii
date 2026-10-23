@@ -40,7 +40,16 @@ step's validator compares it against (`PREFILLED`, `known_bindings`, `prefill`):
   for the explanation's periods and metric;
 - `financial-review`: the hash of the submitted `financial` object parsed as `FinancialReview`;
 - `step-inputs`: for `narrative` the financial stage's `NarrativeInputs`, for `readiness` the
-  narrative step's `DownstreamInputs`.
+  narrative step's `DownstreamInputs`;
+- `quality-inputs` (task 7.4): `cp1_quality_inputs` of the ticket's recomputed registers, the
+  scope `validate_quality_review` binds the review to. Registers that do not stage raise
+  ValueError with the staging issue before anything is written.
+
+Task 7.4: `quality` is the fifth CP-1 step. Its model-facing shape is the stored `QualityReview`
+(materiality, lineage within each ceiling, findings; never a score, band or status). After null
+resolution and the pre-fill it enters the journal only through `cp1_workflow.promote_cp1`: an
+accepted review is the promotion, a rejected one finishes the attempt (no within-attempt
+repair: the step settles the module), so the module-wide repair re-runs the chain.
 
 A value the payload carries is overwritten. A payload already holding every right value is kept
 byte for byte and nothing is recorded; otherwise it is rewritten (`live.schema.exact_json`,
@@ -64,10 +73,13 @@ from pydantic import BaseModel, Field, ValidationError
 from deploy_vii.business_context import BusinessContextSubmission, submit_cp1a_step
 from deploy_vii.contracts import Contract
 from deploy_vii.cp0_workflow import submit_cp0_review
+from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
     CP1_STEPS,
     FinancialStage,
     FinancialSubmission,
+    cp1_registers,
+    promote_cp1,
     submit_cp1_step,
     validate_cp1_stage,
 )
@@ -77,6 +89,7 @@ from deploy_vii.financial_contracts import FacilityObservation, FinancialBook, F
 from deploy_vii.live.schema import Marked, exact_json, json_object, marked_fields, normalise
 from deploy_vii.narrative import NarrativeReview
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.quality import QualityInputs, QualityReview
 from deploy_vii.readiness import (
     Authority,
     Fidelity,
@@ -171,6 +184,9 @@ STEPS: Mapping[str, StepDef] = {
     "financials": StepDef("CP-1", FinancialSubmission),
     "narrative": StepDef("CP-1", NarrativeReview),
     "readiness": StepDef("CP-1", DownstreamReview),
+    # Task 7.4: the analyst's QA review over the retained registers; its accepted submission
+    # is the CP-1 promotion (`cp1_workflow.promote_cp1`).
+    "quality": StepDef("CP-1", QualityReview),
     # Task 7.2: the stored shape is the submission itself; Python composes the registers as the
     # step output (`business_context.submit_cp1a_step`), so no composer is needed here.
     "business_context": StepDef("CP-1A", BusinessContextSubmission),
@@ -194,17 +210,21 @@ PREFILLED: Mapping[str, frozenset[str]] = {
     ),
     "narrative": frozenset({"step-inputs"}),
     "readiness": frozenset({"step-inputs"}),
+    "quality": frozenset({"quality-inputs"}),
 }
 BOUND_STEPS: Mapping[str, tuple[str, ...]] = {
     "source_context": (),
     "financials": ("source_context",),
     "narrative": ("source_context", "financials"),
     "readiness": ("source_context", "financials", "narrative"),
+    "quality": CP1_STEPS,
 }
 # Fill order: a phase reads only values that are sent or that earlier phases wrote (a facility
 # row and an observation hash cover their citations; the financial review hash covers them all).
 PHASES = (
-    frozenset({"context-step", "pack", "source", "source-context-review", "step-inputs"}),
+    frozenset(
+        {"context-step", "pack", "source", "source-context-review", "step-inputs", "quality-inputs"}
+    ),
     frozenset({"facility"}),
     frozenset({"annual-observation", "quarter-observations"}),
     frozenset({"financial-review"}),
@@ -385,11 +405,23 @@ def _held_output(store: Execution, step: StepSubmission) -> str:
     return store.step_output(step.output_sha256)
 
 
+def quality_inputs(store: Execution, ticket_id: str) -> QualityInputs:
+    """The QA scope the `quality` step's review must bind: `cp1_quality_inputs` of the ticket's
+    trusted registers (every stage recomputed). Registers that do not stage raise ValueError
+    with the staging issue, before anything is written."""
+    try:
+        registers = cp1_registers(store, ticket_id)
+    except ValueError as error:
+        raise ValueError(f"Ticket {ticket_id} QA inputs cannot be computed: {error}") from error
+    return cp1_quality_inputs(registers)
+
+
 def known_bindings(store: Execution, ticket_id: str, step_id: str) -> Known:
     """What `prefill` writes for `step_id` on this ticket: exactly the values the step's
     validators compare against (`cp1_workflow._validate_stage`, `validate_source_context`,
     `validate_financial_context`, `validate_definition_review`, the narrative and downstream
-    validators). Raises ValueError when a step the bindings come from is not retained valid."""
+    validators, `validate_quality_review`). Raises ValueError when a step the bindings come from
+    is not retained valid, or when the QA inputs cannot be computed (`quality_inputs`)."""
     snapshot = store.read()
     attempt = next((a for a in snapshot.attempts if a.ticket_id == ticket_id), None)
     held = attempt.steps if attempt is not None else ()
@@ -409,6 +441,8 @@ def known_bindings(store: Execution, ticket_id: str, step_id: str) -> Known:
         step["step-inputs"] = DownstreamInputs.model_validate_json(
             _held_output(store, held[2])
         ).content_hash()
+    elif step_id == "quality":
+        step["quality-inputs"] = quality_inputs(store, ticket_id).content_hash()
     return Known(
         pack_sha256=pack.content_hash(),
         sources={s.source_id: s.sha256 for s in pack.sources if s.status == "ready" and s.sha256},
@@ -643,6 +677,14 @@ def submit_model_payload(
     if step.module_id == "CP-1A":
         journal = submit_cp1a_step(store, ticket_id, step_id, normalised)
         return Submitted(journal, normalised, resolved, (), (), None)
+    if step_id == "quality":
+        # Task 7.4: the review enters the journal only through the promotion, so an accepted
+        # step is the promotion and a rejected one finishes the attempt (`promote_cp1`). Its one
+        # binding always resolves (`quality_inputs` raises before any write when it cannot).
+        known = known_bindings(store, ticket_id, step_id)
+        filled = prefill(step.schema, normalised, known, PREFILLED[step_id])
+        journal = promote_cp1(store, ticket_id, filled.payload)
+        return Submitted(journal, filled.payload, resolved, filled.paths, filled.kinds, None)
     if step_id != "source_readiness":
         known = known_bindings(store, ticket_id, step_id)
         filled = prefill(step.schema, normalised, known, PREFILLED[step_id])

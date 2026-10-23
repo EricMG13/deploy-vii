@@ -14,7 +14,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from deploy_vii.business_context import REQUIRED_REGISTERS
-from deploy_vii.cp1_workflow import FinancialStage, submit_cp1_step
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_workflow import (
+    PROMOTED,
+    FinancialStage,
+    cp1_registers,
+    promote_cp1,
+    submit_cp1_step,
+    write_cp1_envelope,
+)
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Execution, NotAuthorized
 from deploy_vii.live import prompts, runner, submission
@@ -39,6 +47,7 @@ from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
 from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source
+from deploy_vii.quality import QualityInputs
 from deploy_vii.readiness import (
     ReadinessReview,
     build_readiness,
@@ -2188,3 +2197,137 @@ def test_step_repair_of_fails_closed_without_the_rejected_try() -> None:
     names = ["t1-source_context-1", "t1-financials-repair-1", "t2-financials-1"]
     with pytest.raises(ValueError, match="no prior try of t1/financials in the ledger"):
         runner.step_repair_of(names, "t1", "financials")
+
+
+# --- task 7.4: the live `quality` step promotes CP-1 -------------------------------------------
+
+
+def quality_rig(tmp_path: Path) -> tuple[Rig, QualityInputs]:
+    """A rig on a CP-1 ticket whose four stages are retained valid, and its QA inputs."""
+    from tests.product.test_cp1_workflow import staged
+
+    store, attempt = staged(tmp_path / "case")
+    rig = Rig(
+        store=store,
+        ticket_id=attempt.ticket_id,
+        ledger=Ledger(tmp_path / "ledger" / "l.jsonl", Decimal("5"), clock=lambda: NOW),
+        pool=fixture_pool("batch-q"),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(_keys(tmp_path)),
+        review=readiness_fixture()[1],
+        root=tmp_path,
+    )
+    return rig, cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+
+
+def model_review(inputs: QualityInputs, **update: object) -> dict[str, Any]:
+    """What a model returns for `quality`: the at-ceiling review without its inputs binding."""
+    from tests.product.test_cp1_workflow import at_ceiling
+
+    document: dict[str, Any] = json.loads(at_ceiling(inputs, **update).model_dump_json())
+    del document["inputs_sha256"]
+    return document
+
+
+def quality_step(rig: Rig) -> StepSpec:
+    return StepSpec("quality", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+
+
+def test_the_fifth_cp1_step_is_quality_and_its_dispatch_promotes_cp1(tmp_path: Path) -> None:
+    rig, inputs = quality_rig(tmp_path)
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert runner.expected_step(attempt, "CP-1") == "quality"
+    transport = FakeTransport(ok(json.dumps(model_review(inputs)), model=LUNA))
+    result = rig.run(ChatClient(transport), step=quality_step(rig))
+    assert result.status == "accepted", result.issues
+    assert result.journal is not None and result.journal.status == "finished"
+    assert not result.attempt_pending
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    exported = write_cp1_envelope(rig.store, tmp_path / "envelope")
+    assert exported.name == "envelope.md" and (tmp_path / "envelope" / "complete.json").is_file()
+    lines = (result.directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    events = [json.loads(line) for line in lines]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    assert filled["paths"] == ["inputs_sha256"] and filled["by_kind"] == {"quality-inputs": 1}
+    body = json.loads((transport.requests[0].body or b"{}").decode())
+    assert body["response_format"]["json_schema"]["name"] == "quality"
+    system, user = (message["content"] for message in body["messages"])
+    assert prompts.QUALITY_LINEAGE_RULE in system and "inputs_sha256" not in system
+    assert user.count(f"<<<CONTEXT id={prompts.QUALITY_BLOCK_ID} sha256=") == 1
+    assert "<<<SOURCE id=step:" not in user  # the QA scope stands in for the stage outputs
+    assert inputs.content_hash() not in user  # nothing is left to copy
+    request = load(attempt_dir(result) / "request.json")
+    assert result.prompt_tokens_upper_bound == runner.prompt_token_bound(
+        request["body"], BYTES_PER_TOKEN
+    )
+    with pytest.raises(ValueError, match="finished"):
+        rig.run(ChatClient(FakeTransport()), step=quality_step(rig))
+
+
+def test_a_rejected_quality_dispatch_finishes_the_attempt_for_the_module_repair(
+    tmp_path: Path,
+) -> None:
+    """R2: `quality` settles the module, so a rejected review is not repaired within the
+    attempt (it is not in `WITHIN_ATTEMPT_REPAIR`); the module repair re-runs from the start."""
+    rig, inputs = quality_rig(tmp_path)
+    ceilings = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+    document = model_review(inputs)
+    upgraded = next(
+        e for e in document["claims"][0]["evidence"] if ceilings[e["evidence_id"]] == "Calculated"
+    )
+    upgraded["lineage_class"] = "Directly Sourced"
+    transport = FakeTransport(ok(json.dumps(document), model=LUNA))
+    result = rig.run(ChatClient(transport), step=quality_step(rig))
+    upgrade = (
+        f"QA lineage upgrade rejected: {upgraded['evidence_id']} Directly Sourced above ceiling "
+        "Calculated"
+    )
+    assert result.status == "rejected" and upgrade in result.issues
+    assert not result.attempt_pending and result.step_try == 1
+    assert not [h for h in rig.store.read().heads if h.module_id == "CP-1"]
+    repair = rig.store.begin("CP-1")
+    assert repair.number == 1 and runner.expected_step(repair, "CP-1") == "source_context"
+
+
+def test_quality_is_not_dispatched_before_the_readiness_stage(tmp_path: Path) -> None:
+    rig, _ = cp1_rig(tmp_path)  # only source_context is retained
+    idle = FakeTransport()
+    before = rig.ledger.state().lines
+    with pytest.raises(ValueError, match="not the next step"):
+        rig.run(ChatClient(idle), step=quality_step(rig))
+    assert idle.requests == [] and rig.ledger.state().lines == before
+
+
+def test_a_crash_before_the_promotion_settles_is_never_re_sent_and_resumes_in_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The valid `quality` step is retained before `promote_cp1` settles: a crash between them
+    leaves five valid steps on a pending ticket. The runner refuses a second dispatch before
+    anything is spent (the review is not re-bought), and `promote_cp1` resumes from the
+    retained, pre-filled payload."""
+    rig, inputs = quality_rig(tmp_path)
+
+    def crash(*_: object, **__: object) -> object:
+        raise RuntimeError("Simulated host crash before settlement")
+
+    monkeypatch.setattr(rig.store, "finish", crash)
+    transport = FakeTransport(ok(json.dumps(model_review(inputs)), model=LUNA))
+    with pytest.raises(RuntimeError, match="Simulated"):
+        rig.run(ChatClient(transport), step=quality_step(rig))
+    monkeypatch.undo()
+    pending = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert pending.status == "pending" and [s.status for s in pending.steps] == ["valid"] * 5
+    with pytest.raises(ValueError, match="every CP-1 step is already retained"):
+        runner.expected_step(pending, "CP-1")
+    before = rig.ledger.state().lines
+    idle = FakeTransport()
+    with pytest.raises(ValueError, match="every CP-1 step is already retained"):
+        rig.run(ChatClient(idle), step=quality_step(rig))
+    assert idle.requests == [] and rig.ledger.state().lines == before
+    retained = rig.store.payload(pending.steps[-1].payload_sha256)
+    assert json.loads(retained)["inputs_sha256"] == inputs.content_hash()  # pre-filled
+    finished = promote_cp1(rig.store, rig.ticket_id, retained)
+    assert finished.status == "finished" and not finished.issues
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1")
+    assert head.qualification == PROMOTED

@@ -92,7 +92,10 @@ from deploy_vii.registry import canonical, modules
 REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
 TRUNCATED = "truncated"  # a response classification: the completion was cut at the budget
 CP0_STEPS = ("source_readiness",)
-CP1_CHAIN = ("source_context", "financials", "narrative", "readiness")
+# Task 7.4: the four stages, then the QA review whose acceptance is the CP-1 promotion. A
+# rejected review finishes the attempt (it settles the module), so `_run_cell` begins the
+# module repair, which restarts at source_context.
+CP1_CHAIN = ("source_context", "financials", "narrative", "readiness", "quality")
 FULL_CHAIN = CP0_STEPS + CP1_CHAIN
 # Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
 # step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.

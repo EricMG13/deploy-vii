@@ -419,3 +419,25 @@ observed) is now met; the `FinancialSubmission` split stays deferred until batch
 acceptance rule or journal rule moves.
 
 Not verified: a live truncation under the guard and the compact rule's live effect (E1 batch 6).
+
+## Amendment, 23 Oct 2026 (task 7.4)
+
+CP-1 gains a fifth live step, `quality`, so a live or proxy case can reach a promoted CP-1 head
+(the envelope, CP-MODEL publication and the Front Page's CP-1 blocks). The model-facing shape is
+the stored `QualityReview` (`quality-review/1`). The model supplies the analyst's judgments only:
+per candidate claim `material` and a rationale, per evidence id a `lineage_class` at or below the
+producer ceiling with a rationale, and findings (severity, status, resolution, references). It
+never supplies a score, band or QA status: Python computes them (`assess_quality`). Python
+pre-fills `inputs_sha256` (MC-1, the 7.0i mechanism: marker kind `quality-inputs`, dropped from
+the sent schema) with `cp1_quality_inputs(cp1_registers(store, ticket)).content_hash()`; registers
+that do not stage raise before anything is written. The prompt carries the QA scope Python
+projects from the same registers (`<<<CONTEXT id=quality-scope ...>>>`): claims with their text
+and evidence ids, each such id's ceiling, basis and register record, the coverage slots (register
+cells counted by table and status) and the source gate and module status. The review enters the
+journal only through `promote_cp1`, so an accepted `quality` step is the promotion; a rejected
+review finishes the attempt (the step settles the module, so it is outside
+`WITHIN_ATTEMPT_REPAIR`) and the module repair re-runs the chain. `promote_cp1`,
+`validate_quality_review`, the lineage ceilings and the status rules are unchanged.
+
+Not verified: provider acceptance of the `quality` sent schema (`live schema-check`); a live or
+proxy QA review on the real pack.

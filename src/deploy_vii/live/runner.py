@@ -5,8 +5,9 @@ reserving first; the raw response is retained before the journal sees it; the pa
 the journal only through `live.submission.submit_model_payload`: submit_cp0_review /
 submit_cp1_step (the same validators as any other input), or `store.submit_step` with the
 validator that rejects an uncomposable CP-0 submission or a CP-1 payload holding a reference
-Python cannot bind (task 7.0i). For source_readiness Python composes the stored review from the
-model's submission; for every CP-1 step it pre-fills the hash bindings. The ledger is settled
+Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4).
+For source_readiness Python composes the stored review from the model's submission; for every
+CP-1 step it pre-fills the hash bindings. The ledger is settled
 and the manifest sealed even if validation raises. A response from a model other than the
 drawn one (provider fallback) is retained and classified but never submitted, so a substitute
 can never be counted as the drawn model. The key is loaded here, used for the header and for
@@ -30,7 +31,7 @@ from pydantic import BaseModel
 
 from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
 from deploy_vii.business_context import cp1_context_facts
-from deploy_vii.cp1_workflow import CP1_STEPS
+from deploy_vii.cp1_workflow import CP1_PROMOTION, cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
 from deploy_vii.live.catalog import PinnedCandidate, PinnedPool, utc_stamp
 from deploy_vii.live.client import (
@@ -45,7 +46,14 @@ from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
 from deploy_vii.live.ledger import CapExceeded, Ledger, Settlement
-from deploy_vii.live.prompts import UpstreamInput, build, response_format, schema_text
+from deploy_vii.live.prompts import (
+    QUALITY,
+    UpstreamInput,
+    build,
+    quality_scope,
+    response_format,
+    schema_text,
+)
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter, response_envelope
 from deploy_vii.live.schema import (
     RELAXATIONS_BASIS,
@@ -288,10 +296,11 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
         if attempt.steps:
             raise ValueError("CP-1A already retains its one step; resume it through the journal")
         return BUSINESS_CONTEXT
+    # Task 7.4: the four stages, then the `quality` review whose acceptance is the promotion.
     done = sum(1 for item in attempt.steps if item.status == "valid")
-    if done >= len(CP1_STEPS):
+    if done >= len(CP1_PROMOTION):
         raise ValueError("every CP-1 step is already retained")
-    return CP1_STEPS[done]
+    return CP1_PROMOTION[done]
 
 
 def _upstream(store: Execution, attempt: Attempt) -> tuple[UpstreamInput, ...]:
@@ -371,15 +380,19 @@ def _plan(
     candidate = pool.candidate(drawn.slug)
     decision = candidate.effort_for(effort)
     repair = repair_prompt(snapshot, attempt, step.step_id)
+    # Task 7.4: the QA review reads the QA scope of the recomputed registers (registers that do
+    # not stage raise here, before anything is spent), not the four retained stage outputs.
+    quality = step.step_id == QUALITY
     messages = build(
         step.step_id,
         store.pack(snapshot),
         step.declared_sources,
         step.schema,
-        upstream=_upstream(store, attempt),
+        upstream=() if quality else _upstream(store, attempt),
         repair_issues=repair.issues,
         # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
         cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
+        scope=quality_scope(cp1_registers(store, ticket_id)) if quality else None,
     )
     chat = ChatRequest(
         model=candidate.slug,
@@ -481,9 +494,10 @@ def _record_response(plan: _Plan, writer: AttemptWriter, run: _Run) -> None:
 def journal_outcome(
     store: Execution, step_id: str, journal: Attempt
 ) -> tuple[str, tuple[str, ...]]:
-    # A step that settles its module (CP-0's review, CP-1A's one step) is accepted only when the
-    # settled module is: a valid step whose candidate fails the journal's check is rejected.
-    if step_id in {"source_readiness", BUSINESS_CONTEXT}:
+    # A step that settles its module (CP-0's review, CP-1A's one step, CP-1's `quality`
+    # promotion) is accepted only when the settled module is: a valid step whose candidate
+    # fails the journal's check is rejected.
+    if step_id in {"source_readiness", BUSINESS_CONTEXT, QUALITY}:
         accepted = journal.result_sha256 is not None and store.result(
             journal.result_sha256
         ).status in {"accepted", "restricted"}

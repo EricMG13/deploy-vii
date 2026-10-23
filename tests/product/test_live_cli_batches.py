@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission
+from deploy_vii.cp1_workflow import (
+    PROMOTED,
+    FinancialStage,
+    FinancialSubmission,
+    write_cp1_envelope,
+)
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live import cli
@@ -20,7 +25,7 @@ from deploy_vii.live.catalog import PinnedCandidate
 from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import Ledger
-from deploy_vii.live.prompts import schema_text
+from deploy_vii.live.prompts import QUALITY_BLOCK_ID, schema_text
 from deploy_vii.live.schema import (
     VariantRefused,
     bisect_variant,
@@ -29,6 +34,7 @@ from deploy_vii.live.schema import (
     strict_copy,
     strict_schema,
 )
+from deploy_vii.live.submission import quality_inputs
 from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import modules
 from tests.product.live_support import (
@@ -41,9 +47,10 @@ from tests.product.live_support import (
     ok,
 )
 from tests.product.test_business_context import submission_fixture
+from tests.product.test_cp1_workflow import at_ceiling
 from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
-from tests.product.test_narrative import draft
+from tests.product.test_narrative import populated
 from tests.product.test_readiness import as_submission, readiness_fixture
 from tests.product.test_workflow import cp1_case
 
@@ -359,6 +366,20 @@ def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
         ("cp1a", cli.CP1A_CHAIN),
     )
     assert cli.CP1A_CHAIN[-1] == "business_context" and cli.CP1A_CHAIN[:-1] == cli.CP0_STEPS
+    # Task 7.4: the CP-1 chain ends in the QA review whose acceptance promotes CP-1.
+    assert cli.CP1_CHAIN == ("source_context", "financials", "narrative", "readiness", "quality")
+    assert cli.FULL_CHAIN == (*cli.CP0_STEPS, *cli.CP1_CHAIN)
+
+
+def test_the_cp1_module_and_regression_cells_plan_five_cp1_steps() -> None:
+    (module,) = cli._module_cells("CP-1", 7)
+    assert module.steps == cli.FULL_CHAIN and module.steps[1:] == cli.CP1_CHAIN
+    pool = fixture_pool()
+    cells = cli._regression_cells(pool, [item.slug for item in pool.eligible], 7)
+    planned = {cell.case_id: cell.steps for cell in cells}
+    assert planned["cp1"] == ("source_readiness", *cli.CP1_CHAIN)
+    assert planned["cp1"][-1] == "quality" and len(planned["cp1"]) == 6
+    assert planned["cp0"] == cli.CP0_STEPS and planned["cp1a"] == cli.CP1A_CHAIN
 
 
 def test_cap_exhaustion_stops_the_batch_and_sends_nothing(rig: Rig) -> None:
@@ -1422,14 +1443,16 @@ REPAIR_COLUMN = 10
 BAD = "not json"
 OUTAGE = "outage"
 TRUNC = "truncated"  # a completion cut at the --max-tokens budget (finish_reason length)
-CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness")
+UPGRADE = "upgrade"  # a QA review that lifts one lineage above its ceiling (task 7.4)
+CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness", "quality")
 
 
 class Chain:
     """Fake transport for one CP-1 `module` cell. `script` lists, per chat call in order, the
     step the cell must ask for and whether to answer it validly, with `BAD` (a payload the
-    validator rejects) or `OUTAGE` (HTTP 500: no model output). Each valid payload is built
-    from the cell's own journal, so a step is accepted exactly as the validators would."""
+    validator rejects), `UPGRADE` (for `quality`: one lineage above its ceiling) or `OUTAGE`
+    (HTTP 500: no model output). Each valid payload is built from the cell's own journal, so a
+    step is accepted exactly as the validators would."""
 
     def __init__(
         self,
@@ -1459,9 +1482,24 @@ class Chain:
             ).model_dump_json()
         if step == "narrative":
             stage = FinancialStage.model_validate_json(step_text(journal, valid["financials"]))
-            return draft(stage.narrative_inputs).model_dump_json()
-        inputs = DownstreamInputs.model_validate_json(step_text(journal, valid["narrative"]))
-        return DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+            return populated(stage.narrative_inputs).model_dump_json()
+        if step == "readiness":
+            inputs = DownstreamInputs.model_validate_json(step_text(journal, valid["narrative"]))
+            return DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+        assert step == "quality", step
+        # What a model returns: the at-ceiling review without the binding Python fills.
+        ticket = journal.read().attempts[-1].ticket_id
+        review = json.loads(at_ceiling(quality_inputs(journal, ticket)).model_dump_json())
+        del review["inputs_sha256"]
+        return json.dumps(review)
+
+    def upgraded(self) -> str:
+        """The quality review with its first Calculated lineage lifted to Directly Sourced."""
+        review = json.loads(self.payload("quality"))
+        evidence = review["claims"][0]["evidence"]
+        lifted = next(e for e in evidence if e["lineage_class"] == "Calculated")
+        lifted["lineage_class"] = "Directly Sourced"
+        return json.dumps(review)
 
     def __call__(self, request: Request) -> Response:
         if request.url == KEY_URL:
@@ -1474,6 +1512,8 @@ class Chain:
         model = json.loads(request.body or b"{}")["model"]
         if verdict == TRUNC:
             return ok('{"sch', model=model, finish_reason="length")
+        if verdict == UPGRADE:
+            return ok(self.upgraded(), model=model)
         return ok(BAD if verdict == BAD else self.payload(step), model=model)
 
     def user_prompts(self) -> list[str]:
@@ -1537,6 +1577,7 @@ def test_a_rejected_financials_step_is_repaired_within_its_attempt_and_the_cell_
         ("financials", "accepted", "step"),
         ("narrative", "accepted", "-"),
         ("readiness", "accepted", "-"),
+        ("quality", "accepted", "-"),
     ]
     text = rig.report()
     assert "- Repairs dispatched: 1 (module repair attempts 0, within-attempt step repairs 1)" in (
@@ -1549,7 +1590,7 @@ def test_a_rejected_financials_step_is_repaired_within_its_attempt_and_the_cell_
     assert links["repair_of_ticket_id"] is None and links["retry_of_attempt_id"] is None
     assert manifests[rows[3][5]]["retries"]["step_try"] == 2
     prompts = chain.user_prompts()
-    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, False]
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, False, False]
     assert "- (root): Invalid JSON" in prompts[3]
 
 
@@ -1570,6 +1611,7 @@ def test_a_step_rejected_twice_falls_back_to_the_module_repair(tmp_path: Path) -
         ("financials", "accepted", "1"),
         ("narrative", "accepted", "1"),
         ("readiness", "accepted", "1"),
+        ("quality", "accepted", "1"),
     ]
     text = rig.report()
     assert "- Repairs dispatched: 2 (module repair attempts 1, within-attempt step repairs 1)" in (
@@ -1579,7 +1621,7 @@ def test_a_step_rejected_twice_falls_back_to_the_module_repair(tmp_path: Path) -
     assert manifests[rows[5][5]]["links"]["repair_of_ticket_id"] is not None
     assert manifests[rows[5][5]]["links"]["step_repair_of_attempt_id"] is None
     prompts = chain.user_prompts()
-    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, True, False, False]
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, True] + [False] * 3
 
 
 def test_a_second_rejection_ends_the_cell_without_a_third_attempt(tmp_path: Path) -> None:
@@ -1747,9 +1789,66 @@ def test_a_cp0_accepted_on_repair_still_authorizes_cp1(tmp_path: Path) -> None:
         ("financials", "accepted", "-"),
         ("narrative", "accepted", "-"),
         ("readiness", "accepted", "-"),
+        ("quality", "accepted", "-"),
     ]
     assert "- Repairs dispatched: 1" in rig.report()
     assert "<<<REPAIR" in chain.user_prompts()[1]
+
+
+def cell_journal(rig: Rig, cell: str = "module-00") -> Execution:
+    return Execution(rig.store.directory / "live" / "b1" / cell)
+
+
+def test_a_cp1_module_cell_runs_five_steps_and_its_quality_review_promotes_cp1(
+    tmp_path: Path,
+) -> None:
+    """Task 7.4: the fifth step's accepted review is the promotion, so a live cell reaches a
+    promoted CP-1 head whose canonical envelope exports."""
+    rig, chain, status = run_chain(tmp_path, ok_steps(*CHAIN))
+    assert status == 0 and len(chain.requests) == len(CHAIN)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)] == [
+        (step, "accepted", "-") for step in CHAIN
+    ]
+    journal = cell_journal(rig)
+    attempt = journal.read().attempts[-1]
+    assert attempt.status == "finished" and not attempt.issues
+    assert [s.step_id for s in attempt.steps] == list(CHAIN[1:])
+    head = next(h for h in journal.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    exported = write_cp1_envelope(journal, tmp_path / "envelope")
+    assert exported == tmp_path / "envelope" / "envelope.md"
+    body = json.loads(chain.requests[-1].body or b"{}")
+    assert body["response_format"]["json_schema"]["name"] == "quality"
+    assert f"<<<CONTEXT id={QUALITY_BLOCK_ID} sha256=" in body["messages"][1]["content"]
+
+
+def test_a_rejected_quality_review_takes_the_module_repair_and_promotes_on_it(
+    tmp_path: Path,
+) -> None:
+    """R2: `quality` settles the module, so its rejection finishes the attempt (no step repair
+    within it); the 7.0e module repair re-runs the CP-1 chain from source_context and the
+    repaired review carries the rejected one's issues."""
+    script = [*ok_steps(*CHAIN[:-1]), ("quality", UPGRADE), *ok_steps(*CHAIN[1:])]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
+        *[(step, "accepted", "-") for step in CHAIN[:-1]],
+        ("quality", "rejected", "-"),
+        *[(step, "accepted", "1") for step in CHAIN[1:]],
+    ]
+    assert "- Repairs dispatched: 1 (module repair attempts 1, within-attempt step repairs 0)" in (
+        rig.report()
+    )
+    prompts = chain.user_prompts()
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 6 + [False] * 4 + [True]
+    assert "QA lineage upgrade rejected: " in prompts[-1]
+    journal = cell_journal(rig)
+    first, repair = journal.read().attempts[-2:]
+    assert first.status == "finished" and first.step_repairs == ()
+    assert repair.number == 1 and repair.status == "finished" and not repair.issues
+    head = next(h for h in journal.read().heads if h.module_id == "CP-1")
+    assert head.qualification == PROMOTED and head.result_sha256 == repair.result_sha256
 
 
 def test_probe_cells_are_never_repaired(rig: Rig) -> None:

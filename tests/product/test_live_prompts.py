@@ -1,14 +1,21 @@
 """Task 2.9 fix 3: `source_context` states the readiness rules the validator now applies to it."""
 
+import hashlib
 import json
 import re
+import tempfile
+from functools import cache
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from deploy_vii.business_context import BusinessContextSubmission, cp1a_consumers
+from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import Fact
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.financial_contracts import (
     FinancialBook,
     SegmentAllocation,
@@ -26,6 +33,7 @@ from deploy_vii.live.submission import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
+from deploy_vii.quality import CoverageField, EvidenceCeiling, QualityInputs, QualityReview
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
 from deploy_vii.statement_validation import (
@@ -176,10 +184,22 @@ RUN_TEXT_EXAMPLES = (
 )
 
 
+@cache
+def staged_scope() -> tuple[QualityInputs, CanonicalTables]:
+    """The QA inputs and registers of the promotable 6.4 CP-1 case (built once)."""
+    from tests.product.test_cp1_workflow import staged
+
+    with tempfile.TemporaryDirectory() as directory:
+        store, attempt = staged(Path(directory))
+        registers = cp1_registers(store, attempt.ticket_id)
+    return cp1_quality_inputs(registers), registers
+
+
 def composed(step_id: str) -> str:
     pack, _ = readiness_fixture()
     schema = STEPS[step_id].schema
-    return prompts.build(step_id, pack, ("filing",), schema)[0].content
+    scope = prompts.quality_scope(staged_scope()[1]) if step_id == prompts.QUALITY else None
+    return prompts.build(step_id, pack, ("filing",), schema, scope=scope)[0].content
 
 
 def test_the_citation_rule_states_the_interleave_and_page_rules_once() -> None:
@@ -597,3 +617,130 @@ def test_an_omitted_segment_is_rejected_with_the_message_the_rule_describes() ->
 
 def test_the_register_rules_stay_inside_the_financials_prompt_budget() -> None:
     assert sum(len(rule) for rule in REGISTER_RULES) < 4500  # characters, about 1,100 tokens
+
+
+# --- task 7.4: the `quality` step: the analyst's judgments, Python's arithmetic -------------
+
+QUALITY_RULES = (
+    prompts.QUALITY_CLAIMS_RULE,
+    prompts.QUALITY_LINEAGE_RULE,
+    prompts.QUALITY_FINDINGS_RULE,
+)
+
+
+def quality_prompt() -> tuple[str, str]:
+    pack, _ = readiness_fixture()
+    scope = prompts.quality_scope(staged_scope()[1])
+    system, user = (
+        m.content for m in prompts.build("quality", pack, ("filing",), QualityReview, scope=scope)
+    )
+    return system, user
+
+
+def scope_block(user: str) -> tuple[str, str]:
+    """The quality-scope block's header hash and its body."""
+    rest = user.split(f"<<<CONTEXT id={prompts.QUALITY_BLOCK_ID} sha256=", 1)[1]
+    digest, rest = rest.split(">>>\n", 1)
+    return digest, rest.split("\n<<<END>>>", 1)[0]
+
+
+def test_the_quality_step_states_each_rule_once_and_asks_for_no_score() -> None:
+    system, _ = quality_prompt()
+    for rule in QUALITY_RULES:
+        assert rule in prompts.STEP_CONTRACTS["quality"], rule
+        assert system.count(rule) == 1, rule
+    assert "never state a score, band or status" in system
+    assert "Python fills the inputs binding" in system
+    # The validator's lineage order, strongest first (`quality.WEIGHTS`).
+    order = "Directly Sourced, Calculated, Assumption-Based, Analyst Inference, Weak Lineage"
+    assert order in prompts.QUALITY_LINEAGE_RULE
+    assert "never a stronger one" in prompts.QUALITY_LINEAGE_RULE
+    for step_id in ("source_context", "readiness", "business_context"):
+        assert all(rule not in composed(step_id) for rule in QUALITY_RULES), step_id
+    schema = system.split("JSON Schema:\n", 1)[1]
+    assert "inputs_sha256" not in schema and "confidence" not in schema
+
+
+def test_the_quality_context_is_the_qa_scope_as_compact_json_with_its_hash() -> None:
+    inputs, registers = staged_scope()
+    _, user = quality_prompt()
+    assert user.count(f"<<<CONTEXT id={prompts.QUALITY_BLOCK_ID} ") == 1
+    digest, body = scope_block(user)
+    assert digest == hashlib.sha256(body.encode()).hexdigest()
+    assert "\n" not in body and ": " not in body.split('"claims"', 1)[0]  # compact
+    scope = json.loads(body)
+    assert scope == json.loads(json.dumps(prompts.quality_scope(registers)))
+    assert [c["claim_id"] for c in scope["claims"]] == [c.claim_id for c in inputs.claims]
+    assert [c["evidence_ids"] for c in scope["claims"]] == [
+        list(c.evidence_ids) for c in inputs.claims
+    ]
+    ceilings = {c.evidence_id: c for c in inputs.ceilings}
+    named = {e for c in inputs.claims for e in c.evidence_ids}
+    assert {e["evidence_id"] for e in scope["evidence"]} == named
+    for entry in scope["evidence"]:
+        bound = ceilings[entry["evidence_id"]]
+        assert (entry["ceiling"], entry["basis"]) == (bound.ceiling, bound.basis)
+        assert entry["record"]["record_json"] and "citations" in entry["record"]
+    counted = len(scope["coverage_slots"]) + sum(c["slots"] for c in scope["coverage_cells"])
+    assert counted == len(inputs.coverage)
+    present = [s for s in inputs.coverage if s.present]
+    assert sum(s["present"] for s in scope["coverage_slots"]) + sum(
+        c["slots"] for c in scope["coverage_cells"] if c["present"]
+    ) == len(present)
+    assert sum(scope["references_by_basis"].values()) == len(inputs.references)
+    assert (scope["source_gate"], scope["module_status"]) == (
+        inputs.source_gate,
+        inputs.module_status,
+    )
+    assert inputs.content_hash() not in user  # the binding is Python's, never shown
+    assert len(body) < 20_000  # the cells are counted, not listed (about 45,000 here)
+
+
+def test_the_qa_scope_is_required_for_quality_and_refused_elsewhere() -> None:
+    pack, _ = readiness_fixture()
+    with pytest.raises(prompts.PromptError, match="needs its QA scope"):
+        prompts.build("quality", pack, ("filing",), QualityReview)
+    with pytest.raises(prompts.PromptError, match="not a declared input of step readiness"):
+        prompts.build("readiness", pack, ("filing",), STEPS["readiness"].schema, scope={})
+
+
+def test_a_cell_slot_without_its_register_fact_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid registers cannot drop a fact (their own validator refuses it), so this stands in
+    for a QA projection that drifts from the register facts: the scope fails closed."""
+    inputs, registers = staged_scope()
+    stray = CoverageField(field_id="qa-cell:stray", present=True, rationale="Drifted slot")
+    drifted = inputs.model_copy(
+        update={
+            "coverage": (*inputs.coverage, stray),
+            "references": (*inputs.references, stray.field_id),
+            "ceilings": (*inputs.ceilings, EvidenceCeiling.of(stray.field_id, "coverage")),
+        }
+    )
+    monkeypatch.setattr(prompts, "cp1_quality_inputs", lambda _: drifted)
+    with pytest.raises(prompts.PromptError, match="qa-cell:stray matches no register fact"):
+        prompts.quality_scope(registers)
+
+
+def test_claim_evidence_without_its_register_record_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid narrative cites catalogue records only, so this stands in for a QA projection
+    whose claim names evidence the catalogue lacks: the scope fails closed, never a bare id."""
+    inputs, registers = staged_scope()
+    claim = inputs.claims[0]
+    stray = "gap:stray"
+    drifted = inputs.model_copy(
+        update={
+            "claims": (
+                claim.model_copy(update={"evidence_ids": (*claim.evidence_ids, stray)}),
+                *inputs.claims[1:],
+            ),
+            "references": (*inputs.references, stray),
+            "ceilings": (*inputs.ceilings, EvidenceCeiling.of(stray, "gap")),
+        }
+    )
+    monkeypatch.setattr(prompts, "cp1_quality_inputs", lambda _: drifted)
+    with pytest.raises(prompts.PromptError, match="gap:stray has no register record"):
+        prompts.quality_scope(registers)

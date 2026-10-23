@@ -24,8 +24,9 @@ from a pinned pool:
    journal sees it.
 5. `ok` and `truncated` payloads go to `submission.submit_model_payload` only: a
    `source_readiness` submission is composed into a `ReadinessReview` and submitted through
-   `submit_cp0_review`, a CP-1 payload goes to `submit_cp1_step`, so the journal's validators
-   decide acceptance. Fallback, HTTP error, 402 and timeout payloads are not submitted.
+   `submit_cp0_review`, a CP-1 stage payload goes to `submit_cp1_step` and the CP-1 `quality`
+   review to `promote_cp1` (task 7.4), so the journal's validators decide acceptance. Fallback,
+   HTTP error, 402 and timeout payloads are not submitted.
 6. `ledger.settle`, then `manifest.json` last. Both run in a `finally`, so a crash in validation
    still settles money and seals evidence (status `interrupted`) and then propagates.
 
@@ -41,8 +42,8 @@ from a pinned pool:
 | `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block. |
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
-| `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts. |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i), `submit_model_payload` (decision 0008). |
+| `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4). |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
 
@@ -114,6 +115,33 @@ from a pinned pool:
   can use up to 2 x (`max_retries` + 1) dispatches per attempt. CP-0's single
   review, CP-1's `quality` promotion step and CP-1A's single `business_context` step (task
   7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
+- **The `quality` step promotes CP-1 (task 7.4).** CP-1 has five live steps:
+
+  | # | Step | The model supplies | Python fills or computes | Enters the journal through |
+  | --- | --- | --- | --- | --- |
+  | 1 | `source_context` | source descriptions, citations | pack and source hashes | `submit_cp1_step` |
+  | 2 | `financials` | statement values, definition review, context binding | every hash binding (task 7.0i) | `submit_cp1_step` |
+  | 3 | `narrative` | the narrative review | `inputs_sha256` | `submit_cp1_step` |
+  | 4 | `readiness` | the downstream review | `inputs_sha256` | `submit_cp1_step` |
+  | 5 | `quality` | per claim `material` and a rationale; per evidence id a `lineage_class` at or below its ceiling with a rationale; findings with severity, status and resolution | `inputs_sha256` (`cp1_quality_inputs` of the recomputed registers), the confidence score, band and QA status | `promote_cp1` |
+
+  `expected_step` returns the next step of `CP1_PROMOTION` by the count of valid steps. The
+  `quality` prompt carries, in place of the four stage outputs, a second CONTEXT block
+  `<<<CONTEXT id=quality-scope sha256=<body hash>>>>` (`prompts.quality_scope`, compact JSON):
+  each candidate claim (an analytical finding) with its text and evidence ids, each such
+  evidence id's lineage ceiling, basis and register record with citations, the coverage slots
+  (the register cells counted by table and status, not listed: the synthetic case holds about
+  45,000), the source gate, the module status, the reference count per basis and any inherited
+  findings. Its contract (rules a to d: claims once, lineage at or below the ceiling with the
+  class order, findings, nonblank text) asks for no score, band or status. An accepted review
+  **is** the promotion: the attempt finishes and the CP-1 head records `PROMOTED`'s four
+  statuses, so `write_cp1_envelope` and CP-MODEL publication follow. A rejected review
+  (`validate_quality_review`'s issues, a Blocked QA, a handoff that does not verify) finishes the
+  attempt rejected: `quality` settles the module, so it has no repair within the attempt, and
+  the `module` driver begins the module repair, which re-runs the chain from `source_context`
+  with the review's issues on the repaired `quality` prompt. No valid `readiness` step, or
+  registers that do not stage (the QA inputs cannot be computed), raise ValueError before
+  anything is spent or written. The proxy cohort (`accept_proxy_payload`) takes the same route.
 - **A truncated completion is not repaired (task 7.0h).** A try classified `truncated` (cut at
   the `--max-tokens` budget) is a budget verdict, not a validator verdict the model can act on:
   the `module` driver neither re-sends the step (its one in-attempt repair stays unused, the
@@ -271,9 +299,9 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   batches are run one at a time (one owner per worktree). Seeds of cells are strictly increasing, so they are distinct.
   An existing `live-<batch>.md` is never overwritten.
 - `probe`: per eligible model, `--draws-per-model` cells of CP-0, `source_context`, `financials`.
-  `canary`: one cell per eligible model over CP-0 and the four CP-1 steps. `module --module`: one
-  seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the four
-  steps, CP-1A (alias CP-2C; task 7.2) runs CP-0 first then its one step `business_context`;
+  `canary`: one cell per eligible model over CP-0 and the five CP-1 steps. `module --module`: one
+  seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the five
+  steps (`CP1_CHAIN`, ending in `quality`, task 7.4; the `regression` `cp1` case too), CP-1A (alias CP-2C; task 7.2) runs CP-0 first then its one step `business_context`;
   other modules have no live step contract and are refused before spending. A CP-0 that does not
   write `Run CP-1A` for CP-1A ends the cell `not-authorized` before the step is sent.
 - **`business_context` (CP-1A, task 7.2).** One step; the model returns judgments and verbatim
@@ -494,8 +522,9 @@ registered builder's hash (`corpus.SYNTHETIC_PACKS`; a test asserts they still m
 and leaves it unset otherwise, so a probe on another pack replays as `stale-inputs` with the
 reason "no registered synthetic pack" until that pack is registered. `upstream` is read from the
 accepted sibling attempts of the same ticket (their `output.md`); a missing predecessor is a
-`CorpusError`, never a guess. Replayable steps: `source_readiness` and the four CP-1 steps; seeded
-and tested are `source_readiness`, `source_context` and `financials`.
+`CorpusError`, never a guess. Replayable steps: `source_readiness` and the four CP-1 stage steps
+(`quality` is not: `live corpus` refuses it as "not replayable from one payload"); seeded and
+tested are `source_readiness`, `source_context` and `financials`.
 
 To regenerate an entry after a deliberate validator change (`issues-changed`), rerun
 `deploy-vii live corpus <attempt-dir> <case-id> --replace`; without `--replace` an existing entry is
@@ -947,5 +976,7 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep
 their stored contracts until their own MC-1 skeletons); a `FinancialSubmission` split
 (deferred by decision 0008); a per-step repair of CP-0 or of CP-1's `quality` step (task 7.0g
-covers CP-1's four model steps); provider acceptance of the
-`ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun).
+covers CP-1's four stage steps); provider acceptance of the
+`ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun); provider
+acceptance of the `quality` sent schema and a live or proxy QA review on the real pack (task
+7.4); a replay corpus entry for `quality`.

@@ -17,10 +17,16 @@ brackets).
 Task 2.9: `source_context` states the same source, citation and coverage rules as
 `source_readiness` (one text each, so they cannot drift), because its validator now applies the
 same quote matcher and absence rule; its model-facing shape is still the stored contract.
+
+Task 7.4: `quality` gets a second CONTEXT block, `<<<CONTEXT id=quality-scope sha256=<the body's
+own hash>>>>`, holding the QA scope Python projects from the recomputed registers
+(`quality_scope`) as compact JSON, in place of the retained stage outputs the other CP-1 steps
+receive.
 """
 
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
@@ -30,7 +36,10 @@ from pydantic import BaseModel
 
 from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
 from deploy_vii.business_context import context_block
+from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import Fact
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.financial_periods import _id
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import extraction_coverage, live_consumers
@@ -214,6 +223,33 @@ CP1A_ROW_RULES = (
     "is null exactly when its status is Not disclosed. At least one credit translation "
     "populates evidence, risk mechanic and credit implication."
 )
+# Task 7.4: the rules `quality.validate_quality_review` holds the `quality` review to, and the
+# judgments it leaves to the analyst (materiality, lineage within its ceiling, findings).
+QUALITY = "quality"
+QUALITY_BLOCK_ID = "quality-scope"
+QUALITY_CLAIMS_RULE = (
+    "`claims`: exactly one assessment for each claim_id listed under `claims` in the CONTEXT "
+    "block, and no other. `material` is true when the claim bears on the credit view; its "
+    "`rationale` says why or why not."
+)
+QUALITY_LINEAGE_RULE = (
+    "A claim's `evidence`: exactly one lineage for each id in that claim's `evidence_ids`, and no "
+    "other. Its `lineage_class` is the `ceiling` listed for that id under `evidence` or a weaker "
+    "class, never a stronger one: the ceiling's `basis` names the register that produced the "
+    "evidence (citation, calculation, estimate, gap, missing or coverage), which is why it cannot "
+    "go higher. From strongest to weakest: Directly Sourced, Calculated, Assumption-Based, "
+    "Analyst Inference, Weak Lineage, then Untraced, Conflicting and Insufficient Information "
+    "(equally weakest). Keep the ceiling when the record and its citations support it; lower it "
+    "when they do not, and say why in `rationale`."
+)
+QUALITY_FINDINGS_RULE = (
+    "`findings`: one per defect the CONTEXT block shows (for example an absent coverage slot, a "
+    "lineage the record cannot support, a conflict), else none. Each has a new `finding_id` "
+    "(letters, digits and `_` `.` `:` `-`; never one of `inherited_findings`), a `severity` "
+    "(CRITICAL, MATERIAL or MINOR), a `status` that is open unless the CONTEXT block shows the "
+    "defect resolved (any other status needs its `resolution`), a `description`, and "
+    "`references` that name only evidence ids or coverage `field_id`s listed in the CONTEXT block."
+)
 
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
@@ -270,6 +306,22 @@ STEP_CONTRACTS: Mapping[str, str] = {
         "the supplied spans."
     ),
     "readiness": "Review downstream readiness from the supplied inputs only.",
+    # Task 7.4: the analyst's part of CP-1 QA (`quality.md`); Python owns the arithmetic.
+    "quality": (
+        "Review the CP-1 quality scope as the QA analyst. The CONTEXT block id=quality-scope "
+        "holds what Python computed from the retained registers: each candidate claim (an "
+        "analytical finding) with its text and evidence ids, each such evidence id's register "
+        "record, citations and lineage ceiling with its basis, the coverage slots, the source "
+        "gate, the module status and any inherited findings. Return judgments only: Python fills "
+        "the inputs binding and computes the confidence score, band and QA status from your "
+        "judgments; never state a score, band or status.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {QUALITY_CLAIMS_RULE}\n"
+        f"b. {QUALITY_LINEAGE_RULE}\n"
+        f"c. {QUALITY_FINDINGS_RULE}\n"
+        "d. Every rationale, description and resolution is nonblank. The CONTEXT block is not a "
+        "source and is never cited."
+    ),
     "business_context": (
         f"{CP1A_METHOD.strip()}\n"
         "Return judgments and verbatim quotes only: Python fills every hash, identifier, "
@@ -371,6 +423,82 @@ def _context_body(step_id: str, pack: PreparedPack, cp1_facts: Sequence[Fact] = 
     return json.dumps(body, indent=1, sort_keys=True)
 
 
+def quality_scope(registers: CanonicalTables) -> dict[str, Any]:
+    """The `quality` step's CONTEXT body: the QA scope `cp1_quality_inputs` projects from the
+    trusted registers, in the shape the analyst judges (task 7.4, R1).
+
+    Every candidate claim with its finding text and evidence ids; for each evidence id a claim
+    names, its lineage ceiling and basis and its register record with citations; the source
+    gate, module status and inherited findings. The coverage slots are listed one by one except
+    the register cells (`qa-cell:`), which are counted by table and status: the synthetic case
+    alone holds about 45,000 of them, so listing each, or each of the inputs' references, would
+    not fit a prompt. A `qa-cell:` slot that matches no register fact raises PromptError.
+    """
+    inputs = cp1_quality_inputs(registers)
+    narrative = registers.downstream.inputs.narrative
+    findings = {item.finding_id: item for item in narrative.review.findings}
+    records = {item.evidence_id: item for item in narrative.inputs.catalogue}
+    ceilings = {item.evidence_id: item for item in inputs.ceilings}
+    facts = {_id("qa-cell", fact.fact_id): fact for fact in registers.module.facts}
+    slots: list[dict[str, Any]] = []
+    cells: Counter[tuple[str, str, bool]] = Counter()
+    for slot in inputs.coverage:
+        if not slot.field_id.startswith("qa-cell:"):
+            slots.append(slot.model_dump(mode="json"))
+            continue
+        fact = facts.get(slot.field_id)
+        if fact is None:
+            raise PromptError(f"QA coverage slot {slot.field_id} matches no register fact")
+        cells[(fact.table_id, fact.status, slot.present)] += 1
+    claims = []
+    for claim in inputs.claims:
+        finding = findings[claim.claim_id]
+        claims.append(
+            {
+                "claim_id": claim.claim_id,
+                "dimension": finding.dimension,
+                "title": finding.title,
+                **finding.model_dump(
+                    mode="json", include={"evidence", "risk_mechanic", "credit_implication"}
+                ),
+                "evidence_ids": list(claim.evidence_ids),
+            }
+        )
+    evidence = []
+    for evidence_id in dict.fromkeys(e for c in inputs.claims for e in c.evidence_ids):
+        ceiling = ceilings[evidence_id]
+        entry: dict[str, Any] = {
+            "evidence_id": evidence_id,
+            "ceiling": ceiling.ceiling,
+            "basis": ceiling.basis,
+        }
+        record = records.get(evidence_id)
+        if record is None:  # a valid narrative cites catalogue records only
+            raise PromptError(f"QA claim evidence {evidence_id} has no register record")
+        entry["record"] = record.model_dump(
+            mode="json", include={"kind", "reference", "record_json", "citations"}
+        )
+        evidence.append(entry)
+    return {
+        "note": (
+            "This CONTEXT block is the CP-1 QA scope Python computed from the retained registers. "
+            "It is not a source and cannot be cited."
+        ),
+        "coverage_policy": inputs.coverage_policy,
+        "source_gate": inputs.source_gate,
+        "module_status": inputs.module_status,
+        "claims": claims,
+        "evidence": evidence,
+        "coverage_slots": slots,
+        "coverage_cells": [
+            {"table_id": table, "status": status, "present": present, "slots": count}
+            for (table, status, present), count in sorted(cells.items())
+        ],
+        "references_by_basis": dict(Counter(item.basis for item in inputs.ceilings)),
+        "inherited_findings": [item.model_dump(mode="json") for item in inputs.inherited_findings],
+    }
+
+
 def schema_text(schema: type[BaseModel]) -> str:
     """The schema printed in the system prompt: the same strict copy `response_format` sends."""
     return json.dumps(strict_schema(schema), sort_keys=True, separators=(",", ":"))
@@ -393,10 +521,17 @@ def build(
     upstream: Sequence[UpstreamInput] = (),
     repair_issues: Sequence[str] = (),
     cp1_facts: Sequence[Fact] = (),
+    scope: Mapping[str, Any] | None = None,
 ) -> list[Message]:
+    """`scope` is the `quality` step's QA scope (`quality_scope`), required there and refused
+    for every other step (MC-10: only the step's declared inputs)."""
     contract = STEP_CONTRACTS.get(step_id)
     if contract is None:
         raise PromptError(f"no contract is defined for step {step_id}")
+    if step_id == QUALITY and scope is None:
+        raise PromptError(f"step {QUALITY} needs its QA scope")
+    if step_id != QUALITY and scope is not None:
+        raise PromptError(f"the QA scope is not a declared input of step {step_id}")
     system = "\n".join(
         (
             f"You are one step of a credit-research evidence workflow. Step: {step_id}.",
@@ -418,6 +553,10 @@ def build(
     )
     context = _context_body(step_id, pack, cp1_facts)
     blocks = [block("CONTEXT", PACK_BLOCK_ID, pack.content_hash(), context)]
+    if scope is not None:  # compact JSON; the header carries the body's own hash
+        body = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        blocks.append(block("CONTEXT", QUALITY_BLOCK_ID, digest, body))
     for source_id in dict.fromkeys(declared_inputs):
         digest, body = _source_body(pack, source_id)
         blocks.append(block("SOURCE", source_id, digest, body))

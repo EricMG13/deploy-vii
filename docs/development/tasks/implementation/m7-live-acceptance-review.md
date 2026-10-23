@@ -317,3 +317,26 @@ Evidence: E1 batch 6 (DC-8 proxy cohort, 23 October 2026): the first `financials
 Not verified: live uptake (the proxy module repair and the next pool batch).
 
 Fix round 1: the rules also state the renamed statement/account links (rendered from `ACCOUNT_LINKS`), the stable fields of addbacks, segments and KPIs, one line per `item_id` per statement and the `other:` id spelling. The segment-priority sentence is stricter than the validator, which checks operating segments only; that is safe because a corporate/elimination segment given a distinct priority is accepted too.
+
+## 7.4 The live quality step promotes CP-1
+
+CP-1 gains a fifth live step, `quality` (`CP1_CHAIN`, `FULL_CHAIN`, the `module` driver and the
+`regression` `cp1` case). The model returns the `QualityReview` over the QA scope Python projects
+from the recomputed registers (`prompts.quality_scope`, a `quality-scope` CONTEXT block: claims
+with text and evidence ids, each such id's ceiling, basis and record, the coverage slots with
+register cells counted, the source gate and module status). Python fills `inputs_sha256`
+(marker kind `quality-inputs`, dropped from the sent schema) and enters the review through
+`promote_cp1`, so an accepted step is the promotion (head `PROMOTED`, envelope exportable). A
+rejected review finishes the attempt (no within-attempt repair: the step settles the module);
+the module repair re-runs the chain from `source_context`. The proxy cohort takes the same
+route. No valid `readiness` step, or registers that do not stage, raise before any write.
+`promote_cp1`, `validate_quality_review`, the ceilings and the status rules are unchanged
+(decision 0008 amendment "23 Oct 2026 (task 7.4)").
+
+Evidence: offline only (fake transport and proxy payloads on the synthetic 6.4 case): a CP-1
+cell runs five steps to a promoted head whose envelope exports; a lineage above its ceiling is
+rejected with the validator's message and repaired by the module repair; the synthetic scope
+block is about 9.4 KB against 44,777 coverage slots and 48,836 references in the inputs.
+
+Not verified: provider acceptance of the `quality` sent schema (the coordinator runs
+`live schema-check --steps quality`); a live or proxy QA review on the real pack.

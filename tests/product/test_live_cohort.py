@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from deploy_vii.cp1_workflow import PROMOTED, write_cp1_envelope
 from deploy_vii.live import cli
 from deploy_vii.live.client import ChatClient, Response, TransportError
 from deploy_vii.live.cohort import (
@@ -36,6 +37,8 @@ from tests.product.test_live_runner import (
     cp1_rig,
     load,
     make_rig,
+    model_review,
+    quality_rig,
     reply,
 )
 
@@ -535,3 +538,39 @@ def test_a_proxy_payload_records_the_bindings_python_filled(tmp_path: Path) -> N
     assert filled["by_kind"] == {"context-step": 1, "source-context-review": 1}
     attempt = rig.store.read().attempts[-1]
     assert filled["retained_payload_sha256"] == attempt.steps[-1].payload_sha256
+
+
+def test_a_proxy_quality_review_promotes_cp1_at_zero_cost(tmp_path: Path) -> None:
+    """R4 (task 7.4): the no-credit path reaches a promoted CP-1 head through the same route:
+    the review is pre-filled and entered through `promote_cp1`, cohort `proxy:<label>`."""
+    rig, inputs = quality_rig(tmp_path)
+    result = cp1_proxy(rig, "quality", json.dumps(model_review(inputs)))
+    assert result.status == "accepted", result.issues
+    assert result.cohort == "proxy:claude-agent" and result.journal is not None
+    assert result.journal.status == "finished" and not result.journal.issues
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    write_cp1_envelope(rig.store, tmp_path / "envelope")
+    state = rig.ledger.state()
+    assert state.spent == Decimal(0) and state.reserved == Decimal(0)
+    manifest = load(result.directory / "manifest.json")
+    assert manifest["step_id"] == "quality" and manifest["poolable"] is False
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    assert filled["by_kind"] == {"quality-inputs": 1}
+
+
+def test_a_rejected_proxy_quality_review_finishes_the_attempt(tmp_path: Path) -> None:
+    rig, inputs = quality_rig(tmp_path)
+    ceilings = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+    document = model_review(inputs)
+    evidence = document["claims"][0]["evidence"]
+    lifted = next(e for e in evidence if ceilings[e["evidence_id"]] == "Calculated")
+    lifted["lineage_class"] = "Directly Sourced"
+    result = cp1_proxy(rig, "quality", json.dumps(document))
+    assert result.status == "rejected"
+    assert any(i.startswith("QA lineage upgrade rejected: ") for i in result.issues)
+    assert result.journal is not None and result.journal.status == "finished"
+    assert not [h for h in rig.store.read().heads if h.module_id == "CP-1"]

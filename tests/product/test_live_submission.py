@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import shutil
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,14 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from deploy_vii.contracts import Contract, Source, Span
-from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission, submit_cp1_step
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_workflow import (
+    PROMOTED,
+    FinancialStage,
+    FinancialSubmission,
+    cp1_registers,
+    submit_cp1_step,
+)
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
 from deploy_vii.financial_contracts import FinancialReview
@@ -31,6 +39,7 @@ from deploy_vii.live.submission import (
     ConsumerJudgment,
     Known,
     ReadinessSubmission,
+    StepDef,
     SubmittedCitation,
     compose,
     compose_payload,
@@ -40,6 +49,7 @@ from deploy_vii.live.submission import (
     submit_model_payload,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.quality import QualityInputs, QualityReview
 from deploy_vii.readiness import (
     absent_page_ranges,
     coverage_issues,
@@ -979,4 +989,149 @@ def test_every_marked_kind_is_one_python_fills_for_that_step() -> None:
         kinds = set(re.findall(f'"{PREFILLED_MARKER}": "([a-z-]+)"', text))
         assert kinds == set(PREFILLED.get(step_id, frozenset())), step_id
         assert text.count(PREFILLED_MARKER) == len(re.findall(f'"{PREFILLED_MARKER}": "', text))
-    assert set(PREFILLED) == set(CP1)
+    assert set(PREFILLED) == {*CP1, "quality"}
+
+
+# --- task 7.4: the `quality` step: the model supplies the QA review, Python promotes ---------
+
+
+@pytest.fixture(scope="module")
+def staged_quality(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str, QualityInputs]:
+    """A CP-1 ticket whose four stages are retained valid (the promotable 6.4 case)."""
+    from tests.product.test_cp1_workflow import staged  # imported here, as in journal_at
+
+    store, attempt = staged(tmp_path_factory.mktemp("quality"))
+    inputs = cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+    return store.directory, attempt.ticket_id, inputs
+
+
+@pytest.fixture
+def quality_journal(
+    staged_quality: tuple[Path, str, QualityInputs], tmp_path: Path
+) -> tuple[Execution, str, QualityInputs]:
+    directory, ticket_id, inputs = staged_quality
+    shutil.copytree(directory, tmp_path / "journal")
+    return Execution(tmp_path / "journal"), ticket_id, inputs
+
+
+def unbound_review(inputs: QualityInputs, **update: object) -> tuple[QualityReview, str]:
+    """The at-ceiling review and the payload a model writes for it: no `inputs_sha256`."""
+    from tests.product.test_cp1_workflow import at_ceiling
+
+    review = at_ceiling(inputs, **update)
+    payload, paths = without_bindings(QualityReview, review)
+    assert paths == ("inputs_sha256",) and "inputs_sha256" not in payload
+    return review, payload
+
+
+def test_the_quality_step_is_cp1_and_its_sent_schema_asks_for_no_binding() -> None:
+    assert STEPS["quality"] == StepDef("CP-1", QualityReview)
+    assert PREFILLED["quality"] == frozenset({"quality-inputs"})
+    stored = QualityReview.model_json_schema()
+    assert "inputs_sha256" in stored["required"]  # the stored contract still binds it
+    assert stored["properties"]["inputs_sha256"][PREFILLED_MARKER] == "quality-inputs"
+    sent = strict_schema(QualityReview)
+    assert "inputs_sha256" not in sent["properties"] and "inputs_sha256" not in sent["required"]
+    assert "inputs_sha256" not in json.dumps(sent)
+
+
+def test_a_review_without_its_binding_is_bound_by_python_and_promotes_cp1(
+    quality_journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    store, ticket_id, inputs = quality_journal
+    review, payload = unbound_review(inputs)
+    submitted = submit_model_payload(store, ticket_id, "quality", payload)
+    assert submitted.prefilled == ("inputs_sha256",)
+    assert submitted.prefilled_kinds == ("quality-inputs",)
+    assert QualityReview.model_validate_json(submitted.payload) == review
+    journal = submitted.journal
+    assert journal.status == "finished" and not journal.issues
+    assert [(s.step_id, s.status) for s in journal.steps][-1] == ("quality", "valid")
+    assert store.payload(journal.steps[-1].payload_sha256) == submitted.payload
+    head = next(h for h in store.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    assert head.result_sha256 == journal.result_sha256
+
+
+def test_a_lineage_above_its_ceiling_is_rejected_with_the_validators_message(
+    quality_journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    store, ticket_id, inputs = quality_journal
+    ceilings = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+    claim = inputs.claims[0]
+    evidence_id = next(e for e in claim.evidence_ids if ceilings[e] == "Calculated")
+    _, payload = unbound_review(inputs)
+    document = json.loads(payload)
+    for item in document["claims"][0]["evidence"]:
+        if item["evidence_id"] == evidence_id:
+            item["lineage_class"] = "Directly Sourced"
+    submitted = submit_model_payload(store, ticket_id, "quality", json.dumps(document))
+    journal = submitted.journal
+    upgrade = (
+        f"QA lineage upgrade rejected: {evidence_id} Directly Sourced above ceiling Calculated"
+    )
+    assert journal.status == "finished" and upgrade in journal.issues
+    assert journal.steps[-1].status == "invalid" and upgrade in journal.steps[-1].issues
+    # `quality` settles the module: no within-attempt repair (task 7.0g); the 7.0e repair remains.
+    assert journal.step_repairs == ()
+    assert store.result(journal.result_sha256 or "").status == "rejected"
+    assert not [h for h in store.read().heads if h.module_id == "CP-1"]
+    repair = store.begin("CP-1")
+    assert repair.number == 1 and upgrade in repair.repair_issues
+
+
+def test_a_wrong_supplied_binding_is_overwritten_and_recorded(
+    quality_journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    store, ticket_id, inputs = quality_journal
+    _, payload = unbound_review(inputs)
+    document = {**json.loads(payload), "inputs_sha256": ZERO}
+    submitted = submit_model_payload(store, ticket_id, "quality", json.dumps(document))
+    assert submitted.prefilled == ("inputs_sha256",)
+    assert json.loads(submitted.payload)["inputs_sha256"] == inputs.content_hash()
+    assert submitted.journal.status == "finished" and not submitted.journal.issues
+
+
+def test_a_review_already_bound_right_is_kept_byte_for_byte(
+    quality_journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    store, ticket_id, inputs = quality_journal
+    review, _ = unbound_review(inputs)
+    payload = review.model_dump_json(indent=1)
+    submitted = submit_model_payload(store, ticket_id, "quality", payload)
+    assert submitted.prefilled == () and submitted.payload == payload
+    assert store.payload(submitted.journal.steps[-1].payload_sha256) == payload
+    assert submitted.journal.status == "finished" and not submitted.journal.issues
+
+
+def test_quality_without_a_valid_readiness_step_raises_before_anything_is_written(
+    tmp_path: Path,
+) -> None:
+    store, ticket_id, _ = journal_at(tmp_path, "readiness")  # narrative valid, no readiness
+    for ticket, missing in ((ticket_id, "readiness"), ("absent-ticket", "source_context")):
+        before = store.read().content_hash()
+        files = sorted(store.directory.rglob("*"))
+        with pytest.raises(ValueError, match=f"no valid {missing} step to bind"):
+            submit_model_payload(store, ticket, "quality", "{}")
+        assert store.read().content_hash() == before
+        assert sorted(store.directory.rglob("*")) == files
+
+
+def test_qa_inputs_python_cannot_compute_refuse_the_review_before_the_write(
+    quality_journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    """R5: registers that do not stage leave no `inputs_sha256` to fill; the review is refused
+    with the staging issue and nothing is written. Here the narrative step's retained output
+    blob is gone, so the readiness stage cannot be recomputed."""
+    store, ticket_id, inputs = quality_journal
+    attempt = next(a for a in store.read().attempts if a.ticket_id == ticket_id)
+    output = attempt.steps[2].output_sha256
+    assert output is not None
+    (store.directory / "blobs" / output).unlink()
+    _, payload = unbound_review(inputs)
+    before = store.read().content_hash()
+    files = sorted(store.directory.rglob("*"))
+    with pytest.raises(ValueError, match=f"QA inputs cannot be computed: .*{output} is missing"):
+        submit_model_payload(store, ticket_id, "quality", payload)
+    assert store.read().content_hash() == before
+    assert sorted(store.directory.rglob("*")) == files

@@ -869,7 +869,8 @@ def test_prefixed_enum_is_named_where_it_applied_and_marked_nodes_of_another_sha
 # --- task 7.0i: the model supplies no hash; every binding Python fills is left out --------
 
 HASH_PATTERN = "^[0-9a-f]{64}$"
-CP1_STEPS = ("source_context", "financials", "narrative", "readiness")
+# Task 7.4: `quality` is the fifth CP-1 step; its QA inputs binding is pre-filled too.
+CP1_STEPS = ("source_context", "financials", "narrative", "readiness", "quality")
 
 
 def hash_typed(schema: dict[str, Any]) -> list[dict[str, Any]]:
