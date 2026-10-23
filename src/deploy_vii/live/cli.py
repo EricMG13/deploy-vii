@@ -55,14 +55,17 @@ from deploy_vii.live.prompts import schema_text
 from deploy_vii.live.reconcile import (
     Outcome,
     RetainedAttempt,
+    SpendCrossCheck,
     batch_attempts,
     candidates,
     interrupted_attempts,
     lookup_order,
     next_batch_window,
+    open_ledger,
     read_usage,
     reconcile_attempt,
     reconcile_interrupted,
+    spend_cross_check,
     usage_path,
 )
 from deploy_vii.live.retention import AttemptWriter
@@ -859,16 +862,6 @@ def render_report(
     return "\n".join(lines)
 
 
-def open_ledger(path: Path) -> Ledger:
-    """An existing ledger file opened with the cap its first line records."""
-    first = path.read_bytes().split(b"\n", 1)[0]
-    try:
-        cap = Decimal(str(json.loads(first)["cap_usd"]))
-    except (ValueError, KeyError, TypeError, InvalidOperation):
-        raise LedgerError(f"{path.name} has no readable opening line") from None
-    return Ledger(path, cap)
-
-
 def committed_elsewhere(directory: Path) -> Decimal:
     """Held plus settled spend over every ledger file under `directory` (each replayed).
 
@@ -1115,9 +1108,12 @@ def render_reconciliation(
     outcomes: Sequence[Outcome],
     checked_at: str,
     not_authorized: Sequence[Row] = (),
+    *,
+    spend: tuple[SpendCrossCheck | None, str],
 ) -> str:
     """The batch's steps with final charges (ledger after `adjust`) and the lookups made; the
-    steps CP-0 did not authorize (no attempt, nothing charged) follow the retained attempts."""
+    steps CP-0 did not authorize (no attempt, nothing charged) follow the retained attempts;
+    the spend cross-check closes it (task 7.14)."""
     state = ledger.state()
     records = {item.attempt_id: item for item in state.attempts}
     order = {name: index for index, name in enumerate(records)}
@@ -1165,8 +1161,43 @@ def render_reconciliation(
             for o in outcomes
         ),
         "",
+        *_spend_section(spend),
     ]
     return "\n".join(lines)
+
+
+SPEND_NOT_CHECKED = "not checked; the reconcile stopped before the cross-check"
+
+
+def _spend_section(spend: tuple[SpendCrossCheck | None, str]) -> list[str]:
+    """Task 7.14: the key's usage now against every ledger's settled charges, both inputs with
+    their times and the ledger count; without a figure, why. Reported only."""
+    found, why = spend
+    lines = [
+        "## Spend cross-check",
+        "",
+        "Reported only: nothing is settled or adjusted from this figure.",
+        "",
+    ]
+    if found is None:
+        return [*lines, f"- No figure: {why}", ""]
+    count = len(found.ledgers)
+    return [
+        *lines,
+        f"- Origin: {found.origin_file}, usage {format(found.origin_usd, 'f')} USD at "
+        f"{found.origin_at} (the earliest ledger's before-check)",
+        f"- Key usage now: {format(found.now_usd, 'f')} USD at {found.now_at} "
+        "(`GET /api/v1/key` at reconcile time)",
+        f"- Billed since the origin: {format(found.billed_usd, 'f')} USD",
+        f"- Settled in {count} ledger{'' if count == 1 else 's'} (.ledgers/*.jsonl): "
+        f"{format(found.settled_usd, 'f')} USD, of which {format(found.held_usd, 'f')} USD held "
+        f"at a reservation (cost unknown); {found.open_reservations} reservations open "
+        "(not counted)",
+        f"- Unattributed USD: {format(found.unattributed_usd, 'f')} (billed since the origin "
+        "less settled; positive: billed but in no ledger, late billing or spend outside the "
+        "runner; negative: settled but not billed, refunds or lag)",
+        "",
+    ]
 
 
 def _write_derived(path: Path, content: str) -> None:
@@ -1197,6 +1228,7 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
     retained = list(batch_attempts(root, args.batch_id))
     refused = read_not_authorized(root, args.batch_id)  # a bad record fails before any call
     usage = read_usage(root, args.batch_id)
+    spend: tuple[SpendCrossCheck | None, str] = (None, SPEND_NOT_CHECKED)
     try:
         for attempt in lookup_order(candidates(root, args.batch_id)):
             outcomes.append(
@@ -1219,6 +1251,8 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
                     next_batch=next_batch,
                 )
             )
+        # Task 7.14: after every adjust of this run, so the settled sum includes them.
+        spend = spend_cross_check(client, utc_stamp, root)
     finally:
         cells, notes = _cell_names(args.directory / "live" / args.batch_id)
         content = render_reconciliation(
@@ -1230,6 +1264,7 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
             outcomes,
             checked_at,
             refused,
+            spend=spend,
         )
         try:
             _write_derived(report, content)

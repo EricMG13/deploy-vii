@@ -18,13 +18,19 @@ from deploy_vii.live.client import (
     CHAT_URL,
     GENERATION_URL,
     KEY_URL,
+    ChatClient,
     Request,
     Response,
     TransportError,
 )
 from deploy_vii.live.ledger import AttemptRecord, Ledger
-from deploy_vii.live.reconcile import INTERRUPTED_SETTLE, RetainedAttempt, generation_cost
-from tests.product.live_support import FAKE_KEY, ok
+from deploy_vii.live.reconcile import (
+    INTERRUPTED_SETTLE,
+    RetainedAttempt,
+    generation_cost,
+    spend_cross_check,
+)
+from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, make_rtf_key, ok
 from tests.product.test_live_cli_batches import DEEPSEEK, Rig, key_status, step_lines
 
 FIXTURE = Path(__file__).parent / "fixtures" / "live" / "deepseek-504-in-200-1.json"
@@ -994,7 +1000,9 @@ def test_a_killed_batch_is_settled_from_the_next_batchs_before_check_over_an_emp
     before = ledger(rig).state()
     keys = responder.key_checks
     assert rig.run(reconcile_argv(rig), responder) == 0
-    assert responder.key_checks == keys  # no reconcile-time reading: later spend moved it
+    # No reconcile-time reading for the window (later spend moved it); the one reading is the
+    # task 7.14 spend cross-check's, taken after every adjust (`usage_now_usd` is absent below).
+    assert responder.key_checks == keys + 1
     assert events_of(rig, directory.name) == ["reserve", "settle", "adjust"]
     record = record_of(rig, directory.name)
     assert record.charged_usd == Decimal("0.0123")
@@ -1183,3 +1191,260 @@ def test_a_killed_batch_with_no_later_batch_stays_unresolved(rig: Rig) -> None:
     outcome = outcome_line(rig, directory.name)
     assert "| unresolved |" in outcome
     assert "no later batch recorded an account usage check before it" in outcome
+
+
+# --- 7.14: the spend cross-check (key usage now against every ledger's settled charges) -------
+# Reported only: nothing is settled or adjusted from it. Batch e1-cp1-13's after-check lagged its
+# settled charges by US$1.0737551 and caught up before e1-cp1-14's before-check; no window rule
+# sees that, the key's total usage against every settled charge does.
+
+T0, T1, T2 = "2026-10-23T08:00:00Z", "2026-10-23T08:00:05Z", "2026-10-23T09:00:00Z"
+NOW = "2026-10-23T12:00:00Z"
+NOTE = {"key_token_used": 2, "key_tokens_found": 2}
+
+
+class KeyOnly:
+    """A transport answering `GET /api/v1/key` with `usage` (None: no usage reported); any
+    other request fails the test."""
+
+    def __init__(self, usage: str | None) -> None:
+        self.usage = usage
+        self.calls = 0
+
+    def __call__(self, request: Request) -> Response:
+        assert request.url == KEY_URL, request.url
+        self.calls += 1
+        if self.usage is None:
+            return Response(200, b'{"data":{"limit_remaining":null,"usage":null}}')
+        return key_status(self.usage)
+
+
+def two_token_client(tmp_path: Path, transport: KeyOnly) -> ChatClient:
+    """A client reading token 2 of a two-token key file, so each reading carries `NOTE`."""
+    keys = tmp_path / "keys"
+    keys.mkdir(exist_ok=True)
+    key = make_rtf_key(keys, f"{SECOND_FAKE_KEY}\n{FAKE_KEY}", name="two.rtf")
+    return ChatClient(transport, key_path=key, key_index=2)
+
+
+def before_check(root: Path, batch: str, usage: str, at: str, note: object = NOTE) -> None:
+    (root / batch).mkdir(parents=True, exist_ok=True)
+    credit = {"checked_at": at, "usage": usage, "key_file": note, "source": "key-endpoint"}
+    record = {"schema": "account-usage-check/1", "phase": "before", "credit": credit}
+    (root / batch / "account-usage-before.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def spent_ledger(root: Path, batch: str, opened: str, *lines: dict[str, object]) -> None:
+    (root / ".ledgers").mkdir(parents=True, exist_ok=True)
+    every = ({"event": "open", "cap_usd": "5", "at": opened}, *lines)
+    numbered = [{"seq": n, **line} for n, line in enumerate(every, start=1)]
+    text = "".join(json.dumps(line) + "\n" for line in numbered)
+    (root / ".ledgers" / f"{batch}.jsonl").write_text(text, encoding="utf-8")
+
+
+def charge(attempt: str, usd: str | None, at: str, reserved: str = "1") -> list[dict[str, object]]:
+    """A reserve and its settle: `usd` the measured cost, None a hold at the reservation."""
+    return [
+        {"event": "reserve", "attempt_id": attempt, "usd": reserved, "at": at},
+        {
+            "event": "settle",
+            "attempt_id": attempt,
+            "actual_usd": usd,
+            "charged_usd": reserved if usd is None else usd,
+            "reason": "usage.cost" if usd else "no usage",
+            "at": at,
+        },
+    ]
+
+
+def two_batches(root: Path) -> None:
+    """b-early (opened at T1, origin check at T0, usage 10) settled 0.4; b-late settled 0.6."""
+    before_check(root, "b-early", "10", T0)
+    spent_ledger(root, "b-early", T1, *charge("a-1", "0.4", T1))
+    before_check(root, "b-late", "10.9", T2)
+    spent_ledger(root, "b-late", T2, *charge("b-1", "0.6", T2))
+
+
+@pytest.mark.parametrize(
+    ("now", "unattributed"), [("11.25", "0.25"), ("11.0", "0"), ("10.9", "-0.1")]
+)
+def test_the_cross_check_names_billed_less_settled_as_unattributed_usd(
+    tmp_path: Path, now: str, unattributed: str
+) -> None:
+    root = tmp_path / "model-tests"
+    two_batches(root)
+    transport = KeyOnly(now)
+    found, why = spend_cross_check(two_token_client(tmp_path, transport), lambda: NOW, root)
+    assert why == "" and found is not None and transport.calls == 1
+    assert (found.origin_file, found.origin_usd, found.origin_at) == (
+        "b-early/account-usage-before.json",
+        Decimal("10"),
+        T0,
+    )
+    assert (found.now_usd, found.now_at) == (Decimal(now), NOW)
+    assert found.settled_usd == Decimal("1.0")
+    assert found.ledgers == ("b-early.jsonl", "b-late.jsonl")
+    assert found.billed_usd == Decimal(now) - Decimal("10")
+    assert found.unattributed_usd == Decimal(unattributed)
+    # Exact Decimal arithmetic: billed less settled, with no rounding.
+    assert found.unattributed_usd == found.billed_usd - found.settled_usd
+
+
+def test_held_charges_count_at_their_reservation_and_open_reservations_not_at_all(
+    tmp_path: Path,
+) -> None:
+    """The settled sum is the ledgers' own `spent` (adjusted figures where reconciled); the
+    part held at a reservation (cost unknown) and the reservations still open are named."""
+    root = tmp_path / "model-tests"
+    before_check(root, "b1", "10", T0)
+    spent_ledger(
+        root,
+        "b1",
+        T1,
+        *charge("a-1", "0.4", T1),
+        *charge("a-2", None, T1, reserved="0.5"),
+        *charge("a-3", None, T1, reserved="0.7"),
+        {
+            "event": "adjust",
+            "attempt_id": "a-3",
+            "previous_charged_usd": "0.7",
+            "reconciled_usd": "0.05",
+            "generation_id": "gen-a3",
+            "checked_at": T2,
+            "source": "generation-endpoint",
+            "at": T2,
+        },
+        {"event": "reserve", "attempt_id": "a-4", "usd": "2", "at": T2},
+    )
+    found, why = spend_cross_check(two_token_client(tmp_path, KeyOnly("11")), lambda: NOW, root)
+    assert why == "" and found is not None
+    assert found.settled_usd == Decimal("0.95")  # 0.4 + 0.5 held + 0.05 adjusted
+    assert found.held_usd == Decimal("0.5")
+    assert found.open_reservations == 1
+    assert found.unattributed_usd == Decimal("0.05")
+
+
+@pytest.mark.parametrize(
+    ("arrange", "reason"),
+    [
+        (
+            lambda root: (root / "b-early" / "account-usage-before.json").unlink(),
+            "b-early/account-usage-before.json: no account usage was recorded before the batch",
+        ),
+        (
+            lambda root: before_check(root, "b-early", "10", T2),
+            "the origin check b-early/account-usage-before.json at 2026-10-23T09:00:00Z is after "
+            "the earliest ledger b-early.jsonl opened (2026-10-23T08:00:05Z)",
+        ),
+        (
+            lambda root: spent_ledger(root, "b-tie", T1),
+            "ledgers b-early.jsonl and b-tie.jsonl opened in the same second; the earliest "
+            "ledger is unknown",
+        ),
+        (
+            lambda root: (root / ".ledgers" / "b-late.jsonl").write_text("{}\n", encoding="utf-8"),
+            "b-late.jsonl has no readable opening line",
+        ),
+        (
+            lambda root: [p.unlink() for p in (root / ".ledgers").glob("*.jsonl")],
+            "no ledger under .ledgers",
+        ),
+    ],
+    ids=["missing-origin", "origin-after-ledger", "tie", "unreadable-ledger", "no-ledger"],
+)
+def test_an_unusable_origin_or_ledger_shows_no_figure_and_reads_no_key(
+    tmp_path: Path, arrange: Callable[[Path], object], reason: str
+) -> None:
+    root = tmp_path / "model-tests"
+    two_batches(root)
+    arrange(root)
+    transport = KeyOnly("11")
+    found = spend_cross_check(two_token_client(tmp_path, transport), lambda: NOW, root)
+    assert found == (None, reason)
+    assert transport.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("usage", "note", "reason"),
+    [
+        (None, NOTE, "the account usage now is not reported"),
+        ("11", None, "the usage check now reads another key-file note than the origin check"),
+    ],
+)
+def test_a_reading_now_that_cannot_be_compared_shows_no_figure(
+    tmp_path: Path, usage: str | None, note: object, reason: str
+) -> None:
+    root = tmp_path / "model-tests"
+    two_batches(root)
+    before_check(root, "b-early", "10", T0, note=note)
+    found = spend_cross_check(two_token_client(tmp_path, KeyOnly(usage)), lambda: NOW, root)
+    assert found == (None, reason)
+
+
+def test_a_connection_failure_in_the_cross_check_reading_propagates(tmp_path: Path) -> None:
+    root = tmp_path / "model-tests"
+    two_batches(root)
+
+    def down(request: Request) -> Response:
+        raise TransportError(f"connection reset {FAKE_KEY}")
+
+    client = ChatClient(down, key_path=make_rtf_key(tmp_path), key_index=1)
+    with pytest.raises(TransportError):
+        spend_cross_check(client, lambda: NOW, root)
+
+
+def spend_section(report: str) -> list[str]:
+    section = report.split("## Spend cross-check\n", 1)[1]
+    return section.split("\n## ", 1)[0].strip().splitlines()
+
+
+def test_the_reconciled_report_carries_the_section_with_both_inputs_and_no_key(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    responder = ProbeResponder(rig.review)
+    run_probe(rig, responder)
+    responder.generations = {responder.ids[0]: generation(0.002)}
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    model_tests = rig.root / "artifacts" / "model-tests"
+    origin = load(model_tests / "b1" / "account-usage-before.json")["credit"]
+    state = ledger(rig).state()
+    now = responder.usage + responder.unexplained  # what the reconcile-time reading reports
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    lines = spend_section(report)
+    assert lines[0] == "Reported only: nothing is settled or adjusted from this figure."
+    assert (
+        f"- Origin: b1/account-usage-before.json, usage {origin['usage']} USD at "
+        f"{origin['checked_at']} (the earliest ledger's before-check)"
+    ) in lines
+    assert any(line.startswith(f"- Key usage now: {format(now, 'f')} USD at ") for line in lines)
+    assert (
+        f"- Settled in 1 ledger (.ledgers/*.jsonl): {format(state.spent, 'f')} USD, of which "
+        "0 USD held at a reservation (cost unknown); 0 reservations open (not counted)"
+    ) in lines
+    billed = now - Decimal(origin["usage"])
+    assert f"- Billed since the origin: {format(billed, 'f')} USD" in lines
+    assert f"- Unattributed USD: {format(billed - state.spent, 'f')}" in "\n".join(lines)
+    assert "sk-or-" not in report + capsys.readouterr().out
+
+
+def test_without_an_origin_the_section_says_so_and_shows_no_figure(rig: Rig) -> None:
+    responder = ProbeResponder(rig.review)
+    run_probe(rig, responder)
+    (rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-before.json").unlink()
+    responder.generations = {responder.ids[0]: generation(0.002)}
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    lines = spend_section((rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8"))
+    assert lines == [
+        "Reported only: nothing is settled or adjusted from this figure.",
+        "",
+        "- No figure: b1/account-usage-before.json: no account usage was recorded before the batch",
+    ]
+
+
+def test_a_reconcile_stopped_before_the_cross_check_says_it_was_not_checked(rig: Rig) -> None:
+    responder = ProbeResponder(rig.review)
+    run_probe(rig, responder)
+    responder.generations = {responder.ids[0]: OSError(f"reset {FAKE_KEY}")}
+    assert rig.run(reconcile_argv(rig), responder) == cli.EXIT_FAILED
+    lines = spend_section((rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8"))
+    assert lines[-1] == "- No figure: not checked; the reconcile stopped before the cross-check"
