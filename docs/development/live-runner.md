@@ -326,7 +326,9 @@ the 7.10 review), the byte sequence `user_id` left anywhere outside a redacted p
 `\"user_id\"` inside a JSON string, as in OpenRouter's `error.metadata.raw` copy of the upstream
 body, or a body that is not JSON, such as `user_id=` in a form-encoded echo); or, in a JSON body,
 a `user_id` the in-place match cannot reach (a key spelled with a JSON escape, duplicates
-included) or a body too deep to parse. The DC-8 cohort path (`cohort.accept_proxy_payload`)
+included) or a body too deep to parse. Documented fail-closed: a 200 whose model answer itself
+contains `user_id` is withheld too; `output.md` still keeps the answer, which the journal and
+validators read. The DC-8 cohort path (`cohort.accept_proxy_payload`)
 stores the coordinator-supplied proxy payload unredacted, with `body_sha256` the hash of the
 payload as received: it is model output, not a provider reply, and that hash must equal the
 hash of `output.md` and of the journal's retained output, so it is not redacted (by design,
@@ -1107,7 +1109,10 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   nothing (no manifest, so no `metrics.json` flag) and the reservation stayed counted. After the
   lookups, `live reconcile` now takes each attempt directory of the batch whose ledger id is
   still open (`reconcile.interrupted_attempts`) and has no `manifest.json`. When the directory is
-  that shape (`request.json` only, a pool chat request, not a schema-check or bisect case) it
+  that shape (`request.json` only, a pool chat request, not a schema-check or bisect case,
+  written more than twice its recorded `timeout_s` ago: a call lives at most one socket
+  operation past its deadline, so a younger one may still be in flight and the runner may still
+  seal it; reconcile beside a live batch therefore leaves it alone, unresolved) it
   writes, once, the manifest it can truthfully write: `status: "no-response"`, `classification:
   "interrupted"`, `reason: "process ended before the reply; no generation id"`,
   `recorded_by: "deploy-vii live reconcile"`, the batch, case, model and attempt id from the

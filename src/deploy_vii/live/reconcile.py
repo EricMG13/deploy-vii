@@ -52,6 +52,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -652,6 +653,18 @@ def interrupted_manifest(directory: Path) -> tuple[dict[str, Any] | None, str]:
         return None, "request.json is not a pool chat request"
     if model.replace("/", "__") != directory.parent.name:
         return None, "request.json names another model than its directory"
+    # A call lives at most twice its deadline (`client.urllib_transport`: one socket operation
+    # past it); before that the runner may still seal this directory, so it is not interrupted.
+    parameters = request.get("non_secret_parameters")
+    timeout = parameters.get("timeout_s") if isinstance(parameters, dict) else None
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
+        return None, "request.json records no call deadline"
+    age = time.time() - (directory / "request.json").stat().st_mtime
+    if age <= 2 * timeout:
+        return None, (
+            f"request.json was written {age:.0f} s ago, within twice its {timeout:g} s deadline: "
+            "the call may still be in flight"
+        )
     selection = request.get("selection")
     draw = selection.get("draw") if isinstance(selection, dict) else None
     digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()

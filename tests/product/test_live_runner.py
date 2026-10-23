@@ -2348,8 +2348,10 @@ def test_the_account_id_redaction_replaces_only_user_id_values(
         b'"provider_name": "Upstream"}}, "user_id": "u-2"}',
         # Not JSON: a form-encoded echo holds the account id with no key to match.
         b"error=insufficient_credit&user_id=u-1",
+        # Documented fail-closed: a model answer that itself mentions the key (output.md keeps it).
+        b'{"choices": [{"message": {"content": "{\\"note\\": \\"user_id u-1\\"}"}}]}',
     ],
-    ids=["escaped-key", "escaped-duplicate", "too-deep", "metadata-raw", "not-json"],
+    ids=["escaped-key", "escaped-duplicate", "too-deep", "metadata-raw", "not-json", "answer"],
 )
 def test_an_account_id_the_redaction_cannot_reach_withholds_the_body(raw: bytes) -> None:
     """A key spelled with a JSON escape is the same `user_id` but no in-place match, and so is a

@@ -3,7 +3,9 @@
 import argparse
 import hashlib
 import json
+import os
 import socket
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -743,7 +745,12 @@ def interrupted(rig: Rig, *, unexplained: str = "0.0123") -> tuple[AllAnswered, 
     assert sealed.name.endswith("-1")
     directory = sealed.with_name(sealed.name[: -len("-1")] + "-2")
     directory.mkdir()
-    (directory / "request.json").write_bytes((sealed / "request.json").read_bytes())
+    request = directory / "request.json"
+    request.write_bytes((sealed / "request.json").read_bytes())
+    # Written well before its call's longest possible life (twice the deadline) ran out.
+    timeout_s = load(request)["non_secret_parameters"]["timeout_s"]
+    written = time.time() - 2 * timeout_s - 60
+    os.utime(request, (written, written))
     ledger(rig).reserve(directory.name, INTERRUPTED_RESERVE)
     return responder, directory
 
@@ -874,6 +881,21 @@ def test_an_attempt_directory_with_a_manifest_is_untouched_by_the_interrupted_pa
     assert ledger(rig).path.read_bytes() == lines
     report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
     assert "Looked up this run: 0" in report
+
+
+def test_a_request_whose_call_may_still_be_in_flight_is_not_called_interrupted(rig: Rig) -> None:
+    """Confidence review: reconcile run beside a live batch must not seal the runner's in-flight
+    attempt (its own seal would then fail on the existing manifest). A call lives at most
+    twice its deadline (`client.urllib_transport`: one socket operation past it)."""
+    responder, directory = interrupted(rig)
+    os.utime(directory / "request.json")  # written just now: the call may still be running
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert sorted(p.name for p in directory.iterdir()) == ["request.json"]
+    assert ledger(rig).path.read_bytes() == lines
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    (outcome,) = [line for line in report.splitlines() if line.startswith(f"| {directory.name}")]
+    assert "| unresolved |" in outcome and "may still be in flight" in outcome
 
 
 @pytest.mark.parametrize(
