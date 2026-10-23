@@ -1440,7 +1440,7 @@ def test_the_figures_rule_is_a_lettered_narrative_rule_true_to_prose_and_the_con
     stated_once(
         "narrative",
         "The `model_metrics` lines carry no evidence_id, so no evidence part can name one; a "
-        "passage may say in prose that they are absent and no more.",
+        "passage may say in prose that they have no evidence id and no more.",
         "A directional comparison of two cited figures (`exceeds`, `rose from` one evidence "
         "part `to` another) is allowed.",
         "A share, ratio or difference you work out is a figure Python did not compute: never "
@@ -1478,10 +1478,11 @@ def test_the_readiness_rules_state_the_sufficiency_request_gap_scoping_and_unlab
         "the one requirement `consumer_specific_cp1_sufficiency`: judge whether the cited CP-1 "
         "evidence suffices for that consumer's own use; it has no group, so one cited line that "
         "carries a tag and is not a `kind=gap` line is enough for `limited` or `sufficient`.",
-        "A `kind=computation` line has no label (its columns are `operation`, `amount` and "
-        "`status`): recognise one only by an `amount` equal to a dashboard KPI's.",
+        "A `kind=computation` line shows `operation`, `amount` and "
+        "`status` but no label: recognise one by its `operation` and by an `amount` equal to a "
+        "dashboard KPI's.",
         "A gap left out of every scope keeps that consumer `not_ready` (its action reads "
-        '"Assess all retained gaps for this consumer"). The completion budget does not cover '
+        '"Assess all retained gaps for this consumer"). The completion budget may not cover '
         "every gap of every consumer, so scope those that matter to each consumer by class: "
         "the `BLOCK` gaps first, then the gaps matched to that consumer's metrics. One scope "
         "may list many gap_ids.",
@@ -1556,8 +1557,9 @@ def test_the_cp1a_rules_state_the_label_forms_conflicts_and_behaviour_flags() ->
         "is read as a bare figure and rejected.",
         "A source that contradicts itself is one `conflicts` entry quoting both spans: the "
         "validator needs two citations, not two sources.",
-        "When no behaviour type fits, set `behaviour_type` to `other` and still set "
-        "`dimension`; a type you chose by reading rather than the source naming it is an "
+        "When no behaviour type fits, set `behaviour_type` to `other`; a flag "
+        "informs a dimension's score only when it names a `dimension`, so set one if the row bears "
+        "on it; a type you chose by reading rather than the source naming it is an "
         "Analyst Interpretation row.",
     )
     for good in ("Items 10-14", "Items 7, 7A", "Items 7/7A", "Items 7 and 8"):

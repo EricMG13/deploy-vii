@@ -234,7 +234,8 @@ CP1A_ROW_RULES = (
     "`company` states business_description, country and sector once each. A behaviour flag "
     "states `behaviour_type`, `amount_funding_source` and `legal_capacity_link`; a governance "
     "topic leaves them null and is never Extraction-Oriented. When no behaviour type fits, set "
-    "`behaviour_type` to `other` and still set `dimension`; a type you chose by reading rather "
+    "`behaviour_type` to `other`; a flag informs a dimension's score only when it names a "
+    "`dimension`, so set one if the row bears on it; a type you chose by reading rather "
     "than the source naming it is an Analyst Interpretation row. An operating driver's `measure` "
     "is null exactly when its status is Not disclosed. At least one credit translation "
     "populates evidence, risk mechanic and credit implication."
@@ -349,8 +350,9 @@ NARRATIVE_STORIES_RULE = (
 )
 NARRATIVE_FIGURES_RULE = (
     "The `model_metrics` lines carry no evidence_id, so no evidence part can name one; a "
-    "passage may say in prose that they are absent and no more. A directional comparison of "
-    "two cited figures (`exceeds`, `rose from` one evidence part `to` another) is allowed. A "
+    "passage may say in prose that they have no evidence id and no more. A directional "
+    "comparison of two cited figures (`exceeds`, `rose from` one evidence part `to` another) "
+    "is allowed. A "
     "share, ratio or difference you work out is a figure Python did not compute: never "
     "write it, in digits or in words. As to figures the validator rejects only a digit outside a "
     'label (an unlabelled digit fails; a phrase such as "about half" does not), so the '
@@ -386,8 +388,9 @@ READINESS_EVIDENCE_RULE = (
     "the one requirement `consumer_specific_cp1_sufficiency`: judge whether the cited CP-1 "
     "evidence suffices for that consumer's own use; it has no group, so one cited line that "
     "carries a tag and is not a `kind=gap` line is enough for `limited` or `sufficient`. "
-    "A `kind=computation` line has no label (its columns are `operation`, `amount` and "
-    "`status`): recognise one only by an `amount` equal to a dashboard KPI's."
+    "A `kind=computation` line shows `operation`, `amount` and "
+    "`status` but no label: recognise one by its `operation` and by an `amount` equal to a "
+    "dashboard KPI's."
 )
 READINESS_STATUS_RULE = (
     "A requirement whose status is not `sufficient` needs at least one `actions` entry. "
@@ -402,7 +405,7 @@ READINESS_GAPS_RULE = (
     "`not_relevant` needs at least one evidence id and is never given to a gap whose `severity` "
     "is `BLOCK` and whose `origin` is `context_binding` or `context`. "
     "A gap left out of every scope keeps that consumer `not_ready` (its action reads "
-    '"Assess all retained gaps for this consumer"). The completion budget does not cover '
+    '"Assess all retained gaps for this consumer"). The completion budget may not cover '
     "every gap of every consumer, so scope those that matter to each consumer by class: "
     "the `BLOCK` gaps first, then the gaps matched to that consumer's metrics. One scope "
     "may list many gap_ids."
