@@ -2341,12 +2341,20 @@ def test_the_account_id_redaction_replaces_only_user_id_values(
         b'{"user\\u005fid": "u-1", "user_id": "u-2"}',
         # Too deep to parse, so the redaction cannot be verified (rewrite tournament).
         b"[" * 100_000 + b'{"user\\u005fid": "u-1"}' + b"]" * 100_000,
+        # Task 7.11 item 6: OpenRouter carries the upstream body as a JSON string in
+        # `error.metadata.raw`; its escaped `\"user_id\"` is no key, so no in-place match.
+        b'{"error": {"code": 402, "message": "Provider returned error", "metadata": {"raw": '
+        b'"{\\"error\\": {\\"user_id\\": \\"u-1\\", \\"type\\": \\"billing\\"}}", '
+        b'"provider_name": "Upstream"}}, "user_id": "u-2"}',
+        # Not JSON: a form-encoded echo holds the account id with no key to match.
+        b"error=insufficient_credit&user_id=u-1",
     ],
-    ids=["escaped-key", "escaped-duplicate", "too-deep"],
+    ids=["escaped-key", "escaped-duplicate", "too-deep", "metadata-raw", "not-json"],
 )
 def test_an_account_id_the_redaction_cannot_reach_withholds_the_body(raw: bytes) -> None:
-    """A key spelled with a JSON escape is the same `user_id` but no in-place match: the body
-    is withheld rather than stored with the account id (fail closed)."""
+    """A key spelled with a JSON escape is the same `user_id` but no in-place match, and so is a
+    `user_id` inside a JSON string or a non-JSON body: the body is withheld rather than stored
+    with the account id (fail closed), and nothing was redacted in what is stored."""
     from deploy_vii.live.client import ChatResult, parse_usage
     from deploy_vii.live.retention import response_envelope
 
@@ -2356,8 +2364,41 @@ def test_an_account_id_the_redaction_cannot_reach_withholds_the_body(raw: bytes)
     )  # fmt: skip
     envelope = response_envelope(refused)
     assert envelope["body_text"] is None and "body_base64" not in envelope
-    assert "body_sha256" not in envelope and envelope["body_redactions"] == ["user_id"]
+    assert "body_sha256" not in envelope and envelope["body_redactions"] == []
     assert "u-1" not in json.dumps(envelope) and "user_id" in envelope["body_withheld"]
+
+
+def test_a_withheld_body_names_no_redaction_in_response_or_manifest(tmp_path: Path) -> None:
+    """Task 7.11 item 6, end to end: the in-flight 402 with the upstream body in
+    `error.metadata.raw` is withheld; neither file says `user_id` was redacted."""
+    raw = json.loads(IN_FLIGHT_402)
+    raw["error"]["metadata"]["raw"] = json.dumps({"error": {"user_id": ACCOUNT}})
+    body = json.dumps(raw).encode()
+    assert b'\\"user_id\\"' in body and ACCOUNT.encode() in body
+    rig = make_rig(tmp_path)
+    result = rig.run(ChatClient(FakeTransport(Response(402, body), reply(rig))), sleep=Waits())
+    assert result.retried is not None
+    directory = attempt_dir(result.retried)
+    response = load(directory / "response.json")
+    assert response["body_text"] is None and response["body_redactions"] == []
+    assert "body_redactions" not in load(directory / "manifest.json")
+    assert ACCOUNT not in (directory / "response.json").read_text(encoding="utf-8")
+    # The refusal was still read from the body as received (DC-7, task 7.8).
+    assert load(directory / "manifest.json")["credit"]["retry_after_s"] == 120
+
+
+def test_a_body_whose_only_account_id_is_a_top_level_key_is_still_stored() -> None:
+    from deploy_vii.live.client import ChatResult, parse_usage
+    from deploy_vii.live.retention import response_envelope
+
+    raw = b'{"id": "gen-1", "choices": [], "user_id": "u-1"}'
+    accepted = ChatResult(
+        "ok", 200, raw, False, None, None, None, None, None, False, None,
+        parse_usage(None), 0.1, None,
+    )  # fmt: skip
+    envelope = response_envelope(accepted)
+    assert envelope["body_text"] == '{"id": "gen-1", "choices": [], "user_id": "<redacted>"}'
+    assert envelope["body_redactions"] == ["user_id"] and "body_withheld" not in envelope
 
 
 def test_a_check_in_flight_402_stops_with_its_reason_and_no_wait(tmp_path: Path) -> None:

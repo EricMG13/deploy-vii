@@ -1,6 +1,7 @@
 """`deploy-vii live reconcile`: held charges replaced by the generation endpoint's cost."""
 
 import argparse
+import hashlib
 import json
 import socket
 from collections.abc import Callable
@@ -713,3 +714,193 @@ def test_a_connection_failure_in_the_fresh_usage_reading_stops_the_run_and_keeps
     assert "live reconcile failed: TransportError:" in out
     assert "connection reset [REDACTED]" in out
     assert "TESTONLY" not in out
+
+
+# --- 7.11: an interrupted attempt (request.json only, reservation open) ------------------------
+
+INTERRUPTED_RESERVE = Decimal("0.5")
+
+
+class AllAnswered(ProbeResponder):
+    """Every chat call answers with a measured usage cost; `unexplained` stands in for what the
+    interrupted call cost the account (in the after-check and every later key reading)."""
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == CHAT_URL:
+            self.requests.append(request)
+            self.usage += Decimal("0.00033")  # what `ok` reports as usage.cost
+            return ok(self.content, model=json.loads(request.body or b"{}")["model"])
+        return super().__call__(request)
+
+
+def interrupted(rig: Rig, *, unexplained: str = "0.0123") -> tuple[AllAnswered, Path]:
+    """A probe batch whose every attempt is measured, plus the e1-cp1-12 shape (synthetic): a
+    further try of one cell's step reserved in the ledger whose directory holds request.json
+    only, because the process was killed before the reply."""
+    responder = AllAnswered(rig.review, unexplained=unexplained)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    sealed = deepseek_dir(rig)
+    assert sealed.name.endswith("-1")
+    directory = sealed.with_name(sealed.name[: -len("-1")] + "-2")
+    directory.mkdir()
+    (directory / "request.json").write_bytes((sealed / "request.json").read_bytes())
+    ledger(rig).reserve(directory.name, INTERRUPTED_RESERVE)
+    return responder, directory
+
+
+def record_of(rig: Rig, attempt_id: str) -> AttemptRecord:
+    return {a.attempt_id: a for a in ledger(rig).state().attempts}[attempt_id]
+
+
+def events_of(rig: Rig, attempt_id: str) -> list[str]:
+    lines = ledger(rig).path.read_text(encoding="utf-8").splitlines()
+    return [e["event"] for e in map(json.loads, lines) if e.get("attempt_id") == attempt_id]
+
+
+def test_an_interrupted_attempt_with_a_measurable_window_is_settled_by_the_usage_delta(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    responder, directory = interrupted(rig)
+    before = ledger(rig).state()
+    sent = len(responder.requests)
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert len(responder.requests) == sent  # nothing to look up: there is no generation id
+    record = record_of(rig, directory.name)
+    assert events_of(rig, directory.name) == ["reserve", "settle", "adjust"]
+    assert record.status == "settled" and record.charged_usd == Decimal("0.0123")
+    adjustment = record.adjustment
+    assert adjustment is not None and adjustment.source == "account-usage-delta"
+    assert adjustment.generation_id is None and adjustment.previous_charged_usd == Decimal("0.5")
+    evidence = adjustment.evidence
+    assert evidence is not None and evidence["held_attempts"] == [directory.name]
+    others = [a for a in before.attempts if a.attempt_id != directory.name]
+    assert Decimal(evidence["other_attempts_measured_usd"]) == sum(
+        (a.charged_usd or Decimal(0) for a in others), Decimal(0)
+    )
+    assert evidence["usage_now_usd"] == evidence["usage_after_usd"]
+    after = ledger(rig).state()
+    assert after.reserved == before.reserved - INTERRUPTED_RESERVE
+    assert after.spent == before.spent + Decimal("0.0123")
+    # The manifest it can truthfully write: no served, effort or usage block.
+    manifest = load(directory / "manifest.json")
+    request = load(directory / "request.json")
+    assert manifest["status"] == "no-response" and manifest["classification"] == "interrupted"
+    assert manifest["reason"] == "process ended before the reply; no generation id"
+    assert manifest["hashes"] == {
+        "request_sha256": hashlib.sha256(
+            json.dumps(request["body"], sort_keys=True).encode()
+        ).hexdigest()
+    }
+    # The runner hashed the same request body the same way (its sealed first try).
+    sealed = load(directory.with_name(directory.name[: -len("-2")] + "-1") / "manifest.json")
+    assert manifest["hashes"]["request_sha256"] == sealed["hashes"]["request_sha256"]
+    assert manifest["attempt_id"] == directory.name and manifest["model"] == DEEPSEEK
+    assert manifest["cohort"] == "openrouter-pool" and manifest["experiment_id"] == "b1"
+    assert (manifest["ticket_id"], manifest["step_id"]) == (sealed["ticket_id"], sealed["step_id"])
+    assert manifest["draw"] == request["selection"]["draw"]
+    assert not {"served", "effort", "usage", "credit", "validator"} & set(manifest)
+    assert sorted(p.name for p in directory.iterdir()) == ["manifest.json", "request.json"]
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    (row,) = [r for r in step_lines(report, "probe-") if r[5] == directory.name]
+    assert row[6:8] == ["no-response", "interrupted"] and Decimal(row[8]) == Decimal("0.0123")
+    (outcome,) = [line for line in report.splitlines() if line.startswith(f"| {directory.name}")]
+    assert "| reconciled |" in outcome and "settled by account-usage-delta" in outcome
+    assert "Looked up this run: 1; reconciled 1, unresolved 0" in report
+    assert "reconciled 1, unresolved 0" in capsys.readouterr().out
+    # A second run finds nothing to do: no call, no line, no file rewritten.
+    lines, text = ledger(rig).path.read_bytes(), (directory / "manifest.json").read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines
+    assert (directory / "manifest.json").read_bytes() == text
+
+
+def test_an_interrupted_attempt_without_a_usage_window_stays_unresolved_and_open(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real e1-cp1-12 shape: the batch was killed, so no after-check was recorded; never a
+    guessed zero, never a guessed charge."""
+    responder, directory = interrupted(rig)
+    (rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-after.json").unlink()
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0  # unresolved keeps the exit code
+    assert ledger(rig).path.read_bytes() == lines  # the reservation stays open
+    record = record_of(rig, directory.name)
+    assert record.status == "reserved" and record.charged_usd is None
+    assert load(directory / "manifest.json")["classification"] == "interrupted"
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    (row,) = [r for r in step_lines(report, "probe-") if r[5] == directory.name]
+    assert row[8] == "reserved 0.5 (open)"
+    (outcome,) = [line for line in report.splitlines() if line.startswith(f"| {directory.name}")]
+    assert "| unresolved |" in outcome and "reservation kept open" in outcome
+    assert "no account usage was recorded after the batch" in outcome
+    assert f"reserved {format(ledger(rig).state().reserved, 'f')}" in report
+    assert "reconciled 0, unresolved 1" in capsys.readouterr().out
+    # A later run retries from the manifest this path wrote; it is not rewritten.
+    text = (directory / "manifest.json").read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert (directory / "manifest.json").read_bytes() == text
+    assert ledger(rig).path.read_bytes() == lines
+
+
+def test_a_settle_left_by_an_interrupted_reconcile_is_adjusted_once_and_never_settled_again(
+    rig: Rig,
+) -> None:
+    """A reconcile killed between its settle and its adjust leaves a held charge; the next run
+    adjusts it from the same window and writes no second settle (one settle per id)."""
+    responder, directory = interrupted(rig)
+    usage_after = rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-after.json"
+    kept = usage_after.read_bytes()
+    usage_after.unlink()
+    assert rig.run(reconcile_argv(rig), responder) == 0  # writes the manifest, stays open
+    ledger(rig).settle(directory.name, None, "the hold the killed reconcile left")
+    usage_after.write_bytes(kept)
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert events_of(rig, directory.name) == ["reserve", "settle", "adjust"]
+    assert record_of(rig, directory.name).charged_usd == Decimal("0.0123")
+
+
+def test_an_attempt_directory_with_a_manifest_is_untouched_by_the_interrupted_path(
+    rig: Rig,
+) -> None:
+    responder, directory = interrupted(rig)
+    sealed = load(directory.with_name(directory.name[: -len("-2")] + "-1") / "manifest.json")
+    (directory / "manifest.json").write_text(
+        json.dumps({**sealed, "attempt_id": directory.name}), encoding="utf-8"
+    )
+    files = {p.name: p.read_bytes() for p in directory.iterdir()}
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert {p.name: p.read_bytes() for p in directory.iterdir()} == files
+    assert ledger(rig).path.read_bytes() == lines
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    assert "Looked up this run: 0" in report
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            lambda d: (d / "response.json").write_text("{}", encoding="utf-8"),
+            "holds request.json, response.json, not request.json only",
+        ),
+        (lambda d: (d / "request.json").unlink(), "holds no request.json"),
+        (
+            lambda d: (d / "request.json").write_text('{"endpoint": null}', encoding="utf-8"),
+            "not a pool chat request",
+        ),
+    ],
+    ids=["reply-retained", "no-request", "proxy-shaped"],
+)
+def test_another_unsealed_shape_is_reported_unresolved_and_nothing_is_written(
+    rig: Rig, change: Callable[[Path], object], reason: str
+) -> None:
+    responder, directory = interrupted(rig)
+    change(directory)
+    files = {p.name: p.read_bytes() for p in directory.iterdir()}
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert {p.name: p.read_bytes() for p in directory.iterdir()} == files
+    assert ledger(rig).path.read_bytes() == lines
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    (outcome,) = [line for line in report.splitlines() if line.startswith(f"| {directory.name}")]
+    assert "| unresolved |" in outcome and reason in outcome

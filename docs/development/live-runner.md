@@ -39,7 +39,7 @@ from a pinned pool:
 | `catalog.py` | `Catalog` (fetch or file), `pin` to a `PinnedPool`, DeepSeek resolution, `resolve_effort`. |
 | `draw.py` | `draw(pool, seed)`, algorithm `python-random-MT19937`; a one-model pool is not drawn from (algorithm `trivial-single-model-pool`, index 0, seed still recorded; decision 0005 amendment, 22 Oct 2026). |
 | `ledger.py` | `Ledger`: append-only JSON lines (`reserve`, `settle`, `adjust`), atomic replace, derived `.state.json`. |
-| `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block. |
+| `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block; an interrupted attempt's manifest and usage-delta settlement (task 7.11). |
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4). |
@@ -312,16 +312,21 @@ from a pinned pool:
 `artifacts/model-tests/<experiment=batch id>/<case>/<model with / as __>/<attempt id>/` holds
 `request.json` (written before sending), `response.json` (an envelope keeping the returned bytes and
 the SHA-256 of the bytes it stores), `output.md`, `events.jsonl`, `metrics.json`, `checks/`, `render/not-run.json` and
-`manifest.json` last. A directory without `manifest.json` is an incomplete attempt. Files are never
+`manifest.json` last. A directory without `manifest.json` is an incomplete attempt (task 7.11:
+`live reconcile` writes the manifest of an interrupted one once; see Charge reconciliation). Files are never
 overwritten, with one exception: `live reconcile` rewrites the `ledger` block of `metrics.json`
 (keeping the replaced values; see Charge reconciliation). Task 7.10: the stored body is the
 returned body with every `user_id` value (OpenRouter's account id, in 402s and other replies alike)
 replaced by `"<redacted>"`, the key and every other byte kept (`retention.redact_account_id`);
 `body_bytes` and `body_sha256` then describe the stored bytes, and `response.json` and the
-manifest say `body_redactions: ["user_id"]`. A JSON body whose `user_id` the in-place match cannot
-reach (a key spelled with a JSON escape, duplicates included) or that is too deep to parse is
-withheld whole (`body_text` null, `body_withheld` says why), never stored with the id; a body
-that is not JSON gets the in-place match only. Python reads a 402 from the body as received, before
+manifest say `body_redactions: ["user_id"]`. A body that may still hold an account id is
+withheld whole (`body_text` null, `body_withheld` says why, `body_redactions: []` since nothing
+stored was redacted, and the manifest names none), never stored with the id: task 7.11 (from
+the 7.10 review), the byte sequence `user_id` left anywhere outside a redacted pair (an escaped
+`\"user_id\"` inside a JSON string, as in OpenRouter's `error.metadata.raw` copy of the upstream
+body, or a body that is not JSON, such as `user_id=` in a form-encoded echo); or, in a JSON body,
+a `user_id` the in-place match cannot reach (a key spelled with a JSON escape, duplicates
+included) or a body too deep to parse. Python reads a 402 from the body as received, before
 retention (`credit.from_dispatch_402`). Unknown metrics are `null` with a `_reason` sibling; provider values, local measurements
 and estimates are separate objects.
 
@@ -1092,6 +1097,34 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   now); not attributed; a later reconcile may retry` (or that the usage now is not reported, or
   is read through another key token), after `HTTP 404 ...;` or `no provider_request_id
   recorded; nothing to look up;` (decision 0008, task 7.0 amendment).
+- **An interrupted attempt (task 7.11).** A process killed after its reservation and before the
+  reply (batch e1-cp1-12, stopped by the user mid-`financials`) leaves an open `reserve` with no
+  `settle` and an attempt directory holding `request.json` only; before 7.11 reconcile saw
+  nothing (no manifest, so no `metrics.json` flag) and the reservation stayed counted. After the
+  lookups, `live reconcile` now takes each attempt directory of the batch whose ledger id is
+  still open (`reconcile.interrupted_attempts`) and has no `manifest.json`. When the directory is
+  that shape (`request.json` only, a pool chat request, not a schema-check or bisect case) it
+  writes, once, the manifest it can truthfully write: `status: "no-response"`, `classification:
+  "interrupted"`, `reason: "process ended before the reply; no generation id"`,
+  `recorded_by: "deploy-vii live reconcile"`, the batch, case, model and attempt id from the
+  path and `request.json`, `ticket_id` and `step_id` from the attempt id, the draw and
+  `hashes.request_sha256` (the runner's own hash of the request body) from `request.json`, and
+  no served, effort, usage, credit or validator block. It then applies the
+  `account-usage-delta` rule above (the batch's only attempt without a measured cost, every
+  other charge measured, the residual at most the reservation, usage unmoved since the
+  after-check): only when all hold does it write the `settle` (cost unknown, the reservation
+  held) and the `adjust` (`source: "account-usage-delta"`, both facts in `evidence`). Otherwise
+  the attempt is unresolved with `interrupted attempt; reservation kept open: <reason>`, the
+  ledger is not touched and the exit code stays 0, as for any unresolved attempt; a later
+  reconcile retries from the manifest it wrote (never rewritten). A reconcile stopped between
+  that settle and its adjust leaves a held charge, which the next run adjusts without a second
+  settle. Any other directory without a manifest (a retained reply, no `request.json`, a
+  proxy-shaped request, a held settle without a manifest) is reported unresolved with its shape
+  and nothing is written; a directory with a runner-sealed manifest is never touched by this
+  path. The reconciled report lists the attempt in Steps (status, class and `reserved <amount>
+  (open)` while open) and in Reconciliation (outcome and reason, which names the settlement
+  source). The real e1-cp1-12 batch has no `account-usage-after.json` (the kill skipped the
+  after-check), so its reservation stays open there: no window, no figure.
 
 ## Not covered here
 

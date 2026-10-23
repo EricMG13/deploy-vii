@@ -57,9 +57,11 @@ from deploy_vii.live.reconcile import (
     RetainedAttempt,
     batch_attempts,
     candidates,
+    interrupted_attempts,
     lookup_order,
     read_usage,
     reconcile_attempt,
+    reconcile_interrupted,
     usage_path,
 )
 from deploy_vii.live.retention import AttemptWriter
@@ -1080,6 +1082,8 @@ def _reconciled_row(
     seed = draw_record.get("seed") if isinstance(draw_record, dict) else None
     if cohort != COHORT:
         cost = "0 (proxy)"
+    elif record is not None and record.status == "reserved":  # task 7.11: an interrupted try
+        cost = f"reserved {format(record.reserved_usd, 'f')} (open)"
     elif record is None or record.charged_usd is None:
         cost = "not dispatched"
     else:
@@ -1196,6 +1200,13 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
         for attempt in lookup_order(candidates(root, args.batch_id)):
             outcomes.append(
                 reconcile_attempt(attempt, ledger, client, utc_stamp, batch=retained, usage=usage)
+            )
+        # Task 7.11: after every lookup, like a deadline hold (nothing to look up either).
+        for directory in interrupted_attempts(root, args.batch_id, ledger.state()):
+            outcomes.append(
+                reconcile_interrupted(
+                    directory, ledger, client, utc_stamp, batch=retained, usage=usage
+                )
             )
     finally:
         cells, notes = _cell_names(args.directory / "live" / args.batch_id)

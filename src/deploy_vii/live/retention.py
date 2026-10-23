@@ -71,10 +71,19 @@ def redact_account_id(raw: bytes) -> tuple[bytes, tuple[str, ...]]:
     return stored, (ACCOUNT_ID,) if count else ()
 
 
+_REDACTED_PAIR = re.compile(rb'(?<!\\)"user_id"\s*:\s*"' + re.escape(REDACTED.encode()) + rb'"')
+
+
 def _account_id_left(stored: bytes) -> bool:
-    """Whether a JSON body still holds a `user_id` value other than the redaction: a key the
-    in-place match cannot see (one spelled with a JSON escape), duplicates included, since
-    every object's pairs are read before a dict keeps the last of them."""
+    """Whether the stored body may still hold an account id, so it must be withheld.
+
+    Task 7.11 item 6: the byte sequence `user_id` anywhere outside a redacted pair (an escaped
+    `\\"user_id\\"` inside a JSON string, such as OpenRouter's `error.metadata.raw` copy of the
+    upstream body, or a body that is not JSON). Else, for a JSON body, a `user_id` value other
+    than the redaction: a key the in-place match cannot see (one spelled with a JSON escape),
+    duplicates included, since every object's pairs are read before a dict keeps the last."""
+    if ACCOUNT_ID.encode() in _REDACTED_PAIR.sub(b"\0", stored):
+        return True
     values: list[object] = []
 
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -86,7 +95,7 @@ def _account_id_left(stored: bytes) -> bool:
     except RecursionError:
         return True  # too deep to read: the redaction cannot be verified, so withhold
     except ValueError:
-        return False  # not JSON: no key to parse; the in-place match is all there is
+        return False  # not JSON, and no `user_id` bytes left outside a redacted pair
     return any(value != REDACTED for value in values)
 
 
@@ -96,7 +105,7 @@ def response_envelope(result: ChatResult | None, reason: str | None = None) -> d
     The only change is the account id: every `user_id` value is stored as `"<redacted>"`
     (`body_redactions` names it, and `AttemptWriter.seal` copies it into the manifest). A body
     whose account id cannot be redacted in place is withheld whole (`body_withheld`), never
-    stored with it."""
+    stored with it; nothing is stored, so its `body_redactions` is empty (task 7.11)."""
     if result is None or result.raw is None:
         return {
             "http_status": None if result is None else result.http_status,
@@ -112,8 +121,8 @@ def response_envelope(result: ChatResult | None, reason: str | None = None) -> d
         return {
             **envelope,
             "body_text": None,
-            "body_withheld": "a user_id value could not be redacted in place",
-            "body_redactions": [ACCOUNT_ID],
+            "body_withheld": "a user_id could not be redacted in place",
+            "body_redactions": [],
         }
     envelope.update(body_bytes=len(stored), body_sha256=hashlib.sha256(stored).hexdigest())
     if redactions:
@@ -138,6 +147,24 @@ def dump(document: object) -> str:
     )
 
 
+def write_once(path: Path, text: str) -> bool:
+    """Write a new evidence file (temp file, fsync, link: an existing file is never replaced).
+
+    Only key-shaped tokens are replaced (never header-like prose); True if any were."""
+    scrubbed = scrub_key(text, "")
+    data = scrubbed.encode("utf-8")
+    descriptor, temporary = tempfile.mkstemp(prefix=".part-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)  # fails if the file exists: evidence is never replaced
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return scrubbed != text
+
+
 class AttemptWriter:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -155,19 +182,7 @@ class AttemptWriter:
 
     @staticmethod
     def _write_new(path: Path, text: str) -> bool:
-        """Only key-shaped tokens are replaced (never header-like prose); True if any were."""
-        scrubbed = scrub_key(text, "")
-        data = scrubbed.encode("utf-8")
-        descriptor, temporary = tempfile.mkstemp(prefix=".part-", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.link(temporary, path)  # fails if the file exists: evidence is never replaced
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-        return scrubbed != text
+        return write_once(path, text)
 
     def begin(self, locator: AttemptLocator, request: Mapping[str, Any]) -> Path:
         """Create the attempt directory and retain the exact request before it is sent."""

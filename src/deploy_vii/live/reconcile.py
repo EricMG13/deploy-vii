@@ -39,10 +39,18 @@ the attempt stays held ("usage moved since the after-check") and a later reconci
 `metrics.json` is the one retained file this rewrites (atomically, temp file then rename). The
 values it replaces are kept under `ledger.reconciliation.previous`, and the ledger line is the
 authority. Request, response, output, events and manifest are never touched.
+
+Task 7.11: an interrupted attempt (an open reservation whose directory holds `request.json` only:
+the process ended before the reply) gets the one manifest that shape supports, written once as
+a new file (`interrupted_manifest`), and is then settled by the `account-usage-delta` rule above
+(settle held, then adjust) only where it holds; otherwise its reservation stays open and the
+outcome is unresolved. It is processed after every lookup, as a hold without an id is.
 """
 
+import hashlib
 import json
 import os
+import re
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -50,7 +58,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from deploy_vii.live.client import GENERATION_ID, ChatClient, Response
+from deploy_vii.live.client import CHAT_URL, GENERATION_ID, ChatClient, Response
 from deploy_vii.live.credit import from_key_response
 from deploy_vii.live.ledger import (
     ADJUST_404_SOURCE,
@@ -59,8 +67,11 @@ from deploy_vii.live.ledger import (
     AttemptRecord,
     Ledger,
     LedgerError,
+    LedgerState,
 )
-from deploy_vii.live.retention import dump
+from deploy_vii.live.retention import dump, write_once
+from deploy_vii.live.runner import SCHEMA_BISECT_CASE, SCHEMA_CHECK_CASE
+from deploy_vii.live.submission import STEPS
 
 POOL_COHORT = "openrouter-pool"
 USAGE_TOLERANCE_USD = Decimal("0.000001")
@@ -572,6 +583,158 @@ def _attribute(
     return Outcome(
         attempt.attempt_id, None, source, "reconciled", previous, found.amount, found.reason
     )
+
+
+# Task 7.11: an interrupted attempt (the process ended after its reservation, before the reply).
+RECORDED_BY = "deploy-vii live reconcile"
+INTERRUPTED = "interrupted"
+INTERRUPTED_REASON = "process ended before the reply; no generation id"
+INTERRUPTED_SETTLE = (
+    "interrupted: process ended before the reply; cost unknown, reservation held (live reconcile)"
+)
+_CHECK_CASES = frozenset({SCHEMA_CHECK_CASE, SCHEMA_BISECT_CASE})  # their manifests differ
+IDENTITY_BASIS = (
+    "batch, case, model directory and attempt id from the attempt path; model, endpoint, draw "
+    "and request hash from request.json; ticket_id and step_id from the attempt id "
+    "(<ticket>-<step>-<n>); nothing about a reply"
+)
+
+
+def _open_or_held(record: AttemptRecord) -> bool:
+    """A reservation still open, or a settlement with an unknown cost not yet adjusted."""
+    return record.status == "reserved" or (record.actual_usd is None and record.adjustment is None)
+
+
+def interrupted_attempts(artifact_root: Path, batch_id: str, state: LedgerState) -> list[Path]:
+    """Attempt directories of the batch for the interrupted path, whose ledger charge is still
+    open or held: one without `manifest.json`, or holding the manifest this path wrote. A
+    directory the runner sealed is never one of them."""
+    records = {record.attempt_id: record for record in state.attempts}
+    found: list[Path] = []
+    for directory in sorted((artifact_root / batch_id).glob("*/*/*")):
+        record = records.get(directory.name)
+        if record is None or not directory.is_dir() or not _open_or_held(record):
+            continue
+        manifest = directory / "manifest.json"
+        if not manifest.is_file() or _read(manifest).get("recorded_by") == RECORDED_BY:
+            found.append(directory)
+    return found
+
+
+def _run_identity(attempt_id: str) -> dict[str, str]:
+    """`ticket_id` and `step_id` of a dispatch attempt id (`<ticket>-<step>-<n>`, a step repair
+    `<ticket>-<step>-repair-<n>`; `runner._plan`), else nothing."""
+    for step_id in STEPS:
+        match = re.fullmatch(rf"(.+)-{re.escape(step_id)}(?:-repair)?-[0-9]+", attempt_id)
+        if match is not None:
+            return {"ticket_id": match.group(1), "step_id": step_id}
+    return {}
+
+
+def interrupted_manifest(directory: Path) -> tuple[dict[str, Any] | None, str]:
+    """The manifest an interrupted pool attempt's directory supports (request.json only), or
+    None with why the directory is not that shape."""
+    names = sorted(path.name for path in directory.iterdir())
+    if "request.json" not in names:
+        return None, "the attempt directory holds no request.json"
+    if names != ["request.json"]:
+        return None, f"the attempt directory holds {', '.join(names)}, not request.json only"
+    case = directory.parent.parent
+    if case.name in _CHECK_CASES:
+        return None, f"a {case.name} attempt; this path writes no {case.name} record"
+    try:
+        request = _read(directory / "request.json")
+    except ValueError:
+        return None, "request.json is not a readable JSON object"
+    body = request.get("body")
+    model = body.get("model") if isinstance(body, dict) else None
+    if request.get("endpoint") != CHAT_URL or not isinstance(model, str):
+        return None, "request.json is not a pool chat request"
+    if model.replace("/", "__") != directory.parent.name:
+        return None, "request.json names another model than its directory"
+    selection = request.get("selection")
+    draw = selection.get("draw") if isinstance(selection, dict) else None
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    return {
+        "schema": "model-test-attempt/1",
+        "recorded_by": RECORDED_BY,
+        "identity_basis": IDENTITY_BASIS,
+        "experiment_id": case.parent.name,
+        "case_id": case.name,
+        "attempt_id": directory.name,
+        "model": model,
+        **_run_identity(directory.name),
+        "cohort": POOL_COHORT,
+        "status": "no-response",
+        "classification": INTERRUPTED,
+        "reason": INTERRUPTED_REASON,
+        "poolable": False,
+        "endpoint": CHAT_URL,
+        "hashes": {"request_sha256": digest},
+        **({"draw": draw} if isinstance(draw, dict) else {}),
+    }, ""
+
+
+def reconcile_interrupted(
+    directory: Path,
+    ledger: Ledger,
+    client: ChatClient,
+    clock: Callable[[], str],
+    *,
+    batch: Sequence[RetainedAttempt],
+    usage: tuple[UsageWindow | None, str],
+) -> Outcome:
+    """Record an interrupted attempt and settle it from the usage window, or say why not.
+
+    Writes the manifest the directory supports (once), then, only where `attribute_usage` and
+    `usage_unmoved` both hold, settles the open reservation as held and adjusts it by the
+    `account-usage-delta` rule; otherwise the reservation stays open (never a guessed figure)."""
+    attempt_id = directory.name
+    record = {item.attempt_id: item for item in ledger.state().attempts}[attempt_id]
+    reserved = record.status == "reserved"
+    held = record.reserved_usd if reserved else record.charged_usd
+    kept = "reservation kept open" if reserved else "the charge stays held"
+
+    def unresolved(why: str) -> Outcome:
+        reason = f"interrupted attempt; {kept}: {why}"
+        return Outcome(attempt_id, None, "none", "unresolved", held, None, reason)
+
+    path = directory / "manifest.json"
+    if path.is_file():
+        manifest = _read(path)
+    elif not reserved:
+        return unresolved("the ledger settled it, but no manifest was sealed")
+    else:
+        written, refusal = interrupted_manifest(directory)
+        if written is None:
+            return unresolved(f"{refusal}; not reconciled by this path")
+        write_once(path, dump(written))
+        manifest = written
+    checked_at = clock()
+    found = attribute_usage(
+        RetainedAttempt(directory, manifest, {}), ledger.state().attempts, batch, usage
+    )
+    window = usage[0]
+    if found.amount is None or found.evidence is None or window is None:
+        return unresolved(found.reason)
+    now, why = usage_unmoved(client, clock, window)  # only once the delta attributes it
+    if now is None:
+        return unresolved(why)
+    if reserved:
+        ledger.settle(attempt_id, None, INTERRUPTED_SETTLE)
+    ledger.adjust(
+        attempt_id,
+        found.amount,
+        generation_id=None,
+        checked_at=checked_at,
+        source=ADJUST_USAGE_SOURCE,
+        evidence={**found.evidence, **now},
+    )
+    reason = (
+        f"interrupted attempt ({INTERRUPTED_REASON}); settled by {ADJUST_USAGE_SOURCE}: "
+        f"{found.reason}"
+    )
+    return Outcome(attempt_id, None, "none", "reconciled", held, found.amount, reason)
 
 
 def candidates(artifact_root: Path, batch_id: str) -> list[RetainedAttempt]:
