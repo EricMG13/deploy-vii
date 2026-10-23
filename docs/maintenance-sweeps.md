@@ -1,7 +1,7 @@
 # Refactoring and optimisation sweeps
 
-Design added 20 October 2026 for later development. No sweep, benchmark or
-performance change has been executed in Deploy VII.
+Design added 20 October 2026 for later development. Sweeps executed since are
+recorded under [Sweeps performed](#sweeps-performed).
 
 ## Cadence
 
@@ -62,5 +62,36 @@ measured comparison, uncertainty and next action. Publish through the
 a semantic change or replace live layer acceptance. This document does not
 authorize starting implementation or live tests.
 
+## Sweeps performed
+
+### M7 7.12: envelope write path memory (23 October 2026, optimisation pass)
+
+- **Scope.** `envelope.write_envelope` and `register_envelope` on the synthetic
+  `staged()` case (3,529,566-character Markdown, 43,202,184-character sidecar).
+  Trigger: measured memory regression (the 4 GiB Linux parity VM killed 14 test files).
+- **Baseline** (base 1f9070f, macOS 26.5.1 arm64, Python 3.13.15, pydantic 2.14.1,
+  `ru_maxrss` per stage, three runs): `write_envelope` adds 0.525 to 0.528 GB
+  (peak 1.338 to 1.347 GB, 1.52 to 1.63 s); `register_envelope` adds 0.26 to 0.28 GB.
+- **Profile.** The largest avoidable cost is the str form of large JSON. The JSON holds
+  an em dash, so a `model_dump_json()` str takes two bytes per character (86 MB for
+  the 43 MB module). `content_hash()` then encodes it back for hashing. This happens
+  once for the module hash and once for the 57 MB registers hash, and once more for the
+  re-validation input. The other two costs are fixed by design: the validated copy of
+  the envelope (about 0.18 GB with its input) and the returned sidecar str (about
+  0.13 GB).
+- **Candidate** (measured, then reverted): hash the module and the registers from
+  `__pydantic_serializer__.to_json()` bytes, which are the bytes `content_hash()`
+  hashes, and validate from those bytes. It was byte-identical: 309 distinct
+  write/read/register inputs across 15 envelope test files and the replay corpus gave
+  the same outputs, refusal texts and issues. The `write_envelope` delta fell to 0.393
+  to 0.399 GB, a 25 % cut, below the brief's 30 % threshold. Ordering the sidecar dump
+  first had no effect.
+- **Outcome: no change.** Both fixed costs stay because they are the re-validation
+  trust boundary and the `(str, str)` API. Next action, for the coordinator to decide:
+  adopt the candidate on its other measured benefits. It takes the pipeline peak from
+  1.34 to 0.98 GB, the `register_envelope` delta from about 0.27 to 0.03 to 0.05 GB, and
+  the round-trip test process from 1.52 to 1.04 GB.
+- **Uncertainty.** No Linux figure; no real pack (absent).
+
 Not verified: sweep duration, performance gain or maintained equivalence on real
-Deploy VII code/packs; implementation has not begun.
+Deploy VII packs (no sweep has run on one); the 7.12 figures are macOS only.

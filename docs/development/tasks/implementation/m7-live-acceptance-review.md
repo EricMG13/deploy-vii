@@ -475,3 +475,23 @@ Not verified: a live `financials` attempt through the real transport with the pr
 Resolved in fix round 1 (coordinator ruling): the real root's earliest ledger, `probe-1`, recorded no before-check, so the origin is now the earliest recorded before-check and `probe-1` is named as not covered.
 
 Not verified: live uptake of rule d and of the two validator rules; the cross-check against the real key (the coordinator runs `live reconcile`); a real-pack replay of a `source_context` entry (none is recorded).
+
+## 7.12 Envelope write path memory sweep (no change)
+
+Offline optimisation pass (`docs/maintenance-sweeps.md`, "Sweeps performed"). Python 3.13.15, macOS 26.5.1 arm64, base 1f9070f, synthetic `staged()` case. The measures are `ru_maxrss` after each stage, three runs each; the real pack is absent from the checkout.
+
+| Stage | Baseline peak GB (s) | Candidate peak GB (s) |
+| --- | --- | --- |
+| imports | 0.134 to 0.136 | 0.133 to 0.135 |
+| `staged` | 0.429 to 0.431 (2.5 to 2.7) | 0.426 to 0.429 (2.5) |
+| `cp1_registers` | 0.527 to 0.560 (3.9 to 4.2) | 0.527 to 0.559 (3.8 to 3.9) |
+| `register_envelope` | 0.811 to 0.822 (0.3) | 0.580 to 0.590 (0.2) |
+| `write_envelope` | 1.338 to 1.347 (1.5 to 1.6) | 0.979 to 0.983 (1.4 to 1.5) |
+| `write_envelope` delta | 0.525 to 0.528 | 0.393 to 0.399 |
+
+1. **Cause.** The sidecar JSON holds an em dash, so every `model_dump_json()` str of it takes two bytes per character. `content_hash()` builds an 86 MB str for the 43 MB module and a 115 MB str for the 57 MB registers, then encodes each back. The re-validation input of `write_envelope` takes the same path.
+2. **Candidate.** One envelope-local helper hashes `__pydantic_serializer__.to_json()` bytes for the module (writer and reader) and the registers. These are the bytes `content_hash()` hashes, because `model_dump_json` is `to_json().decode()` with the same defaults. The candidate also re-validates from the same bytes. Identity was checked by recording every `write_envelope`, `envelope_issues` and `register_envelope` call across 15 envelope test files and the replay corpus, before and after. 309 distinct inputs gave 0 differing outputs, including 5 refusal texts and 8 non-empty issue lists. The synthetic case was Markdown `5c650233…9280` and sidecar `7afafd3a…2018` both times.
+3. **Below the threshold, so reverted.** The `write_envelope` delta fell by 25 %, short of the 30 % the brief requires, so no code changed. The other costs are fixed by design. The re-validated copy (about 0.18 GB with its input) is the trust boundary, and the returned sidecar str (about 0.13 GB) is the `(str, str)` API. Sidecar-first ordering gained nothing. Reusing the validation input as the sidecar would skip the canonicalisation of a `model_construct` input, so it is not byte-safe.
+4. **For the coordinator.** The candidate's other measured gains: the pipeline peak falls from 1.34 to 0.98 GB, and the single round-trip test process from 1.52 to 1.04 GB (`/usr/bin/time -l`, two runs each). Run serially, the two files `test_envelope.py` and `test_cp1_workflow.py` fall from 4.41 to 4.05 GB. The diff and its evidence are in the 7.12 report. Adopting it needs a regression test, confidence-review and a rewrite tournament (provenance).
+
+Not verified: the Linux figure (the parity VM is the coordinator's); the real pack (absent); the full parallel suite peak with the candidate.
