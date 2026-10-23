@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import re
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -555,8 +556,8 @@ def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
         return
 
     # output.md keeps the raw content; the journal sees nulls for omitted defaults resolved,
-    # for source_readiness the review Python composed from the submission and for financials the
-    # binding Python pre-filled (task 7.0i).
+    # for source_readiness the review Python composed from the submission and for every CP-1
+    # step the hash bindings Python pre-filled (task 7.0i).
     def resolved(paths: tuple[str, ...]) -> None:
         if paths:
             plan.event("payload_nulls_resolved", paths=list(paths))
@@ -576,12 +577,15 @@ def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
 
 def composed_event(event: Callable[..., None], submitted: Submitted) -> None:
     """Record what Python composed from a submission: the retained review's hash, the items it
-    added as explicit gaps and the issues that kept the payload from composing; for a pre-filled
-    binding (task 7.0i), the fields Python set and the retained payload's hash."""
+    added as explicit gaps and the issues that kept the payload from composing; for pre-filled
+    bindings (task 7.0i), the paths Python set, their count and count per kind, and the retained
+    payload's hash."""
     if submitted.prefilled:
         event(
             "payload_prefilled",
             paths=list(submitted.prefilled),
+            count=len(submitted.prefilled),
+            by_kind=dict(Counter(submitted.prefilled_kinds)),
             retained_payload_sha256=hashlib.sha256(submitted.payload.encode()).hexdigest(),
         )
     composition = submitted.composition

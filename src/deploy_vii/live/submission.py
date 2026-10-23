@@ -45,10 +45,12 @@ step's validator compares it against (`PREFILLED`, `known_bindings`, `prefill`):
 A value the payload carries is overwritten. A payload already holding every right value is kept
 byte for byte and nothing is recorded; otherwise it is rewritten (`live.schema.exact_json`,
 numbers keep their digits) and every changed JSON path is recorded in `Submitted.prefilled`. A
-binding Python cannot know (an unknown source, facility or observation, or a sub-object that does
-not parse) is left as sent, so the existing shape or validator rejection stands; so is a payload
-that is not a JSON object or cannot be stored as UTF-8. A missing retained step raises ValueError
-before anything is written. The validators' binding checks are unchanged.
+reference Python cannot resolve (an unknown or not-ready source, an unknown facility or period,
+an audit explanation whose period or observation the book lacks) is rejected with the validator's
+own wording first (`_validate_unbound`, mirroring CP-0's uncomposable path); a binding whose
+sub-object does not parse is left as sent, so the shape rejection names the cause; a payload that
+is not a JSON object or cannot be stored as UTF-8 is handed on as received. A missing retained
+step raises ValueError before anything is written. The validators' binding checks are unchanged.
 """
 
 import json
@@ -62,7 +64,13 @@ from pydantic import BaseModel, Field, ValidationError
 from deploy_vii.business_context import BusinessContextSubmission, submit_cp1a_step
 from deploy_vii.contracts import Contract
 from deploy_vii.cp0_workflow import submit_cp0_review
-from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission, submit_cp1_step
+from deploy_vii.cp1_workflow import (
+    CP1_STEPS,
+    FinancialStage,
+    FinancialSubmission,
+    submit_cp1_step,
+    validate_cp1_stage,
+)
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
 from deploy_vii.financial_contracts import FacilityObservation, FinancialBook, FinancialReview
@@ -419,13 +427,26 @@ def _parsed_hash(model: type[Contract], value: object) -> str | None:
         return None
 
 
+@dataclass(frozen=True)
+class _Book:
+    """What `audit_explanation_issues` reads of one book: its period ids and each effective
+    account value's hash by (period, metric), the last one winning."""
+
+    periods: frozenset[str]
+    observations: Mapping[tuple[str, str], str]
+
+
 class _Resolver:
-    """The value of one marked binding (None when Python cannot know it from what was sent)."""
+    """The value of one marked binding, or None when Python cannot know it from what was sent.
+    A reference Python cannot resolve (an unknown or not-ready source, an unknown facility, an
+    audit explanation period or observation the book lacks) is recorded in `unbound` with the
+    validator's own wording, so the step is rejected as the validator would reject it."""
 
     def __init__(self, known: Known, document: dict[str, Any]) -> None:
         self.known = known
         self.document = document
-        self.observations: dict[int, dict[tuple[str, str], str] | None] = {}
+        self.books: dict[int, _Book | None] = {}
+        self.unbound: list[tuple[str, str]] = []
 
     @cached_property
     def financial_review(self) -> str | None:
@@ -438,7 +459,12 @@ class _Resolver:
             return self.known.pack_sha256
         if kind == "source":
             source_id = holder.get("source_id")
-            return self.known.sources.get(source_id) if isinstance(source_id, str) else None
+            if not isinstance(source_id, str):
+                return None  # not an id: the shape rejection names it
+            digest = self.known.sources.get(source_id)
+            if digest is None:  # `readiness.citation_issues`' wording
+                self.unbound.append((item.path, f"Unavailable or changed source: {source_id}"))
+            return digest
         if kind in self.known.step:
             return self.known.step[kind]
         if kind == "financial-review":
@@ -447,72 +473,108 @@ class _Resolver:
         if book is None:
             return None
         if kind == "facility":
-            # `fx_conversion_issues` keys rows by (facility_id, period_id); the last one wins.
-            scope = holder.get("facility_id"), holder.get("period_id")
-            rows = book.get("facilities")
-            matches = [
-                row
-                for row in (rows if isinstance(rows, list) else ())
-                if isinstance(row, dict) and (row.get("facility_id"), row.get("period_id")) == scope
-            ]
-            return _parsed_hash(FacilityObservation, matches[-1]) if matches else None
-        hashes = self._observations(book)
-        metric = holder.get("metric_id")
-        annual = holder.get("annual_period_id")
-        quarters = holder.get("quarter_period_ids")
-        if hashes is None or not isinstance(metric, str):
-            return None
-        if kind == "annual-observation":
-            return hashes.get((annual, metric)) if isinstance(annual, str) else None
-        if kind != "quarter-observations":
-            raise ValueError(f"No pre-fill for the marked binding kind {kind!r}")
-        if not (isinstance(quarters, list) and all(isinstance(q, str) for q in quarters)):
-            return None
-        found = [hashes.get((quarter, metric)) for quarter in quarters]
-        return found if all(found) else None
+            return self._facility(item, book)
+        if kind in {"annual-observation", "quarter-observations"}:
+            return self._observation(item, book)
+        raise ValueError(f"No pre-fill for the marked binding kind {kind!r}")
 
-    def _observations(self, book: dict[str, Any]) -> dict[tuple[str, str], str] | None:
-        """`audit_explanation_issues`' observation hashes for this book: each effective account
-        value by (period, metric), the last one winning. The explanations themselves are not
-        parsed (effective accounts read only accounts and statement lines)."""
-        if id(book) not in self.observations:
+    def _facility(self, item: Marked, book: dict[str, Any]) -> str | None:
+        # `fx_conversion_issues` keys rows by (facility_id, period_id); the last one wins.
+        scope = item.holder.get("facility_id"), item.holder.get("period_id")
+        rows = book.get("facilities")
+        matches = [
+            row
+            for row in (rows if isinstance(rows, list) else ())
+            if isinstance(row, dict) and (row.get("facility_id"), row.get("period_id")) == scope
+        ]
+        if matches:
+            return _parsed_hash(FacilityObservation, matches[-1])
+        conversion = item.holder.get("conversion_id")
+        if isinstance(conversion, str):  # `fx_conversion_issues`' wording
+            self.unbound.append((item.path, f"FX conversion {conversion}: unknown facility/period"))
+        return None
+
+    def _observation(self, item: Marked, book: dict[str, Any]) -> object | None:
+        holder = item.holder
+        explanation, metric = holder.get("explanation_id"), holder.get("metric_id")
+        annual, quarters = holder.get("annual_period_id"), holder.get("quarter_period_ids")
+        parsed = self._book(book)
+        if (
+            parsed is None
+            or not isinstance(explanation, str)
+            or not isinstance(metric, str)
+            or not isinstance(annual, str)
+            or not (isinstance(quarters, list) and all(isinstance(q, str) for q in quarters))
+        ):
+            return None  # the shape rejection names what does not parse
+        # `audit_explanation_issues`' wording, in its order.
+        if annual not in parsed.periods or any(q not in parsed.periods for q in quarters):
+            self.unbound.append((item.path, f"Unknown audit explanation period: {explanation}"))
+            return None
+        wanted = [annual] if item.kind == "annual-observation" else quarters
+        found = [parsed.observations.get((period, metric)) for period in wanted]
+        for period, digest in zip(wanted, found, strict=True):
+            if digest is None:
+                issue = f"Stale audit explanation observation: {explanation} {period}"
+                self.unbound.append((item.path, issue))
+        if not all(found):
+            return None
+        return found[0] if item.kind == "annual-observation" else found
+
+    def _book(self, book: dict[str, Any]) -> _Book | None:
+        """The book parsed without its explanations (effective accounts read only accounts and
+        statement lines); None when it does not parse."""
+        if id(book) not in self.books:
             try:
                 parsed = FinancialBook.model_validate_json(
                     exact_json({**book, "audit_basis_explanations": []})
                 )
             except ValidationError:
-                self.observations[id(book)] = None
+                self.books[id(book)] = None
             else:
-                self.observations[id(book)] = {
-                    (row.period_id, row.metric_id): row.value.content_hash()
-                    for row in effective_accounts(parsed)
-                }
-        return self.observations[id(book)]
+                self.books[id(book)] = _Book(
+                    periods=frozenset(p.period_id for p in parsed.periods),
+                    observations={
+                        (row.period_id, row.metric_id): row.value.content_hash()
+                        for row in effective_accounts(parsed)
+                    },
+                )
+        return self.books[id(book)]
 
 
-def prefill(
-    model: type[BaseModel], payload: str, known: Known, kinds: frozenset[str]
-) -> tuple[str, tuple[str, ...]]:
+@dataclass(frozen=True)
+class Prefill:
+    """`prefill`'s result: the payload to retain, the JSON paths Python set with each one's kind,
+    the (path, validator-worded issue) of each reference Python could not resolve, and the marked
+    paths still unset (an unbound reference's field and the bindings that depend on it)."""
+
+    payload: str
+    paths: tuple[str, ...] = ()
+    kinds: tuple[str, ...] = ()
+    unbound: tuple[tuple[str, str], ...] = ()
+    unset: tuple[str, ...] = ()
+
+
+def prefill(model: type[BaseModel], payload: str, known: Known, kinds: frozenset[str]) -> Prefill:
     """`payload` with every marked binding (`live.schema.marked_fields`) set to the value Python
-    knows, in `PHASES` order, and the JSON paths that changed. Unchanged (same string, no paths)
-    when every value is already right, when the payload is not a JSON object or cannot be stored
-    as UTF-8 (a lone surrogate escape, which Pydantic refuses as invalid JSON); a binding Python
-    cannot know (an unknown source or facility, a sub-object that does not parse) is left as
-    sent for the validators. A marked kind outside `kinds` raises ValueError (nothing fills
-    it)."""
+    knows, in `PHASES` order. The payload is unchanged (same string, no paths) when every value is
+    already right, or when it is not a JSON object or cannot be stored as UTF-8 (a lone surrogate
+    escape, which Pydantic refuses as invalid JSON). A binding Python cannot know is left as sent;
+    an unresolvable reference among them is also returned in `unbound`. A marked kind outside
+    `kinds` raises ValueError (nothing fills it)."""
     document = json_object(payload)
     if document is None:
-        return payload, ()
+        return Prefill(payload)
     try:
         exact_json(document).encode()
     except UnicodeEncodeError:
-        return payload, ()
+        return Prefill(payload)
     marked = marked_fields(model, document)
     unknown = sorted({item.kind for item in marked} - kinds)
     if unknown:
         raise ValueError(f"No pre-fill for the marked binding kinds {unknown}")
     resolve = _Resolver(known, document)
-    changed: list[str] = []
+    changed: list[Marked] = []
     for phase in PHASES:
         for item in marked:
             if item.kind not in phase:
@@ -520,10 +582,33 @@ def prefill(
             value = resolve(item)
             if value is not None and item.holder.get(item.name) != value:
                 item.holder[item.name] = value
-                changed.append(item.path)
-    if not changed:
-        return payload, ()
-    return exact_json(document), tuple(changed)
+                changed.append(item)
+    return Prefill(
+        exact_json(document) if changed else payload,
+        tuple(item.path for item in changed),
+        tuple(item.kind for item in changed),
+        tuple(dict.fromkeys(resolve.unbound)),
+        tuple(item.path for item in marked if item.name not in item.holder),
+    )
+
+
+def _validate_unbound(
+    store: Execution, known: Known, step_id: str, pack: PreparedPack, attempt: Attempt
+) -> StepValidation:
+    """The rejection of a step whose payload holds a reference Python could not resolve (as
+    `_validate_uncomposable` is CP-0's): the validator-worded unbound issues first, recomputed
+    from the retained payload and the bindings read before the write, then the stage's own
+    issues without the "Field required" of each marked field left unset (the sent schema never
+    offers it: an unbound reference's own field, or a hash that covers it, such as the financial
+    review's). Acceptance is unchanged: such a payload never validated."""
+    retained = store.payload(attempt.steps[-1].payload_sha256)
+    result = prefill(STEPS[step_id].schema, retained, known, PREFILLED[step_id])
+    if not result.unbound:
+        raise ValueError("Retained payload binds cleanly; resubmit it through submit_cp1_step")
+    unset = {f"{path}: Field required" for path in result.unset}
+    stage = validate_cp1_stage(store, pack, attempt)
+    issues = (*(issue for _, issue in result.unbound), *(i for i in stage.issues if i not in unset))
+    return StepValidation(issues=tuple(dict.fromkeys(issues)))
 
 
 @dataclass(frozen=True)
@@ -532,6 +617,7 @@ class Submitted:
     payload: str  # what the journal step retains: composed, pre-filled or as received
     nulls_resolved: tuple[str, ...]
     prefilled: tuple[str, ...]  # JSON paths of the bindings Python set (task 7.0i)
+    prefilled_kinds: tuple[str, ...]  # each path's binding kind
     composition: Composition | None  # source_readiness only
 
 
@@ -547,25 +633,36 @@ def submit_model_payload(
 
     Nulls standing for omitted defaults are resolved first (`live.schema.normalise`, against the
     model-facing schema). `on_normalised` sees the resolved paths before the journal does, so a
-    caller can record them even if validation raises. Then `financials` gets its pre-filled
-    binding (`prefill`; see the module docstring)."""
+    caller can record them even if validation raises. Then every CP-1 step's hash bindings are
+    pre-filled (`prefill`; see the module docstring); a payload with an unresolvable reference is
+    rejected with the validator's wording first (`_validate_unbound`)."""
     step = STEPS[step_id]
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
     if step.module_id == "CP-1A":
         journal = submit_cp1a_step(store, ticket_id, step_id, normalised)
-        return Submitted(journal, normalised, resolved, (), None)
+        return Submitted(journal, normalised, resolved, (), (), None)
     if step_id != "source_readiness":
         known = known_bindings(store, ticket_id, step_id)
-        normalised, filled = prefill(step.schema, normalised, known, PREFILLED[step_id])
-        journal = submit_cp1_step(store, ticket_id, step_id, normalised)
-        return Submitted(journal, normalised, resolved, filled, None)
+        filled = prefill(step.schema, normalised, known, PREFILLED[step_id])
+        if filled.unbound:
+            journal = store.submit_step(
+                ticket_id,
+                "CP-1",
+                CP1_STEPS,
+                step_id,
+                filled.payload,
+                lambda pack, current: _validate_unbound(store, known, step_id, pack, current),
+            )
+        else:
+            journal = submit_cp1_step(store, ticket_id, step_id, filled.payload)
+        return Submitted(journal, filled.payload, resolved, filled.paths, filled.kinds, None)
     composition = compose_payload(store.pack(), normalised)
     if composition.review is not None and not composition.issues:
         retained = composition.review.model_dump_json()
         return Submitted(
-            submit_cp0_review(store, ticket_id, retained), retained, resolved, (), composition
+            submit_cp0_review(store, ticket_id, retained), retained, resolved, (), (), composition
         )
     journal = store.submit_step(
         ticket_id,
@@ -575,4 +672,4 @@ def submit_model_payload(
         normalised,
         lambda pack, current: _validate_uncomposable(store, pack, current),
     )
-    return Submitted(journal, normalised, resolved, (), composition)
+    return Submitted(journal, normalised, resolved, (), (), composition)

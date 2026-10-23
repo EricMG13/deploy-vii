@@ -184,6 +184,12 @@ def _validate_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> S
     return StepValidation(output=result.model_dump_json())
 
 
+def validate_cp1_stage(store: Execution, pack: PreparedPack, attempt: Attempt) -> StepValidation:
+    """The trusted validation of the attempt's last CP-1 step, exactly as `submit_cp1_step` runs
+    it (task 7.0i: `live.submission` prefixes the issues of references it could not bind)."""
+    return _validate_stage(store, pack, attempt)
+
+
 def submit_cp1_step(store: Execution, ticket_id: str, step_id: str, payload: str) -> Attempt:
     """Submit one step or resume its exact retained response after a runtime failure."""
     return store.submit_step(

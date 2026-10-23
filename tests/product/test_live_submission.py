@@ -10,12 +10,11 @@ from typing import Any
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from pydantic import ValidationError
 
 from deploy_vii.contracts import Contract, Source, Span
 from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission, submit_cp1_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
-from deploy_vii.execution import Execution, StepSubmission
+from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_validation import validate_financial_review
 from deploy_vii.live.schema import (
@@ -640,12 +639,12 @@ def test_facility_and_audit_observation_hashes_are_the_validators_values(case: s
     wanted = {"facility"} if case == "facility" else {"annual-observation", "quarter-observations"}
     document = json.loads(review.model_dump_json())
     assert wanted <= {item.kind for item in marked_fields(FinancialReview, document)}
-    text, filled = prefill(FinancialReview, payload, known_for(pack), PREFILLED["financials"])
-    assert sorted(filled) == sorted(paths)
-    assert FinancialReview.model_validate_json(text) == review
+    result = prefill(FinancialReview, payload, known_for(pack), PREFILLED["financials"])
+    assert sorted(result.paths) == sorted(paths) and result.unbound == ()
+    assert FinancialReview.model_validate_json(result.payload) == review
 
 
-def test_an_unknown_facility_or_source_is_left_for_the_validators() -> None:
+def test_an_unknown_facility_or_source_is_unbound_with_the_validators_wording() -> None:
     from tests.product.test_facility_fx import freeze_fx, fx_case
 
     pack, review = freeze_fx(fx_case())
@@ -655,13 +654,165 @@ def test_an_unknown_facility_or_source_is_left_for_the_validators() -> None:
     conversions[0]["facility_id"] = "no-such-facility"
     conversions[1]["citations"][0]["source_id"] = "no-such-source"
     known = known_for(pack)
-    text, _ = prefill(FinancialReview, json.dumps(document), known, PREFILLED["financials"])
-    filled = json.loads(text)["books"][0]["facility_fx_conversions"]
+    result = prefill(FinancialReview, json.dumps(document), known, PREFILLED["financials"])
+    filled = json.loads(result.payload)["books"][0]["facility_fx_conversions"]
     assert "facility_sha256" not in filled[0]  # nothing Python could bind it to
     assert "source_sha256" not in filled[1]["citations"][0]
     assert all("facility_sha256" in item for item in filled[1:])
-    with pytest.raises(ValidationError, match=r"facility_sha256|source_sha256"):
-        FinancialReview.model_validate_json(text)
+    base = "books.0.facility_fx_conversions"
+    assert result.unbound == (
+        (f"{base}.1.citations.0.source_sha256", "Unavailable or changed source: no-such-source"),
+        (
+            f"{base}.0.facility_sha256",
+            f"FX conversion {conversions[0]['conversion_id']}: unknown facility/period",
+        ),
+    )
+
+
+def test_the_last_of_duplicate_facility_rows_is_bound_as_the_validator_reads_it() -> None:
+    from deploy_vii.facility_fx import fx_conversion_issues
+    from deploy_vii.financial_contracts import FinancialBook
+    from tests.product.test_facility_fx import freeze_fx, fx_case
+
+    pack, review = freeze_fx(fx_case())
+    payload, _ = without_bindings(FinancialReview, review)
+    document = json.loads(payload)
+    book = document["books"][0]
+    conversion = book["facility_fx_conversions"][0]
+    first = next(
+        row
+        for row in book["facilities"]
+        if (row["facility_id"], row["period_id"])
+        == (conversion["facility_id"], conversion["period_id"])
+    )
+    later = json.loads(json.dumps(first))
+    later["currency"] = "GBP"  # a different row with the same facility and period
+    book["facilities"].append(later)
+    result = prefill(
+        FinancialReview, json.dumps(document), known_for(pack), PREFILLED["financials"]
+    )
+    bound = FinancialReview.model_validate_json(result.payload).books[0]
+    rows = [
+        r
+        for r in bound.facilities
+        if (r.facility_id, r.period_id) == (conversion["facility_id"], conversion["period_id"])
+    ]
+    assert len(rows) == 2 and rows[0] != rows[1]
+    assert bound.facility_fx_conversions[0].facility_sha256 == rows[-1].content_hash()
+    issues = fx_conversion_issues(FinancialBook.model_validate_json(bound.model_dump_json()))
+    assert not [i for i in issues if "stale facility hash" in i], issues
+
+
+@pytest.mark.parametrize("change", ["unknown-period", "no-observation"])
+def test_an_unbindable_audit_explanation_is_unbound_with_the_validators_wording(
+    change: str,
+) -> None:
+    from tests.product.test_audit_basis import differing, explain, frozen
+
+    pack, review = frozen(explain(differing()))
+    payload, _ = without_bindings(FinancialReview, review)
+    document = json.loads(payload)
+    item = document["books"][0]["audit_basis_explanations"][0]
+    if change == "unknown-period":
+        item["quarter_period_ids"][3] = "Q9"
+        expected = f"Unknown audit explanation period: {item['explanation_id']}"
+    else:
+        item["metric_id"] = "no_such_metric"
+        expected = f"Stale audit explanation observation: {item['explanation_id']} FY"
+    result = prefill(
+        FinancialReview, json.dumps(document), known_for(pack), PREFILLED["financials"]
+    )
+    assert result.unbound and result.unbound[0][1] == expected
+    kept = json.loads(result.payload)["books"][0]["audit_basis_explanations"][0]
+    assert "annual_observation_sha256" not in kept and "quarter_observation_sha256" not in kept
+
+
+def unknown_source(document: dict[str, Any], model: type[Contract]) -> str:
+    """Point the first citation of `document` at a source the pack does not hold."""
+    first = next(item for item in marked_fields(model, document) if item.kind == "source")
+    first.holder["source_id"] = "no-such-source"
+    return first.path
+
+
+@pytest.mark.parametrize("step_id", ["source_context", "financials"])
+def test_an_unknown_source_is_rejected_with_the_validators_wording_first(
+    tmp_path: Path, step_id: str
+) -> None:
+    """Fix 2 (F1): never "...source_sha256: Field required", a field the sent schema forbids."""
+    store, ticket_id, value = journal_at(tmp_path, step_id)
+    model = STEPS[step_id].schema
+    payload, _ = without_bindings(model, value)
+    document = json.loads(payload)
+    path = unknown_source(document, model)
+    submitted = submit_model_payload(store, ticket_id, step_id, json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs  # rejected, as before; the repair is kept
+    assert rejected.issues[0] == "Unavailable or changed source: no-such-source"
+    assert f"{path}: Field required" not in rejected.issues
+    assert not [issue for issue in rejected.issues if "Field required" in issue], rejected.issues
+    assert store.payload(rejected.payload_sha256) == submitted.payload
+
+
+def test_an_unknown_facility_is_rejected_with_the_validators_wording_first(
+    tmp_path: Path,
+) -> None:
+    from tests.product.test_facility_fx import fx_case
+
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    book = document["financial"]["books"][0]
+    conversion = json.loads(fx_case().facility_fx_conversions[0].model_dump_json())
+    citation = next(
+        m.holder for m in marked_fields(FinancialSubmission, document) if m.kind == "source"
+    )
+    conversion.update(
+        conversion_id="fx-unknown",
+        facility_id="no-such-facility",
+        period_id=book["periods"][0]["period_id"],
+        citations=[dict(citation)],
+    )
+    conversion["rate"]["citations"] = [dict(citation)]
+    del conversion["facility_sha256"]
+    book["facility_fx_conversions"] = [conversion]
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0] == "FX conversion fx-unknown: unknown facility/period"
+    assert not [issue for issue in rejected.issues if "Field required" in issue], rejected.issues
+
+
+def test_a_resumed_unbound_step_recomputes_the_same_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A validator exception leaves the step pending; resuming the same payload recomputes the
+    unbound issues from the retained payload and the bindings read before the write."""
+    from deploy_vii.live import submission
+
+    store, ticket_id, value = journal_at(tmp_path / "a", "source_context")
+    payload, _ = without_bindings(SourceContextReview, value)
+    document = json.loads(payload)
+    unknown_source(document, SourceContextReview)
+    payload = json.dumps(document)
+    fresh_store, fresh_ticket, _ = journal_at(tmp_path / "b", "source_context")
+    expected = submit_model_payload(fresh_store, fresh_ticket, "source_context", payload)
+    real = submission.validate_cp1_stage
+    calls: list[int] = []
+
+    def flaky(store: Execution, pack: PreparedPack, attempt: Attempt) -> StepValidation:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("validator interrupted")
+        return real(store, pack, attempt)
+
+    monkeypatch.setattr(submission, "validate_cp1_stage", flaky)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        submit_model_payload(store, ticket_id, "source_context", payload)
+    pending = next(a for a in store.read().attempts if a.ticket_id == ticket_id).steps[-1]
+    assert pending.status == "pending"
+    resumed = submit_model_payload(store, ticket_id, "source_context", payload)
+    (rejected,) = resumed.journal.step_repairs
+    assert rejected.payload_sha256 == pending.payload_sha256
+    assert rejected.issues == expected.journal.step_repairs[0].issues
+    assert rejected.issues[0] == "Unavailable or changed source: no-such-source"
 
 
 def test_a_financial_review_that_does_not_parse_leaves_its_two_hashes_unset(
@@ -684,8 +835,9 @@ def test_a_rewritten_payload_keeps_every_number_and_text_exactly() -> None:
     digest = "a" * 64
     payload = '{"amount":3624.10,"tiny":1e-7,"n":-0,"text":"caf\\u00e9 \\u2013 \\"q\\"","x":[1,2]}'
     known = Known(pack_sha256=ZERO, sources={}, step={"step-inputs": digest})
-    text, filled = prefill(DownstreamReview, payload, known, PREFILLED["readiness"])
-    assert filled == ("inputs_sha256",)
+    result = prefill(DownstreamReview, payload, known, PREFILLED["readiness"])
+    assert (result.paths, result.kinds) == (("inputs_sha256",), ("step-inputs",))
+    text = result.payload
     assert text == (
         f'{{"amount":3624.10,"tiny":1E-7,"n":0,"text":"café {EN_DASH} \\"q\\"","x":[1,2],'
         f'"inputs_sha256":"{digest}"}}'
@@ -713,7 +865,8 @@ def test_a_payload_that_is_not_a_json_object_is_handed_on_untouched(
 ) -> None:
     store, ticket_id, _ = journal_at(tmp_path, "financials")
     known = known_bindings(store, ticket_id, "financials")
-    assert prefill(FinancialSubmission, payload, known, PREFILLED["financials"]) == (payload, ())
+    result = prefill(FinancialSubmission, payload, known, PREFILLED["financials"])
+    assert (result.payload, result.paths, result.unbound) == (payload, (), ())
     submitted = submit_model_payload(store, ticket_id, "financials", payload)
     assert (submitted.payload, submitted.prefilled) == (payload, ())
     (rejected,) = submitted.journal.step_repairs  # the step's first rejection (task 7.0g)
@@ -752,16 +905,33 @@ def test_a_marked_kind_nothing_fills_raises(tmp_path: Path) -> None:
         prefill(FinancialSubmission, value.model_dump_json(), known, frozenset({"pack"}))
 
 
+@pytest.mark.parametrize(
+    ("step_id", "field", "message"),
+    [
+        ("financials", ("context_step_sha256",), NOT_BOUND),
+        (
+            "financials",
+            ("binding", "source_context_review_sha256"),
+            "Context binding does not identify current financial and source reviews",
+        ),
+        ("narrative", ("inputs_sha256",), "Narrative review does not bind current input registers"),
+        ("readiness", ("inputs_sha256",), "Downstream review does not bind current inputs"),
+    ],
+    ids=["context-step", "source-context-review", "narrative-inputs", "readiness-inputs"],
+)
 def test_the_validator_still_rejects_a_mismatched_binding_that_bypasses_the_prefill(
-    tmp_path: Path,
+    tmp_path: Path, step_id: str, field: tuple[str, ...], message: str
 ) -> None:
-    store, ticket_id, value = journal_at(tmp_path, "financials")
-    source = store.read().attempts[-1].steps[0]
+    """R3: the independent-artefact checks stay real guards when the pre-fill is bypassed."""
+    store, ticket_id, value = journal_at(tmp_path, step_id)
     document = json.loads(value.model_dump_json())
-    document["context_step_sha256"] = source.output_sha256
-    journal = submit_cp1_step(store, ticket_id, "financials", json.dumps(document))
+    holder = document
+    for key in field[:-1]:
+        holder = holder[key]
+    holder[field[-1]] = store.read().attempts[-1].steps[0].output_sha256
+    journal = submit_cp1_step(store, ticket_id, step_id, json.dumps(document))
     (rejected,) = journal.step_repairs
-    assert rejected.issues == (NOT_BOUND,)
+    assert message in rejected.issues, rejected.issues
 
 
 def test_every_marked_kind_is_one_python_fills_for_that_step() -> None:

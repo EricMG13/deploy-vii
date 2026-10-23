@@ -715,11 +715,16 @@ retained-step block is the header `sha256=` and the step output, with no `step_o
 line.
 
 `submission.submit_model_payload` fills each binding after null resolution and overwrites any
-value the reply carries; a binding Python cannot know is left as sent for the validators. The
-journal retains the pre-filled payload, and output.md keeps the raw reply. A reply that already
-holds every value is kept byte for byte, and a reply that is not a JSON object is handed on as
-received. The changed paths are in `Submitted.prefilled` and in a `payload_prefilled` event
-(`paths`, `retained_payload_sha256`). The validators still reject a mismatched binding.
+value the reply carries. A reference Python cannot resolve is rejected with the validator's
+own message first. The cases are an unknown or not-ready source ("Unavailable or changed source:
+<id>"), an unknown facility or period ("FX conversion <id>: unknown facility/period") and an audit
+explanation's missing period or observation. The stage's remaining issues follow, without the
+"Field required" of a field the sent schema never offers (`_validate_unbound`, recomputed on
+resume). The journal retains the pre-filled payload, and output.md keeps the raw reply. A reply
+that already holds every value is kept byte for byte, and a reply that is not a JSON object is
+handed on as received. The changed paths are in `Submitted.prefilled` and in a
+`payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`). The
+validators still reject a mismatched binding.
 
 Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
 `"(211)"`), which the stored contract refused, and the sent schema allowed them. The

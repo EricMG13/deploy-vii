@@ -515,3 +515,23 @@ def test_a_proxy_repair_of_a_pool_rejection_links_the_pool_try(tmp_path: Path) -
     manifest = load(fixed.directory / "manifest.json")
     assert manifest["links"]["step_repair_of_attempt_id"] == pooled.attempt_id
     assert manifest["links"]["retry_of_attempt_id"] is None
+
+
+def test_a_proxy_payload_records_the_bindings_python_filled(tmp_path: Path) -> None:
+    """Task 7.0i: the proxy cohort enters payloads the same way, so its events say what Python
+    pre-filled (paths, count and the count per kind)."""
+    rig, extraction = cp1_rig(tmp_path)
+    document = json.loads(extraction.model_dump_json())
+    del document["context_step_sha256"]
+    document["binding"]["source_context_review_sha256"] = "0" * 64
+    result = cp1_proxy(rig, "financials", json.dumps(document))
+    assert result.status == "accepted", result.issues
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    assert filled["paths"] == ["context_step_sha256", "binding.source_context_review_sha256"]
+    assert filled["count"] == 2
+    assert filled["by_kind"] == {"context-step": 1, "source-context-review": 1}
+    attempt = rig.store.read().attempts[-1]
+    assert filled["retained_payload_sha256"] == attempt.steps[-1].payload_sha256

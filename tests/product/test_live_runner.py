@@ -1625,6 +1625,7 @@ def test_the_prefilled_context_binding_is_recorded_beside_the_raw_output(tmp_pat
     attempt = rig.store.read().attempts[-1]
     kept = rig.store.payload(attempt.steps[-1].payload_sha256)
     assert filled["paths"] == ["context_step_sha256"]
+    assert (filled["count"], filled["by_kind"]) == (1, {"context-step": 1})
     assert filled["retained_payload_sha256"] == attempt.steps[-1].payload_sha256
     assert json.loads(kept)["context_step_sha256"] == attempt.steps[0].content_hash()
     # The model was never asked: neither the schema nor the step text names the field.

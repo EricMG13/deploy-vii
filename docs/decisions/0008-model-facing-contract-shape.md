@@ -353,16 +353,32 @@ retained-step block's `step_output_sha256=` line are removed; the block header `
 After null resolution, `live.submission.submit_model_payload` fills each binding with the value
 its validator compares against and overwrites any value the payload carries. Phases keep the
 dependencies: citations and step values first, then facility rows, then observations, then the
-financial review. A binding Python cannot know is left as sent, so the existing shape or
-validator rejection stands: an unknown source, facility or observation, or a sub-object that
-does not parse. A payload that already holds every right value is kept byte for byte; a payload
-that is not a JSON object is handed on as received. A missing retained step raises before any
-write. The journal retains the pre-filled payload, rewritten with every number's digits kept,
-and output.md keeps the raw reply. Every changed JSON path is recorded in `Submitted.prefilled`
-and in the attempt's `payload_prefilled` event (`paths`, `retained_payload_sha256`).
+financial review.
+
+A reference Python cannot resolve is rejected with the validator's own message, listed first,
+as CP-0's uncomposable path does. The cases are an unknown or not-ready source ("Unavailable or
+changed source: <id>"), an unknown facility or period ("FX conversion <id>: unknown
+facility/period"), and an audit explanation whose period or observation the book lacks ("Unknown
+audit explanation period: <id>", "Stale audit explanation observation: <id> <period>"). The step
+is entered through `store.submit_step` with a validator that recomputes these issues from the
+retained payload and the bindings read before the write. It then appends the stage validation's
+issues (`cp1_workflow.validate_cp1_stage`), less the "Field required" of any marked field left
+unset, a field the sent schema never offers. Such a payload was rejected before and still is.
+A binding that cannot be filled because its sub-object does not parse is left as sent, so the
+shape rejection names the cause.
+
+A payload that already holds every right value is kept byte for byte; a payload that is not a
+JSON object is handed on as received. A missing retained step raises before any write. The
+journal retains the pre-filled payload, rewritten with every number's digits kept, and output.md
+keeps the raw reply. Every changed JSON path is recorded in `Submitted.prefilled` and in the
+attempt's `payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`).
 
 The stored contracts, the validators' binding checks and their messages are unchanged, so
-analytical meaning is unchanged (decision 0005). Not verified: provider acceptance of the changed
+analytical meaning is unchanged (decision 0005). The facility, audit-observation and
+financial-review checks now compare values computed from the same payload, so on the live path
+they only re-check Python's own fill. The checks against independent artefacts remain real
+guards: the context step, the source-context review, the pack and the step inputs. Not
+verified: provider acceptance of the changed
 CP-1 sent schemas (`live schema-check`) and live uptake (E1 batch 7).
 
 ## Evidence
