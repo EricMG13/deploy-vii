@@ -118,3 +118,63 @@ first.
   `response_format`. Both are judged by the same journal path.
 - Cost compares settled `usage.cost`; the baseline had no cache reads, the hybrid draws had
   71.5–76.7%.
+
+## 7. Medium effort (hybrid-cp0-2)
+
+Evidence only, not adoption: decision 0005 (amended 22 Oct 2026) says every run uses GPT-6.1 Sol
+at high. User request (23 Oct 2026): 3 more hybrid draws at medium effort, US$3 cap, same
+harness. Harness commit 27fbbb6 adds `--effort {high,medium}` (default high); the effort is
+pinned in the catalog selection and refused if the catalog would map it, and `medium` was sent
+unmapped (catalog efforts low/medium/high/xhigh/max). Every other setting is the same as
+hybrid-cp0-1: `max_tokens` 32000, 25 calls, 900 s, 3 submits, `tool_choice` "required", same pack
+and prompt. Root `/Users/ericguei/Documents/DEPLOY VII/artifacts/model-tests/hybrid-cp0-2/`, ledger
+`.ledgers/hybrid-cp0-2.jsonl` (cap 3). Ceiling check: prior US$34.488936219830 (now including
+hybrid-cp0-1) + cap US$3 ≤ US$200, with the same worst-case line (`e1-cp1-2.jsonl` seq 8).
+
+| Draw | Verdict | Wall s | Calls | Prompt / completion / reasoning (cached) | USD | Submits | Issue classes (rejected submits) | Pages read | Shrink flag |
+|---|---|---|---|---|---|---|---|---|---|
+| hybrid-1 | **accepted** | 73.3 | 4 | 56,050 / 3,945 / 91 (cached 24,191) | 0.1212646 | 1: accepted | none | 24 of 195 (12.3%) | no (one submit) |
+| hybrid-2 | **accepted** | 101.6 | 6 | 109,539 / 6,137 / 100 (cached 77,789) | 0.1481459 | 2: rejected, accepted | Quote/locator mismatch ×1 | 25 of 195 (12.8%) | no |
+| hybrid-3 | **accepted** | 66.6 | 5 | 71,925 / 3,556 / 98 (cached 49,684) | 0.0958159 | 1: accepted | none | 21 of 195 (10.8%) | no (one submit) |
+
+All 15 calls were served by `openai/gpt-6.1-sol` via OpenAI (identity verified), classified ok,
+`finish_reason` `tool_calls`, with `usage.cost` reported (nothing held); no tool call was refused.
+The one rejected submit (hybrid-2 submit 1) was `Quote/locator mismatch: quote not found under
+czr-2025-10k page:95 … "Reconciliation of"`, the same page as hybrid-cp0-1's hybrid-1. Every
+cited locator was read through `read_pages` (`cited_not_read` empty in all three). Batch spend
+US$0.3652264 (15 attempts, nothing held, no overrun); both batches together US$1.2072964.
+
+### High vs medium
+
+| | High (hybrid-cp0-1) | Medium (hybrid-cp0-2) | Change |
+|---|---|---|---|
+| Median wall clock s (range) | 207.8 (160.3–230.6) | 73.3 (66.6–101.6) | −64.7% |
+| Median latency of a submit-producing call s (n calls) | 106.0 (5) | 53.1 (4) | −49.9% |
+| Median per-draw time in submit-producing calls s | 177.8 | 63.9 | |
+| Median reasoning tokens | 1,225 | 98 | −92.0% |
+| Median completion tokens | 12,582 | 3,945 | −68.6% |
+| Median prompt tokens | 240,543 | 71,925 | |
+| Median calls | 7 | 5 | |
+| Median USD (batch total) | 0.2627989 (0.8420700) | 0.1212646 (0.3652264) | −53.9% |
+| First-pass acceptance | 1 of 3 | 2 of 3 | |
+| Final acceptance | 3 of 3 | 3 of 3 | |
+| Issue classes (rejected submits) | Quote/locator mismatch ×2, Absence claim contradicts extraction coverage ×1 | Quote/locator mismatch ×1 | |
+| Pages read (median) | 47, 61, 34 (47) | 24, 25, 21 (24) | |
+| Shrink flag | 1 of 3 (hybrid-3) | 0 of 3 | |
+
+Medians and changes were computed in Python from `metrics.json` and `tool-calls.jsonl`.
+
+What the comparison shows, and what it does not:
+- Both efforts were accepted 3 of 3 on the same trusted journal path, and all six accepted
+  payloads reach the same verdicts: issuer confirmed, source fidelity `degraded`, CP-1, CP-1A,
+  CP-2 and CP-5 READY_WITH_LIMITATIONS, CP-3, CP-4 and CP-6 CONDITIONAL.
+- Medium is faster mainly because it reads and writes less: about half the pages, and smaller
+  accepted payloads. Accepted payload counts at medium: citations 43, 30, 31 (high: 54, 65,
+  65); limitation entries 21, 18, 24 (high: 34, 37, 34); claims 3, 2, 3 (high: 4, 6, 4); gaps
+  3, 3, 3 (high: 3, 5, 4); 7 consumer judgments and 1 source judgment in every draw. The
+  validator accepts both; this probe does not judge whether the thinner evidence is enough for
+  the downstream modules.
+- Medium's cache share was lower in one draw (43.2% in hybrid-1; 71.0% and 69.1% in the
+  others), which narrows its cost advantage relative to its token reduction.
+- Same limits as section 6: n = 3 per effort, one issuer, same-day provider variance; the medium
+  batch ran about 30 minutes after the high batch.
