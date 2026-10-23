@@ -50,6 +50,8 @@ from tests.product.test_business_context import submission_fixture
 from tests.product.test_cp1_workflow import at_ceiling
 from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
+from tests.product.test_live_credit import ACCOUNT, CREDIT_402, IN_FLIGHT_402
+from tests.product.test_live_runner import no_wait
 from tests.product.test_narrative import populated
 from tests.product.test_readiness import as_submission, readiness_fixture
 from tests.product.test_workflow import cp1_case
@@ -146,10 +148,15 @@ class Rig:
         ]
         return out + (["--cap", cap] if cap else [])
 
-    def run(self, argv: list[str], responder: cli.Transport) -> int:
+    def run(
+        self,
+        argv: list[str],
+        responder: cli.Transport,
+        sleep: Callable[[float], None] = no_wait,
+    ) -> int:
         parser = argparse.ArgumentParser()
         cli.configure(parser)
-        return cli.execute(parser.parse_args(argv), transport=responder)
+        return cli.execute(parser.parse_args(argv), transport=responder, sleep=sleep)
 
     def report(self, batch: str = "b1") -> str:
         return (self.reports / f"live-{batch}.md").read_text(encoding="utf-8")
@@ -510,6 +517,66 @@ def test_credit_exhaustion_mid_batch_aborts_cleanly_with_its_own_exit_code(
     assert "Traceback" not in out and FAKE_KEY not in out
     assert "Stopped: aborted: CreditExhausted" in rig.report()
     assert len(served.requests) == 2  # the 402 stopped the batch: no later cell, no other model
+
+
+def refuses_after_first(served: Responder, *bodies: bytes) -> Callable[[Request], Response]:
+    """Answer the first chat call, then each of `bodies` as a 402, then answer again."""
+    queue = list(bodies)
+
+    def transport(request: Request) -> Response:
+        if served.requests and request.url != KEY_URL and queue:
+            served.requests.append(request)
+            return Response(402, queue.pop(0))
+        return served(request)
+
+    return transport
+
+
+def test_an_in_flight_402_mid_batch_waits_and_retries_and_both_attempts_are_reported(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 7.8 (batch e1-cp1-8): the in-flight refusal no longer aborts the batch."""
+    served = Responder(rig.review)
+    waits: list[float] = []
+    code = rig.run(rig.argv("canary"), refuses_after_first(served, IN_FLIGHT_402), waits.append)
+    assert code == 0 and waits == [120]
+    rows = step_lines(rig.report(), "canary-")
+    assert rows[0][6:8] == ["accepted", "ok"]
+    assert rows[1][6:9] == ["no-response", "insufficient_credit", "0"]
+    assert rows[2][7] == "ok"  # the re-send got a model answer (the validator's verdict aside)
+    assert rows[1][5] != rows[2][5] and rows[1][2] == rows[2][2]  # same step, a new attempt
+    assert len(rows) == len(served.requests)  # every chat call has its row
+    assert "- Stopped: no" in rig.report()
+    assert ACCOUNT not in capsys.readouterr().out
+
+
+def test_a_second_in_flight_402_aborts_naming_both_attempts(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    served = Responder(rig.review)
+    waits: list[float] = []
+    transport = refuses_after_first(served, IN_FLIGHT_402, IN_FLIGHT_402)
+    code = rig.run(rig.argv("canary"), transport, waits.append)
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_CREDIT == 4 and waits == [120]
+    assert "reason in_flight_budget_exhausted" in out and "again after one retry of" in out
+    assert "ticket pending; coordinator decision (DC-8)" in out
+    stopped = next(line for line in rig.report().splitlines() if line.startswith("- Stopped:"))
+    assert stopped.startswith("- Stopped: aborted: CreditExhausted (reason in_flight_budget")
+    assert len(served.requests) == 3
+
+
+def test_a_credit_402_aborts_with_the_affordable_budget_on_both_lines(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 7.8 (batch e1-cp1-9): the owner sees what the balance can afford."""
+    served = Responder(rig.review)
+    code = rig.run(rig.argv("canary"), refuses_after_first(served, CREDIT_402))
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_CREDIT
+    budget = "reason openrouter_credits; requested max_tokens 128000, affordable 91075"
+    assert budget in out and ACCOUNT not in out
+    assert f"- Stopped: aborted: CreditExhausted ({budget}; HTTP 402)" in rig.report()
 
 
 def test_a_402_inside_choices_stops_the_batch_as_dc8_requires(

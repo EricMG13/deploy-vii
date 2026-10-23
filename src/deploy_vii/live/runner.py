@@ -18,12 +18,13 @@ import hashlib
 import json
 import math
 import re
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from fractions import Fraction
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,9 @@ COHORT = "openrouter-pool"
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_TOKENS = 16000  # the completion budget; `live ... --max-tokens N` overrides it
 TOKEN_OVERHEAD = 64
+# Task 7.8: the wait before the one retry of an in-flight 402 (`in_flight_wait_s`).
+IN_FLIGHT_DEFAULT_WAIT_S = 120  # when the refusal states no Retry-After
+IN_FLIGHT_MAX_WAIT_S = 300
 SUBMITTED = frozenset({"ok", "truncated"})
 POOLABLE_STATUSES = frozenset({"accepted", "rejected"})
 
@@ -130,6 +134,10 @@ class DispatchResult:
     pending (`attempt_pending`, task 7.0g): the same step is expected again, and its next
     dispatch is the step's one repair within the attempt (`step_try` 2), with its own attempt
     ids (`<ticket>-<step>-repair-<n>`) and its own retry budget.
+
+    An in-flight 402 (task 7.8, `credit.from_dispatch_402`) is waited out and re-sent once by
+    `dispatch` itself: the result is the re-sent attempt's, and `retried` holds the refused
+    one (`no-response`, `insufficient_credit`, its credit state in `in_flight`).
     """
 
     attempt_id: str
@@ -146,6 +154,8 @@ class DispatchResult:
     prompt_tokens_upper_bound: int | None = None  # the reservation's prompt bound (MC-10)
     attempt_pending: bool = False  # the journal ticket is still pending after this dispatch
     step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
+    in_flight: CreditState | None = None  # an in-flight 402 that `dispatch` retries (7.8)
+    retried: "DispatchResult | None" = None  # the in-flight refused attempt this one re-sent
 
 
 @cache
@@ -249,6 +259,8 @@ class _Plan:
     events: list[dict[str, Any]] = field(default_factory=list)
     # Counts only, and only when the key file held several tokens (see credential.LoadedKey).
     key_note: dict[str, int] = field(default_factory=dict)
+    # The wait before this re-send of an in-flight 402 (task 7.8; links name the refused try).
+    in_flight_waited_s: int | None = None
 
     @property
     def exhausted(self) -> bool:
@@ -456,6 +468,8 @@ def _plan(
             "step_repair_of_attempt_id": (
                 step_repair_of(known, ticket_id, step.step_id) if current == 2 else None
             ),
+            # The in-flight 402 this try re-sends (task 7.8); set by `dispatch`.
+            "in_flight_retry_of_attempt_id": None,
         },
         clock=clock,
         started_at=clock(),
@@ -562,6 +576,30 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
     }
 
 
+def _refusal(plan: _Plan, result: ChatResult) -> CreditState:
+    """The 402 as its body reads (task 7.8). An in-flight refusal is retried once, so on the
+    re-send itself, or on the last try the retry budget allows, it is exhaustion (DC-8)."""
+    state = from_dispatch_402(plan.clock(), result.http_status, result.raw, result.retry_after)
+    if not state.transient:
+        return state
+    retried = plan.links["in_flight_retry_of_attempt_id"]
+    if retried is not None:
+        why = f"in flight again after one retry of {retried} ({plan.in_flight_waited_s} s wait)"
+    elif plan.exhausted:
+        why = f"in flight on the last allowed try (max_retries={plan.max_retries}), no retry left"
+    else:
+        return state
+    detail = f"{state.detail} on {plan.attempt_id}, {why}: treated as exhaustion"
+    return replace(state, exhausted=True, detail=detail)
+
+
+def in_flight_wait_s(state: CreditState) -> int:
+    """Seconds to wait before re-sending an in-flight 402: its Retry-After, at most 300; 120
+    when the refusal states none (task 7.8)."""
+    stated = state.retry_after_s
+    return min(IN_FLIGHT_DEFAULT_WAIT_S if stated is None else stated, IN_FLIGHT_MAX_WAIT_S)
+
+
 def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
     result = run.result
     assert result is not None
@@ -575,9 +613,11 @@ def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
         plan.event("journal_skipped", reason="no model payload to submit")
         if result.classification == "insufficient_credit":
             # Credit is not a model failure: the ticket stays open for the coordinator's
-            # explicit choice (native Luna or a proxy) and the input set's repair is kept.
-            run.credit = from_dispatch_402(plan.clock(), result.http_status)
-            plan.event("credit_exhausted", **run.credit.to_record())
+            # explicit choice (native Luna or a proxy) and the input set's repair is kept. An
+            # in-flight refusal is not a model failure either: `dispatch` re-sends it once.
+            run.credit = _refusal(plan, result)
+            name = "credit_exhausted" if run.credit.exhausted else "credit_in_flight_refusal"
+            plan.event(name, **run.credit.to_record())
             return
         _interrupt_if_exhausted(plan, store, run, result.classification)
         return
@@ -859,6 +899,7 @@ def dispatch(
     max_retries: int = DEFAULT_MAX_RETRIES,
     credit: CreditState | None = None,
     schema_rejections: Mapping[tuple[str, str, str], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> DispatchResult:
     """Run one attempt of `step` on the model drawn from `pool` with `seed`.
 
@@ -868,6 +909,11 @@ def dispatch(
     before anything is reserved or sent (task 2.11).
     Credit exhaustion (a 402, or a `credit` state already known to be exhausted) raises
     CreditExhausted; the runner never switches model or cohort on its own (DC-8).
+    An in-flight 402 (task 7.8) is the one exception: once that attempt is sealed and settled
+    (at zero), `sleep(in_flight_wait_s(...))` and the step is re-sent once on the same drawn
+    model as the next try, reserved anew under the same cap. Its manifest names the refused try
+    (`links.in_flight_retry_of_attempt_id`). A second in-flight 402, or one on the last try
+    `max_retries` allows, is exhaustion.
     `key_index` is `[model_tests].credential_token_index`; a refused key (401) is never retried
     with another token from the file. `bytes_per_token` is
     `[model_tests].prompt_bytes_per_token_lower_bound` (the reservation's prompt bound). Both are
@@ -875,6 +921,53 @@ def dispatch(
     """
     if credit is not None and credit.exhausted is True:
         raise CreditExhausted(credit, ticket_id)
+    send = partial(
+        _dispatch_once,
+        step,
+        store=store,
+        ticket_id=ticket_id,
+        ledger=ledger,
+        pool=pool,
+        seed=seed,
+        client=client,
+        writer=writer,
+        key_path=key_path,
+        key_index=key_index,
+        bytes_per_token=bytes_per_token,
+        effort=effort,
+        clock=clock,
+        max_retries=max_retries,
+        schema_rejections=schema_rejections,
+    )
+    first = send(None)
+    if first.in_flight is None:
+        return first
+    waited = in_flight_wait_s(first.in_flight)
+    sleep(waited)
+    # The re-send raises CreditExhausted on any further in-flight 402 (`_refusal`).
+    return replace(send((first.attempt_id, waited)), retried=first)
+
+
+def _dispatch_once(
+    step: StepSpec,
+    in_flight_of: tuple[str, int] | None,
+    *,
+    store: Execution,
+    ticket_id: str,
+    ledger: Ledger,
+    pool: PinnedPool,
+    seed: int,
+    client: ChatClient,
+    writer: AttemptWriter,
+    key_path: Path,
+    key_index: int,
+    bytes_per_token: Decimal,
+    effort: str,
+    clock: Callable[[], str],
+    max_retries: int,
+    schema_rejections: Mapping[tuple[str, str, str], str] | None,
+) -> DispatchResult:
+    """One attempt of `dispatch`; `in_flight_of` is (the refused try, the wait) on a re-send."""
     plan = _plan(
         step,
         store,
@@ -901,6 +994,11 @@ def dispatch(
         plan.locator, _request_record(plan)
     )  # the exact request is retained before sending
     plan.event("drawn", draw=plan.drawn.to_record(), effort=plan.effort)
+    if in_flight_of is not None:
+        retry_of, waited = in_flight_of
+        plan.links["in_flight_retry_of_attempt_id"] = retry_of
+        plan.in_flight_waited_s = waited
+        plan.event("in_flight_retry", retry_of=retry_of, waited_s=waited)
     if plan.attempt.repair_of is not None or plan.step_try == 2:
         plan.event("repair_prompt", **plan.repair.to_record())
     if plan.misfit is not None:
@@ -946,7 +1044,8 @@ def dispatch(
     finally:
         _close(plan, ledger, writer, run, key)
     assert run.directory is not None
-    if run.credit is not None:
+    # Only a retryable in-flight refusal (exhausted unknown) returns; every other 402 raises.
+    if run.credit is not None and run.credit.exhausted is not None:
         raise CreditExhausted(run.credit, ticket_id)
     return DispatchResult(
         attempt_id=plan.attempt_id,
@@ -963,6 +1062,7 @@ def dispatch(
         prompt_tokens_upper_bound=plan.prompt_tokens,
         attempt_pending=_pending(store, ticket_id),
         step_try=plan.step_try,
+        in_flight=run.credit,
     )
 
 
@@ -1230,7 +1330,8 @@ def check_schema(
     no real run reads. A reservation the cap refuses is sealed and returned as outcome
     `refused` (nothing sent; the caller stops); a connection failure propagates after the
     reservation is settled as held; a 402 raises CreditExhausted after the attempt is sealed
-    (DC-8)."""
+    (DC-8), with the reason its body states. A check is not retried, so an in-flight 402 stops
+    it too (task 7.8; only `dispatch` waits and re-sends)."""
     name, schema = variant if variant is not None else (None, None)
     chat = schema_check_request(candidate, step_id, schema)
     tokens = prompt_token_bound(chat.body(), bytes_per_token)
@@ -1315,7 +1416,11 @@ def check_schema(
         finally:
             _seal_check(check, writer, cost)
     if answer.classification == "insufficient_credit":
-        raise CreditExhausted(from_dispatch_402(clock(), answer.http_status))
+        state = from_dispatch_402(clock(), answer.http_status, answer.raw, answer.retry_after)
+        if state.exhausted is not True:
+            detail = f"{state.detail} in flight; schema-check does not retry: treated as exhaustion"
+            state = replace(state, exhausted=True, detail=detail)
+        raise CreditExhausted(state)
     return _result(check)
 
 

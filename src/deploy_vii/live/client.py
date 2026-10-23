@@ -58,6 +58,9 @@ class Request:
 class Response:
     status: int
     body: bytes
+    # The reply's HTTP `Retry-After`, verbatim (task 7.8: an in-flight 402 states its wait);
+    # no other header is kept.
+    retry_after: str | None = None
 
 
 Transport = Callable[[Request], Response]
@@ -129,6 +132,8 @@ class ChatResult:
     # OpenRouter's `error.metadata.provider_error_code` of a non-2xx reply, when it is text
     # (probe-5b OpenAI: "invalid_json_schema"); None otherwise.
     provider_error_code: str | None = None
+    # The HTTP `Retry-After` of a reply that is not a model answer (`Response.retry_after`).
+    retry_after: str | None = None
 
 
 def _count(value: object) -> int | None:
@@ -332,6 +337,7 @@ def _classify(request: ChatRequest, response: Response, key: str, latency: float
         raw=raw,
         redacted=redacted,
         provider_request_id=_text(document.get("id")),
+        retry_after=response.retry_after,
     )
     error = _as_dict(document.get("error"))
     message = redact(str(error.get("message", "")), key)
@@ -529,7 +535,9 @@ def urllib_transport(request: Request) -> Response:
             )
     except urllib.error.HTTPError as error:
         with error:
-            return Response(status=error.code, body=error.read())
+            return Response(
+                status=error.code, body=error.read(), retry_after=error.headers.get("Retry-After")
+            )
     except urllib.error.URLError as error:
         if isinstance(error.reason, TimeoutError):
             raise TimeoutError("request timed out") from None

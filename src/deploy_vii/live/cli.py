@@ -15,6 +15,7 @@ import random
 import re
 import secrets
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -484,6 +485,7 @@ def _run_cell(
     batch: Batch,
     rejections: Mapping[tuple[str, str, str], str],
     repair: bool,
+    sleep: Callable[[float], None],
 ) -> None:
     """Run one cell's steps in order, module by module. With `repair` (the `module` driver) a
     validator rejection that leaves the attempt pending is followed by that step's one repair
@@ -514,25 +516,27 @@ def _run_cell(
             bytes_per_token=bytes_per_token,
             effort=effort,
             schema_rejections=rejections,
+            sleep=sleep,
         )
-        batch.rows.append(
+        # An in-flight 402 the runner waited out and re-sent (task 7.8) is a row of its own.
+        sent = (result.retried, result) if result.retried is not None else (result,)
+        batch.rows.extend(
             Row(
                 cell.cell_id,
                 cell.case_id,
                 step_id,
-                result.draw.slug,
+                item.draw.slug,
                 cell.seed,
-                result.attempt_id,
-                result.status,
-                result.classification or "none",
-                usd_cell(
-                    result.cost_usd, bool(result.settlement and result.settlement.unreconciled)
-                ),
-                len(result.issues),
-                prompt_bound=result.prompt_tokens_upper_bound,
+                item.attempt_id,
+                item.status,
+                item.classification or "none",
+                usd_cell(item.cost_usd, bool(item.settlement and item.settlement.unreconciled)),
+                len(item.issues),
+                prompt_bound=item.prompt_tokens_upper_bound,
                 repair=attempt.number,
-                step_try=result.step_try,
+                step_try=item.step_try,
             )
+            for item in sent
         )
         return result
 
@@ -871,6 +875,15 @@ def committed_elsewhere(directory: Path) -> Decimal:
     return total
 
 
+def aborted(failure: BaseException) -> str:
+    """The report's `Stopped:` value for an exception; a credit stop also says why (task 7.8:
+    the 402's reason and, for a balance refusal, the requested and affordable max_tokens)."""
+    stop = f"aborted: {type(failure).__name__}"
+    if isinstance(failure, CreditExhausted):
+        return f"{stop} ({failure.state.summary()})"
+    return stop
+
+
 def _finish_report(path: Path, content: str, inflight: BaseException | None) -> None:
     """Write the report; a failure here never replaces the exception `inflight`, if any."""
     try:
@@ -954,8 +967,14 @@ def _open_batch(args: argparse.Namespace, settings: LiveSettings, batch_id: str)
     return report
 
 
-def run_live(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
-    """Run one live subcommand and return its exit status."""
+def run_live(
+    args: argparse.Namespace,
+    *,
+    transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Run one live subcommand and return its exit status. `sleep` is the wait before the
+    runner re-sends an in-flight 402 (task 7.8)."""
     transport = transport or urllib_transport
     settings: LiveSettings = load_settings(args.settings)
     batch_id = args.batch_id or utc_stamp().replace(":", "").replace("-", "")
@@ -999,11 +1018,12 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 batch=batch,
                 rejections=rejections,
                 repair=args.live_command == "module",
+                sleep=sleep,
             )
     except CapExceeded as stop:
         batch.stopped = f"cap: {stop}"
     except BaseException as failure:
-        batch.stopped = f"aborted: {type(failure).__name__}"
+        batch.stopped = aborted(failure)
         raise
     finally:
         _record_usage_after(root, batch_id, usage_client, args.live_command, sys.exception())
@@ -1492,7 +1512,7 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
         record_usage(root, batch_id, "before", usage_client, args.live_command)
         stopped = checks()
     except BaseException as failure:
-        stopped = f"aborted: {type(failure).__name__}"
+        stopped = aborted(failure)
         raise
     finally:
         _record_usage_after(root, batch_id, usage_client, args.live_command, sys.exception())
@@ -1509,7 +1529,12 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
     return EXIT_CAP if stopped else 0
 
 
-def execute(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
+def execute(
+    args: argparse.Namespace,
+    *,
+    transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
     if args.live_command == "corpus":
         try:
             target = write_entry(
@@ -1531,7 +1556,7 @@ def execute(args: argparse.Namespace, *, transport: Transport | None = None) -> 
             return run_schema_check(args, transport=transport)
         if args.live_command == "reconcile":
             return run_reconcile(args, transport=transport)
-        return run_live(args, transport=transport)
+        return run_live(args, transport=transport, sleep=sleep)
     except CreditExhausted as error:
         print(f"live {args.live_command} stopped: {error}")
         print("ticket pending; coordinator decision (DC-8)")

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -74,6 +75,7 @@ from tests.product.test_live_client import (
     choice_error_body,
     install,
 )
+from tests.product.test_live_credit import ACCOUNT, CREDIT_402, IN_FLIGHT_402, refusal
 from tests.product.test_narrative import draft
 from tests.product.test_readiness import as_submission, readiness_fixture
 from tests.product.test_workflow import cp1_case
@@ -94,6 +96,11 @@ SEVEN = {
     "checks",
     "render",
 }
+
+
+def no_wait(seconds: float) -> None:
+    """The default `sleep` of these tests: a dispatch that waits unasked is a failure."""
+    raise AssertionError(f"unexpected wait of {seconds} s")
 
 
 @dataclass
@@ -121,6 +128,7 @@ class Rig:
         step: StepSpec = CP0,
         max_retries: int = 2,
         key_index: int = 1,
+        sleep: Callable[[float], None] | None = None,
     ) -> DispatchResult:
         return dispatch(
             step,
@@ -137,6 +145,7 @@ class Rig:
             effort=effort,
             clock=lambda: NOW,
             max_retries=max_retries,
+            sleep=sleep or no_wait,
         )
 
     def files(self, *, include_journal: bool = True) -> list[Path]:
@@ -403,6 +412,7 @@ def test_dispatch_accepts_a_valid_review_and_retains_every_artifact(tmp_path: Pa
         "repair_of_attempt_id": None,
         "retry_of_attempt_id": None,
         "step_repair_of_attempt_id": None,  # task 7.0g
+        "in_flight_retry_of_attempt_id": None,  # task 7.8
     }
     request = load(directory / "request.json")
     assert request["body"]["model"] == LUNA and "tools" not in request["body"]
@@ -2094,6 +2104,126 @@ def test_a_check_402_is_sealed_then_stops_with_credit_exhausted(tmp_path: Path) 
     assert load(manifest_path)["status"] == "other"
     (record,) = Ledger(tmp_path / "ledger" / "s1.jsonl", Decimal("0.05")).state().attempts
     assert record.status == "settled" and record.charged_usd == Decimal(0)  # known-zero 402
+
+
+class Waits:
+    """Records each requested wait (the injected `sleep`)."""
+
+    def __init__(self) -> None:
+        self.seconds: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.seconds.append(seconds)
+
+
+def in_flight(retry_after: object = "120") -> Response:
+    metadata: dict[str, object] = {"reason": "in_flight_budget_exhausted"}
+    if retry_after is not None:
+        metadata["headers"] = {"Retry-After": retry_after}
+    return Response(402, refusal("Retry after in-flight requests settle", metadata))
+
+
+def test_an_in_flight_402_waits_retry_after_and_retries_once_as_a_new_reservation(
+    tmp_path: Path,
+) -> None:
+    """Task 7.8 (batch e1-cp1-8): the transient refusal is sealed, settled at zero, waited out
+    and re-sent once on the same drawn model as a separately reserved attempt."""
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))
+    result = rig.run(ChatClient(transport), sleep=waits)
+    assert result.status == "accepted" and waits.seconds == [120]
+    first = result.retried
+    assert first is not None and first.retried is None
+    assert (first.status, first.classification) == ("no-response", "insufficient_credit")
+    assert first.cost_usd == Decimal(0) and first.draw == result.draw
+    assert transport.requests[0].body == transport.requests[1].body  # the same request
+    sealed = load(attempt_dir(first) / "manifest.json")
+    assert sealed["status"] == "no-response" and sealed["credit"]["transient"] is True
+    assert sealed["credit"]["exhausted"] is None and sealed["credit"]["retry_after_s"] == 120
+    assert ACCOUNT not in json.dumps(sealed)
+    events = (attempt_dir(first) / "events.jsonl").read_text(encoding="utf-8")
+    assert "credit_in_flight_refusal" in events and "credit_exhausted" not in events
+    retried = load(attempt_dir(result) / "manifest.json")
+    assert retried["links"]["in_flight_retry_of_attempt_id"] == first.attempt_id
+    assert retried["links"]["retry_of_attempt_id"] == first.attempt_id
+    assert retried["retries"]["attempt_number"] == 2 and retried["credit"] is None
+    wait = [
+        json.loads(line)
+        for line in (attempt_dir(result) / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if '"in_flight_retry"' in line
+    ]
+    assert wait[0]["retry_of"] == first.attempt_id and wait[0]["waited_s"] == 120
+    records = {record.attempt_id: record for record in rig.ledger.state().attempts}
+    assert records[first.attempt_id].charged_usd == Decimal(0)  # the known-zero 402
+    assert records[result.attempt_id].charged_usd == Decimal("0.00033")
+    assert [a.status for a in rig.store.read().attempts] == ["finished"]
+
+
+@pytest.mark.parametrize(("retry_after", "waited"), [("900", 300), (None, 120), ("0", 0)])
+def test_the_in_flight_wait_is_capped_and_defaults_when_absent(
+    tmp_path: Path, retry_after: str | None, waited: int
+) -> None:
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    rig.run(ChatClient(FakeTransport(in_flight(retry_after), reply(rig))), sleep=waits)
+    assert waits.seconds == [waited]
+
+
+def test_a_second_in_flight_402_is_exhaustion_and_both_attempts_are_sealed(
+    tmp_path: Path,
+) -> None:
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402))
+    with pytest.raises(CreditExhausted) as raised:
+        rig.run(ChatClient(transport), sleep=waits)
+    assert waits.seconds == [120] and len(transport.requests) == 2
+    manifests = sorted(
+        (load(path) for path in (rig.root / "artifacts").rglob("manifest.json")),
+        key=lambda manifest: manifest["attempt_id"],
+    )
+    first, second = (manifest["attempt_id"] for manifest in manifests)
+    assert [manifest["status"] for manifest in manifests] == ["no-response", "no-response"]
+    assert manifests[0]["credit"]["exhausted"] is None
+    assert manifests[1]["credit"]["exhausted"] is True
+    assert manifests[1]["links"]["in_flight_retry_of_attempt_id"] == first
+    message = str(raised.value)
+    assert first in message and second in message and "in_flight_budget_exhausted" in message
+    assert raised.value.state.exhausted is True
+    assert all(record.charged_usd == Decimal(0) for record in rig.ledger.state().attempts)
+    assert [a.status for a in rig.store.read().attempts] == ["pending"]  # repair kept
+
+
+def test_a_credit_402_does_not_wait_and_reports_the_affordable_budget(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    transport = FakeTransport(Response(402, CREDIT_402))
+    with pytest.raises(CreditExhausted) as raised:
+        rig.run(ChatClient(transport))  # the default `sleep` fails on any wait
+    assert len(transport.requests) == 1
+    assert "requested max_tokens 128000, affordable 91075" in str(raised.value)
+    (path,) = (rig.root / "artifacts").rglob("manifest.json")
+    credit = load(path)["credit"]
+    assert credit["exhausted"] is True and credit["reason"] == "openrouter_credits"
+    assert credit["affordable_max_tokens"] == 91075 and ACCOUNT not in json.dumps(load(path))
+
+
+def test_an_in_flight_402_on_the_last_allowed_try_is_exhaustion(tmp_path: Path) -> None:
+    """No retry slot is left (max_retries=0), so the refusal fails closed: nothing waits."""
+    rig = make_rig(tmp_path)
+    transport = FakeTransport(Response(402, IN_FLIGHT_402))
+    with pytest.raises(CreditExhausted) as raised:
+        rig.run(ChatClient(transport), max_retries=0)
+    assert len(transport.requests) == 1 and "no retry left" in str(raised.value)
+    assert [a.status for a in rig.store.read().attempts] == ["pending"]
+
+
+def test_a_check_in_flight_402_stops_with_its_reason_and_no_wait(tmp_path: Path) -> None:
+    """`live schema-check` does not retry: the refusal stops the check, named as in flight."""
+    with pytest.raises(CreditExhausted) as raised:
+        run_check(tmp_path, FakeTransport(Response(402, IN_FLIGHT_402)))
+    assert "in_flight_budget_exhausted" in str(raised.value)
+    assert raised.value.state.exhausted is True
 
 
 def test_a_check_with_a_multi_token_key_file_records_the_counts_only(tmp_path: Path) -> None:

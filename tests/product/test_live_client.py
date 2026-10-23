@@ -327,6 +327,28 @@ def test_default_transport_maps_urllib_outcomes(monkeypatch: pytest.MonkeyPatch)
         urllib_transport(Request(url="file:///etc/passwd", method="GET", headers={}))
 
 
+def test_the_retry_after_header_of_an_error_reply_reaches_the_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 7.8: an in-flight 402 may state its wait only as the HTTP header; only that one
+    header is kept (in memory), never the others."""
+    headers = Message()
+    headers["Retry-After"] = "120"
+    headers["X-Other"] = "not kept"
+
+    def http_error(http: object, timeout: float) -> None:
+        raise urllib.error.HTTPError(CHAT_URL, 402, "Payment Required", headers, io.BytesIO(b"{}"))
+
+    install(monkeypatch, http_error)
+    request = Request(url=CHAT_URL, method="POST", headers={}, body=b"{}", timeout_s=7.0)
+    assert urllib_transport(request) == Response(402, b"{}", retry_after="120")
+    reply = Response(402, b'{"error":{"code":402}}', retry_after="120")
+    result = ChatClient(FakeTransport(reply)).complete(make_request(), key=FAKE_KEY)
+    assert result.classification == "insufficient_credit" and result.retry_after == "120"
+    plain = ChatClient(FakeTransport(Response(402, b"{}"))).complete(make_request(), key=FAKE_KEY)
+    assert plain.retry_after is None
+
+
 # --- 2.7a: errors reported inside a 200 body (probe-2 fixtures) ----------------------------
 
 PROBE_FIXTURES = Path(__file__).parent / "fixtures" / "live"

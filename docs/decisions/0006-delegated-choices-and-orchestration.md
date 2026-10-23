@@ -39,6 +39,16 @@ case. E1 for the CP-1 case: US$10 per batch, batch cap US$12 with the CP-0 case.
 stay at US$3 per case. The US$200 cumulative ceiling is unchanged. ... Pause and ask the user
 before any figure above these." The orchestrator pauses and asks before any figure above them.
 
+### Amendment, 23 Oct 2026 (DC-8, task 7.8)
+
+A dispatch 402 is read for its reason before it is called exhaustion. OpenRouter's in-flight
+refusal (`in_flight_budget_exhausted`, limit source `openrouter_in_flight_budget`) waits out its
+Retry-After (at most 300 s, 120 s when absent) and is re-sent once as a new, separately
+reserved attempt; a second one is exhaustion. The credit refusal (`openrouter_credits`), and
+any 402 whose body cannot be read, is exhaustion as before, and the stop reports the requested
+and affordable max_tokens the body states. Nothing else in DC-8 changes: no model or cohort is
+switched, and the no-credit route stays a coordinator decision.
+
 ## Consequences
 
 - CLAUDE.md, `docs/pr-worktree-workflow.md`, `settings/project.toml` and

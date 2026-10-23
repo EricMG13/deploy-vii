@@ -686,6 +686,30 @@ leaves it unchanged.
   mid-batch aborts the batch (report line `Stopped: aborted: CreditExhausted`), prints
   "ticket pending; coordinator decision (DC-8)" and exits 4 (`EXIT_CREDIT`; 2 is a failure, 3 a
   cap stop). `accept_proxy_payload` has no CLI entry: the coordinator calls it from Python.
+- Task 7.8 (the two 402 reasons; it qualifies the item above). `credit.from_dispatch_402` reads
+  the 402's `error` object (top level, else `choices[0].error`). `error.metadata.reason ==
+  "in_flight_budget_exhausted"` or `limit_source == "openrouter_in_flight_budget"` is the
+  in-flight refusal: transient, `exhausted` null, `transient: true`. Every other 402
+  (`openrouter_credits`, no metadata, a body that is not JSON) is exhaustion as before. The
+  manifest `credit` block of a dispatch 402 adds `transient`, `reason` (metadata `reason`, else
+  `limit_source`), `retry_after_s` (`error.metadata.headers.Retry-After`, else the HTTP header,
+  which `Response.retry_after` now carries), `requested_max_tokens` and `affordable_max_tokens`
+  (from "You requested up to N tokens, but can only afford M"); each null has its `<name>_reason`.
+  Only these fields are copied: the body's `user_id` and message text are not recorded there
+  (the raw body stays in `response.json`, as for every reply). The key-endpoint record is
+  unchanged. Retry rule: `dispatch` seals the refused attempt (`no-response`,
+  `insufficient_credit`, settled at zero, ticket pending, nothing interrupted), calls
+  `sleep(min(Retry-After, 300))` (120 s when absent; `sleep` is injectable, the CLI passes
+  `time.sleep`) and re-sends once as the step's next try: the same drawn model and request, a new
+  attempt id and a new reservation under the same cap. Its manifest names the refused try in
+  `links.in_flight_retry_of_attempt_id` (and `retry_of_attempt_id`); its events start with
+  `in_flight_retry` (`retry_of`, `waited_s`). `DispatchResult.retried` holds the refused attempt,
+  and the batch report gives it its own row. A second in-flight 402, or one on the last try that
+  `max_retries` allows, is exhaustion: its credit block says `exhausted: true` and the detail
+  names both attempts. `live schema-check` does not retry: an in-flight 402 there stops the check
+  as exhaustion, named as in flight. The CLI abort line and the report's `Stopped:` line carry
+  `CreditState.summary()`, e.g. `Stopped: aborted: CreditExhausted (reason openrouter_credits;
+  requested max_tokens 128000, affordable 91075; HTTP 402)`; `EXIT_CREDIT` stays 4.
 - Replay corpus entries carry a required `provenance.cohort` taken from the attempt manifest
   (`synthetic` for the seed entries, `proxy:<label>` for proxy attempts); the replay verdict lists it.
 - A proxy attempt after a cap overrun is refused by its zero reservation (the cap's job); the
