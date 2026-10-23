@@ -32,6 +32,13 @@ This decision supersedes:
 | DC-9 | Design reference bytes | **Delegated:** the orchestrator fetches the remaining Front Page and `lib/` files through the claude-design connector (M3.1). Each is accepted only if its byte size matches the project listing. On a mismatch, the user is asked to export the project. | Avoids blocking M3 on a manual export | User export first |
 | DC-10 | Current work | **User:** merge the review, plan and decisions to `main` now. **Delegated:** squash-merge as one PR from `claude/deploy-vii-adversarial-review-a78eab`. | User instruction | — |
 
+### Amendment, 22 Oct 2026 (DC-6, user-approved E1 cap amendment)
+
+The user ruled, relayed through the Watcher session on 22 Oct 2026: "approve US$10 per CP-1
+case. E1 for the CP-1 case: US$10 per batch, batch cap US$12 with the CP-0 case. Other modules
+stay at US$3 per case. The US$200 cumulative ceiling is unchanged. ... Pause and ask the user
+before any figure above these." The orchestrator pauses and asks before any figure above them.
+
 ## Consequences
 
 - CLAUDE.md, `docs/pr-worktree-workflow.md`, `settings/project.toml` and

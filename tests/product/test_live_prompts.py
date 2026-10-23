@@ -383,3 +383,13 @@ def test_the_cp1_facts_never_appear_in_another_steps_context() -> None:
         "source_readiness", pack, ("filing",), ReadinessSubmission, cp1_facts=(cp1_fact(pack),)
     )[1].content
     assert "cp1_facts" not in user and "T4.10.liquidity" not in user
+
+
+def test_every_step_states_the_compact_output_rule_once() -> None:
+    """Task 7.0h: the budget-saving rule rides in the common preamble of every step."""
+    rule = prompts.COMPACT_OUTPUT_RULE
+    assert "no indentation" in rule and "no line breaks between fields" in rule
+    assert "cut before its last field" in rule
+    for step_id in STEPS:
+        assert composed(step_id).count(rule) == 1, step_id
+        assert rule not in prompts.STEP_CONTRACTS[step_id], step_id

@@ -493,3 +493,9 @@ for `source_readiness` (the model returns a `ReadinessSubmission`, Python compos
 (revisit when the rerun shows a module-wide budget exhausted; the rerun reports `repair_count`
 per step) and a `FinancialSubmission` split (revisit when `financials` first-pass validity on
 the rerun is below 2 of 3 draws for any model).
+
+User-owned choice, 22 October 2026 (E1 cap amendment, decision 0006 DC-6, relayed through the
+Watcher session): E1 for the CP-1 case is US$10 per batch, with a batch cap of US$12 together
+with the CP-0 case; other modules stay at US$3 per case; the US$200 cumulative ceiling is
+unchanged; the orchestrator pauses and asks the user before any figure above these. E1 batches
+1 to 5 (`e1-cp1-1` to `e1-cp1-5`) ran under it.

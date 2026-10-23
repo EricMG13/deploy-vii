@@ -323,3 +323,26 @@ Not verified: provider acceptance of the submission schema; first-pass validity 
 (the rerun); whether GLM's absence claims came from the model or from provider-side truncation
 (154,609 billed prompt tokens argues against truncation, not conclusively); whether the 3.0 ratio
 holds for other models, packs and languages.
+
+## Amendment, 23 Oct 2026 (task 7.0h)
+
+E1 batch `e1-cp1-5` (Sol, 23 Oct 2026) met item 3's trigger: `financials` was cut at exactly
+64,000 completion tokens (the `--max-tokens` budget; classification `truncated`) twice. The
+7.0g step repair re-sent the step at the same budget with a REPAIR block that said only
+`(root): Invalid JSON: EOF while parsing a string at line 5928 column 13`; the model compacted
+its JSON (184,578 characters on 100 statement lines, against 263,993 characters on 70 lines
+indented) and was cut again (US$1.09 lost); the 7.0e module repair then re-ran `source_context`
+(US$0.47) and `financials` (about US$1.1) at the same budget, and was cut a third time.
+
+Rule: a `truncated` classification consumes no repair, step or module. A truncation is a budget
+verdict, not a validator verdict the model can act on, and the budget is the operator's knob
+(`--max-tokens`); a re-send at the same budget is a near-certain loss. The driver leaves the
+step's one in-attempt repair unused, the ticket stays pending, the cell ends and the batch goes
+on; the report counts such rows under `Truncated`. Compact-output rule: every step's preamble
+states that the JSON object is emitted compactly (no indentation, no line breaks between fields)
+because the completion budget is finite and charged per token. Item 3's trigger (truncation
+observed) is now met; the `FinancialSubmission` split stays deferred until batch 6 measures
+`--max-tokens 128000` (Sol's maximum completion). Analytical meaning is unchanged: no validator,
+acceptance rule or journal rule moves.
+
+Not verified: a live truncation under the guard and the compact rule's live effect (E1 batch 6).

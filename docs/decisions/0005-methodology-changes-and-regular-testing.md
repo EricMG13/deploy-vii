@@ -85,6 +85,8 @@ CI is available.
   recurring caps apply ([decision 0006](0006-delegated-choices-and-orchestration.md) DC-6,
   21 October 2026), under a cumulative ceiling of US$200 including the first batch:
   - E1: US$3 per module case;
+    (the CP-1 case is amended: US$10 per batch, US$12 with the CP-0 case; see the 22 Oct 2026
+    amendment under DC-6 in decision 0006)
   - E2: US$15 per milestone;
   - E3: US$3 per week.
 

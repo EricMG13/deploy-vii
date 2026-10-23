@@ -114,6 +114,13 @@ from a pinned pool:
   can use up to 2 x (`max_retries` + 1) dispatches per attempt. CP-0's single
   review, CP-1's `quality` promotion step and CP-1A's single `business_context` step (task
   7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
+  7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
+- **A truncated completion is not repaired (task 7.0h).** A try classified `truncated` (cut at
+  the `--max-tokens` budget) is a budget verdict, not a validator verdict the model can act on:
+  the `module` driver neither re-sends the step (its one in-attempt repair stays unused, the
+  journal keeps the invalid try in `step_repairs`) nor begins a module repair, whether the cut
+  is the first try or the step repair. The cell ends, the row keeps `truncated`, the batch goes
+  on, and the header counts `- Truncated: N`. Raise `--max-tokens` instead.
 - **The `module` driver's repair loop (task 7.0e).** In `deploy-vii live module` (and only
   there; `probe`, `regression` and `canary` stay single-attempt) a step whose status is
   `rejected` with the attempt still pending is re-sent once, as the step's repair within the
@@ -172,6 +179,9 @@ from a pinned pool:
   a citation's quote), also a paragraph of `methods/cp0.md`. A test holds each example label in
   the rule to `prose.bare_figures`, so the prompt never allows a figure the validator rejects.
   Stored replay payloads are unaffected (the corpus replays payloads, not prompts).
+  Task 7.0h adds `prompts.COMPACT_OUTPUT_RULE` once to the common preamble of every step (rule
+  6, after the no-tools rule): emit the JSON object compactly, with no indentation and no line
+  breaks between fields, because the budget is finite and charged per token.
 - **Quotes and absence claims (task 2.9).** Every citation check uses `deploy_vii.quotes`: quote
   and span text are compared after removing soft hyphens, mapping curly quotes, dashes and the
   minus sign to ASCII and collapsing every whitespace run to one space; the quote must still be
@@ -278,8 +288,8 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   (accepted or restricted) CP-1 head as an input of the ticket; otherwise `cp1_facts` is empty
   and `cp1_facts_note` says no figure may be referenced. A valid step settles CP-1A at once
   (`submit_cp1a_step`), with the four statuses in its head as 6.4 does.
-  `regression`: cases `cp0` and `cp1`, every candidate once per case in an order shuffled by the
-  seed; it refuses a pool with an ineligible arm.
+  `regression`: cases `cp0`, `cp1` and (task 7.0h) `cp1a` (`CP1A_CHAIN`), every candidate once
+  per case in an order shuffled by the seed; it refuses a pool with an ineligible arm.
 - The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
   with `default_effort`/`complex_effort`. Since the decision 0005 amendment (user decision,
   22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone at `high`, so every cell's draw is

@@ -315,13 +315,20 @@ def _tries(names: list[str], prefix: str) -> list[str]:
     return [name for name in names if pattern.fullmatch(name)]
 
 
-def step_repair_of(names: list[str], ticket_id: str, step_id: str) -> str | None:
+def step_repair_of(names: list[str], ticket_id: str, step_id: str) -> str:
     """The last first try of this ticket step among the ledger ids `names`, from either cohort
     (`<ticket>-<step>-<n>` or `proxy-<label>-<ticket>-<step>-<n>`): the try the journal rejected
-    and kept for the step's repair within the attempt (task 7.0g)."""
+    and kept for the step's repair within the attempt (task 7.0g). A repair without that try would
+    carry false provenance, so its absence raises before anything is written (task 7.0h)."""
     first = re.escape(f"{ticket_id}-{step_id}") + r"-[0-9]+"
     pattern = re.compile(r"(?:proxy-[A-Za-z0-9_.-]+-)?" + first)
-    return next((name for name in reversed(names) if pattern.fullmatch(name)), None)
+    found = next((name for name in reversed(names) if pattern.fullmatch(name)), None)
+    if found is None:
+        raise ValueError(
+            f"no prior try of {ticket_id}/{step_id} in the ledger: "
+            "a step repair needs the rejected try"
+        )
+    return found
 
 
 def next_attempt_id(

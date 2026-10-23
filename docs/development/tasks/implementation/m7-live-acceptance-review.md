@@ -275,3 +275,15 @@ The pixel baselines did not shift: both screenshots are within tolerance.
 
 Not verified: live uptake (E1, the coordinator runs it) and provider acceptance of the sent
 schema (the coordinator runs `live schema-check --steps business_context`).
+
+## 7.0h Truncation guard
+
+E1 batch 5 showed a completion cut at the `--max-tokens` budget being re-sent twice at the same
+budget. A `truncated` classification now consumes no repair: the step's in-attempt repair stays
+unused, no module repair begins, the cell ends and the report counts it under `Truncated`. Every
+step's preamble also asks for compact JSON, `live regression` gains the `cp1a` case, and
+`step_repair_of` raises instead of returning `None` when the rejected try is absent.
+
+Evidence: batch 5 `financials` was cut at 64,000 completion tokens twice (US$2.21 on the cuts),
+and the module repair cost about US$1.6 more. Not verified: a live truncation under the guard and
+the compact rule's live effect (E1 batch 6).

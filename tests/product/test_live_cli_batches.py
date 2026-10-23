@@ -345,9 +345,20 @@ def test_regression_order_is_seeded_and_matched(rig: Rig) -> None:
             r[3] for r in step_lines(rig.report(batch), f"{case}-") if r[2] == "source_readiness"
         ]
 
-    for case in ("cp0", "cp1"):
+    for case in ("cp0", "cp1", "cp1a"):  # task 7.0h: cp1a follows cp1, drawing after them
         assert sorted(order("r1", case)) == sorted([LUNA, GLM, DEEPSEEK])  # matched arms
         assert order("r1", case) == order("r2", case)  # same seed, same order
+    cells = [r[1] for r in step_lines(rig.report("r1"), "cp") if r[2] == "source_readiness"]
+    assert cells == ["cp0"] * 3 + ["cp1"] * 3 + ["cp1a"] * 3
+
+
+def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
+    assert cli.REGRESSION_CASES == (
+        ("cp0", cli.CP0_STEPS),
+        ("cp1", cli.FULL_CHAIN),
+        ("cp1a", cli.CP1A_CHAIN),
+    )
+    assert cli.CP1A_CHAIN[-1] == "business_context" and cli.CP1A_CHAIN[:-1] == cli.CP0_STEPS
 
 
 def test_cap_exhaustion_stops_the_batch_and_sends_nothing(rig: Rig) -> None:
@@ -1409,6 +1420,7 @@ def test_a_variant_that_cannot_be_built_is_reported_and_not_sent(
 REPAIR_COLUMN = 10
 BAD = "not json"
 OUTAGE = "outage"
+TRUNC = "truncated"  # a completion cut at the --max-tokens budget (finish_reason length)
 CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness")
 
 
@@ -1459,6 +1471,8 @@ class Chain:
         if verdict == OUTAGE:
             return Response(500, b"upstream down")
         model = json.loads(request.body or b"{}")["model"]
+        if verdict == TRUNC:
+            return ok('{"sch', model=model, finish_reason="length")
         return ok(BAD if verdict == BAD else self.payload(step), model=model)
 
     def user_prompts(self) -> list[str]:
@@ -1623,6 +1637,53 @@ def test_a_repair_whose_first_step_is_ineligible_is_not_counted_as_dispatched(
     assert f"- Repairs dispatched: {counted}" in rig.report()
 
 
+def test_a_truncated_first_try_is_not_resent_and_ends_the_cell(tmp_path: Path) -> None:
+    """Task 7.0h (a): a cut at the --max-tokens budget is no validator verdict the model can act
+    on, so the step's repair is left unused, no module repair begins and the cell ends."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", TRUNC)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 3  # nothing is re-sent
+    assert [(r[2], r[6], r[7], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "truncated", "-")
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 0 (module repair attempts 0, within-attempt step repairs 0)" in (
+        text
+    )
+    assert "- Truncated: 1" in text and "- Stopped: no" in text
+
+
+def test_a_truncated_step_repair_ends_the_cell_without_a_module_repair(tmp_path: Path) -> None:
+    """Task 7.0h (c): the validator rejects the first try, the re-send is cut at the budget."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", TRUNC)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 4
+    assert [(r[2], r[6], r[7], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "ok", "-"),
+        ("financials", "rejected", "truncated", "step"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 1 (module repair attempts 0, within-attempt step repairs 1)" in (
+        text
+    )
+    assert "- Truncated: 1" in text
+
+
+def test_a_cut_cell_does_not_stop_the_batch(rig: Rig) -> None:
+    """Task 7.0h (a): every cell of a regression is cut at its first step; each is counted and
+    the batch still plans, runs and reports all of them."""
+
+    def cut(request: Request) -> Response:
+        if request.url == KEY_URL:
+            return key_status("1.5")
+        model = json.loads(request.body or b"{}")["model"]
+        return ok('{"sch', model=model, finish_reason="length")
+
+    assert rig.run(rig.argv("regression", batch="r1"), cut) == 0
+    text = rig.report("r1")
+    assert "- Truncated: 9" in text and "- Cells planned: 9;" in text
+
+
 def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
     """A no-response is no validator verdict: the journal ticket stays pending, so no repair
     is begun, and the batch (here one cell) ends normally."""
@@ -1644,7 +1705,10 @@ def test_a_cap_that_cannot_cover_the_repair_ends_the_batch_without_a_partial_row
     script = [("source_readiness", BAD), *ok_steps(*CHAIN)]
     measured, _, _ = run_chain(tmp_path / "measure", script)  # same cell, ample cap
     first, repair = ledger(measured).state().attempts[:2]
-    assert repair.reserved_usd > first.reserved_usd
+    # At this rig's 300 bytes per token the REPAIR block can fit inside the same ceil token
+    # (task 7.0h moved that boundary); the cap still cannot cover the repair, because the first
+    # attempt's charge is spent before it.
+    assert repair.reserved_usd >= first.reserved_usd
     rig, chain, status = run_chain(tmp_path / "capped", script, cap=format(first.reserved_usd, "f"))
     assert status == cli.EXIT_CAP and len(chain.requests) == 1
     text = rig.report()

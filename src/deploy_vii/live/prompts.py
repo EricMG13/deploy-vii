@@ -64,6 +64,13 @@ RUN_TEXT_RULE = (
     "(`001-36629`) and coverage counts (`195 of 195 pages`); every other figure belongs in a "
     "citation's quote, not in the text (the validator rejects a bare figure)."
 )
+# Task 7.0h (E1 batch e1-cp1-5): an indented object spent the completion budget on whitespace and
+# was cut before its last field; a cut rejects the whole submission and is never repaired.
+COMPACT_OUTPUT_RULE = (
+    "Emit the JSON object compactly: no indentation, no line breaks between fields. The "
+    "completion budget is finite and is charged per token; an indented object can be cut before "
+    "its last field, which rejects the whole submission."
+)
 COVERAGE_RULE = (
     "The CONTEXT block states each source's extraction coverage. Never call a page or locator "
     "absent when that coverage lists it."
@@ -345,6 +352,7 @@ def build(
             "4. Where evidence is missing or ambiguous, say so in the schema's gap or limitation "
             "fields. Never guess, and never do arithmetic: Python computes every number.",
             "5. You have no tools.",
+            f"6. {COMPACT_OUTPUT_RULE}",
             "JSON Schema:",
             schema_text(schema),
         )

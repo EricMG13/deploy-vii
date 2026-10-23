@@ -2109,3 +2109,17 @@ def test_cp1a_context_offers_settled_cp1_figures_and_the_module_resolves_them(
     module = rig.store.head_module(head)
     copied = next(f for f in module.facts if f.fact_id == "T4.10.liquidity.FY2025")
     assert copied.table_id == "cp1_references" and copied.amount == Decimal("1100")
+
+
+def test_step_repair_of_returns_the_last_first_try_from_either_cohort() -> None:
+    """Task 7.0h: the happy path, plain and `proxy-` prefixed ids; repair ids never match."""
+    names = ["t1-financials-1", "t1-financials-repair-1", "t2-financials-1"]
+    assert runner.step_repair_of(names, "t1", "financials") == "t1-financials-1"
+    proxy = ["proxy-agent_a-t1-financials-2"]
+    assert runner.step_repair_of(proxy, "t1", "financials") == "proxy-agent_a-t1-financials-2"
+
+
+def test_step_repair_of_fails_closed_without_the_rejected_try() -> None:
+    names = ["t1-source_context-1", "t1-financials-repair-1", "t2-financials-1"]
+    with pytest.raises(ValueError, match="no prior try of t1/financials in the ledger"):
+        runner.step_repair_of(names, "t1", "financials")

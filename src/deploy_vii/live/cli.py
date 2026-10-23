@@ -90,12 +90,20 @@ from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsErr
 from deploy_vii.registry import canonical, modules
 
 REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
+TRUNCATED = "truncated"  # a response classification: the completion was cut at the budget
 CP0_STEPS = ("source_readiness",)
 CP1_CHAIN = ("source_context", "financials", "narrative", "readiness")
 FULL_CHAIN = CP0_STEPS + CP1_CHAIN
 # Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
 # step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.
 CP1A_CHAIN = (*CP0_STEPS, "business_context")
+# Task 7.0h: the matched comparison's cases, in shuffle order (cp1a draws after the other two,
+# so the cp0 and cp1 orders are those of the two-case plan).
+REGRESSION_CASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cp0", CP0_STEPS),
+    ("cp1", FULL_CHAIN),
+    ("cp1a", CP1A_CHAIN),
+)
 PROBE_STEPS = ("source_readiness", "source_context", "financials")
 SEED_SEARCH_LIMIT = 100_000
 BATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -415,8 +423,7 @@ def _regression_cells(pool: PinnedPool, slugs: list[str], seed: int) -> list[Cel
         raise CliError(f"a matched comparison needs every candidate eligible; excluded: {excluded}")
     shuffler = random.Random(seed)
     plan: list[tuple[str, tuple[str, ...], str]] = []
-    cases: tuple[tuple[str, tuple[str, ...]], ...] = (("cp0", CP0_STEPS), ("cp1", FULL_CHAIN))
-    for case, steps in cases:
+    for case, steps in REGRESSION_CASES:
         order = list(slugs)
         shuffler.shuffle(order)
         plan += [(case, steps, slug) for slug in order]
@@ -525,7 +532,15 @@ def _run_cell(
                 cp0_attempt = result.attempt_id  # the attempt whose review holds the T8 commands
             # A rejection the journal kept pending is the step's one repair within the attempt:
             # re-send the same step once. Its second rejection finishes the attempt (journal).
-            if repair and result.status == "rejected" and result.attempt_pending:
+            # A truncated try is no verdict the model can act on (the budget is the operator's
+            # knob, `--max-tokens`): a re-send at the same budget is a near-certain loss, so the
+            # step's repair stays unused (task 7.0h).
+            if (
+                repair
+                and result.status == "rejected"
+                and result.attempt_pending
+                and result.classification != TRUNCATED
+            ):
                 result = send(step_id, attempt)
             if result.status != "accepted":
                 break
@@ -548,8 +563,15 @@ def _run_cell(
                 break  # every step of the module is accepted: on to the next module
             # Only a validator verdict (rejected) on a first attempt earns the module's one MC-7
             # repair. A no-response or fallback leaves the ticket pending, and a repair already
-            # used is spent: either ends the cell. `begin` refuses a consumed repair loudly.
-            if not repair or result.status != "rejected" or attempt.number != 0:
+            # used is spent: either ends the cell. A truncated rejection is a budget verdict, not a
+            # validator one, and consumes no module repair either (task 7.0h). `begin` refuses a
+            # consumed repair loudly.
+            if (
+                not repair
+                or result.status != "rejected"
+                or result.classification == TRUNCATED
+                or attempt.number != 0
+            ):
                 return
             attempt = store.begin(module)
             steps = group[group.index(expected_step(attempt, module)) :]
@@ -742,6 +764,7 @@ def render_report(
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
         f"- Repairs dispatched: {_repairs_dispatched(batch.rows)}",
+        f"- Truncated: {sum(row.classification == TRUNCATED for row in batch.rows)}",
         f"- Stopped: {batch.stopped or 'no'}",
         "",
         "## Pool",
