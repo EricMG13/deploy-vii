@@ -273,10 +273,12 @@ QUALITY_REPAIR_RULE = (
 # inline (a test holds them to `canonical_narrative`).
 REVIEW_PROSE_RULE = (
     "Every free-text field (a prose part's `text`, a `title`, `rationale`, `action` or "
-    "`limitation`) is nonblank run text with no bare figure: digits appear only in period, filing "
-    "and section labels (`FY2025`, `Q3 2025`, `10-K`, `Item 7A`); a number stays in the evidence "
-    "it comes from and is never written out, and `{ref|unit}` and `[ref]` references are never "
-    "written. A space or an empty string is not prose."
+    "`limitation`) is nonblank run text with no bare figure: digits appear only inside a period, "
+    "filing, section, instrument, coverage-count or ordinal label (`FY2025`, `Q3 2025`, `10-K`, "
+    "`Item 7A`, `6.50% notes due 2032`, `195 of 195 pages`, `CP-1`); a number stays in the "
+    "evidence it comes from and is never written out. Write no braces or square brackets "
+    "anywhere in prose, since all are reserved for references. A space or an empty string is "
+    "not prose."
 )
 
 
@@ -341,8 +343,9 @@ def _evidence_groups() -> str:
 
 
 READINESS_EVIDENCE_RULE = (
-    "A requirement whose status is `sufficient` or `limited` names at least one evidence_id, each "
-    "once and each from the evidence table (`missing` may name none). Evidence is judged by tags: "
+    "For every status, a requirement's `evidence_ids` are distinct and from the evidence table. A "
+    "requirement whose status is `sufficient` or `limited` names at least one (`missing` may name "
+    "none). Evidence is judged by tags: "
     "a line's tags are its `kind`, plus `kpi:<key>` for a `kind=kpi` line (its `key` column) and "
     "`observation:<register_id>` for a `kind=observation` line (its `register_id` column); a "
     "`kind=kpi`, `kind=statement_*` or `kind=observation` line whose `amount` is null has no tag "
@@ -353,7 +356,8 @@ READINESS_EVIDENCE_RULE = (
 )
 READINESS_STATUS_RULE = (
     "A requirement whose status is not `sufficient` needs at least one `actions` entry. "
-    "`kpi_dashboard` is `sufficient` only when every `kind=kpi` line has a non-null `amount`."
+    "`kpi_dashboard` is `sufficient` only when at least one `kind=kpi` line exists and every "
+    "one has a non-null `amount`."
 )
 READINESS_GAPS_RULE = (
     "`gaps`: each scope's `gap_ids` are distinct and taken from the `gap_id` column of the "

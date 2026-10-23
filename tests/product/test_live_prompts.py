@@ -232,6 +232,7 @@ def staged_scope() -> tuple[QualityInputs, CanonicalTables]:
     return cp1_quality_inputs(registers), registers
 
 
+@cache
 def composed(step_id: str) -> str:
     pack, _ = readiness_fixture()
     schema = STEPS[step_id].schema
@@ -880,12 +881,22 @@ def test_the_prose_rule_matches_what_the_prose_validator_rejects() -> None:
             ProsePart(text=text)
     assert ProsePart(text=" faces refinancing in FY2025 after the 10-K").text
     assert ProsePart(text="Item 7A and Q3 2025 are read as labels").text
-    for phrase in ("nonblank", "no bare figure", "`FY2025`", "`10-K`", "`{ref|unit}`", "`[ref]`"):
+    assert "no braces or square brackets" in prompts.REVIEW_PROSE_RULE
+    for text in ("See {x}", "See [1]", "See }"):
+        with pytest.raises(ValueError):
+            ProsePart(text=text)
+    assert ProsePart(text="The 6.50% notes due 2032 and 195 of 195 pages").text
+    for phrase in (
+        "nonblank",
+        "no bare figure",
+        "`FY2025`",
+        "`10-K`",
+    ):
         assert phrase in prompts.REVIEW_PROSE_RULE, phrase
 
 
 def test_the_parts_rule_matches_the_issues_the_validator_raises() -> None:
-    inputs = narrative_inputs(*case())
+    inputs = base_inputs()
     good = populated(inputs)
     assert validate_narrative_review(inputs, good) == ()
     one = good.findings[0]
@@ -941,7 +952,7 @@ def test_the_coverage_rule_lists_the_validators_dimensions_and_financial_subset(
     source = files("deploy_vii").joinpath("live", "prompts.py").read_text(encoding="utf-8")
     # `coverage` is also a field name, so only the other names show nothing is hand-copied.
     assert not [d for d in _DIMENSIONS if d != "coverage" and f'"{d}"' in source]
-    inputs = narrative_inputs(*case())
+    inputs = base_inputs()
     review = populated(inputs)
     moved = review.coverage[0].model_copy(
         update={"dimension": "leverage", "finding_ids": ("liquidity",)}
@@ -953,6 +964,12 @@ def test_the_coverage_rule_lists_the_validators_dimensions_and_financial_subset(
     assert "Inapplicable dimension lacks evidence: liquidity" in issues
 
 
+@cache
+def base_inputs() -> NarrativeInputs:
+    return narrative_inputs(*case())
+
+
+@cache
 def funding_case() -> tuple[tuple[Any, ...], NarrativeInputs, str]:
     value = book().model_copy(
         update={
@@ -1091,8 +1108,13 @@ def test_a_subsequent_event_is_a_story_kind_the_rule_names() -> None:
 
 
 @cache
+def ready_args() -> tuple[Any, ...]:
+    return case(ready_case())
+
+
+@cache
 def readiness_case(entries: tuple[str, ...]) -> DownstreamInputs:
-    args = case(ready_case())
+    args = ready_args()
     return downstream_inputs(*args, draft(narrative_inputs(*args)), entries)
 
 
@@ -1192,6 +1214,38 @@ def test_a_key_without_groups_needs_a_cited_line_that_is_not_a_gap() -> None:
     assert only_gap in run(gap)
     assert run(entity) == ()
     assert "at least one cited line" in prompts.READINESS_EVIDENCE_RULE
+
+
+def test_a_missing_requirement_still_names_distinct_known_evidence() -> None:
+    inputs = readiness_case(("CP-2A",))
+    key, fcf = inputs.consumers[0].requirements[0], evidence(inputs, "kpi", "fcf")
+    rule = prompts.READINESS_EVIDENCE_RULE
+    assert (
+        "`evidence_ids` are distinct and from the evidence table" in rule
+        and "`missing` may name none" in rule
+    )
+    for ids in ((fcf, fcf), ("narrative-evidence:nope",)):
+        done = requirement(key, "missing", ids, "Obtain the missing source")
+        issues = review_of(inputs, ConsumerAssessment(entry="CP-2A", requirements=(done,)))[1]
+        assert f"Invalid requirement evidence: CP-2A {key}" in issues
+
+
+def test_an_empty_dashboard_is_not_sufficient() -> None:
+    assert "at least one `kind=kpi` line exists" in prompts.READINESS_STATUS_RULE
+    value = book()
+    partial = value.addback_disclosure.model_copy(update={"status": "partial"})
+    args = case(value.model_copy(update={"addback_disclosure": partial}))
+    bare = downstream_inputs(*args, draft(narrative_inputs(*args)), ("CP-2",))
+    assert bare.narrative.inputs.scope == "data_quality_only"
+    assert not any(r.kind == "kpi" for r in bare.narrative.inputs.catalogue)
+    done = requirement("kpi_dashboard", "sufficient", (evidence(bare, "entity"),))
+    issues = review_of(bare, ConsumerAssessment(entry="CP-2", requirements=(done,)))[1]
+    assert "Complete KPI dashboard has unavailable values: CP-2" in issues
+
+
+def test_the_story_kinds_the_rule_names_are_evidence_table_headers() -> None:
+    for kind in ("subsequent_event", "multi_figure_event"):
+        assert kind in KINDS and f"`kind={kind}`" in prompts.NARRATIVE_STORIES_RULE
 
 
 def test_the_status_rule_requires_actions_and_a_complete_dashboard() -> None:
