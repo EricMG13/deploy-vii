@@ -15,7 +15,13 @@ first try (M7 would keep a rejected one as the step's repair within the attempt)
 copy is the journal the next step starts from. A step that does not end accepted stops its cell.
 
 Providers: OpenRouter through the product `ChatClient` (as hybrid CP-0), and Anthropic's
-Messages API over the same stdlib `urllib_transport`. Anthropic reports no cost: it is computed
+Messages API streamed (`"stream": true`) over stdlib urllib with the same https-only,
+no-redirect rules (`urllib_stream`): server-sent events are read line by line with an idle limit
+of IDLE_S between bytes and the step's remaining wall-clock time for the whole stream; the
+assistant content is rebuilt by block index (`assemble`) and the raw stream is retained. A
+stream cut before `message_stop` is `stream-incomplete`: its reservation is held and its cell
+stops. Every call allows MAX_TOKENS (128,000, as the e1-cp1 batches) and may use the rest of
+its step's wall-clock limit. Anthropic reports no cost: it is computed
 from usage at list prices and recorded as `computed-from-list-prices`. Anthropic replies are
 parsed with Decimal numbers and bodies re-serialised with `schema.exact_json`, so tool inputs
 and the assistant content sent back keep their exact digits.
@@ -45,9 +51,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -66,6 +74,7 @@ from deploy_vii.live.client import (  # type: ignore[import-untyped]
     Transport,
     TransportError,
     _count,
+    _NoRedirect,
     urllib_transport,
 )
 from deploy_vii.live.credential import (  # type: ignore[import-untyped]
@@ -96,13 +105,14 @@ from devtools import hybrid_cp0 as cp0
 
 BATCH_ID = "hybrid-cp1-1"
 CP0_JOURNAL = cp0.ARTIFACT_ROOT / "hybrid-cp0-1" / "hybrid-2" / "journal-submit-1"
-MAX_TOKENS = cp0.MAX_TOKENS
+MAX_TOKENS = 128_000  # as the e1-cp1 batches (user decision, 23 Oct 2026)
 MAX_CALLS = 30
 DEADLINE_S = 1200.0
 MAX_SUBMITS = cp0.MAX_SUBMITS
-CAPS = {"openrouter": Decimal(8), "anthropic": Decimal(17)}
+CAPS = {"openrouter": Decimal(15), "anthropic": Decimal(25)}
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
+IDLE_S = 120.0  # longest silence allowed between stream bytes
 MILLION = Decimal(1_000_000)
 # Opus 5.5 and Sonnet 5.5 context window (claude-api reference, models.md). A prompt whose bound
 # plus MAX_TOKENS exceeds it is not sent, as `PinnedCandidate.misfit` does for OpenRouter.
@@ -232,6 +242,7 @@ class Reply:
     schema_rejected: bool = False
     tool_choice_rejected: bool = False
     extras: Mapping[str, Any] = field(default_factory=dict)
+    raw_kind: str = "json"  # "sse": the key-scrubbed event stream as received
 
 
 @dataclass(frozen=True)
@@ -369,9 +380,161 @@ def anthropic_reservation(prices: Prices, bound: int) -> Decimal:
     return (bound * max(prices.input, prices.write_5m) + MAX_TOKENS * prices.output) / MILLION
 
 
+@dataclass(frozen=True)
+class Stream:
+    """An HTTP reply read line by line: the event stream of a 2xx, the error body otherwise.
+    Iterating raises TimeoutError when no byte arrives within the transport's idle limit."""
+
+    status: int
+    lines: Iterator[bytes]
+
+
+StreamTransport = Callable[[Request, float], Stream]  # (request, idle seconds)
+
+
+def urllib_stream(request: Request, idle_s: float) -> Stream:
+    """`urllib_transport` for a streamed reply: https only, no redirects, HTTP errors returned.
+    Each socket operation waits at most `idle_s`, so a silent stream ends there; the caller
+    enforces the overall wall-clock deadline between lines."""
+    if not request.url.startswith("https://"):
+        raise TransportError("only https endpoints are permitted")
+    http = urllib.request.Request(
+        request.url, data=request.body, headers=dict(request.headers), method=request.method
+    )
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        reply = opener.open(http, timeout=idle_s)
+    except urllib.error.HTTPError as error:
+        with error:
+            return Stream(error.code, iter(error.read().splitlines(keepends=True)))
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise TimeoutError("request timed out") from None
+        raise TransportError(f"network error: {type(error.reason).__name__}") from None
+
+    def lines() -> Iterator[bytes]:
+        with reply:
+            while line := reply.readline():
+                yield line
+
+    return Stream(reply.status, lines())
+
+
+@dataclass
+class Events:
+    events: list[dict[str, Any]]
+    raw: list[str]
+    cut: str | None  # why reading ended before `message_stop` or an `error` event
+
+
+def read_events(
+    lines: Iterator[bytes], deadline: float, clock: Callable[[], float], idle_s: float
+) -> Events:
+    """Server-sent events (`event:`/`data:` lines, a blank line ends one) parsed with Decimal
+    numbers, up to `message_stop` or an `error` event. Every line read is kept."""
+    events: list[dict[str, Any]] = []
+    raw: list[str] = []
+    data: list[str] = []
+    try:
+        for line in lines:
+            text = line.decode("utf-8", errors="replace")
+            raw.append(text)
+            if clock() > deadline:
+                return Events(events, raw, "the step's wall-clock deadline passed mid-stream")
+            stripped = text.rstrip("\r\n")
+            if stripped:
+                field_name, _, value = stripped.partition(":")
+                if field_name == "data":
+                    data.append(value[1:] if value.startswith(" ") else value)
+                continue  # `event:` names repeat the data's `type`; comments are ignored
+            if not data:
+                continue
+            try:
+                event = json.loads("\n".join(data), parse_float=Decimal)
+            except ValueError:
+                return Events(events, raw, "an event's data is not JSON")
+            data = []
+            if not isinstance(event, dict):
+                return Events(events, raw, "an event's data is not a JSON object")
+            events.append(event)
+            if event.get("type") in ("message_stop", "error"):
+                return Events(events, raw, None)
+    except TimeoutError:
+        return Events(events, raw, f"no byte for {idle_s} s (idle timeout)")
+    except OSError as error:
+        return Events(events, raw, f"connection lost: {type(error).__name__}")
+    return Events(events, raw, "the stream ended before message_stop")
+
+
+_DELTA_FIELDS = {
+    "text_delta": ("text", "text"),
+    "thinking_delta": ("thinking", "thinking"),
+    "signature_delta": ("signature", "signature"),
+}
+
+
+def assemble(events: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], str | None]:
+    """The Message the events describe, content rebuilt by index (thinking blocks with their
+    signatures; each tool_use input parsed once from its joined `partial_json`, exact digits),
+    usage merged (`message_start`, then every field of the last `message_delta`); or a problem
+    when the events cannot be rebuilt exactly."""
+    message: dict[str, Any] = {}
+    blocks: dict[int, dict[str, Any]] = {}
+    partial: dict[int, list[str]] = {}
+    usage: dict[str, Any] = {}
+    for event in events:
+        kind = event.get("type")
+        index = event.get("index")
+        if kind == "message_start" and isinstance(event.get("message"), dict):
+            message = dict(event["message"])
+            usage.update(message.get("usage") or {})
+        elif kind == "content_block_start" and isinstance(index, int):
+            block = event.get("content_block")
+            if not isinstance(block, dict) or index in blocks:
+                return message, f"content block {index} starts twice or without a block"
+            blocks[index] = dict(block)
+            if block.get("type") == "tool_use":
+                partial[index] = []
+        elif kind == "content_block_delta" and isinstance(index, int):
+            delta = event.get("delta")
+            if index not in blocks or not isinstance(delta, dict):
+                return message, f"delta for content block {index}, which has not started"
+            if delta.get("type") == "input_json_delta" and index in partial:
+                partial[index].append(str(delta.get("partial_json", "")))
+            elif delta.get("type") in _DELTA_FIELDS:
+                source, target = _DELTA_FIELDS[str(delta["type"])]
+                blocks[index][target] = str(blocks[index].get(target) or "") + str(
+                    delta.get(source, "")
+                )
+            else:
+                return message, f"unknown delta type {delta.get('type')!r}"
+        elif kind == "content_block_stop" and isinstance(index, int):
+            if index not in blocks:
+                return message, f"stop for content block {index}, which has not started"
+            if index in partial:
+                text = "".join(partial.pop(index)) or "{}"
+                try:
+                    blocks[index]["input"] = json.loads(text, parse_float=Decimal)
+                except ValueError:
+                    blocks[index]["input"] = text  # read as a malformed tool call
+        elif kind == "message_delta":
+            delta = event.get("delta")
+            message.update(delta if isinstance(delta, dict) else {})
+            usage.update(event.get("usage") or {})
+        elif kind not in ("ping", "message_stop"):
+            return message, f"unexpected event {kind!r}"
+    if not message:
+        return message, "no message_start event"
+    if partial:
+        return message, f"content blocks {sorted(partial)} never stopped"
+    message["content"] = [blocks[index] for index in sorted(blocks)]
+    message["usage"] = usage
+    return message, None
+
+
 @dataclass
 class Anthropic:
-    transport: Transport
+    stream_transport: StreamTransport
     bytes_per_token: Decimal
     clock: Callable[[], float] = time.monotonic
     tool_choice: str = "any"  # "auto" after a 400 naming tool_choice, for every later call
@@ -395,6 +558,7 @@ class Anthropic:
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": cell.effort},
             "cache_control": {"type": "ephemeral"},
+            "stream": True,
         }
 
     def prepare(
@@ -420,6 +584,8 @@ class Anthropic:
         )
 
     def send(self, cell: Cell, prepared: Prepared, key: str) -> Reply:
+        """One streamed call: an idle limit between bytes (IDLE_S) and the step's remaining
+        wall-clock time (`prepared.timeout_s`) for the whole stream."""
         http = Request(
             url=ANTHROPIC_URL,
             method="POST",
@@ -431,9 +597,10 @@ class Anthropic:
             body=prepared.payload,
             timeout_s=prepared.timeout_s,
         )
+        idle = min(IDLE_S, prepared.timeout_s)
         started = self.clock()
         try:
-            response = self.transport(http)
+            stream = self.stream_transport(http, idle)
         except TimeoutError:
             return Reply(
                 classification="timeout",
@@ -443,15 +610,20 @@ class Anthropic:
                 cost=None,
                 cost_basis="unknown",
                 cost_reason="no response received; reservation held",
-                error_detail="request timed out",
+                error_detail="request timed out before the reply began",
             )
         except (TransportError, OSError) as error:  # re-raised with the key scrubbed
             raise TransportError(
                 scrub(redact(f"{type(error).__name__}: {error}", key), key)
             ) from None
-        return anthropic_reply(
-            cell.model, response.status, response.body, key, self.clock() - started
-        )
+        if not 200 <= stream.status < 300:  # an error body, not a stream
+            try:
+                body = b"".join(stream.lines)
+            except (TimeoutError, OSError):  # documented: the status alone classifies it
+                body = b""
+            return anthropic_reply(cell.model, stream.status, body, key, self.clock() - started)
+        events = read_events(stream.lines, started + prepared.timeout_s, self.clock, idle)
+        return stream_reply(cell.model, stream.status, events, key, self.clock() - started)
 
     def tool_results(self, results: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
         blocks = [
@@ -475,30 +647,49 @@ def anthropic_reply(model: str, status: int, body: bytes, key: str, latency: flo
     except ValueError:
         parsed = None
     document: dict[str, Any] = parsed if isinstance(parsed, dict) else {}
-    request_id = _text(document.get("id"))
     if not 200 <= status < 300 or not document or document.get("type") == "error":
-        error = document.get("error")
-        error = error if isinstance(error, dict) else {}
-        message = scrub(redact(str(error.get("message", "")), key), key)[:PROVIDER_DETAIL_CHARS]
-        kind = _text(error.get("type")) or "error"
-        zero = 400 <= status < 500 and status != 408
-        return Reply(
-            classification="insufficient_credit"
-            if status == 402 or "credit balance" in message.lower()
-            else "http_error",
-            http_status=status,
-            raw=raw,
-            latency_s=latency,
-            cost=Decimal(0) if zero else None,
-            cost_basis="known-zero" if zero else "unknown",
-            cost_reason=f"HTTP {status} refused before inference"
-            if zero
-            else "no usage in the reply; reservation held",
-            error_detail=f"HTTP {status} {kind}: {message}" if message else f"HTTP {status}",
-            request_id=request_id,
-            schema_rejected=status == 400 and bool(_SCHEMA_ERROR.search(message)),
-            tool_choice_rejected=status == 400 and "tool_choice" in message,
-        )
+        return _error_reply(status, document, raw, latency, key)
+    return _message_reply(model, status, document, raw, latency)
+
+
+def _error_reply(
+    status: int, document: Mapping[str, Any], raw: bytes, latency: float, key: str
+) -> Reply:
+    """An HTTP error reply: settled at zero for a 4xx other than 408, else held."""
+    request_id = _text(document.get("id"))
+    error = document.get("error")
+    error = error if isinstance(error, dict) else {}
+    message = scrub(redact(str(error.get("message", "")), key), key)[:PROVIDER_DETAIL_CHARS]
+    kind = _text(error.get("type")) or "error"
+    zero = 400 <= status < 500 and status != 408
+    return Reply(
+        classification="insufficient_credit"
+        if status == 402 or "credit balance" in message.lower()
+        else "http_error",
+        http_status=status,
+        raw=raw,
+        latency_s=latency,
+        cost=Decimal(0) if zero else None,
+        cost_basis="known-zero" if zero else "unknown",
+        cost_reason=f"HTTP {status} refused before inference"
+        if zero
+        else "no usage in the reply; reservation held",
+        error_detail=f"HTTP {status} {kind}: {message}" if message else f"HTTP {status}",
+        request_id=request_id,
+        schema_rejected=status == 400 and bool(_SCHEMA_ERROR.search(message)),
+        tool_choice_rejected=status == 400 and "tool_choice" in message,
+    )
+
+
+def _message_reply(
+    model: str,
+    status: int,
+    document: Mapping[str, Any],
+    raw: bytes,
+    latency: float,
+    raw_kind: str = "json",
+) -> Reply:
+    """A Message: ok, truncated (max_tokens), refusal or fallback (another model served)."""
     content = document.get("content")
     blocks = content if isinstance(content, list) else []
     calls = tuple(
@@ -529,13 +720,53 @@ def anthropic_reply(model: str, status: int, body: bytes, key: str, latency: flo
         cost_reason=reason,
         finish_reason=stop,
         served_model=served,
-        request_id=request_id,
+        request_id=_text(document.get("id")),
         tool_calls=calls,
         turn=({"role": "assistant", "content": content},) if calls else (),
         usage=usage,
         usage_missing=missing,
         extras={k: document[k] for k in ("stop_details", "diagnostics", "usage") if k in document},
+        raw_kind=raw_kind,
     )
+
+
+def stream_reply(model: str, status: int, events: Events, key: str, latency: float) -> Reply:
+    """A streamed reply: an `error` event is the provider's failure; a stream cut before
+    `message_stop` (or one that cannot be rebuilt exactly) is `stream-incomplete`. Both hold
+    the reservation (tokens may have been generated). The raw stream is retained either way."""
+    raw = scrub("".join(events.raw), key).encode()
+    held = Reply(
+        classification="stream-incomplete",
+        http_status=status,
+        raw=raw,
+        latency_s=latency,
+        cost=None,
+        cost_basis="unknown",
+        cost_reason="stream incomplete; reservation held",
+        raw_kind="sse",
+    )
+    error = next((e for e in events.events if e.get("type") == "error"), None)
+    if error is not None:
+        found = error.get("error")
+        detail: dict[str, Any] = found if isinstance(found, dict) else {}
+        message = scrub(redact(str(detail.get("message", "")), key), key)[:PROVIDER_DETAIL_CHARS]
+        return replace(
+            held,
+            classification="insufficient_credit"
+            if "credit balance" in message.lower()
+            else "http_error",
+            cost_reason="error event mid-stream; reservation held",
+            error_detail=f"stream error {detail.get('type', 'error')}: {message}",
+        )
+    document, problem = assemble(events.events)
+    if events.cut is not None or problem is not None:
+        return replace(
+            held,
+            error_detail=events.cut or problem,
+            served_model=_text(document.get("model")),
+            request_id=_text(document.get("id")),
+        )
+    return _message_reply(model, status, document, raw, latency, raw_kind="sse")
 
 
 def _tool_use(item: Mapping[str, Any]) -> ToolCall:
@@ -771,6 +1002,7 @@ class Harness:
     keys: Mapping[str, str] = field(repr=False)
     batch_directory: Path
     clock: Callable[[], float] = time.monotonic
+    deadline_s: float = DEADLINE_S  # the step's wall-clock limit
 
 
 def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Call | None:
@@ -806,7 +1038,8 @@ def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Cal
             else "no response received; reservation held"
         )
         call.settlement = ledger.settle(attempt, cost, reason)
-    response = step.directory / f"call-{number:02d}-response.json"
+    kind = call.reply.raw_kind if call.reply is not None else "json"
+    response = step.directory / f"call-{number:02d}-response.{kind}"
     if call.reply is not None and call.reply.raw is not None:
         with response.open("xb") as stream:
             stream.write(call.reply.raw)
@@ -817,7 +1050,8 @@ def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Cal
 
 
 def run_step(harness: Harness, cell: Cell, step: StepRun, base: Path, ticket: str) -> None:
-    """One step's hybrid conversation, bounded by MAX_CALLS calls and DEADLINE_S seconds."""
+    """One step's hybrid conversation, bounded by MAX_CALLS calls and the harness's step
+    wall-clock limit; each call may use the rest of that limit (no per-call cap)."""
     step.directory.mkdir(parents=True)
     store = Execution(base)
     snapshot = store.read()
@@ -833,21 +1067,22 @@ def run_step(harness: Harness, cell: Cell, step: StepRun, base: Path, ticket: st
     try:
         while step.verdict == "not run":
             elapsed = harness.clock() - started
-            if len(step.calls) >= MAX_CALLS or elapsed >= DEADLINE_S:
+            if len(step.calls) >= MAX_CALLS or elapsed >= harness.deadline_s:
                 step.verdict = "rejected: limit"
                 step.verdict_reason = f"{len(step.calls)} calls, {elapsed:.1f} s"
                 break
-            timeout = min(DEFAULT_TIMEOUT_SECONDS, DEADLINE_S - elapsed)
+            timeout = harness.deadline_s - elapsed
             provider = harness.providers[cell.provider]
             prepared = provider.prepare(cell, system, conversation, tools, timeout)
             call = send(harness, cell, step, prepared)
             if call is None:
                 break
             _turn(harness, cell, step, call, conversation, (base, ticket))
-            if step.verdict == "no-response: timeout" and harness.clock() - started >= DEADLINE_S:
+            timed_out = step.verdict in ("no-response: timeout", "no-response: stream-incomplete")
+            if timed_out and harness.clock() - started >= harness.deadline_s:
                 step.verdict = "rejected: limit"  # the call's bound was the step's deadline
                 step.verdict_reason = (
-                    f"deadline of {DEADLINE_S} s reached during call {call.number}"
+                    f"deadline of {harness.deadline_s} s reached during call {call.number}"
                 )
     finally:
         step.wall_clock_s = harness.clock() - started
@@ -1218,6 +1453,12 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
     command.add_argument("--catalog", type=Path, help="saved models JSON; else fetched (public)")
     command.add_argument(
+        "--step-seconds",
+        type=float,
+        default=DEADLINE_S,
+        help="each step's wall-clock limit (the brief's 1,200 s by default)",
+    )
+    command.add_argument(
         "--upstream-from",
         help="measure every step's prompt with retained payloads: PREFIX-<step>-1/output.md",
     )
@@ -1229,7 +1470,12 @@ def _refuse(reason: str) -> int:
     return 2
 
 
-def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_transport) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    transport: Transport = urllib_transport,
+    stream_transport: StreamTransport = urllib_stream,
+) -> int:
     args = parser().parse_args(argv)
     settings = load_settings(args.settings)
     caps = {"openrouter": args.cap_openrouter, "anthropic": args.cap_anthropic}
@@ -1288,7 +1534,7 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
     bpt = settings.prompt_bytes_per_token_lower_bound
     providers: dict[str, Provider] = {
         "openrouter": OpenRouter(ChatClient(transport), candidate, bpt),
-        "anthropic": Anthropic(transport, bpt),
+        "anthropic": Anthropic(stream_transport, bpt),
     }
     first = [{"role": "user", "content": user}]
     tools = step_tools(CP1_STEPS[0])
@@ -1333,7 +1579,8 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
         "limits": {
             "max_tokens_per_call": MAX_TOKENS,
             "calls_per_step": MAX_CALLS,
-            "wall_clock_s_per_step": DEADLINE_S,
+            "wall_clock_s_per_step": args.step_seconds,
+            "idle_s_between_stream_bytes": IDLE_S,
             "submits_per_step": MAX_SUBMITS,
         },
         "money": {
@@ -1368,6 +1615,7 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
         ledgers={name: Ledger(path, caps[name]) for name, path in paths.items()},
         keys={"openrouter": openrouter_key.key, "anthropic": anthropic_key.key},
         batch_directory=batch_directory,
+        deadline_s=args.step_seconds,
     )
     runs = [
         CellRun(cell, n, batch_directory / cell.cell_id) for n, cell in enumerate(order, start=1)

@@ -5,7 +5,7 @@ import json
 import random
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -114,7 +114,7 @@ class Model:
         entered = submit_model_payload(self.store, self.ticket, step_id, payload).journal
         assert entered.steps[-1].status == "valid", entered.steps[-1].issues
         if request.url == cp1.ANTHROPIC_URL:
-            return ant_reply(("t1", f"submit_{step_id}", payload), model=self.model)
+            return ant_stream(("t1", f"submit_{step_id}", payload), model=self.model)
         return reply(("c1", f"submit_{step_id}", payload))
 
 
@@ -160,6 +160,82 @@ def ant_reply(
     return Response(200, text.encode())
 
 
+def sse(*events: dict[str, Any]) -> bytes:
+    """Server-sent events as the Messages API streams them (`event:` then `data:` lines)."""
+    return b"".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode() for event in events
+    )
+
+
+def delta(index: int, kind: str, **value: str) -> dict[str, Any]:
+    return {"type": "content_block_delta", "index": index, "delta": {"type": kind, **value}}
+
+
+def stream_events(
+    *calls: tuple[str, str, str],
+    model: str = OPUS,
+    stop: str = "tool_use",
+    usage: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The events of `ant_reply`'s message: input-side usage on message_start, output usage on
+    message_delta, the thinking text and each tool input's JSON split across deltas, a ping."""
+    usage = ANT_USAGE if usage is None else usage
+    late = ("output_tokens", "output_tokens_details")
+    early = {k: v for k, v in usage.items() if k not in late} | {"output_tokens": 1}
+    message = {
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [],
+        "stop_reason": None,
+        "usage": early,
+    }
+    thinking = {"type": "thinking", "thinking": "", "signature": ""}
+    events: list[dict[str, Any]] = [
+        {"type": "message_start", "message": message},
+        {"type": "content_block_start", "index": 0, "content_block": thinking},
+        delta(0, "thinking_delta", thinking="Plan the "),
+        {"type": "ping"},
+        delta(0, "thinking_delta", thinking="step."),
+        delta(0, "signature_delta", signature="opaque-signature=="),
+        {"type": "content_block_stop", "index": 0},
+    ]
+    for index, (ident, name, raw) in enumerate(calls, start=1):
+        half = len(raw) // 2
+        block = {"type": "tool_use", "id": ident, "name": name, "input": {}}
+        events.append({"type": "content_block_start", "index": index, "content_block": block})
+        events.append(delta(index, "input_json_delta", partial_json=raw[:half]))
+        events.append(delta(index, "input_json_delta", partial_json=raw[half:]))
+        events.append({"type": "content_block_stop", "index": index})
+    final = {"delta": {"stop_reason": stop, "stop_sequence": None}}
+    events.append(
+        {"type": "message_delta", **final, "usage": {k: usage[k] for k in late if k in usage}}
+    )
+    events.append({"type": "message_stop"})
+    return events
+
+
+def ant_stream(
+    *calls: tuple[str, str, str],
+    model: str = OPUS,
+    stop: str = "tool_use",
+    usage: dict[str, Any] | None = None,
+) -> Response:
+    """`ant_reply`'s message, streamed."""
+    return Response(200, sse(*stream_events(*calls, model=model, stop=stop, usage=usage)))
+
+
+def as_stream(transport: Callable[[Request], Response]) -> cp1.StreamTransport:
+    """A stream transport over a fake transport: its reply body, line by line."""
+
+    def open_stream(request: Request, idle_s: float) -> cp1.Stream:
+        response = transport(request)
+        return cp1.Stream(response.status, iter(response.body.splitlines(keepends=True)))
+
+    return open_stream
+
+
 def make_harness(
     tmp_path: Path,
     transport: Callable[[Request], Response],
@@ -179,7 +255,7 @@ def make_harness(
         cp0_journal=frozen,
         providers={
             "openrouter": cp1.OpenRouter(ChatClient(transport), candidate, Decimal("3.0")),
-            "anthropic": cp1.Anthropic(transport, Decimal("3.0")),
+            "anthropic": cp1.Anthropic(as_stream(transport), Decimal("3.0")),
         },
         ledgers={
             name: Ledger(tmp_path / ".ledgers" / f"t-{name}.jsonl", caps[name]) for name in caps
@@ -242,8 +318,8 @@ def test_each_step_offers_the_pack_tools_and_its_own_submit_schema() -> None:
 
 
 def test_the_anthropic_request_has_the_documented_shape() -> None:
-    transport = FakeTransport(ant_reply(("t1", "search_pack", '{"query": "covenant"}')))
-    provider = cp1.Anthropic(transport, Decimal("3.0"))
+    transport = FakeTransport(ant_stream(("t1", "search_pack", '{"query": "covenant"}')))
+    provider = cp1.Anthropic(as_stream(transport), Decimal("3.0"))
     tools = cp1.step_tools("source_context")
     prepared = provider.prepare(
         CELL["sonnet-xhigh"], "system text", [{"role": "user", "content": "u"}], tools, 60.0
@@ -251,7 +327,7 @@ def test_the_anthropic_request_has_the_documented_shape() -> None:
     body = json.loads(prepared.payload)
     assert body == {
         "model": SONNET,
-        "max_tokens": 32000,
+        "max_tokens": 128000,
         "system": "system text",
         "messages": [{"role": "user", "content": "u"}],
         "tools": [{"name": n, "description": d, "input_schema": s} for n, d, s in tools],
@@ -259,6 +335,7 @@ def test_the_anthropic_request_has_the_documented_shape() -> None:
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "xhigh"},
         "cache_control": {"type": "ephemeral"},
+        "stream": True,
     }
     provider.send(CELL["sonnet-xhigh"], prepared, ANT_KEY)
     sent = transport.requests[0]
@@ -281,18 +358,19 @@ def test_token_bound_is_the_runner_bound_over_the_same_bytes() -> None:
 def test_the_anthropic_reservation_is_the_bound_at_the_write_price_plus_full_output() -> None:
     prices = cp1.PRICES[OPUS]
     assert cp1.anthropic_reservation(prices, 10_000) == (
-        10_000 * Decimal("5.00") + 32_000 * Decimal("20.00")
+        10_000 * Decimal("5.00") + 128_000 * Decimal("20.00")
     ) / Decimal(1_000_000)
 
 
 def test_assistant_content_goes_back_unmodified_with_one_tool_result_message(
     case: Case, tmp_path: Path
 ) -> None:
-    first = ant_reply(
+    calls = (
         ("t1", "search_pack", '{"query": "statement", "max_hits": 2}'),
         ("t2", "read_pages", '{"source_id": "nope", "first_page": 1, "last_page": 1}'),
     )
-    transport = FakeTransport(first, Model(case, tmp_path / "model"))
+    first = ant_reply(*calls)
+    transport = FakeTransport(ant_stream(*calls), Model(case, tmp_path / "model"))
     harness = make_harness(tmp_path, transport, case.frozen)
     anthropic = harness.providers["anthropic"]
     assert isinstance(anthropic, cp1.Anthropic)
@@ -493,7 +571,7 @@ def test_a_prompt_beyond_the_context_window_is_not_sent_and_stops_the_cell(
 
 
 def test_a_rejected_step_stops_its_cell_and_the_next_cell_runs(case: Case, tmp_path: Path) -> None:
-    bad = ant_reply(("t1", "submit_source_context", "{}"))
+    bad = ant_stream(("t1", "submit_source_context", "{}"))
     sonnet = Model(case, tmp_path / "m", SONNET)
     transport = FakeTransport(TOOL_CHOICE_400, bad, bad, bad, *[sonnet] * 4)
     harness = make_harness(tmp_path, transport, case.frozen)
@@ -635,9 +713,9 @@ def test_the_dry_run_prints_order_reservations_and_key_index_and_sends_nothing(
     )
     sol = first["sol-high"]
     assert Decimal(sol["reserved_usd"]) == (
-        sol["prompt_tokens_upper_bound"] * Decimal("0.000001") + 32000 * Decimal("0.000002")
+        sol["prompt_tokens_upper_bound"] * Decimal("0.000001") + 128000 * Decimal("0.000002")
     )
-    assert plan["money"]["caps_usd"] == {"openrouter": "8", "anthropic": "17"}
+    assert plan["money"]["caps_usd"] == {"openrouter": "15", "anthropic": "25"}
     for text in (captured.out, captured.err):
         assert ANT_KEY not in text and FAKE_KEY not in text
         assert not re.search(r"sk-(ant|or)-[A-Za-z0-9_\-]{6,}", text)  # no key-shaped text
@@ -682,3 +760,132 @@ def test_the_dry_run_measures_every_step_with_retained_payloads(
     )
     assert all(c["misfit"] is None for s in steps for c in s["first_call_per_cell"].values())
     assert tree_digest(case.frozen) == before and not (tmp_path / "root").exists()
+
+
+# --- streaming -------------------------------------------------------------------------------
+
+
+def read(body: bytes, clock: Callable[[], float] = lambda: 0.0) -> cp1.Events:
+    return cp1.read_events(iter(body.splitlines(keepends=True)), 10.0, clock, cp1.IDLE_S)
+
+
+def test_a_stream_rebuilds_the_content_exactly_and_merges_usage() -> None:
+    calls = (("t1", "submit_financials", '{"amount": 1.50, "scale": 1E+3, "note": "a b"}'),)
+    events = stream_events(*calls)
+    assert {"type": "ping"} in events  # a ping between the thinking deltas
+    reply = cp1.stream_reply(OPUS, 200, read(sse(*events)), ANT_KEY, 0.1)
+    assert reply.classification == "ok" and reply.raw_kind == "sse"
+    unstreamed = json.loads(ant_reply(*calls).body, parse_float=Decimal)["content"]
+    assert reply.turn == ({"role": "assistant", "content": unstreamed},)
+    assert unstreamed[0] == {
+        "type": "thinking",
+        "thinking": "Plan the step.",
+        "signature": "opaque-signature==",
+    }
+    # The input's JSON arrived in two pieces split mid-text; its digits are kept.
+    assert reply.tool_calls[0].arguments == '{"amount":1.50,"scale":1E+3,"note":"a b"}'
+    # Input-side usage from message_start, output_tokens (1 there) from message_delta.
+    assert reply.usage == {
+        "prompt_tokens": 6000,
+        "completion_tokens": 400,
+        "reasoning_tokens": 300,
+        "cached_tokens": 3000,
+    }
+    assert reply.cost == Decimal("0.0226") and reply.cost_basis == "computed-from-list-prices"
+    assert reply.raw is not None and b"event: ping" in reply.raw
+
+
+def test_a_stream_that_cannot_be_rebuilt_exactly_is_incomplete() -> None:
+    events = stream_events(("t1", "search_pack", '{"query": "x"}'))
+    unknown = [*events[:2], delta(0, "citations_delta", citation="?"), *events[2:]]
+    reply = cp1.stream_reply(OPUS, 200, read(sse(*unknown)), ANT_KEY, 0.1)
+    assert reply.classification == "stream-incomplete"
+    assert reply.error_detail == "unknown delta type 'citations_delta'"
+    unstarted = [*events[:2], delta(5, "text_delta", text="x"), *events[2:]]
+    assert cp1.stream_reply(OPUS, 200, read(sse(*unstarted)), ANT_KEY, 0.1).cost is None
+
+
+def test_the_wall_clock_deadline_cuts_a_stream() -> None:
+    ticks = iter(range(100))
+    events = read(ant_stream(("t1", "search_pack", "{}")).body, lambda: float(next(ticks)))
+    assert events.cut == "the step's wall-clock deadline passed mid-stream"
+
+
+def stream_cell(tmp_path: Path, case: Case, body: bytes) -> tuple[cp1.CellRun, cp1.Harness]:
+    harness = make_harness(tmp_path, FakeTransport(Response(200, body)), case.frozen)
+    anthropic = harness.providers["anthropic"]
+    assert isinstance(anthropic, cp1.Anthropic)
+    anthropic.tool_choice = "auto"
+    [run] = runs(harness, "sonnet-max")
+    cp1.run_batch(harness, [run], seed=1)
+    return run, harness
+
+
+def test_an_error_event_mid_stream_holds_the_reservation_and_stops_the_cell(
+    case: Case, tmp_path: Path
+) -> None:
+    error = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+    body = sse(*stream_events(("t1", "search_pack", "{}"))[:3], error)
+    run, _ = stream_cell(tmp_path, case, body)
+    step = run.steps[0]
+    assert step.verdict == "no-response: http_error"
+    assert step.verdict_reason == "stream error overloaded_error: Overloaded"
+    assert run.verdict == "stopped at source_context: no-response: http_error"
+    settled = step.calls[0].settlement
+    assert settled is not None and settled.unreconciled  # held
+    assert (step.directory / "call-01-response.sse").read_bytes() == body  # partial events
+
+
+def test_a_cut_stream_is_incomplete_holds_and_stops_the_cell(case: Case, tmp_path: Path) -> None:
+    body = sse(*stream_events(("t1", "submit_source_context", case.context))[:-2])
+    run, harness = stream_cell(tmp_path, case, body)
+    step = run.steps[0]
+    assert step.verdict == "no-response: stream-incomplete"
+    assert step.verdict_reason == "the stream ended before message_stop"
+    assert not step.submits  # nothing from a cut stream is judged
+    settled = step.calls[0].settlement
+    assert settled is not None and settled.unreconciled
+    assert (step.directory / "call-01-response.sse").read_bytes() == body
+    assert harness.ledgers["anthropic"].state().reserved == 0
+
+
+def test_the_connection_is_closed_once_message_stop_is_read() -> None:
+    closed: list[bool] = []
+
+    def open_stream(request: Request, idle_s: float) -> cp1.Stream:
+        def lines() -> Iterator[bytes]:
+            try:
+                yield from ant_stream(("t1", "search_pack", "{}")).body.splitlines(keepends=True)
+                yield b": the server could keep the connection open\n"
+            finally:
+                closed.append(True)
+
+        return cp1.Stream(200, lines())
+
+    provider = cp1.Anthropic(open_stream, Decimal("3.0"), tool_choice="auto")
+    prepared = provider.prepare(CELL["opus-high"], "s", [{"role": "user", "content": "u"}], (), 60)
+    assert provider.send(CELL["opus-high"], prepared, ANT_KEY).classification == "ok"
+    assert closed == [True]
+
+
+def test_an_idle_stream_is_cut_at_the_idle_limit() -> None:
+    seen: list[float] = []
+
+    def silent_after_start(request: Request, idle_s: float) -> cp1.Stream:
+        seen.append(idle_s)
+        start = sse(*stream_events(("t1", "search_pack", "{}"))[:2]).splitlines(keepends=True)
+
+        def lines() -> Iterator[bytes]:
+            yield from start
+            raise TimeoutError("timed out")
+
+        return cp1.Stream(200, lines())
+
+    provider = cp1.Anthropic(silent_after_start, Decimal("3.0"), tool_choice="auto")
+    user = [{"role": "user", "content": "u"}]
+    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 900.0)
+    reply = provider.send(CELL["opus-high"], prepared, ANT_KEY)
+    assert seen == [cp1.IDLE_S]
+    assert reply.classification == "stream-incomplete" and reply.cost is None
+    assert reply.error_detail == f"no byte for {cp1.IDLE_S} s (idle timeout)"
+    assert reply.served_model == OPUS and reply.raw is not None
