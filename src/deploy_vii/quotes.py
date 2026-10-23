@@ -108,8 +108,13 @@ def quoted(quote: str, text: str) -> bool:
     needles = _needles(quote)
     if not needles[0]:
         return False
-    readings = (normalise(text), _joined(text)) if hyphen_wrapped(text) else (normalise(text),)
-    return any(needle in reading for needle in needles for reading in readings)
+
+    def readings() -> Iterator[str]:  # the joined span only once the plain one misses
+        yield normalise(text)
+        if hyphen_wrapped(text):
+            yield _joined(text)
+
+    return any(needle in reading for reading in readings() for needle in needles)
 
 
 def prefix(quote: str) -> str:
