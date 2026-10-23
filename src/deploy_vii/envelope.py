@@ -80,7 +80,18 @@ SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Limitation Flags", ()),
     (
         "Module Handoff",
-        ("T4.14", "T4.15", "T4.16", "T4.17", "T4.18", "T4.19", "operating-kpis", "pro-forma"),
+        (
+            "T4.14",
+            "T4.15",
+            "T4.16",
+            "T4.17",
+            "T4.18",
+            "T4.19",
+            # Emitted only for a segmented book (model_interface); in the interface's order.
+            "segment-allocation",
+            "operating-kpis",
+            "pro-forma",
+        ),
     ),
 )
 FINDINGS = "Findings"

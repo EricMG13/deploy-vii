@@ -12,6 +12,7 @@ from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission, submit_cp1_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReport, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
+from deploy_vii.financial_contracts import FinancialBook
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ConsumerReadiness, ReadinessReview, SourceAssessment
 from deploy_vii.registry import plan
@@ -178,9 +179,9 @@ def test_step_state_contract() -> None:
 
 
 def cp1_case(
-    tmp_path: Path, *, partial: bool = False
+    tmp_path: Path, *, partial: bool = False, book: FinancialBook | None = None
 ) -> tuple[Execution, Attempt, FinancialSubmission]:
-    value = ready_case()
+    value = ready_case() if book is None else book
     if partial:
         value = value.model_copy(
             update={

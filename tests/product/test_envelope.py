@@ -10,6 +10,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+import deploy_vii.envelope as envelope_writer
+from deploy_vii.canonical_tables import COLUMNS, CanonicalTables
 from deploy_vii.contracts import (
     Citation,
     Claim,
@@ -21,6 +23,7 @@ from deploy_vii.contracts import (
     TableColumn,
     TableRow,
 )
+from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.envelope import (
     SECTIONS,
@@ -32,8 +35,13 @@ from deploy_vii.envelope import (
     register_envelope,
     write_envelope,
 )
+from deploy_vii.financial_contracts import FinancialBook, SegmentAllocation, SegmentObservation
+from deploy_vii.model_interface import SCHEMAS as INTERFACE_SCHEMAS
+from deploy_vii.narrative_projection import SCHEMAS as NARRATIVE_SCHEMAS
 from deploy_vii.table_markdown import read_table_markdown
 from tests.product.test_cp1_workflow import staged
+from tests.product.test_financials import _C, observed
+from tests.product.test_model_readiness import ready_case
 
 RUN = Run(
     run_id="envelope-run",
@@ -423,3 +431,98 @@ def test_qa_text_that_looks_like_a_gap_marker_is_not_a_marker() -> None:
     markdown, sidecar = write_envelope(envelope)
     assert "| minor | MINOR | open | ∅ G999 |" in markdown
     assert read_envelope(markdown, sidecar) == envelope
+
+
+def segmented_book() -> FinancialBook:
+    """`ready_case` with one operating segment carrying each period's revenue and its slot."""
+    value = ready_case()
+    revenue = {r.period_id: r.value.amount for r in value.accounts if r.metric_id == "revenue"}
+    segments = tuple(
+        SegmentObservation(
+            segment_id="gaming",
+            segment_name="Gaming",
+            segment_type="OPERATING_SEGMENT",
+            display_priority=1,
+            period_id=period_id,
+            revenue=observed(f"segment.{period_id}", str(amount)),
+            classification_citations=(_C,),
+        )
+        for period_id, amount in revenue.items()
+    )
+    allocation = SegmentAllocation(
+        slot_id="DIVISION_1",
+        slot_label="Gaming",
+        component_segment_ids=("gaming",),
+        rationale="Synthetic single-segment forecast mapping",
+    )
+    return FinancialBook.model_validate(
+        {
+            **value.model_dump(),
+            "segments": segments,
+            "segment_allocation": (allocation,),
+            "segment_disclosure": value.segment_disclosure.model_copy(update={"status": "partial"}),
+        }
+    )
+
+
+@pytest.fixture(scope="module")
+def segmented_registers(tmp_path_factory: pytest.TempPathFactory) -> CanonicalTables:
+    store, attempt = staged(tmp_path_factory.mktemp("segmented"), book=segmented_book())
+    return cp1_registers(store, attempt.ticket_id)
+
+
+def test_a_segmented_book_places_its_segment_allocation_in_module_handoff(
+    segmented_registers: CanonicalTables,
+) -> None:
+    # Task 7.7 (e1-cp1-7): before the placement, write_envelope raised
+    # "No r14 envelope section for table: segment-allocation" for every segmented issuer.
+    envelope = register_envelope(segmented_registers)
+    table = next(t for t in envelope.module.tables if t.table_id == "segment-allocation")
+    assert table.interface_id == "cp1.cp_model_segment_allocation" and len(table.rows) == 1
+    markdown, sidecar = write_envelope(envelope)
+    assert envelope_issues(markdown, sidecar) == ()
+    handoff = markdown[markdown.index("\n## Module Handoff\n") :]
+    assert handoff.count("\n### segment-allocation — Model Segment Allocation\n") == 1
+    slot = next(
+        f
+        for f in cp1_quality_inputs(segmented_registers).coverage
+        if f.field_id == "canonical-handoff"
+    )
+    assert slot.present, slot.rationale
+
+
+def test_every_table_the_cp1_module_can_carry_has_exactly_one_section(
+    fixture_envelope: tuple[Envelope, str, str], segmented_registers: CanonicalTables
+) -> None:
+    # Derived from the producers: the register, model-interface and narrative schemas (the
+    # conditional segment-allocation included) and the tables both fixtures emit (the
+    # statement tables T4.4-T4.6 have no exported schema).
+    placed = [table_id for _, ids in SECTIONS for table_id in ids]
+    assert len(placed) == len(set(placed))
+    carried = {
+        *COLUMNS,
+        *INTERFACE_SCHEMAS,
+        *NARRATIVE_SCHEMAS,
+        *(t.table_id for t in fixture_envelope[0].module.tables),
+        *(t.table_id for t in segmented_registers.module.tables),
+    }
+    assert carried == set(placed)
+    handoff = dict(SECTIONS)["Module Handoff"]
+    assert tuple(key for key in INTERFACE_SCHEMAS if key in handoff) == handoff
+
+
+def test_an_unsegmented_envelope_gains_only_the_segment_allocation_line(
+    fixture_envelope: tuple[Envelope, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envelope, markdown, sidecar = fixture_envelope
+    assert all(t.table_id != "segment-allocation" for t in envelope.module.tables)
+    before = tuple(
+        (name, tuple(i for i in ids if i != "segment-allocation")) for name, ids in SECTIONS
+    )
+    monkeypatch.setattr(envelope_writer, "SECTIONS", before)
+    prior_markdown, prior_sidecar = write_envelope(envelope)
+    assert prior_sidecar == sidecar
+    line = "### segment-allocation\n\nNot produced: segment-allocation is not in this module.\n\n"
+    anchor = "### operating-kpis — "
+    assert prior_markdown.count(anchor) == 1
+    assert markdown == prior_markdown.replace(anchor, line + anchor)

@@ -114,7 +114,7 @@ this order (pinned Deploy VI `bd71346`,
 | 14 | Evidence Trace | Findings, `analysis-coverage`, `funding-assessment`, `required-stories`, `evidence-trace`, Evidence list |
 | 15 | QA Status | Confidence, QA findings, QA limitations |
 | 16 | Limitation Flags | Own, inherited and gap-register limitations |
-| 17 | Module Handoff | Identity, T4.14–T4.19, `operating-kpis`, `pro-forma`, Provenance |
+| 17 | Module Handoff | Identity, T4.14–T4.19, `segment-allocation` (`Not produced` for a book without segments), `operating-kpis`, `pro-forma`, Provenance |
 
 r14 lists no Analysis H2 among the 17, so the findings open Evidence Trace beside the
 records they stand on. Every section is present. A table the module lacks is an H3 with

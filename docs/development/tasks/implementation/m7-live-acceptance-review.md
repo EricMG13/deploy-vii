@@ -374,3 +374,11 @@ The `narrative` contract now states, as step rules a to e, the prose rule, the p
 Evidence: E1 batch 6 (DC-8 proxy cohort, 23 October 2026): the first `narrative` submission past shape validation drew 21 semantic issues (6 missing issuer bindings, 2 funding rows that were not located balance-sheet rows, 9 unknown required stories, 3 stories whose finding lacked the story's evidence, and on the first try 1 blank prose part used as a separator).
 
 Not verified: proxy uptake (the next proxy narrative and readiness runs); the real-pack `readiness` prompt size (the rules add about 6,400 characters in all to the two system messages; the evidence table is unchanged).
+
+## 7.7 The r14 envelope places the `segment-allocation` table
+
+`model_interface` emits the `segment-allocation` table (Model Segment Allocation, `cp1.cp_model_segment_allocation`) only for a book with segments, and `envelope.SECTIONS` had no place for it, so `write_envelope` refused every segmented issuer (`No r14 envelope section for table: segment-allocation`), the registers' `canonical-handoff` QA slot was absent and `_quality_stage` refused every review. The table now sits in Module Handoff between T4.19 and `operating-kpis`, the model interface's own order; `_sections` still refuses any unplaced table, and a test derives the set of tables the CP-1 module can carry from the producers' schemas and both fixtures and requires exactly one section for each. For a book without segments the sidecar is byte-identical and the Markdown gains only the `Not produced: segment-allocation is not in this module.` block; validators, QA scoring and promotion rules are unchanged (decision 0005).
+
+Evidence: E1 batch e1-cp1-7 (DC-8 proxy cohort, 23 October 2026), ticket c5d7cc31: `source_context`, `financials`, `narrative` and `readiness` accepted, then `quality` rejected by Python in `_sections` on the segmented Caesars book; offline, a segmented synthetic book now writes, verifies and fills the `canonical-handoff` slot.
+
+Not verified: the real-pack re-run of the `quality` step (the coordinator repairs attempt c5d7cc31's input set on e1-cp1-7); on that pack QA is expected to stay Blocked (narrative `blocked`), an analytical outcome this task does not change.

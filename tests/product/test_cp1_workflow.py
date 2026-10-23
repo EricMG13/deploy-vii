@@ -22,6 +22,7 @@ from deploy_vii.cp1_workflow import (
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.envelope import read_envelope
 from deploy_vii.execution import Attempt, Execution, NotAuthorized, text_sha256
+from deploy_vii.financial_contracts import FinancialBook
 from deploy_vii.quality import (
     ClaimAssessment,
     EvidenceLineage,
@@ -39,15 +40,20 @@ SLIP = "not json"  # a payload every CP-1 step validator rejects ("(root): Inval
 
 
 def staged(
-    tmp_path: Path, *, partial: bool = False, slip: str | None = None
+    tmp_path: Path,
+    *,
+    partial: bool = False,
+    slip: str | None = None,
+    book: FinancialBook | None = None,
 ) -> tuple[Execution, Attempt]:
     """A CP-1 attempt with its four stages valid and one finding; the ticket is pending.
 
     The full case cites a KPI (ceiling Calculated); the partial case has no KPI, cites an
     observation and its narrative is blocked (its scope is data quality only). With `slip`, that
-    step is first rejected once and then repaired within the attempt (task 7.0g).
+    step is first rejected once and then repaired within the attempt (task 7.0g). `book`
+    replaces the default synthetic book (`ready_case`).
     """
-    store, ticket, extraction = cp1_case(tmp_path, partial=partial)
+    store, ticket, extraction = cp1_case(tmp_path, partial=partial, book=book)
 
     def submit(step_id: str, payload: str) -> Attempt:
         if step_id == slip:
