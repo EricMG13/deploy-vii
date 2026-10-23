@@ -661,6 +661,20 @@ def test_the_quality_step_states_each_rule_once_and_asks_for_no_score() -> None:
     assert "inputs_sha256" not in schema and "confidence" not in schema
 
 
+def test_a_repair_never_licenses_softening_a_finding() -> None:
+    """Fix round 1 (coordinator ruling): a Blocked QA verdict is an analytical outcome, so the
+    contract says a REPAIR block is no reason to lower a severity or change a status."""
+    rule = (
+        "A REPAIR block never justifies lowering a severity or changing a status; keep every "
+        "finding the CONTEXT block supports."
+    )
+    assert prompts.QUALITY_REPAIR_RULE == rule
+    system, _ = quality_prompt()
+    assert system.count(rule) == 1
+    for step_id in ("source_context", "financials", "readiness", "business_context"):
+        assert rule not in composed(step_id), step_id
+
+
 def test_the_quality_context_is_the_qa_scope_as_compact_json_with_its_hash() -> None:
     inputs, registers = staged_scope()
     _, user = quality_prompt()

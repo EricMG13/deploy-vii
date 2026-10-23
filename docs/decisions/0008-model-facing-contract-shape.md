@@ -436,8 +436,12 @@ and evidence ids, each such id's ceiling, basis and register record, the coverag
 cells counted by table and status) and the source gate and module status. The review enters the
 journal only through `promote_cp1`, so an accepted `quality` step is the promotion; a rejected
 review finishes the attempt (the step settles the module, so it is outside
-`WITHIN_ATTEMPT_REPAIR`) and the module repair re-runs the chain. `promote_cp1`,
-`validate_quality_review`, the lineage ceilings and the status rules are unchanged.
+`WITHIN_ATTEMPT_REPAIR`) and the module repair re-runs the chain. A QA Blocked verdict alone
+is an analytical outcome, not a defect to repair (coordinator ruling, fix round 1): it stands in
+the journal and the `module` driver ends the cell without a module repair, as for a truncation;
+the contract adds that a REPAIR block never justifies lowering a severity or changing a status.
+`promote_cp1`, `validate_quality_review`, the lineage ceilings and the status rules are
+unchanged.
 
 Not verified: provider acceptance of the `quality` sent schema (`live schema-check`); a live or
 proxy QA review on the real pack.

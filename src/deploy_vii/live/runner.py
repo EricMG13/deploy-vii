@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
 from deploy_vii.business_context import cp1_context_facts
+from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import CP1_PROMOTION, cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
 from deploy_vii.live.catalog import PinnedCandidate, PinnedPool, utc_stamp
@@ -383,6 +384,8 @@ def _plan(
     # Task 7.4: the QA review reads the QA scope of the recomputed registers (registers that do
     # not stage raise here, before anything is spent), not the four retained stage outputs.
     quality = step.step_id == QUALITY
+    registers = cp1_registers(store, ticket_id) if quality else None
+    inputs = cp1_quality_inputs(registers) if registers is not None else None
     messages = build(
         step.step_id,
         store.pack(snapshot),
@@ -392,7 +395,7 @@ def _plan(
         repair_issues=repair.issues,
         # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
         cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
-        scope=quality_scope(cp1_registers(store, ticket_id)) if quality else None,
+        scope=quality_scope(registers, inputs) if registers is not None else None,
     )
     chat = ChatRequest(
         model=candidate.slug,
@@ -464,6 +467,8 @@ def _plan(
             "schema_sha256": hashlib.sha256(schema_text(step.schema).encode()).hexdigest(),
             "request_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
             "declared_inputs": list(step.declared_sources),
+            # Task 7.4 fix round 1: the QA inputs the scope shows and the review must bind.
+            **({} if inputs is None else {"quality_inputs_sha256": inputs.content_hash()}),
         },
     )
 

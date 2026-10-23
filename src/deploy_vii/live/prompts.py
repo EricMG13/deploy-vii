@@ -42,6 +42,7 @@ from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.financial_periods import _id
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.quality import QualityInputs
 from deploy_vii.readiness import extraction_coverage, live_consumers
 from deploy_vii.registry import modules
 from deploy_vii.statement_validation import ACCOUNT_LINKS, OPTIONAL_ITEMS, REQUIRED_ITEMS
@@ -250,6 +251,12 @@ QUALITY_FINDINGS_RULE = (
     "defect resolved (any other status needs its `resolution`), a `description`, and "
     "`references` that name only evidence ids or coverage `field_id`s listed in the CONTEXT block."
 )
+# Fix round 1 (coordinator ruling): a Blocked QA verdict is an analytical outcome, so a repair
+# prompt is no reason to soften the findings that produced it.
+QUALITY_REPAIR_RULE = (
+    "A REPAIR block never justifies lowering a severity or changing a status; keep every "
+    "finding the CONTEXT block supports."
+)
 
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
@@ -320,7 +327,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"b. {QUALITY_LINEAGE_RULE}\n"
         f"c. {QUALITY_FINDINGS_RULE}\n"
         "d. Every rationale, description and resolution is nonblank. The CONTEXT block is not a "
-        "source and is never cited."
+        "source and is never cited.\n"
+        f"e. {QUALITY_REPAIR_RULE}"
     ),
     "business_context": (
         f"{CP1A_METHOD.strip()}\n"
@@ -423,7 +431,9 @@ def _context_body(step_id: str, pack: PreparedPack, cp1_facts: Sequence[Fact] = 
     return json.dumps(body, indent=1, sort_keys=True)
 
 
-def quality_scope(registers: CanonicalTables) -> dict[str, Any]:
+def quality_scope(
+    registers: CanonicalTables, inputs: QualityInputs | None = None
+) -> dict[str, Any]:
     """The `quality` step's CONTEXT body: the QA scope `cp1_quality_inputs` projects from the
     trusted registers, in the shape the analyst judges (task 7.4, R1).
 
@@ -433,8 +443,10 @@ def quality_scope(registers: CanonicalTables) -> dict[str, Any]:
     the register cells (`qa-cell:`), which are counted by table and status: the synthetic case
     alone holds about 45,000 of them, so listing each, or each of the inputs' references, would
     not fit a prompt. A `qa-cell:` slot that matches no register fact raises PromptError.
+    `inputs` is `cp1_quality_inputs(registers)`, computed here unless the caller already holds it.
     """
-    inputs = cp1_quality_inputs(registers)
+    if inputs is None:
+        inputs = cp1_quality_inputs(registers)
     narrative = registers.downstream.inputs.narrative
     findings = {item.finding_id: item for item in narrative.review.findings}
     records = {item.evidence_id: item for item in narrative.inputs.catalogue}

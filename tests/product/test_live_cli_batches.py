@@ -1444,14 +1444,16 @@ BAD = "not json"
 OUTAGE = "outage"
 TRUNC = "truncated"  # a completion cut at the --max-tokens budget (finish_reason length)
 UPGRADE = "upgrade"  # a QA review that lifts one lineage above its ceiling (task 7.4)
+CRITICAL = "critical"  # a QA review with one open CRITICAL finding: QA Blocked (fix round 1)
 CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness", "quality")
 
 
 class Chain:
     """Fake transport for one CP-1 `module` cell. `script` lists, per chat call in order, the
     step the cell must ask for and whether to answer it validly, with `BAD` (a payload the
-    validator rejects), `UPGRADE` (for `quality`: one lineage above its ceiling) or `OUTAGE`
-    (HTTP 500: no model output). Each valid payload is built from the cell's own journal, so a
+    validator rejects), `UPGRADE` (for `quality`: one lineage above its ceiling), `CRITICAL`
+    (for `quality`: an open CRITICAL finding, so QA is Blocked) or `OUTAGE` (HTTP 500: no model
+    output). Each valid payload is built from the cell's own journal, so a
     step is accepted exactly as the validators would."""
 
     def __init__(
@@ -1501,6 +1503,21 @@ class Chain:
         lifted["lineage_class"] = "Directly Sourced"
         return json.dumps(review)
 
+    def critical(self) -> str:
+        """The quality review with one open CRITICAL finding (its arithmetic blocks QA)."""
+        review = json.loads(self.payload("quality"))
+        review["findings"] = [
+            {
+                "finding_id": "qa.synthetic-critical",
+                "severity": "CRITICAL",
+                "status": "open",
+                "description": "Synthetic critical defect",
+                "references": [],
+                "resolution": None,
+            }
+        ]
+        return json.dumps(review)
+
     def __call__(self, request: Request) -> Response:
         if request.url == KEY_URL:
             return key_status(format(self.usage, "f"))
@@ -1514,6 +1531,8 @@ class Chain:
             return ok('{"sch', model=model, finish_reason="length")
         if verdict == UPGRADE:
             return ok(self.upgraded(), model=model)
+        if verdict == CRITICAL:
+            return ok(self.critical(), model=model)
         return ok(BAD if verdict == BAD else self.payload(step), model=model)
 
     def user_prompts(self) -> list[str]:
@@ -1849,6 +1868,59 @@ def test_a_rejected_quality_review_takes_the_module_repair_and_promotes_on_it(
     assert repair.number == 1 and repair.status == "finished" and not repair.issues
     head = next(h for h in journal.read().heads if h.module_id == "CP-1")
     assert head.qualification == PROMOTED and head.result_sha256 == repair.result_sha256
+
+
+def test_a_blocked_qa_verdict_stands_and_ends_the_cell_without_a_module_repair(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 (coordinator ruling): a Blocked QA verdict is an analytical outcome, not a
+    defect to repair, so the cell ends at it (as at a truncation) and the journal keeps it."""
+    script = [*ok_steps(*CHAIN[:-1]), ("quality", CRITICAL)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)  # nothing is re-sent
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows][-1] == ("quality", "rejected", "-")
+    text = rig.report()
+    assert "- Repairs dispatched: 0 (module repair attempts 0, within-attempt step repairs 0)" in (
+        text
+    )
+    assert "- Stopped: no" in text
+    journal = cell_journal(rig)
+    cp1 = [a for a in journal.read().attempts if a.module_id == "CP-1"]
+    assert len(cp1) == 1 and cp1[0].status == "finished"  # no repair attempt was begun
+    (blocked,) = cp1[0].issues
+    assert blocked.startswith("CP-1 QA Blocked: confidence ")
+    assert blocked.endswith("; a Blocked handoff is not promoted")
+    assert not [h for h in journal.read().heads if h.module_id == "CP-1"]
+
+
+def test_a_validator_rejection_beside_a_blocked_line_still_takes_the_module_repair() -> None:
+    blocked = "CP-1 QA Blocked: confidence 12 (Insufficient Information); "
+    blocked += "a Blocked handoff is not promoted"
+    assert cli.qa_blocked_only((blocked,))
+    assert not cli.qa_blocked_only(())
+    assert not cli.qa_blocked_only((blocked, "QA review does not bind current inputs"))
+    assert not cli.qa_blocked_only(("QA review does not bind current inputs",))
+
+
+def test_a_truncated_quality_review_finishes_the_attempt_and_ends_the_cell(
+    tmp_path: Path,
+) -> None:
+    """A cut `quality` is still submitted (as every truncated payload is), and the step settles
+    the module: the attempt finishes rejected, its four accepted stages are not promoted, and
+    the 7.0h guard ends the cell without a module repair, as for CP-0."""
+    script = [*ok_steps(*CHAIN[:-1]), ("quality", TRUNC)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    assert [(r[2], r[6], r[7], r[REPAIR_COLUMN]) for r in module_rows(rig)][-1] == (
+        "quality",
+        "rejected",
+        "truncated",
+        "-",
+    )
+    assert "- Repairs dispatched: 0" in rig.report() and "- Truncated: 1" in rig.report()
+    cp1 = [a for a in cell_journal(rig).read().attempts if a.module_id == "CP-1"]
+    assert len(cp1) == 1 and cp1[0].status == "finished" and cp1[0].issues
 
 
 def test_probe_cells_are_never_repaired(rig: Rig) -> None:

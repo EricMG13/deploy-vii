@@ -1117,6 +1117,29 @@ def test_quality_without_a_valid_readiness_step_raises_before_anything_is_writte
         assert sorted(store.directory.rglob("*")) == files
 
 
+def test_the_validator_still_rejects_a_wrong_qa_binding_that_the_prefill_writes(
+    quality_journal: tuple[Execution, str, QualityInputs], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: the pre-fill and the validation compute the QA inputs independently, so a
+    wrong value from the pre-fill side is still refused by `validate_quality_review` (as the
+    7.0i bypass test shows for the stage bindings) and nothing is promoted."""
+    from deploy_vii.live import submission
+
+    store, ticket_id, inputs = quality_journal
+
+    def wrong(store: Execution, ticket_id: str) -> QualityInputs:
+        return inputs.model_copy(update={"coverage_policy": "drifted-policy/1"})
+
+    monkeypatch.setattr(submission, "quality_inputs", wrong)
+    _, payload = unbound_review(inputs)
+    submitted = submit_model_payload(store, ticket_id, "quality", payload)
+    written = json.loads(submitted.payload)["inputs_sha256"]
+    assert written == wrong(store, ticket_id).content_hash() != inputs.content_hash()
+    assert submitted.journal.status == "finished"
+    assert "QA review does not bind current inputs" in submitted.journal.issues
+    assert not [h for h in store.read().heads if h.module_id == "CP-1"]
+
+
 def test_qa_inputs_python_cannot_compute_refuse_the_review_before_the_write(
     quality_journal: tuple[Execution, str, QualityInputs],
 ) -> None:

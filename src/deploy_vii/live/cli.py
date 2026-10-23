@@ -97,6 +97,11 @@ CP0_STEPS = ("source_readiness",)
 # module repair, which restarts at source_context.
 CP1_CHAIN = ("source_context", "financials", "narrative", "readiness", "quality")
 FULL_CHAIN = CP0_STEPS + CP1_CHAIN
+# Fix round 1 (coordinator ruling): `cp1_workflow._quality_stage`'s Blocked verdict. A Blocked QA
+# outcome is analytical, not a defect to repair: the cell ends at it, as at a truncation.
+QA_BLOCKED = re.compile(
+    r"CP-1 QA Blocked: confidence [0-9]+ \([^()]*\); a Blocked handoff is not promoted"
+)
 # Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
 # step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.
 CP1A_CHAIN = (*CP0_STEPS, "business_context")
@@ -567,17 +572,25 @@ def _run_cell(
             # Only a validator verdict (rejected) on a first attempt earns the module's one MC-7
             # repair. A no-response or fallback leaves the ticket pending, and a repair already
             # used is spent: either ends the cell. A truncated rejection is a budget verdict, not a
-            # validator one, and consumes no module repair either (task 7.0h). `begin` refuses a
-            # consumed repair loudly.
+            # validator one, and consumes no module repair either (task 7.0h); nor does a CP-1 QA
+            # Blocked verdict, an analytical outcome that stands (task 7.4 fix round 1). `begin`
+            # refuses a consumed repair loudly.
             if (
                 not repair
                 or result.status != "rejected"
                 or result.classification == TRUNCATED
+                or qa_blocked_only(result.issues)
                 or attempt.number != 0
             ):
                 return
             attempt = store.begin(module)
             steps = group[group.index(expected_step(attempt, module)) :]
+
+
+def qa_blocked_only(issues: Sequence[str]) -> bool:
+    """True when a rejection's issues are only the CP-1 QA Blocked verdict (`QA_BLOCKED`): the
+    review is valid and its own judgments block QA, so the verdict stands and is not repaired."""
+    return bool(issues) and all(QA_BLOCKED.fullmatch(issue) for issue in issues)
 
 
 def _record_not_authorized(

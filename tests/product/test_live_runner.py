@@ -1065,6 +1065,8 @@ def test_cp1_step_dispatch_carries_the_retained_step_as_upstream_data(tmp_path: 
     user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
     assert f"<<<SOURCE id=step:source_context sha256={held.content_hash()}>>>" in user
     assert extraction.context_step_sha256 == held.content_hash()
+    # Only the `quality` manifest names QA inputs (task 7.4 fix round 1).
+    assert "quality_inputs_sha256" not in load(attempt_dir(result) / "manifest.json")["hashes"]
     # The step order is enforced before any money is spent.
     idle = FakeTransport()
     before = rig.ledger.state().lines
@@ -2261,6 +2263,11 @@ def test_the_fifth_cp1_step_is_quality_and_its_dispatch_promotes_cp1(tmp_path: P
     assert result.prompt_tokens_upper_bound == runner.prompt_token_bound(
         request["body"], BYTES_PER_TOKEN
     )
+    # Fix round 1: the manifest links the scope the model saw to the binding the review holds.
+    manifest = load(attempt_dir(result) / "manifest.json")
+    retained = rig.store.payload(result.journal.steps[-1].payload_sha256)
+    assert manifest["hashes"]["quality_inputs_sha256"] == inputs.content_hash()
+    assert json.loads(retained)["inputs_sha256"] == inputs.content_hash()
     with pytest.raises(ValueError, match="finished"):
         rig.run(ChatClient(FakeTransport()), step=quality_step(rig))
 

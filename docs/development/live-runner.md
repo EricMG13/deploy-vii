@@ -132,16 +132,31 @@ from a pinned pool:
   evidence id's lineage ceiling, basis and register record with citations, the coverage slots
   (the register cells counted by table and status, not listed: the synthetic case holds about
   45,000), the source gate, the module status, the reference count per basis and any inherited
-  findings. Its contract (rules a to d: claims once, lineage at or below the ceiling with the
-  class order, findings, nonblank text) asks for no score, band or status. An accepted review
+  findings. Its contract (rules a to e: claims once, lineage at or below the ceiling with the
+  class order, findings, nonblank text, no softening on a repair) asks for no score, band or
+  status. An accepted review
   **is** the promotion: the attempt finishes and the CP-1 head records `PROMOTED`'s four
   statuses, so `write_cp1_envelope` and CP-MODEL publication follow. A rejected review
   (`validate_quality_review`'s issues, a Blocked QA, a handoff that does not verify) finishes the
   attempt rejected: `quality` settles the module, so it has no repair within the attempt, and
   the `module` driver begins the module repair, which re-runs the chain from `source_context`
-  with the review's issues on the repaired `quality` prompt. No valid `readiness` step, or
-  registers that do not stage (the QA inputs cannot be computed), raise ValueError before
-  anything is spent or written. The proxy cohort (`accept_proxy_payload`) takes the same route.
+  with the review's issues on the repaired `quality` prompt. Exception (fix round 1,
+  coordinator ruling): a rejection whose issues are only the QA Blocked verdict ("CP-1 QA
+  Blocked: confidence N (band); a Blocked handoff is not promoted", `cli.qa_blocked_only`) is an
+  analytical outcome, not a defect to repair. The verdict stands in the journal, the cell ends
+  without a module repair (as at a truncation) and `Repairs dispatched` does not count it. Rule
+  e of the contract says a REPAIR block never justifies lowering a severity or changing a status.
+  A truncated `quality` is submitted like any truncated payload and, since the step settles the
+  module, finishes the attempt rejected: the four accepted stages are not promoted, and the cell
+  ends without a repair (7.0h), as for CP-0. No valid `readiness` step, or registers that do not
+  stage (the QA inputs cannot be computed), raise ValueError before anything is spent or
+  written. A crash after the valid `quality` step is retained but before settlement leaves five
+  valid steps on a pending ticket: the runner refuses a further dispatch ("every CP-1 step is
+  already retained"), and the resume is `promote_cp1` (or `execution cp1-promote`) with the
+  **retained, pre-filled** payload; the raw model output differs from it and raises "Ticket
+  already retains a different QA review". The manifest's `hashes.quality_inputs_sha256` names
+  the QA inputs the scope was projected from, which the review must bind. The proxy cohort
+  (`accept_proxy_payload`) takes the same route.
 - **A truncated completion is not repaired (task 7.0h).** A try classified `truncated` (cut at
   the `--max-tokens` budget) is a budget verdict, not a validator verdict the model can act on:
   the `module` driver neither re-sends the step (its one in-attempt repair stays unused, the
@@ -160,7 +175,9 @@ from a pinned pool:
   `source_context` and costs one extra context call. At most one repair per module per cell: the
   cell ends at the first step that is not accepted, whether in the first attempt after its
   repair is spent, in the repair itself, or at its end. A `no-response` or withheld fallback is
-  no verdict (the ticket stays pending), so it ends the cell with no repair. A cap too small
+  no verdict (the ticket stays pending), so it ends the cell with no repair; so does a CP-1
+  `quality` rejection that is only the QA Blocked verdict (task 7.4 fix round 1: the verdict
+  stands). A cap too small
   for the repair's reservation raises `CapExceeded`, ends the batch with `Stopped: cap` and
   leaves no row for the unsent step. A journal refusal of the repair ("...one repair has been
   consumed") is not caught and fails the batch. A CP-0 accepted on repair authorizes the CP-1
