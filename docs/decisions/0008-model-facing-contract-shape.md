@@ -327,7 +327,8 @@ holds for other models, packs and languages.
 ## Amendment, 23 Oct 2026 (task 7.0h)
 
 E1 batch `e1-cp1-5` (Sol, 23 Oct 2026) met item 3's trigger: `financials` was cut at exactly
-64,000 completion tokens (the `--max-tokens` budget; classification `truncated`) twice. The
+64,000 completion tokens (the `--max-tokens` budget; classification `truncated`) twice in the
+first attempt, and a third time in the module repair. The
 7.0g step repair re-sent the step at the same budget with a REPAIR block that said only
 `(root): Invalid JSON: EOF while parsing a string at line 5928 column 13`; the model compacted
 its JSON (184,578 characters on 100 statement lines, against 263,993 characters on 70 lines

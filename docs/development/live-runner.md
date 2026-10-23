@@ -114,7 +114,6 @@ from a pinned pool:
   can use up to 2 x (`max_retries` + 1) dispatches per attempt. CP-0's single
   review, CP-1's `quality` promotion step and CP-1A's single `business_context` step (task
   7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
-  7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
 - **A truncated completion is not repaired (task 7.0h).** A try classified `truncated` (cut at
   the `--max-tokens` budget) is a budget verdict, not a validator verdict the model can act on:
   the `module` driver neither re-sends the step (its one in-attempt repair stays unused, the

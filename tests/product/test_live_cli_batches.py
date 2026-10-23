@@ -1699,15 +1699,15 @@ def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
 def test_a_cap_that_cannot_cover_the_repair_ends_the_batch_without_a_partial_row(
     tmp_path: Path,
 ) -> None:
-    """The repair prompt carries the REPAIR block, so its reservation is above the first
-    attempt's. A cap equal to the first reservation covers that attempt, and after its charge
-    cannot cover the repair's: nothing is sent and the repair has no row."""
+    """The repair prompt carries the REPAIR block, so its request is longer than the first
+    attempt's (at this rig's 300 bytes per token the two reservations may still be equal, the
+    token bound being a ceiling). A cap equal to the first reservation covers that attempt, and
+    after its charge cannot cover the repair's: nothing is sent and the repair has no row."""
     script = [("source_readiness", BAD), *ok_steps(*CHAIN)]
-    measured, _, _ = run_chain(tmp_path / "measure", script)  # same cell, ample cap
+    measured, chain_measured, _ = run_chain(tmp_path / "measure", script)  # ample cap
     first, repair = ledger(measured).state().attempts[:2]
-    # At this rig's 300 bytes per token the REPAIR block can fit inside the same ceil token
-    # (task 7.0h moved that boundary); the cap still cannot cover the repair, because the first
-    # attempt's charge is spent before it.
+    first_request, repair_request = chain_measured.requests[:2]
+    assert len(repair_request.body or b"") > len(first_request.body or b"")
     assert repair.reserved_usd >= first.reserved_usd
     rig, chain, status = run_chain(tmp_path / "capped", script, cap=format(first.reserved_usd, "f"))
     assert status == cli.EXIT_CAP and len(chain.requests) == 1
