@@ -23,7 +23,7 @@ from deploy_vii.live.client import (
     TransportError,
 )
 from deploy_vii.live.ledger import AttemptRecord, Ledger
-from deploy_vii.live.reconcile import RetainedAttempt, generation_cost
+from deploy_vii.live.reconcile import INTERRUPTED_SETTLE, RetainedAttempt, generation_cost
 from tests.product.live_support import FAKE_KEY, ok
 from tests.product.test_live_cli_batches import DEEPSEEK, Rig, key_status, step_lines
 
@@ -1018,6 +1018,9 @@ def test_a_killed_batch_is_settled_from_the_next_batchs_before_check_over_an_emp
         (a.charged_usd or Decimal(0) for a in others), Decimal(0)
     )
     assert "usage_now_usd" not in evidence
+    # Review fix: the record names the window's limit (a later booking is not seen).
+    assert evidence["reconcile_time_reading"] is False
+    closing_at = load(next_before)["credit"]["checked_at"]
     outcome = outcome_line(rig, directory.name)
     assert "| reconciled |" in outcome and f"settled by {NEXT_SOURCE}" in outcome
     for fact in (
@@ -1025,6 +1028,7 @@ def test_a_killed_batch_is_settled_from_the_next_batchs_before_check_over_an_emp
         "b2/account-usage-before.json",
         b1["credit"]["checked_at"],
         "no reservation of any other batch was opened between the two checks",
+        f"no reconcile-time reading: a charge booked after {closing_at} is not seen",
     ):
         assert fact in outcome, fact
 
@@ -1082,6 +1086,92 @@ def test_a_next_check_before_the_killed_batchs_last_line_does_not_close_its_wind
     outcome = outcome_line(rig, directory.name)
     assert "| unresolved |" in outcome
     assert "follows the next batch's before-check; the window does not cover the batch" in outcome
+
+
+def test_a_settle_left_after_the_closing_check_is_adjusted_once_from_the_same_window(
+    rig: Rig,
+) -> None:
+    """Review fix 1: a reconcile stopped between its own settle and its adjust leaves a settle
+    stamped after the next batch's check. That line is reconcile's, not the runner's, so the
+    window still covers the batch and the next run writes the one adjust."""
+    responder, directory, next_before = killed_batch(rig)
+    kept = next_before.read_bytes()
+    next_before.unlink()
+    assert rig.run(reconcile_argv(rig), responder) == 0  # writes the manifest, stays open
+    later = Ledger(ledger(rig).path, Decimal("5.00"), clock=lambda: _stamp(time.time() + 120))
+    later.settle(directory.name, None, INTERRUPTED_SETTLE)
+    next_before.write_bytes(kept)
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert events_of(rig, directory.name) == ["reserve", "settle", "adjust"]
+    adjustment = record_of(rig, directory.name).adjustment
+    assert adjustment is not None and adjustment.source == NEXT_SOURCE
+    assert record_of(rig, directory.name).charged_usd == Decimal("0.0123")
+
+
+def other_ledger(rig: Rig, name: str, lines: list[dict[str, object]]) -> None:
+    path = rig.root / "artifacts" / "model-tests" / ".ledgers" / f"{name}.jsonl"
+    numbered = [{"seq": n, **line} for n, line in enumerate(lines, start=1)]
+    path.write_text("".join(json.dumps(line) + "\n" for line in numbered), encoding="utf-8")
+
+
+def test_another_batchs_reservation_open_at_the_before_check_leaves_it_unresolved(
+    rig: Rig,
+) -> None:
+    """Review ruling 3: a reservation of another batch opened before the window and settled
+    after it (or never) may be billed inside it."""
+    responder, directory, _ = killed_batch(rig)
+    early, late = _stamp(time.time() - 3600), _stamp(time.time() + 300)
+    other_ledger(
+        rig,
+        "b0",
+        [
+            {"event": "open", "cap_usd": "1", "at": early},
+            {"event": "reserve", "attempt_id": "z-1", "usd": "0.1", "at": early},
+            {
+                "event": "settle",
+                "attempt_id": "z-1",
+                "actual_usd": "0.01",
+                "charged_usd": "0.01",
+                "reason": "usage.cost",
+                "at": late,
+            },
+        ],
+    )
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines
+    outcome = outcome_line(rig, directory.name)
+    assert "| unresolved |" in outcome
+    assert f"b0.jsonl reservation z-1 (reserved at {early}) was still open at the before-check" in (
+        outcome
+    )
+
+
+def test_another_batchs_settle_inside_the_window_leaves_it_unresolved(rig: Rig) -> None:
+    responder, directory, _ = killed_batch(rig)
+    early, gap = _stamp(time.time() - 3600), _stamp(time.time() + 30)
+    other_ledger(
+        rig,
+        "b0",
+        [
+            {"event": "open", "cap_usd": "1", "at": early},
+            {"event": "reserve", "attempt_id": "z-1", "usd": "0.1", "at": early},
+            {
+                "event": "settle",
+                "attempt_id": "z-1",
+                "actual_usd": "0.01",
+                "charged_usd": "0.01",
+                "reason": "usage.cost",
+                "at": gap,
+            },
+        ],
+    )
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines
+    outcome = outcome_line(rig, directory.name)
+    assert "| unresolved |" in outcome
+    assert f"b0.jsonl settled z-1 at {gap}, inside the window" in outcome
 
 
 def test_a_killed_batch_with_no_later_batch_stays_unresolved(rig: Rig) -> None:

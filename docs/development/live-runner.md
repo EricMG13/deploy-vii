@@ -1116,7 +1116,7 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   `reconciled_usd` 0 and an `evidence` object (status 404, both usage figures and times, the
   delta, the other attempts and their sum, the difference, the tolerance, who recorded the
   usage). Replay refuses that source with a non-zero figure or without evidence. A missing
-  record, a usage that is not a number, checks made with different key tokens or a difference
+  record, a usage that is not a number, checks with different key-file notes or a difference
   above the tolerance leave the attempt unresolved with the reason. Probe-2 predates the
   records: its holds stay unresolved until the coordinator writes the two files from the
   recorded checks (25.7172663 before, 25.724167155 after).
@@ -1148,7 +1148,7 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   (`reconcile.usage_unmoved`; the evidence adds `usage_now_usd` and `usage_now_checked_at`).
   Otherwise the attempt stays held with `usage moved since the after-check (<after> then, <now>
   now); not attributed; a later reconcile may retry` (or that the usage now is not reported, or
-  is read through another key token), after `HTTP 404 ...;` or `no provider_request_id
+  records another key-file note), after `HTTP 404 ...;` or `no provider_request_id
   recorded; nothing to look up;` (decision 0008, task 7.0 amendment).
 - **An interrupted attempt (task 7.11).** A process killed after its reservation and before the
   reply (batch e1-cp1-12, stopped by the user mid-`financials`) leaves an open `reserve` with no
@@ -1185,16 +1185,22 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   recorded no `account-usage-after.json`, `reconcile.next_batch_window` closes its usage window
   at the `account-usage-before.json` of the earliest later batch under the same artifact root
   (by `checked_at`; a later check without a readable time, or two in one second, leaves the next
-  batch unknown). It holds only when both checks read the same key token, the batch's own ledger
-  ends before the closing check, and no reservation of any other batch was opened between the
-  two checks: every `.ledgers/*.jsonl` is read, and the next batch's own lines in the second of
-  its check are after it (the runner records the check before its first reservation). The
+  batch unknown). It holds only when both checks record the same key-file note (`credit.key_file`: the token count found and the token used, not a key fingerprint), the batch's own ledger
+  ends before the closing check, and no other batch reserved or settled between the two checks
+  or held a reservation open at the first (opened before it and settled after it, or never):
+  every `.ledgers/*.jsonl` is read, and the next batch's own lines in the second of its check
+  are after it (the runner records the check before its first reservation). For the batch's own
+  ledger only the runner's lines count (`reserve`, and a `settle` other than reconcile's
+  interrupted settle): a reconcile stopped between its settle and its `adjust` leaves lines
+  after the closing check, and the next run still writes the one `adjust`. The
   `account-usage-delta` attribution then runs over that window (only held attempt, every other
   charge measured, residual within the tolerance and at most the reservation) and writes the
   settle and an `adjust` with `source: "account-usage-delta/next-batch-before"`; the evidence
   adds `usage_window_closed_by`, `usage_before_file`, `usage_after_file` (paths under the
-  artifact root), `next_batch_id`, `reservations_between_checks: 0` and `ledgers_read`, and the
-  reconciled report's reason names both files, both times and the no-reservation fact. There is
+  artifact root), `next_batch_id`, `reservations_between_checks: 0`, `ledgers_read` and
+  `reconcile_time_reading: false`, and the reconciled report's reason names both files, both
+  times, the no-reservation fact and `no reconcile-time reading: a charge booked after <closing
+  check> is not seen`. There is
   no reconcile-time reading (later batches have moved the usage since), so unlike the in-batch
   rule this one cannot see a charge the provider books after the next batch's before-check (see
   the 7.13 review section). Anything short of it, a reservation in the gap above all, leaves the

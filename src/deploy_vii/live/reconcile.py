@@ -11,11 +11,11 @@ inferred. A connection failure stops the run (TransportError propagates).
 
 One corroborated exception (decision 0008): when the generation endpoint answers 404 for a held
 attempt and the batch's recorded account usage (`GET /api/v1/key` before and after the batch,
-`account-usage-{before,after}.json` under the batch directory, same key token) moved by exactly
+`account-usage-{before,after}.json` under the batch directory, same key-file note) moved by exactly
 the sum of the other pool attempts' measured costs (provider-reported, known-zero or reconciled
 from the endpoint) within US$0.000001, the held attempts together cost nothing measurable, so
 the attempt is adjusted to 0 with source `generation-404+usage-delta` and both facts in the
-ledger line. Anything short of that (no record, a usage figure missing, different key tokens,
+ledger line. Anything short of that (no record, a usage figure missing, different key-file notes,
 a difference above the tolerance) leaves the attempt unresolved with the reason. The delta also
 moves with any other spend on the account in the batch window; that can only make the
 difference larger, never fake a match.
@@ -48,7 +48,7 @@ outcome is unresolved. It is processed after every lookup, as a hold without an 
 
 Task 7.13: a batch killed before its after-check (e1-cp1-12) has no window of its own. Its
 window may then close at the earliest later batch's before-check under the same artifact root
-(`next_batch_window`), only when both checks read the same key token, the batch's own ledger
+(`next_batch_window`), only when both checks record the same key-file note, the batch's own ledger
 ends before that check and no reservation of any other batch was opened between the two checks
 (every `.ledgers/*.jsonl` read). The same attribution settles the interrupted attempt, source
 `account-usage-delta/next-batch-before`, with both files, both times and the no-reservation fact
@@ -325,12 +325,17 @@ def _next_before(
 def _ledgers_between(
     ledgers: Path, batch_id: str, next_id: str, start: datetime, end: datetime
 ) -> tuple[list[str] | None, str]:
-    """The ledger files read, when no batch but `batch_id` reserved between `start` and `end`
-    (inclusive; the next batch's own lines at `end` follow its check, which it records before
-    its first reservation) and every line of `batch_id`'s precedes `end`; else None with why."""
+    """The ledger files read, when no other batch's spend can fall between `start` and `end`
+    (inclusive), else None with why. Another batch may not reserve or settle in the window,
+    nor hold a reservation opened before `start` and not settled by then (the next batch's own
+    lines at `end` follow its check, which it records before its first reservation). Every
+    line the runner wrote for `batch_id` (a reserve, a settle other than this module's
+    `INTERRUPTED_SETTLE`) must precede `end`; `live reconcile`'s own settle and `adjust` lines
+    may follow it (a reconcile stopped between its settle and its adjust)."""
     read: list[str] = []
     for path in sorted(ledgers.glob("*.jsonl")):
         read.append(path.name)
+        opened: dict[object, str] = {}  # reserved before `start` and not yet settled
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             try:
                 entry = json.loads(line)
@@ -338,22 +343,40 @@ def _ledgers_between(
                 entry = None
             stamp = entry.get("at") if isinstance(entry, dict) else None
             at = _instant(stamp)
-            if not isinstance(entry, dict) or at is None:
+            if not isinstance(entry, dict) or at is None or stamp is None:
                 return None, f"{path.name} line {number} records no readable time"
+            event, attempt = entry.get("event"), entry.get("attempt_id")
             if path.stem == batch_id:
-                if at > end:
+                runner = event == "reserve" or (
+                    event == "settle" and entry.get("reason") != INTERRUPTED_SETTLE
+                )
+                if runner and at > end:
                     return None, (
                         f"{path.name} line {number} at {stamp} follows the next batch's "
                         "before-check; the window does not cover the batch"
                     )
                 continue
-            if entry.get("event") != "reserve" or not start <= at <= end:
+            if event not in {"reserve", "settle"}:
                 continue
-            if path.stem == next_id and at == end:
+            if at < start:
+                if event == "reserve":
+                    opened[attempt] = stamp
+                else:
+                    opened.pop(attempt, None)
                 continue
+            if at > end or (path.stem == next_id and at == end):
+                continue
+            done = "reserved" if event == "reserve" else "settled"
+            where = "between the two checks" if event == "reserve" else "inside the window"
             return None, (
-                f"{path.name} reserved {entry.get('attempt_id')} at {stamp}, between the two "
-                "checks; the account usage delta is not this batch's alone"
+                f"{path.name} {done} {attempt} at {stamp}, {where}; the account usage delta is "
+                "not this batch's alone"
+            )
+        if opened:
+            attempt, stamp = next(iter(opened.items()))
+            return None, (
+                f"{path.name} reservation {attempt} (reserved at {stamp}) was still open at the "
+                "before-check; it may be billed inside the window"
             )
     return read, ""
 
@@ -361,10 +384,12 @@ def _ledgers_between(
 def next_batch_window(artifact_root: Path, batch_id: str) -> tuple[NextBatchWindow | None, str]:
     """Task 7.13: the usage window of a batch that recorded no after-check (a killed run),
     closed at the before-check of the earliest later batch under the same artifact root, only
-    when both checks read the same key token, no reservation of any other batch was opened
-    between the two checks (every `.ledgers/*.jsonl` is read) and the batch's own ledger ends
-    before the closing check. None with why otherwise. No reconcile-time reading is added, as
-    the in-batch rule does (`usage_unmoved`): later batches have moved the usage since."""
+    when both checks record the same key-file note (`credit.key_file`), no other batch
+    reserved or settled between the two checks or held a reservation open at the first (every
+    `.ledgers/*.jsonl` is read, `_ledgers_between`) and the runner's own lines for the batch
+    precede the closing check. None with why otherwise. No reconcile-time reading is added, as
+    the in-batch rule does (`usage_unmoved`): later batches have moved the usage since, so the
+    record says so (`reconcile_time_reading: false` and the reason's last clause)."""
     own_path = usage_path(artifact_root, batch_id, "before")
     own, why = _usage_check(own_path, "before")
     if own is None:
@@ -381,7 +406,7 @@ def next_batch_window(artifact_root: Path, batch_id: str) -> tuple[NextBatchWind
     if end is None:
         return None, f"{closing}: {why}"
     if end.key_file != own.key_file:
-        return None, f"{closing} read another key token than the before-check"
+        return None, f"{closing} records another key-file note than the before-check"
     read, why = _ledgers_between(artifact_root / ".ledgers", batch_id, next_id, start, end_at)
     if read is None:
         return None, why
@@ -401,11 +426,14 @@ def next_batch_window(artifact_root: Path, batch_id: str) -> tuple[NextBatchWind
         "next_batch_id": next_id,
         "reservations_between_checks": 0,
         "ledgers_read": read,
+        # The window's limit, on the record: nothing corroborates it after the closing check.
+        "reconcile_time_reading": False,
     }
     reason = (
         f"window from {opening} at {own.checked_at} to the next batch's before-check {closing} "
         f"at {end.checked_at}; no reservation of any other batch was opened between the two "
-        f"checks ({len(read)} ledgers read)"
+        f"checks ({len(read)} ledgers read); no reconcile-time reading: a charge booked after "
+        f"{end.checked_at} is not seen"
     )
     return NextBatchWindow(window, evidence, reason), ""
 
