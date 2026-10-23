@@ -22,6 +22,7 @@ from deploy_vii.live.cohort import (
     native_luna_available,
     native_luna_check,
 )
+from deploy_vii.live.context import step_sources
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.ledger import CapExceeded
 from deploy_vii.live.retention import RetentionError
@@ -468,10 +469,12 @@ def test_proxy_after_a_cap_overrun_is_refused_by_the_zero_reservation(tmp_path: 
     assert [a.attempt_id for a in rig.ledger.state().attempts] == ["earlier"]
 
 
-def cp1_proxy(rig: Rig, step_id: str, payload: str) -> ProxyResult:
+def cp1_proxy(rig: Rig, step_id: str, payload: str, *, all_sources: bool = False) -> ProxyResult:
+    """A proxy CP-1 step declaring the pack sources `step_sources` gives it (task 7.5, R6), or,
+    with `all_sources`, every pack source whatever the step."""
     sources = tuple(s.source_id for s in rig.store.pack().sources)
     return accept_proxy_payload(
-        StepSpec(step_id, "case-cp1", sources),
+        StepSpec(step_id, "case-cp1", sources if all_sources else step_sources(step_id, sources)),
         payload,
         "claude-agent",
         store=rig.store,
@@ -574,3 +577,20 @@ def test_a_rejected_proxy_quality_review_finishes_the_attempt(tmp_path: Path) ->
     assert any(i.startswith("QA lineage upgrade rejected: ") for i in result.issues)
     assert result.journal is not None and result.journal.status == "finished"
     assert not [h for h in rig.store.read().heads if h.module_id == "CP-1"]
+
+
+def test_a_proxy_step_that_checks_no_span_is_refused_the_pack_sources(tmp_path: Path) -> None:
+    """Task 7.5 fix 1 (R6 on the proxy path): `quality` matches no quote against the pack, so a
+    proxy spec declaring pack sources is refused before anything is written; the manifest never
+    records pack sources for it. The `step_sources` spec is accepted (above, it promotes CP-1)."""
+    rig, inputs = quality_rig(tmp_path)
+    before = rig.ledger.state().lines
+    with pytest.raises(ValueError, match="step quality checks no span against the pack"):
+        cp1_proxy(rig, "quality", json.dumps(model_review(inputs)), all_sources=True)
+    assert rig.ledger.state().lines == before
+    assert not (rig.root / "artifacts").exists() or not list((rig.root / "artifacts").rglob("*"))
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert len(attempt.steps) == 4 and attempt.status == "pending"
+    result = cp1_proxy(rig, "quality", json.dumps(model_review(inputs)))
+    assert result.status == "accepted", result.issues
+    assert load(result.directory / "request.json")["declared_inputs"] == []

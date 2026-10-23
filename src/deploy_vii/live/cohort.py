@@ -23,6 +23,7 @@ from typing import Any
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live.catalog import utc_stamp
 from deploy_vii.live.client import ChatClient
+from deploy_vii.live.context import PACK_SOURCE_STEPS
 from deploy_vii.live.credential import redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_key_response
 from deploy_vii.live.ledger import Ledger, Settlement
@@ -137,11 +138,17 @@ def accept_proxy_payload(
 ) -> ProxyResult:
     """Feed a coordinator-supplied payload through the journal validators as cohort proxy:<label>.
 
-    Raises ValueError for a bad label, unknown ticket or a step that is not next on the ticket,
-    before anything is written. A payload the journal rejects is retained and settles `rejected`.
+    Raises ValueError for a bad label, pack sources declared for a step whose validator checks no
+    span (task 7.5, R6), unknown ticket or a step that is not next on the ticket, before anything
+    is written. A payload the journal rejects is retained and settles `rejected`.
     """
     if not AGENT_LABEL.fullmatch(agent_label):
         raise ValueError("agent label may hold letters, digits, '.', '_' and '-' (max 40)")
+    if step.declared_sources and step.step_id not in PACK_SOURCE_STEPS:  # task 7.5, R6
+        raise ValueError(
+            f"step {step.step_id} checks no span against the pack; it declares no pack sources "
+            "(declare them through live.context.step_sources)"
+        )
     snapshot = store.read()
     attempt = next((item for item in snapshot.attempts if item.ticket_id == ticket_id), None)
     if attempt is None:
