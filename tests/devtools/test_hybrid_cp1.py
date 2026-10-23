@@ -115,7 +115,11 @@ class Model:
         assert entered.steps[-1].status == "valid", entered.steps[-1].issues
         if request.url == cp1.ANTHROPIC_URL:
             return ant_stream(("t1", f"submit_{step_id}", payload), model=self.model)
-        return reply(("c1", f"submit_{step_id}", payload))
+        answer = reply(("c1", f"submit_{step_id}", payload))
+        if self.model == OPUS:  # the default: Sol is served, as `reply` states
+            return answer
+        served = json.loads(answer.body) | {"model": self.model}
+        return Response(answer.status, json.dumps(served).encode())
 
 
 def body_of(request: Request) -> dict[str, Any]:
@@ -254,7 +258,9 @@ def make_harness(
     return cp1.Harness(
         cp0_journal=frozen,
         providers={
-            "openrouter": cp1.OpenRouter(ChatClient(transport), candidate, Decimal("3.0")),
+            "openrouter": cp1.OpenRouter(
+                ChatClient(transport), {cp0.MODEL: candidate}, Decimal("3.0")
+            ),
             "anthropic": cp1.Anthropic(as_stream(transport), Decimal("3.0")),
         },
         ledgers={
@@ -667,12 +673,23 @@ def test_evidence_counts_cover_citations_limitations_and_claims() -> None:
 # --- command line ----------------------------------------------------------------------------
 
 
-def cli(tmp_path: Path, frozen: Path, *extra: str) -> list[str]:
+LUNA = "openai/gpt-6-luna"
+
+
+def cli(
+    tmp_path: Path,
+    frozen: Path,
+    *extra: str,
+    luna_efforts: tuple[str, ...] = ("low", "medium", "high", "xhigh"),
+) -> list[str]:
     catalog = tmp_path / "models.json"
-    row = catalog_row(
-        cp0.MODEL, parameters=PARAMETERS, pricing=PRICING, efforts=("low", "medium", "high")
-    )
-    catalog.write_text(json.dumps({"data": [row]}), encoding="utf-8")
+    rows = [
+        catalog_row(
+            cp0.MODEL, parameters=PARAMETERS, pricing=PRICING, efforts=("low", "medium", "high")
+        ),
+        catalog_row(LUNA, parameters=PARAMETERS, pricing=PRICING, efforts=luna_efforts),
+    ]
+    catalog.write_text(json.dumps({"data": rows}), encoding="utf-8")
     return [
         "--cp0-journal",
         str(frozen),
@@ -889,3 +906,181 @@ def test_an_idle_stream_is_cut_at_the_idle_limit() -> None:
     assert reply.classification == "stream-incomplete" and reply.cost is None
     assert reply.error_detail == f"no byte for {cp1.IDLE_S} s (idle timeout)"
     assert reply.served_model == OPUS and reply.raw is not None
+
+
+# --- the extra Luna cell on a shared OpenRouter ledger -----------------------------------------
+
+
+def earlier_batch_ledger(tmp_path: Path) -> Path:
+    """hybrid-cp1-1's OpenRouter ledger after one settled Sol call (cap 15)."""
+    path = tmp_path / "root" / ".ledgers" / "hybrid-cp1-1-openrouter.jsonl"
+    path.parent.mkdir(parents=True)
+    ledger = Ledger(path, Decimal(15))
+    ledger.reserve("sol-high-source_context-call-01", Decimal(2))
+    ledger.settle("sol-high-source_context-call-01", Decimal("0.5"), "usage.cost")
+    return path
+
+
+def test_luna_runs_on_the_earlier_batchs_openrouter_ledger(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    loaded: list[str] = []
+    monkeypatch.setattr(cp1, "load_anthropic_key", lambda *_: loaded.append("anthropic"))
+    shared = earlier_batch_ledger(tmp_path)
+    before = shared.read_bytes()
+    luna = Model(case, tmp_path / "model", LUNA)
+    transport = FakeTransport(*[luna] * 4)
+    args = cli(tmp_path, case.frozen, "--cells", "luna-xhigh", "--batch-id", "hybrid-cp1-2")
+    args += ["--openrouter-ledger", str(shared), "--seed", "1", "--step-seconds", "3600"]
+    assert cp1.main(args, transport=transport, stream_transport=unexpected_stream) == 0
+    plan, summary = cp0_json_documents(capsys.readouterr().out)
+    assert [o["cell_id"] for o in plan["order"]] == ["luna-xhigh"]
+    assert plan["openrouter"]["efforts"]["luna-xhigh"]["sent"] == "xhigh"
+    assert not plan["openrouter"]["efforts"]["luna-xhigh"]["mapped"]
+    assert plan["money"]["ledgers"]["openrouter"]["shared"] is True
+    assert Decimal(plan["money"]["ledgers"]["openrouter"]["headroom"]) == Decimal("14.5")
+    assert "anthropic" not in plan["money"]["ledgers"] and not loaded
+    assert summary["cells"][0]["verdict"] == "accepted"
+    sent = [body_of(r) for r in transport.requests]
+    assert {b["model"] for b in sent} == {LUNA} and {b["reasoning"]["effort"] for b in sent} == {
+        "xhigh"
+    }
+    # The earlier batch's lines stand as written; Luna's attempts follow them.
+    after = shared.read_bytes()
+    assert after.startswith(before)
+    state = Ledger(shared, Decimal(15)).state()
+    names = [a.attempt_id for a in state.attempts]
+    assert names[0] == "sol-high-source_context-call-01"
+    assert all(n.startswith("luna-xhigh-") for n in names[1:]) and len(names) == 5
+    assert not (tmp_path / "root" / ".ledgers" / "hybrid-cp1-2-openrouter.jsonl").exists()
+    assert (tmp_path / "root" / "hybrid-cp1-2" / "luna-xhigh" / "metrics.json").exists()
+
+
+def test_luna_is_not_run_when_xhigh_would_be_mapped(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    shared = earlier_batch_ledger(tmp_path)
+    args = cli(tmp_path, case.frozen, "--cells", "luna-xhigh", luna_efforts=("low", "high"))
+    args += ["--openrouter-ledger", str(shared), "--batch-id", "hybrid-cp1-2"]
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert "luna-xhigh: effort xhigh would be sent as" in capsys.readouterr().err
+    assert not (tmp_path / "root" / "hybrid-cp1-2").exists()
+
+
+def test_a_missing_shared_ledger_is_refused(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    absent = tmp_path / "absent.jsonl"
+    args = cli(tmp_path, case.frozen, "--cells", "luna-xhigh", "--openrouter-ledger", str(absent))
+    assert cp1.main(args, transport=unexpected_send) == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def unexpected_stream(request: Request, idle_s: float) -> cp1.Stream:
+    raise AssertionError(f"an Anthropic call was opened: {request.url}")
+
+
+def cp0_json_documents(out: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The plan and the batch summary main prints, one JSON document after the other."""
+    decoder = json.JSONDecoder()
+    plan, end = decoder.raw_decode(out)
+    summary, _ = decoder.raw_decode(out[end:].lstrip())
+    return plan, summary
+
+
+# --- resuming hybrid-cp1-1 after the user skipped opus-high ------------------------------------
+
+
+def stopped_batch(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
+    """hybrid-cp1-1 as the stop left it: four cells done, opus-high's directory begun (no call),
+    sonnet-xhigh not started, both ledgers holding earlier attempts."""
+    batch = tmp_path / "root" / "hybrid-cp1-1"
+    order = ["sonnet-max", "sol-high", "sol-medium", "opus-medium", "opus-high", "sonnet-xhigh"]
+    for cell_id in order[:4]:
+        (batch / cell_id).mkdir(parents=True)
+    (batch / "opus-high" / "journal-start").mkdir(parents=True)
+    rows = [{"order": n, "cell_id": cell_id} for n, cell_id in enumerate(order, start=1)]
+    (batch / "plan.json").write_text(json.dumps({"order": rows}), encoding="utf-8")
+    shared = earlier_batch_ledger(tmp_path)
+    anthropic = shared.with_name("hybrid-cp1-1-anthropic.jsonl")
+    ledger = Ledger(anthropic, Decimal(25))
+    ledger.reserve("opus-medium-source_context-call-01", Decimal(3))
+    ledger.settle("opus-medium-source_context-call-01", Decimal("1.25"), "computed")
+    before = {p.name: p.read_bytes() for p in (shared, anthropic, batch / "plan.json")}
+    return batch, before
+
+
+def test_a_resume_runs_only_the_named_cell_and_records_the_skip(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    batch, before = stopped_batch(tmp_path)
+    sonnet = Model(case, tmp_path / "model", SONNET)
+    transport = FakeTransport(*[sonnet] * 4)
+    args = cli(tmp_path, case.frozen, "--resume", "--cells", "sonnet-xhigh", "--seed", "1")
+    args += ["--skipped-by-user", "opus-high", "--step-seconds", "3600"]
+    assert cp1.main(args, transport=unexpected_send, stream_transport=as_stream(transport)) == 0
+    plan, summary = cp0_json_documents(capsys.readouterr().out)
+    ledgers = plan["money"]["ledgers"]
+    assert set(ledgers) == {"anthropic"} and ledgers["anthropic"]["shared"] is True
+    assert Decimal(ledgers["anthropic"]["headroom"]) == Decimal("23.75")
+    assert plan["resume"] == {"of": "plan.json"} and plan["skipped_by_user"] == ["opus-high"]
+    assert [(c["cell_id"], c["order"]) for c in plan["order"]] == [("sonnet-xhigh", 6)]
+    cells = {c["cell_id"]: c for c in summary["cells"]}
+    assert cells["opus-high"]["verdict"] == "skipped by user" and cells["opus-high"]["order"] == 5
+    assert cells["opus-high"]["steps"] == [] and cells["opus-high"]["cost_settled_usd"] == "0"
+    assert cells["sonnet-xhigh"]["verdict"] == "accepted" and cells["sonnet-xhigh"]["order"] == 6
+    assert not (batch / "opus-high" / "metrics.json").exists()
+    assert (batch / "sonnet-xhigh" / "metrics.json").exists()
+    assert (batch / "plan-resume-sonnet-xhigh.json").exists()
+    assert (batch / "batch-summary-resume-sonnet-xhigh.json").exists()
+    assert not (batch / "batch-summary.json").exists()
+    # Earlier evidence stands as written; the Anthropic ledger gains only sonnet-xhigh lines.
+    ledger_dir = batch.parent / ".ledgers"
+    assert (batch / "plan.json").read_bytes() == before["plan.json"]
+    openrouter = ledger_dir / "hybrid-cp1-1-openrouter.jsonl"
+    assert openrouter.read_bytes() == before[openrouter.name]
+    anthropic = ledger_dir / "hybrid-cp1-1-anthropic.jsonl"
+    assert anthropic.read_bytes().startswith(before[anthropic.name])
+    names = [a.attempt_id for a in Ledger(anthropic, Decimal(25)).state().attempts]
+    assert names[0] == "opus-medium-source_context-call-01"
+    assert len(names) == 5 and all(n.startswith("sonnet-xhigh-") for n in names[1:])
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (("--cells", "opus-medium"), "already started: ['opus-medium']"),
+        (("--cells", "opus-high"), "already started: ['opus-high']"),
+        (("--cells", "luna-xhigh"), "not in hybrid-cp1-1's plan: ['luna-xhigh']"),
+        (("--cells", "sonnet-xhigh", "--skipped-by-user", "sonnet-xhigh"), "both run and skipped"),
+    ],
+)
+def test_a_resume_never_reruns_a_started_cell(
+    case: Case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: tuple[str, ...],
+    reason: str,
+) -> None:
+    fake_keys(monkeypatch)
+    batch, _ = stopped_batch(tmp_path)
+    args = cli(tmp_path, case.frozen, "--resume", *extra)
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert reason in capsys.readouterr().err
+    assert sorted(p.name for p in batch.iterdir() if p.is_file()) == ["plan.json"]
+
+
+def test_a_resume_needs_the_batchs_ledger(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    batch, _ = stopped_batch(tmp_path)
+    (batch.parent / ".ledgers" / "hybrid-cp1-1-anthropic.jsonl").unlink()
+    args = cli(tmp_path, case.frozen, "--resume", "--cells", "sonnet-xhigh")
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert "hybrid-cp1-1-anthropic.jsonl does not exist" in capsys.readouterr().err

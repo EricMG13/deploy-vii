@@ -87,6 +87,7 @@ from deploy_vii.live.credential import (  # type: ignore[import-untyped]
 )
 from deploy_vii.live.ledger import CapExceeded, Ledger, LedgerError, Settlement  # type: ignore[import-untyped]
 from deploy_vii.live.prompts import PromptError, UpstreamInput, build  # type: ignore[import-untyped]
+from deploy_vii.live.reconcile import open_ledger  # type: ignore[import-untyped]
 from deploy_vii.live.runner import (  # type: ignore[import-untyped]
     TOKEN_OVERHEAD,
     _cost,
@@ -142,6 +143,10 @@ CELLS = (
     Cell("sonnet-xhigh", "claude-sonnet-5-5", "anthropic", "xhigh"),
     Cell("sonnet-max", "claude-sonnet-5-5", "anthropic", "max"),
 )
+# Run only when named with --cells (user decision, 23 Oct 2026: Luna at xhigh, after
+# hybrid-cp1-1, on that batch's OpenRouter ledger). Decision 0005's amendment superseded Luna.
+EXTRA_CELLS = (Cell("luna-xhigh", "openai/gpt-6-luna", "openrouter", "xhigh"),)
+SKIPPED_BY_USER = "skipped by user"  # user decision, 24 Oct 2026: "skip opus high"
 
 
 @dataclass(frozen=True)
@@ -276,7 +281,7 @@ class Provider(Protocol):
 @dataclass
 class OpenRouter:
     client: ChatClient
-    candidate: PinnedCandidate
+    candidates: Mapping[str, PinnedCandidate]  # by the cell's model id
     bytes_per_token: Decimal
     name: str = "openrouter"
 
@@ -288,13 +293,14 @@ class OpenRouter:
         tools: Sequence[Tool],
         timeout_s: float,
     ) -> Prepared:
+        candidate = self.candidates[cell.model]
         request = cp0.ToolChatRequest(
-            model=self.candidate.slug,
+            model=candidate.slug,
             messages=(),
             max_tokens=MAX_TOKENS,
             response_format={},
             reasoning_effort=cell.effort,
-            accepted_model_ids=(self.candidate.slug, self.candidate.canonical_slug),
+            accepted_model_ids=(candidate.slug, candidate.canonical_slug),
             timeout_s=timeout_s,
             conversation=({"role": "system", "content": system}, *conversation),
             tools=tuple(
@@ -307,8 +313,8 @@ class OpenRouter:
         return Prepared(
             payload=json.dumps(body, sort_keys=True).encode(),  # what ChatClient sends
             bound=bound,
-            reserve=reservation_usd(self.candidate, bound, MAX_TOKENS),
-            misfit=self.candidate.misfit(bound, MAX_TOKENS),
+            reserve=reservation_usd(candidate, bound, MAX_TOKENS),
+            misfit=candidate.misfit(bound, MAX_TOKENS),
             tool_choice=request.tool_choice,
             timeout_s=timeout_s,
             request=request,
@@ -316,7 +322,8 @@ class OpenRouter:
 
     def send(self, cell: Cell, prepared: Prepared, key: str) -> Reply:
         assert prepared.request is not None
-        return openrouter_reply(self.candidate, self.client.complete(prepared.request, key=key))
+        result = self.client.complete(prepared.request, key=key)
+        return openrouter_reply(self.candidates[cell.model], result)
 
     def tool_results(self, results: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
         return [{"role": "tool", "tool_call_id": ident, "content": text} for ident, text in results]
@@ -1294,13 +1301,21 @@ def cell_metrics(run: CellRun) -> dict[str, Any]:
 
 
 def run_batch(
-    harness: Harness, runs: Sequence[CellRun], *, seed: int, prior: cp0.PriorSpend | None = None
+    harness: Harness,
+    runs: Sequence[CellRun],
+    *,
+    seed: int,
+    prior: cp0.PriorSpend | None = None,
+    summary_name: str = "batch-summary.json",
 ) -> dict[str, Any]:
     """Run the cells in order. A ProviderStop skips that provider's remaining cells and is
-    recorded, never raised; the other provider's cells go on."""
+    recorded, never raised; the other provider's cells go on. A cell whose verdict is already
+    SKIPPED_BY_USER is listed in the summary and never started."""
     stopped: dict[str, str] = {}
     for run in runs:
         provider = run.cell.provider
+        if run.verdict == SKIPPED_BY_USER:
+            continue
         if provider in stopped:
             run.verdict = f"not run: {provider} stopped"
             continue
@@ -1358,7 +1373,7 @@ def run_batch(
             for run in runs
         ],
     }
-    cp0._write(harness.batch_directory / "batch-summary.json", summary)
+    cp0._write(harness.batch_directory / summary_name, summary)
     return summary
 
 
@@ -1453,6 +1468,28 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
     command.add_argument("--catalog", type=Path, help="saved models JSON; else fetched (public)")
     command.add_argument(
+        "--cells",
+        type=_cells,
+        default=CELLS,
+        help="comma-separated cell ids (default: the six of hybrid-cp1-1)",
+    )
+    command.add_argument(
+        "--openrouter-ledger",
+        type=Path,
+        help="spend OpenRouter cells against this existing ledger (its own cap)",
+    )
+    command.add_argument(
+        "--resume",
+        action="store_true",
+        help="run --cells of the batch's plan.json not yet started, on its existing ledgers",
+    )
+    command.add_argument(
+        "--skipped-by-user",
+        type=_cells,
+        default=(),
+        help="comma-separated cell ids the user skipped; listed in the summary, never started",
+    )
+    command.add_argument(
         "--step-seconds",
         type=float,
         default=DEADLINE_S,
@@ -1470,6 +1507,67 @@ def _refuse(reason: str) -> int:
     return 2
 
 
+def _cells(text: str) -> tuple[Cell, ...]:
+    known = {cell.cell_id: cell for cell in (*CELLS, *EXTRA_CELLS)}
+    chosen = [name.strip() for name in text.split(",") if name.strip()]
+    unknown = [name for name in chosen if name not in known]
+    if unknown or not chosen or len(set(chosen)) != len(chosen):
+        raise argparse.ArgumentTypeError(f"cells must be distinct ids of {sorted(known)}")
+    return tuple(known[name] for name in chosen)
+
+
+@dataclass(frozen=True)
+class LedgerPlan:
+    path: Path
+    cap: Decimal
+    headroom: Decimal  # what this batch can still commit against the ceiling
+    shared: bool
+
+
+def _ledger_plans(
+    args: argparse.Namespace, providers: Sequence[str], directory: Path
+) -> dict[str, LedgerPlan]:
+    """A new `<batch>-<provider>.jsonl` per provider (it must not exist), or an existing ledger
+    with the cap its first line records: --openrouter-ledger's for OpenRouter, the batch's own
+    under --resume (attempt ids are cell-prefixed, so cells cannot collide). Raises ValueError
+    to refuse."""
+    plans = {}
+    for name in providers:
+        given = args.openrouter_ledger if name == "openrouter" else None
+        path = given or directory / f"{args.batch_id}-{name}.jsonl"
+        if given is not None or args.resume:
+            if not path.is_file():
+                raise ValueError(f"ledger {path.name} does not exist")
+            state = open_ledger(path).state()
+            plans[name] = LedgerPlan(path, state.cap, state.remaining, True)
+            continue
+        if path.exists():
+            raise ValueError(f"{path.name} already exists; use a new --batch-id")
+        cap = args.cap_openrouter if name == "openrouter" else args.cap_anthropic
+        plans[name] = LedgerPlan(path, cap, cap, False)
+    return plans
+
+
+def _cell_numbers(args: argparse.Namespace, batch_directory: Path) -> dict[str, int]:
+    """Under --resume, each cell's place in the batch's own plan.json order; for a new batch,
+    none (the seeded shuffle numbers it). Raises ValueError to refuse."""
+    running = [cell.cell_id for cell in args.cells]
+    skipped = [cell.cell_id for cell in args.skipped_by_user]
+    if both := sorted(set(running) & set(skipped)):
+        raise ValueError(f"both run and skipped: {both}")
+    if not args.resume:
+        if batch_directory.exists():
+            raise ValueError("already has a directory; use a new --batch-id or --resume")
+        return {}
+    plan = json.loads((batch_directory / "plan.json").read_text(encoding="utf-8"))
+    numbers = {str(row["cell_id"]): int(row["order"]) for row in plan["order"]}
+    if absent := [name for name in [*running, *skipped] if name not in numbers]:
+        raise ValueError(f"not in {args.batch_id}'s plan: {absent}")
+    if started := [name for name in running if (batch_directory / name).exists()]:
+        raise ValueError(f"already started: {started}; a started cell is never re-run")
+    return numbers
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1478,9 +1576,9 @@ def main(
 ) -> int:
     args = parser().parse_args(argv)
     settings = load_settings(args.settings)
-    caps = {"openrouter": args.cap_openrouter, "anthropic": args.cap_anthropic}
+    cells: tuple[Cell, ...] = args.cells
+    used = sorted({cell.provider for cell in cells})
     ledgers = args.artifact_root / ".ledgers"
-    paths = {name: ledgers / f"{args.batch_id}-{name}.jsonl" for name in caps}
     batch_directory = args.artifact_root / args.batch_id
     try:
         spend = cp0.prior_committed(ledgers)
@@ -1493,47 +1591,66 @@ def main(
             f"{item['previous_charged_usd']}",
             file=sys.stderr,
         )
+    try:
+        plans = _ledger_plans(args, used, ledgers)
+    except (ValueError, LedgerError) as error:
+        return _refuse(str(error))
     ceiling = settings.caps.cumulative_ceiling
-    total_cap = sum(caps.values(), Decimal(0))
-    if spend.total + total_cap > ceiling:
-        return _refuse(f"prior ledgers hold {spend.total} USD; with caps {total_cap} > {ceiling}")
-    if any(path.exists() for path in paths.values()) or batch_directory.exists():
-        return _refuse(f"{args.batch_id} already has a ledger or directory; use a new --batch-id")
+    headroom = sum((plan.headroom for plan in plans.values()), Decimal(0))
+    if spend.total + headroom > ceiling:
+        return _refuse(f"prior ledgers hold {spend.total} USD; with {headroom} more > {ceiling}")
+    try:
+        numbers = _cell_numbers(args, batch_directory)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return _refuse(f"{args.batch_id}: {error}")
     try:
         pack, system, user = cp1_start(args.cp0_journal)
     except (OSError, ValueError, PromptError) as error:
         return _refuse(f"the frozen CP-0 journal cannot start CP-1: {error}")
-    try:
-        catalog = Catalog.from_file(args.catalog) if args.catalog else Catalog.fetch(transport)
-        pool = catalog.pin_selected(args.batch_id, (ModelSelection(cp0.MODEL, None),))
-        candidate = pool.candidate(cp0.MODEL)
-    except CatalogError as error:
-        return _refuse(str(error))
-    lacking = [p for p in ("tools", "tool_choice") if p not in candidate.supported_parameters]
-    if not candidate.eligible or lacking:
-        return _refuse(f"{cp0.MODEL} ineligible: {candidate.exclusion_reason or lacking}")
+    models = list(dict.fromkeys(c.model for c in cells if c.provider == "openrouter"))
+    candidates: dict[str, PinnedCandidate] = {}
+    catalog = None
+    if models:
+        try:
+            catalog = Catalog.from_file(args.catalog) if args.catalog else Catalog.fetch(transport)
+            selection = tuple(ModelSelection(model, None) for model in models)
+            pool = catalog.pin_selected(args.batch_id, selection)
+            candidates = {model: pool.candidate(model) for model in models}
+        except CatalogError as error:
+            return _refuse(str(error))
+    for model, candidate in candidates.items():
+        lacking = [p for p in ("tools", "tool_choice") if p not in candidate.supported_parameters]
+        if not candidate.eligible or lacking:
+            return _refuse(f"{model} ineligible: {candidate.exclusion_reason or lacking}")
     efforts = {}
-    for cell in CELLS:
+    for cell in cells:
         if cell.provider == "openrouter":
-            decision = candidate.effort_for(cell.effort)
-            if decision.sent != cell.effort:  # never measure an effort other than the one asked
+            decision = candidates[cell.model].effort_for(cell.effort)
+            if decision.sent != cell.effort or decision.mapped:  # only the effort asked for
                 return _refuse(
                     f"{cell.cell_id}: effort {cell.effort} would be sent as {decision.sent}"
                 )
             efforts[cell.cell_id] = decision.to_record()
+    keys: dict[str, LoadedKey] = {}
     try:
-        openrouter_key = load_key_with_note(
-            settings.credential_file, settings.credential_token_index
-        )
-        anthropic_key = load_anthropic_key(settings.credential_file)
+        if "openrouter" in used:
+            keys["openrouter"] = load_key_with_note(
+                settings.credential_file, settings.credential_token_index
+            )
+        if "anthropic" in used:
+            keys["anthropic"] = load_anthropic_key(settings.credential_file)
     except CredentialError as error:  # messages hold counts only
         return _refuse(f"credential: {error}")
     seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**32)
-    order = list(CELLS)
+    order = list(cells)
     random.Random(seed).shuffle(order)
+    skipped: tuple[Cell, ...] = args.skipped_by_user
+    listed = [*order, *skipped]
+    numbers = numbers or {cell.cell_id: n for n, cell in enumerate(listed, start=1)}
+    listed.sort(key=lambda cell: numbers[cell.cell_id])
     bpt = settings.prompt_bytes_per_token_lower_bound
     providers: dict[str, Provider] = {
-        "openrouter": OpenRouter(ChatClient(transport), candidate, bpt),
+        "openrouter": OpenRouter(ChatClient(transport), candidates, bpt),
         "anthropic": Anthropic(stream_transport, bpt),
     }
     first = [{"role": "user", "content": user}]
@@ -1550,16 +1667,23 @@ def main(
             "tool_choice": prepared.tool_choice,
             "misfit": prepared.misfit,
         }
+    notes: dict[str, dict[str, object]] = {name: dict(key.note()) for name, key in keys.items()}
+    if "anthropic" in notes:
+        notes["anthropic"]["rule"] = "the one sk-ant- token among the file's distinct sk- tokens"
     plan = {
         "batch_id": args.batch_id,
         "seed": seed,
-        "order": [{"order": n} | asdict(cell) for n, cell in enumerate(order, start=1)],
+        "order": [{"order": numbers[cell.cell_id]} | asdict(cell) for cell in order],
+        "skipped_by_user": [cell.cell_id for cell in skipped],
+        "resume": {"of": "plan.json"} if args.resume else None,
         "steps": list(CP1_STEPS),
         "cp0_journal": {"path": args.cp0_journal, "pack_sha256": pack.content_hash()},
         "located_pages": cp0.PackTools(pack).located_pages,
         "openrouter": {
-            "pinned_candidate": candidate.to_record(),
-            "catalog": {"source": catalog.source, "sha256": catalog.sha256},
+            "pinned_candidates": {m: c.to_record() for m, c in candidates.items()},
+            "catalog": None
+            if catalog is None
+            else {"source": catalog.source, "sha256": catalog.sha256},
             "efforts": efforts,
         },
         "anthropic": {
@@ -1570,12 +1694,7 @@ def main(
             "tool_choice": "any first; auto after a 400 naming tool_choice",
             "thinking": {"type": "adaptive"},
         },
-        "credential": {
-            "recorded": False,
-            "openrouter": openrouter_key.note(),
-            "anthropic": anthropic_key.note()
-            | {"rule": "the one sk-ant- token among the file's distinct sk- tokens"},
-        },
+        "credential": {"recorded": False, **notes},
         "limits": {
             "max_tokens_per_call": MAX_TOKENS,
             "calls_per_step": MAX_CALLS,
@@ -1584,11 +1703,11 @@ def main(
             "submits_per_step": MAX_SUBMITS,
         },
         "money": {
-            "caps_usd": caps,
+            "caps_usd": {name: plan.cap for name, plan in plans.items()},
+            "ledgers": {name: asdict(plan) for name, plan in plans.items()},
             "prior_committed_usd": spend.total,
             "prior_worst_case_adjusts": list(spend.worst_case_adjusts),
             "cumulative_ceiling_usd": ceiling,
-            "ledgers": paths,
             "first_call_per_cell": first_calls,
             "later_calls": "reserved at send time from each call's own (growing) request body",
         },
@@ -1607,20 +1726,31 @@ def main(
     print(cp0._json(plan), end="")
     if args.dry_run:
         return 0
-    batch_directory.mkdir(parents=True)
-    cp0._write(batch_directory / "plan.json", plan)
+    # A resume writes beside the batch's plan.json, never over it.
+    suffix = "-resume-" + "-".join(cell.cell_id for cell in order) if args.resume else ""
+    batch_directory.mkdir(parents=True, exist_ok=args.resume)
+    cp0._write(batch_directory / f"plan{suffix}.json", plan)
     harness = Harness(
         cp0_journal=args.cp0_journal,
         providers=providers,
-        ledgers={name: Ledger(path, caps[name]) for name, path in paths.items()},
-        keys={"openrouter": openrouter_key.key, "anthropic": anthropic_key.key},
+        ledgers={name: Ledger(plan.path, plan.cap) for name, plan in plans.items()},
+        keys={name: key.key for name, key in keys.items()},
         batch_directory=batch_directory,
         deadline_s=args.step_seconds,
     )
     runs = [
-        CellRun(cell, n, batch_directory / cell.cell_id) for n, cell in enumerate(order, start=1)
+        CellRun(
+            cell,
+            numbers[cell.cell_id],
+            batch_directory / cell.cell_id,
+            verdict="not run" if cell in order else SKIPPED_BY_USER,
+        )
+        for cell in listed
     ]
-    print(cp0._json(run_batch(harness, runs, seed=seed, prior=spend)), end="")
+    summary = run_batch(
+        harness, runs, seed=seed, prior=spend, summary_name=f"batch-summary{suffix}.json"
+    )
+    print(cp0._json(summary), end="")
     return 0
 
 
