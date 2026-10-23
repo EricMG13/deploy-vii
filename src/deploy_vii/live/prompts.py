@@ -157,6 +157,19 @@ BOUND_SCOPE_RULE = (
     "only periods whose scopes carry the same four strings: a period with no such scope, or a "
     "book whose periods' scopes differ, is a rejection."
 )
+# Task 7.14 (batches e1-cp1-13 and -14: three of four source contexts left `currency` null on every
+# scope and worded the current year's perimeter unlike the comparative years'):
+# `source_context.validate_source_context` rejects a null dimension on a financial source's
+# historical or period-end scope (rule 1) and any two stated strings of one entity's such scopes
+# that differ, compared exactly (rule 2, `_disagreements`).
+SCOPE_DIMENSION_RULE = (
+    "Every `historical_duration` and `period_end` scope of a financial source states `currency` "
+    "and `unit`, and `entity_perimeter` and `accounting_basis` too (none is null). All such "
+    "scopes of one entity, across every financial source, carry the same four strings word for "
+    "word: `entity_perimeter` names the consolidation perimeter, not how a year is presented, so "
+    "a comparative year's scope repeats the current year's words. Forecast and unspecified "
+    "scopes are not held to this."
+)
 # Task 7.0j (E1 batch 6, proxy cohort: 98 semantic issues the prompt never stated): the register
 # rules `statement_validation.statement_issues` and `financial_validation._series_issues` apply.
 LINE_IDENTITY_RULE = (
@@ -476,7 +489,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"a. {SOURCES_ONCE_RULE}\n"
         f"b. {CITATION_RULE}\n"
         f"c. {COVERAGE_RULE} This holds for every text field: limitations, explanations, "
-        "rationales, scopes, entities and events."
+        "rationales, scopes, entities and events.\n"
+        f"d. {SCOPE_DIMENSION_RULE}"
     ),
     "financials": (
         "Extract the financial statement values, the definition review and the context binding "

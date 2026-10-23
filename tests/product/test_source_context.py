@@ -1,9 +1,12 @@
 """Synthetic located context and extraction-scope boundary tests."""
 
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from deploy_vii.context_binding import (
     BookEntityBinding,
@@ -19,6 +22,7 @@ from deploy_vii.financial_contracts import (
     ProFormaObservation,
 )
 from deploy_vii.financial_validation import records
+from deploy_vii.live.submission import _period_scopes
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.source_context import (
     EntityContext,
@@ -316,8 +320,10 @@ def test_invalid_contracts_duplicate_identity_and_unlocated_assertions_are_rejec
 def test_unresolved_fields_and_basis_differences_are_retained_as_gaps() -> None:
     pack, review, _, _ = case()
     source, entity = review.sources[0], review.entities[0]
+    # Task 7.14: a historical scope must state its unit and the entity's currency (rejected,
+    # not a gap); a forecast scope that differs or omits one is retained as a gap.
     scope = source.scopes[0].model_copy(
-        update={"scope_id": "different", "currency": "EUR", "unit": None}
+        update={"scope_id": "different", "period_kind": "forecast", "currency": "EUR", "unit": None}
     )
     source = source.model_copy(
         update={
@@ -535,10 +541,14 @@ def test_financial_binding_checks_conflict_alternative_sources_not_just_settled_
     pack = pack.model_copy(update={"sources": (*pack.sources, second_source)})
     first = context.sources[0]
     citations = tuple(c.model_copy(update={"source_id": "S2"}) for c in first.citations)
+    # Task 7.14: one entity's scopes share one perimeter, so the second source's other
+    # perimeter is another entity's scope; none matches the book's bound entity.
+    other = context.entities[0].model_copy(update={"entity_id": "other", "roles": ("other",)})
     scopes = tuple(
         scope.model_copy(
             update={
                 "scope_id": "S2." + scope.scope_id,
+                "entity_id": other.entity_id,
                 "entity_perimeter": "Other",
                 "citations": citations,
             }
@@ -554,8 +564,13 @@ def test_financial_binding_checks_conflict_alternative_sources_not_just_settled_
         }
     )
     context = context.model_copy(
-        update={"pack_sha256": pack.content_hash(), "sources": (first, second)}
+        update={
+            "pack_sha256": pack.content_hash(),
+            "sources": (first, second),
+            "entities": (*context.entities, other),
+        }
     )
+    assert validate_source_context(pack, context) == ()
     row = financial.books[0].accounts[0]
     conflict_value = Observation(
         observation_id=row.value.observation_id,
@@ -711,4 +726,247 @@ def test_source_context_quotes_use_the_layout_normalised_matcher() -> None:
             'whitespace, quote marks and dashes): "Page 4 text"',
         )
         * 3
+    )
+
+
+# --- task 7.14: financial scopes state their four dimensions, the same for one entity -------
+# Batches e1-cp1-13/-14: three of four `source_context` outputs wrote `currency: null` on every
+# scope and worded the FY2025 perimeter unlike the comparative years; the step was accepted and
+# the financials prefill (task 7.13) could bind no book.
+
+DIMENSIONS = ("currency", "unit", "entity_perimeter", "accounting_basis")
+
+
+def with_scopes(review: SourceContextReview, *scopes: ReportingScope) -> SourceContextReview:
+    (source,) = review.sources
+    return review.model_copy(update={"sources": (source.model_copy(update={"scopes": scopes}),)})
+
+
+def vs(*groups: Sequence[ReportingScope]) -> str:
+    return " vs ".join(", ".join(s.scope_id for s in group) for group in groups)
+
+
+@pytest.mark.parametrize("field", DIMENSIONS)
+@pytest.mark.parametrize("kind", ["historical_duration", "period_end"])
+def test_a_financial_scope_lacking_a_dimension_is_rejected_naming_the_field(
+    field: str, kind: str
+) -> None:
+    pack, review, _, _ = case()
+    first, *rest = review.sources[0].scopes
+    update: dict[str, object] = {field: None}
+    if kind == "period_end":
+        update |= {"period_kind": "period_end", "start_date": None}
+    review = with_scopes(review, first.model_copy(update=update), *rest)
+    assert validate_source_context(pack, review) == (
+        f"Financial scope lacks {field}: {first.scope_id}",
+    )
+
+
+def test_every_missing_dimension_of_every_scope_is_one_issue() -> None:
+    """No scope states a currency or a unit: each scope and field is named once."""
+    pack, review, _, _ = case()
+    scopes = review.sources[0].scopes
+    review = with_scopes(
+        review, *(s.model_copy(update={"currency": None, "unit": None}) for s in scopes)
+    )
+    assert validate_source_context(pack, review) == tuple(
+        f"Financial scope lacks {field}: {s.scope_id}"
+        for s in scopes
+        for field in ("currency", "unit")
+    )
+
+
+@pytest.mark.parametrize("kind", ["forecast", "unspecified"])
+def test_forecast_and_unspecified_scopes_may_omit_or_differ_in_dimensions(kind: str) -> None:
+    pack, review, _, _ = case()
+    scopes = review.sources[0].scopes
+    other = scopes[0].model_copy(
+        update={
+            "scope_id": "outlook",
+            "period_kind": kind,
+            "currency": None,
+            "unit": None,
+            "entity_perimeter": "Worded otherwise",
+            "accounting_basis": None,
+        }
+    )
+    assert validate_source_context(pack, with_scopes(review, *scopes, other)) == ()
+
+
+def test_scopes_of_a_nonfinancial_source_are_not_held_to_the_dimension_rules() -> None:
+    pack, review, _, _ = case()
+    (source,) = review.sources
+    first, *rest = source.scopes
+    source = source.model_copy(
+        update={
+            "classification": "nonfinancial",
+            "scopes": (
+                first.model_copy(update={"currency": None, "entity_perimeter": "Other words"}),
+                *rest,
+            ),
+        }
+    )
+    assert validate_source_context(pack, review.model_copy(update={"sources": (source,)})) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("currency", "EUR"),
+        ("unit", "THOUSANDS"),
+        ("entity_perimeter", "Synthetic borrower group as reported for the comparative year"),
+        ("accounting_basis", "IFRS"),
+        ("entity_perimeter", "Consolidated "),  # one character: compared exactly, never normalised
+    ],
+)
+def test_one_entitys_financial_scopes_must_agree_on_each_dimension(field: str, value: str) -> None:
+    """One issue per field, naming the entity and the scope ids that share each value."""
+    pack, review, _, _ = case()
+    first, *rest = review.sources[0].scopes
+    assert first.entity_perimeter == "Consolidated"
+    review = with_scopes(review, first.model_copy(update={field: value}), *rest)
+    assert validate_source_context(pack, review) == (
+        f"Financial scopes of one entity disagree on {field}: issuer {vs([first], rest)}",
+    )
+
+
+def test_a_duration_and_a_period_end_scope_of_one_entity_must_agree() -> None:
+    pack, review, _, _ = case()
+    scopes = review.sources[0].scopes
+    closing = scopes[-1].model_copy(
+        update={
+            "scope_id": "closing",
+            "period_kind": "period_end",
+            "start_date": None,
+            "entity_perimeter": "Synthetic borrower group, as presented",
+        }
+    )
+    issues = validate_source_context(pack, with_scopes(review, *scopes, closing))
+    assert issues == (
+        f"Financial scopes of one entity disagree on entity_perimeter: issuer "
+        f"{vs(scopes, [closing])}",
+    )
+
+
+def test_each_entity_is_held_to_its_own_scopes_only() -> None:
+    pack, review, _, _ = case()
+    scopes = review.sources[0].scopes
+    other = review.entities[0].model_copy(update={"entity_id": "parent", "roles": ("other",)})
+    parent = tuple(
+        s.model_copy(
+            update={"scope_id": f"parent-{s.scope_id}", "entity_id": "parent", "unit": "THOUSANDS"}
+        )
+        for s in scopes
+    )
+    review = with_scopes(review, *scopes, *parent).model_copy(
+        update={"entities": (*review.entities, other)}
+    )
+    assert validate_source_context(pack, review) == ()
+    first, *rest = parent
+    review = with_scopes(review, *scopes, first.model_copy(update={"unit": "UNITS"}), *rest)
+    assert validate_source_context(pack, review) == (
+        f"Financial scopes of one entity disagree on unit: parent {vs([first], rest)}",
+    )
+
+
+def test_agreement_holds_across_every_financial_source_of_the_review() -> None:
+    pack, review, _, _ = case()
+    first = review.sources[0]
+    second_source = pack.sources[0].model_copy(update={"source_id": "S2", "name": "Second"})
+    pack = pack.model_copy(update={"sources": (*pack.sources, second_source)})
+    citations = tuple(c.model_copy(update={"source_id": "S2"}) for c in first.citations)
+
+    def second(perimeter: str | None) -> SourceContext:
+        return first.model_copy(
+            update={
+                "source_id": "S2",
+                "citations": citations,
+                "event_scan_citations": citations,
+                "scopes": tuple(
+                    s.model_copy(
+                        update={
+                            "scope_id": f"S2.{s.scope_id}",
+                            "citations": citations,
+                            "entity_perimeter": perimeter or s.entity_perimeter,
+                        }
+                    )
+                    for s in first.scopes
+                ),
+            }
+        )
+
+    agreeing = review.model_copy(
+        update={"pack_sha256": pack.content_hash(), "sources": (first, second(None))}
+    )
+    assert validate_source_context(pack, agreeing) == ()
+    differing = agreeing.model_copy(update={"sources": (first, second("Other perimeter"))})
+    assert validate_source_context(pack, differing) == (
+        "Financial scopes of one entity disagree on entity_perimeter: issuer "
+        f"{vs(first.scopes, differing.sources[1].scopes)}",
+    )
+
+
+_POOLS: dict[str, tuple[str | None, ...]] = {
+    "currency": ("USD", "EUR", None),
+    "unit": ("MILLIONS", "THOUSANDS", None),
+    "entity_perimeter": ("Consolidated", "Consolidated ", None),
+    "accounting_basis": ("US GAAP", "IFRS", None),
+}
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.data())
+def test_a_context_that_passes_leaves_the_prefill_one_complete_tuple_per_book(
+    data: st.DataObject,
+) -> None:
+    """Rules 1 and 2 are what `live.submission._dimensions` needs: over the scopes a passing
+    context holds, every period binds to at most one tuple of four stated strings and every
+    period of the book to the same one, so its "Bound source scopes disagree" and "Field
+    required" rejections cannot follow a context the validator accepted."""
+    pack, review, _, _ = case()
+    durations = review.sources[0].scopes
+    closing = durations[-1].model_copy(
+        update={"scope_id": "Q2-close", "period_kind": "period_end", "start_date": None}
+    )
+    scopes = tuple(
+        scope.model_copy(
+            update={name: data.draw(st.sampled_from(pool)) for name, pool in _POOLS.items()}
+        )
+        for scope in (*durations, closing)
+    )
+    issues = validate_source_context(pack, with_scopes(review, *scopes))
+    periods = [
+        {"period_id": s.scope_id, "period_type": "QUARTER", **_iso(s)} for s in durations
+    ] + [{"period_id": "close", "period_type": "PERIOD_END", **_iso(closing)}]
+    found = [_period_scopes(period, scopes) for period in periods]
+    single = len(frozenset().union(*(f for f in found if f))) == 1
+    complete = all(None not in strings for f in found if f for strings in f)
+    if not issues:
+        assert single and complete and all(found)
+    if not (single and complete):
+        assert issues
+
+
+def _iso(scope: ReportingScope) -> dict[str, str | None]:
+    start = scope.start_date
+    end = scope.end_date
+    return {
+        "start_date": None if start is None else start.isoformat(),
+        "end_date": None if end is None else end.isoformat(),
+    }
+
+
+def test_the_batch_shape_is_rejected_with_each_cause_once() -> None:
+    """Every scope null in currency; the first year's perimeter worded unlike the others. A
+    null is rule 1's issue alone; the stated perimeters disagree (rule 2)."""
+    pack, review, _, _ = case()
+    first, *rest = review.sources[0].scopes
+    scopes = (
+        first.model_copy(update={"currency": None, "entity_perimeter": "Group, eliminated"}),
+        *(s.model_copy(update={"currency": None}) for s in rest),
+    )
+    assert validate_source_context(pack, with_scopes(review, *scopes)) == (
+        *(f"Financial scope lacks currency: {s.scope_id}" for s in scopes),
+        f"Financial scopes of one entity disagree on entity_perimeter: issuer "
+        f"{vs(scopes[:1], scopes[1:])}",
     )

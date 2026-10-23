@@ -1,5 +1,6 @@
 """Decision 0008 (MC-1): the model returns judgments and quotes; Python composes the review."""
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -60,7 +61,11 @@ from deploy_vii.readiness import (
     live_consumers,
     validate_review,
 )
-from deploy_vii.source_context import ReportingScope, SourceContextReview
+from deploy_vii.source_context import (
+    ReportingScope,
+    SourceContextReview,
+    validate_source_context,
+)
 from tests.product.test_readiness import as_submission, readiness_fixture, submission_fixture
 
 FIXTURES = Path(__file__).parent / "fixtures" / "live"
@@ -1059,6 +1064,37 @@ def scoped_journal(
     return store, ticket.ticket_id, extraction.model_copy(update={"binding": binding}), context
 
 
+def refused_context_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: Callable[[ReportingScope], ReportingScope],
+    refusal: str,
+) -> tuple[Execution, str, FinancialSubmission]:
+    """Task 7.14: `validate_source_context` now refuses scopes of one entity that disagree or
+    lack a dimension, so no such context is retained. The prefill's own rejections stay as
+    defence in depth; to reach them, the ticket retains the agreeing scopes and the prefill
+    alone reads the changed ones (its `known_bindings` is replaced). The changed context's
+    refusal by the source_context validator starts with `refusal`."""
+    store, ticket_id, value, context = scoped_journal(tmp_path, monkeypatch)
+    (source,) = context.sources
+    changed = context.model_copy(
+        update={
+            "sources": (
+                source.model_copy(update={"scopes": tuple(change(s) for s in source.scopes)}),
+            )
+        }
+    )
+    issues = validate_source_context(store.pack(store.read()), changed)
+    assert issues and all(issue.startswith(refusal) for issue in issues), issues
+    real = known_bindings
+
+    def with_changed(store: Execution, ticket_id: str, step_id: str) -> Known:
+        return dataclasses.replace(real(store, ticket_id, step_id), context=changed)
+
+    monkeypatch.setattr("deploy_vii.live.submission.known_bindings", with_changed)
+    return store, ticket_id, value
+
+
 def rebound(document: dict[str, Any]) -> str:
     """`document` with its two financial-review hashes recomputed, as a payload that reaches
     the journal without the prefill must carry them."""
@@ -1157,7 +1193,9 @@ def test_a_book_whose_periods_scopes_disagree_is_rejected_with_one_issue_and_no_
             return scope
         return scope.model_copy(update={"entity_perimeter": PARAPHRASE})
 
-    store, ticket_id, value, _ = scoped_journal(tmp_path, monkeypatch, q1_differs)
+    store, ticket_id, value = refused_context_journal(
+        tmp_path, monkeypatch, q1_differs, "Financial scopes of one entity disagree on "
+    )
     payload, _ = without_bindings(FinancialSubmission, value)
     submitted = submit_model_payload(store, ticket_id, "financials", payload)
     (rejected,) = submitted.journal.step_repairs
@@ -1195,8 +1233,11 @@ def test_a_scope_without_a_currency_leaves_the_currency_to_the_validators_messag
 ) -> None:
     """E1 batch e1-cp1-14: every scope's `currency` was null. Python writes no currency; the
     stored contract requires one, so the step is rejected with that field's message."""
-    store, ticket_id, value, _ = scoped_journal(
-        tmp_path, monkeypatch, lambda scope: scope.model_copy(update={"currency": None})
+    store, ticket_id, value = refused_context_journal(
+        tmp_path,
+        monkeypatch,
+        lambda scope: scope.model_copy(update={"currency": None}),
+        "Financial scope lacks currency: ",
     )
     payload, _ = without_bindings(FinancialSubmission, value)
     submitted = submit_model_payload(store, ticket_id, "financials", payload)
@@ -1222,7 +1263,9 @@ def test_a_null_scope_currency_stays_named_beside_a_disagreement_issue(
             update["entity_perimeter"] = PARAPHRASE
         return scope.model_copy(update=update)
 
-    store, ticket_id, value, _ = scoped_journal(tmp_path, monkeypatch, batch_14)
+    store, ticket_id, value = refused_context_journal(
+        tmp_path, monkeypatch, batch_14, "Financial scope"
+    )
     payload, _ = without_bindings(FinancialSubmission, value)
     submitted = submit_model_payload(store, ticket_id, "financials", payload)
     (rejected,) = submitted.journal.step_repairs

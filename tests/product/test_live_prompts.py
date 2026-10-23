@@ -1641,6 +1641,25 @@ def test_the_financials_step_states_the_bound_scope_rule_once_as_rule_i() -> Non
     assert PROJECTIONS[("financials", "source_context")] == FULL
 
 
+def test_the_source_context_step_states_the_scope_dimension_rule_once_as_rule_d() -> None:
+    """Task 7.14: the validator's two scope rules, stated where the model can repair them."""
+    rule = prompts.SCOPE_DIMENSION_RULE
+    contract = prompts.STEP_CONTRACTS["source_context"]
+    assert contract.endswith(f"events.\nd. {rule}")
+    assert composed("source_context").count(rule) == 1
+    for step_id in set(ALL_STEPS) - {"source_context"}:
+        assert rule not in composed(step_id), step_id
+    for phrase in (
+        "Every `historical_duration` and `period_end` scope of a financial source states "
+        "`currency` and `unit`, and `entity_perimeter` and `accounting_basis` too (none is null)",
+        "All such scopes of one entity, across every financial source, carry the same four "
+        "strings word for word",
+        "`entity_perimeter` names the consolidation perimeter, not how a year is presented",
+        "Forecast and unspecified scopes are not held to this.",
+    ):
+        assert phrase in rule, phrase
+
+
 def test_the_financials_schema_the_prompt_prints_asks_for_no_dimension_string() -> None:
     """The rule's first claim: the sent schema leaves the eight strings out (the facility's own
     currency and a KPI's own unit stay; they are not the book's)."""
