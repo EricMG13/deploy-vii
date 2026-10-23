@@ -756,6 +756,14 @@ def test_the_quality_context_is_the_qa_scope_as_compact_json_with_its_hash() -> 
     assert len(body) < 20_000  # the cells are counted, not listed (about 45,000 here)
 
 
+def test_the_qa_scope_with_held_inputs_equals_the_scope_it_computes() -> None:
+    """Task 7.10 item 3: `runner._plan` passes the inputs it already holds (it also records their
+    hash in the manifest), always `cp1_quality_inputs(registers)`, so the scope is unchanged."""
+    inputs, registers = staged_scope()
+    assert inputs == cp1_quality_inputs(registers)
+    assert prompts.quality_scope(registers, inputs) == prompts.quality_scope(registers)
+
+
 def test_the_qa_scope_is_required_for_quality_and_refused_elsewhere() -> None:
     pack, _ = readiness_fixture()
     with pytest.raises(prompts.PromptError, match="needs its QA scope"):

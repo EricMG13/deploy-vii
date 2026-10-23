@@ -24,6 +24,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any
 
+from deploy_vii.cp1_workflow import is_qa_blocked
 from deploy_vii.execution import Attempt, Execution, NotAuthorized
 from deploy_vii.live.catalog import (
     USER_SELECTED,
@@ -99,11 +100,6 @@ CP0_STEPS = ("source_readiness",)
 # module repair, which restarts at source_context.
 CP1_CHAIN = ("source_context", "financials", "narrative", "readiness", "quality")
 FULL_CHAIN = CP0_STEPS + CP1_CHAIN
-# Fix round 1 (coordinator ruling): `cp1_workflow._quality_stage`'s Blocked verdict. A Blocked QA
-# outcome is analytical, not a defect to repair: the cell ends at it, as at a truncation.
-QA_BLOCKED = re.compile(
-    r"CP-1 QA Blocked: confidence [0-9]+ \([^()]*\); a Blocked handoff is not promoted"
-)
 # Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
 # step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.
 CP1A_CHAIN = (*CP0_STEPS, "business_context")
@@ -545,8 +541,9 @@ def _run_cell(
 
     cp0_attempt = None
 
-    def play(steps: Sequence[str], attempt: Attempt) -> DispatchResult:
-        """Send the steps in order; the last result is the first non-accepted one, or the final."""
+    def play(steps: Sequence[str], attempt: Attempt) -> tuple[str, DispatchResult]:
+        """Send the steps in order; the last result, with its step, is the first non-accepted
+        one, or the final."""
         nonlocal cp0_attempt
         for step_id in steps:
             result = send(step_id, attempt)
@@ -566,7 +563,7 @@ def _run_cell(
                 result = send(step_id, attempt)
             if result.status != "accepted":
                 break
-        return result
+        return step_id, result
 
     for module, run in groupby(cell.steps, key=lambda step_id: STEPS[step_id].module_id):
         group = tuple(run)
@@ -580,7 +577,7 @@ def _run_cell(
             return
         steps = group
         while True:
-            result = play(steps, attempt)
+            step_id, result = play(steps, attempt)
             if result.status == "accepted":
                 break  # every step of the module is accepted: on to the next module
             # Only a validator verdict (rejected) on a first attempt earns the module's one MC-7
@@ -593,7 +590,7 @@ def _run_cell(
                 not repair
                 or result.status != "rejected"
                 or result.classification == TRUNCATED
-                or qa_blocked_only(result.issues)
+                or qa_blocked_only(step_id, result.issues)
                 or attempt.number != 0
             ):
                 return
@@ -601,10 +598,13 @@ def _run_cell(
             steps = group[group.index(expected_step(attempt, module)) :]
 
 
-def qa_blocked_only(issues: Sequence[str]) -> bool:
-    """True when a rejection's issues are only the CP-1 QA Blocked verdict (`QA_BLOCKED`): the
-    review is valid and its own judgments block QA, so the verdict stands and is not repaired."""
-    return bool(issues) and all(QA_BLOCKED.fullmatch(issue) for issue in issues)
+def qa_blocked_only(step_id: str, issues: Sequence[str]) -> bool:
+    """True when a `quality` rejection's issues are only the CP-1 QA Blocked verdict
+    (`cp1_workflow.is_qa_blocked`, fix round 1, coordinator ruling): the review is valid and its
+    own judgments block QA, an analytical outcome that stands and is not repaired, so the cell
+    ends at it as at a truncation. Only `quality` emits the verdict (task 7.10 item 2): the same
+    text on any other step is an ordinary rejection."""
+    return step_id == "quality" and bool(issues) and all(map(is_qa_blocked, issues))
 
 
 def _record_not_authorized(

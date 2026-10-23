@@ -143,8 +143,10 @@ from a pinned pool:
   the `module` driver begins the module repair, which re-runs the chain from `source_context`
   with the review's issues on the repaired `quality` prompt. Exception (fix round 1,
   coordinator ruling): a rejection whose issues are only the QA Blocked verdict ("CP-1 QA
-  Blocked: confidence N (band); a Blocked handoff is not promoted", `cli.qa_blocked_only`) is an
-  analytical outcome, not a defect to repair. The verdict stands in the journal, the cell ends
+  Blocked: confidence N (band); a Blocked handoff is not promoted", `cli.qa_blocked_only`, built
+  on `cp1_workflow.is_qa_blocked`, the check of the text `_quality_stage` emits, since task 7.10)
+  is an analytical outcome, not a defect to repair. Only a `quality` rejection qualifies; the same
+  text on any other step is an ordinary rejection. The verdict stands in the journal, the cell ends
   without a module repair (as at a truncation) and `Repairs dispatched` does not count it. Rule
   e of the contract says a REPAIR block never justifies lowering a severity or changing a status.
   A truncated `quality` is submitted like any truncated payload and, since the step settles the
@@ -302,11 +304,19 @@ from a pinned pool:
 ## Retention layout
 
 `artifacts/model-tests/<experiment=batch id>/<case>/<model with / as __>/<attempt id>/` holds
-`request.json` (written before sending), `response.json` (an envelope keeping the exact bytes and their
-SHA-256), `output.md`, `events.jsonl`, `metrics.json`, `checks/`, `render/not-run.json` and
+`request.json` (written before sending), `response.json` (an envelope keeping the returned bytes and
+the SHA-256 of the bytes it stores), `output.md`, `events.jsonl`, `metrics.json`, `checks/`, `render/not-run.json` and
 `manifest.json` last. A directory without `manifest.json` is an incomplete attempt. Files are never
 overwritten, with one exception: `live reconcile` rewrites the `ledger` block of `metrics.json`
-(keeping the replaced values; see Charge reconciliation). Unknown metrics are `null` with a `_reason` sibling; provider values, local measurements
+(keeping the replaced values; see Charge reconciliation). Task 7.10: the stored body is the
+returned body with every `user_id` value (OpenRouter's account id, in 402s and other replies alike)
+replaced by `"<redacted>"`, the key and every other byte kept (`retention.redact_account_id`);
+`body_bytes` and `body_sha256` then describe the stored bytes, and `response.json` and the
+manifest say `body_redactions: ["user_id"]`. A JSON body whose `user_id` the in-place match cannot
+reach (a key spelled with a JSON escape, duplicates included) or that is too deep to parse is
+withheld whole (`body_text` null, `body_withheld` says why), never stored with the id; a body
+that is not JSON gets the in-place match only. Python reads a 402 from the body as received, before
+retention (`credit.from_dispatch_402`). Unknown metrics are `null` with a `_reason` sibling; provider values, local measurements
 and estimates are separate objects.
 
 ## CLI and Make targets (Task B)
@@ -419,7 +429,9 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   credential, ledger, transport or journal error. The report is written even when a batch aborts.
 - Reports (`live-<batch>.md`): command, seed, cap and ledger totals, catalog source and hash,
   registry-derived module counts, max tokens, cells planned with steps run and steps not
-  authorized by CP-0, the pool with exclusion reasons, and a per-step table (cell, model, seed,
+  authorized by CP-0 (`steps run` counts report rows, so an in-flight-refused 402 attempt,
+  which is no model try and has its own row, counts as a step run beside its re-send; see
+  "No-credit backup cohort"), the pool with exclusion reasons, and a per-step table (cell, model, seed,
   attempt, status, classification, cost, issue count). Task 7.0: an attempt with no model
   payload (status `no-response`: a timeout, an HTTP error or a provider error inside a 200, a
   deadline hold) shows `-` for its issue count and is counted in the Cohorts table's
@@ -552,7 +564,7 @@ a deliberate validator wording change shows up as `issues-changed` and the entry
 `deploy-vii live corpus <attempt-dir> <case-id> [--root DIR]` writes an entry from a sealed attempt
 (manifest.json plus output.md); it refuses attempts that never reached the validators
 (fallback, no-response, interrupted), attempts whose output was credential-scrubbed, unreplayable
-steps and existing entries (unless `--replace`). The four seed entries are labelled synthetic
+steps and existing entries (unless `--replace`). The seed entries are labelled synthetic
 (`synthetic` in the case id and `provenance.batch_id`) so `make replay` is green before any probe.
 
 Optional keys beyond the five of the brief: `pack`, the name of a registered synthetic builder
@@ -564,9 +576,12 @@ registered builder's hash (`corpus.SYNTHETIC_PACKS`; a test asserts they still m
 and leaves it unset otherwise, so a probe on another pack replays as `stale-inputs` with the
 reason "no registered synthetic pack" until that pack is registered. `upstream` is read from the
 accepted sibling attempts of the same ticket (their `output.md`); a missing predecessor is a
-`CorpusError`, never a guess. Replayable steps: `source_readiness` and the four CP-1 stage steps
-(`quality` is not: `live corpus` refuses it as "not replayable from one payload"); seeded and
-tested are `source_readiness`, `source_context` and `financials`.
+`CorpusError`, never a guess. Replayable steps: `source_readiness` and the five CP-1 steps.
+Task 7.10: a `quality` entry holds all four stages in `upstream` and its review replays through
+`promote_cp1` (as live, via `submit_model_payload`), so an accepted entry is the promotion and a
+rejected one keeps the refusal, the QA Blocked verdict included; seeded and tested are
+`source_readiness`, `source_context`, `financials` and `quality` (one promotion, one QA Blocked
+verdict, both on `synthetic-cp1`). Real-pack replay still covers `source_readiness` only.
 
 To regenerate an entry after a deliberate validator change (`issues-changed`), rerun
 `deploy-vii live corpus <attempt-dir> <case-id> --replace`; without `--replace` an existing entry is
@@ -696,7 +711,8 @@ leaves it unchanged.
   which `Response.retry_after` now carries), `requested_max_tokens` and `affordable_max_tokens`
   (from "You requested up to N tokens, but can only afford M"); each null has its `<name>_reason`.
   Only these fields are copied: the body's `user_id` and message text are not recorded there
-  (the raw body stays in `response.json`, as for every reply). The key-endpoint record is
+  (the body stays in `response.json`, as for every reply, with its `user_id` value redacted
+  since task 7.10; see Retention layout). The key-endpoint record is
   unchanged. Retry rule: `dispatch` seals the refused attempt (`no-response`,
   `insufficient_credit`, settled at zero, ticket pending, nothing interrupted), calls
   `sleep(min(Retry-After, 300))` (120 s when absent; `sleep` is injectable, the CLI passes
@@ -704,7 +720,9 @@ leaves it unchanged.
   reservation under the same cap. Credit is not a model failure, so the refused attempt uses up
   no `max_retries` try (fix round 1): its ledger settle reason ends with `; in-flight 402: not a
   model try`, `_plan` leaves such ids out of its try count (`runner.in_flight_refused`), and the
-  re-send carries the same `retries.attempt_number`, also on the last allowed try. Its manifest
+  re-send carries the same `retries.attempt_number`, also on the last allowed try; the refused
+  attempt's manifest records `retries.exhausted: false` (a re-send follows; task 7.10) and the
+  re-send's keeps the real value. Its manifest
   names the refused try in `links.in_flight_retry_of_attempt_id` (and `retry_of_attempt_id`);
   its events start with `in_flight_retry` (`retry_of`, `waited_s`). `DispatchResult.retried`
   holds the refused attempt; `dispatch(..., on_in_flight=)` hands it over before the wait, which
@@ -1077,4 +1095,4 @@ their stored contracts until their own MC-1 skeletons); a `FinancialSubmission` 
 covers CP-1's four stage steps); provider acceptance of the
 `ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun); provider
 acceptance of the `quality` sent schema and a live or proxy QA review on the real pack (task
-7.4); a replay corpus entry for `quality`.
+7.4); a real-pack replay of any CP-1 entry (the synthetic `quality` entries replay, task 7.10).

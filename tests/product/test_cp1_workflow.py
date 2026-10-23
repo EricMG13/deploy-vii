@@ -3,9 +3,11 @@
 import json
 import shutil
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
+from deploy_vii import envelope as envelope_writer
 from deploy_vii.canonical_tables import REGISTER_NOTE, CanonicalTables
 from deploy_vii.contracts import Input, Module
 from deploy_vii.cp1_quality import cp1_quality_inputs
@@ -15,7 +17,9 @@ from deploy_vii.cp1_workflow import (
     FinancialStage,
     cp1_register_preview,
     cp1_registers,
+    is_qa_blocked,
     promote_cp1,
+    qa_blocked_issue,
     submit_cp1_step,
     write_cp1_envelope,
 )
@@ -23,7 +27,9 @@ from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.envelope import read_envelope
 from deploy_vii.execution import Attempt, Execution, NotAuthorized, text_sha256
 from deploy_vii.financial_contracts import FinancialBook
+from deploy_vii.live import cli
 from deploy_vii.quality import (
+    Band,
     ClaimAssessment,
     EvidenceLineage,
     QaFinding,
@@ -209,6 +215,28 @@ def test_an_open_critical_qa_finding_blocks_and_is_not_promoted(
     assert cp1_head(store) is None
 
 
+def test_the_cli_recognises_exactly_the_blocked_verdict_promotion_emits(
+    journal: tuple[Execution, str, QualityInputs],
+) -> None:
+    """Task 7.10 item 1: the CLI's check is built from `cp1_workflow`'s own verdict text, so the
+    verdict `_quality_stage` emits for a Blocked review round-trips through `qa_blocked_only`."""
+    store, ticket, inputs = journal
+    critical = QaFinding(
+        finding_id="critical", severity="CRITICAL", description="Synthetic critical finding"
+    )
+    finished = promote_cp1(
+        store, ticket, at_ceiling(inputs, findings=(critical,)).model_dump_json()
+    )
+    (verdict,) = finished.issues
+    assert is_qa_blocked(verdict) and cli.qa_blocked_only("quality", finished.issues)
+    for band in get_args(Band):
+        for score in (0, 39, 100):
+            assert is_qa_blocked(qa_blocked_issue(score, band))
+    for drifted in (verdict + " ", verdict.replace("Blocked", "Restricted", 1), "x" + verdict):
+        assert not is_qa_blocked(drifted)
+        assert not cli.qa_blocked_only("quality", (drifted,))
+
+
 def test_a_blocked_narrative_gives_blocked_qa_and_is_not_promoted(tmp_path: Path) -> None:
     store, attempt = staged(tmp_path, partial=True)
     inputs = cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
@@ -352,6 +380,84 @@ def test_cli_quality_inputs_promotion_and_envelope(
     main()
     assert capsys.readouterr().out.strip() == str(output / "envelope.md")
     assert {p.name for p in output.iterdir()} == {"envelope.md", "envelope.json", "complete.json"}
+
+
+def test_the_export_re_renders_the_handoff_the_promotion_bound(
+    journal: tuple[Execution, str, QualityInputs], tmp_path: Path
+) -> None:
+    """Task 7.10 item 5: before any file is written, the handoff envelope (the promoted
+    candidate, QA and the journal binding) is rendered again and must hash as the `quality`
+    step recorded it, Markdown and sidecar both."""
+    store, ticket, inputs = journal
+    finished = promote_cp1(store, ticket, at_ceiling(inputs).model_dump_json())
+    handoff = CP1Handoff.model_validate_json(step_text(store, finished.steps[-1]))
+    path = write_cp1_envelope(store, tmp_path / "envelope")
+    # The export carries the settled status, so its own files differ from the handoff's.
+    assert text_sha256(path.read_text()) != handoff.envelope_sha256
+    assert read_envelope(path.read_text(), (path.parent / "envelope.json").read_text())
+
+
+def test_an_export_whose_handoff_no_longer_renders_as_bound_is_refused(
+    journal: tuple[Execution, str, QualityInputs], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, ticket, inputs = journal
+    finished = promote_cp1(store, ticket, at_ceiling(inputs).model_dump_json())
+    handoff = CP1Handoff.model_validate_json(step_text(store, finished.steps[-1]))
+    # A rendering that drifted after promotion: the same sections in another order.
+    monkeypatch.setattr(envelope_writer, "SECTIONS", tuple(reversed(envelope_writer.SECTIONS)))
+    with pytest.raises(ValueError, match=r"handoff envelope\.md renders") as raised:
+        write_cp1_envelope(store, tmp_path / "envelope")
+    assert handoff.envelope_sha256 in str(raised.value)
+    assert not (tmp_path / "envelope").exists()  # fail closed: nothing is written
+
+
+def test_an_export_whose_retained_candidate_differs_from_the_handoff_is_refused(
+    journal: tuple[Execution, str, QualityInputs], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, ticket, inputs = journal
+    finished = promote_cp1(store, ticket, at_ceiling(inputs).model_dump_json())
+    handoff = CP1Handoff.model_validate_json(step_text(store, finished.steps[-1]))
+    tampered = handoff.model_copy(update={"candidate_sha256": "0" * 64})
+    real = store.step_output
+
+    def step_output(digest: str) -> str:
+        if digest == finished.steps[-1].output_sha256:
+            return tampered.model_dump_json()
+        return real(digest)
+
+    monkeypatch.setattr(store, "step_output", step_output)
+    with pytest.raises(ValueError, match="candidate differs from its handoff"):
+        write_cp1_envelope(store, tmp_path / "envelope")
+    assert not (tmp_path / "envelope").exists()
+
+
+def test_a_segmented_book_promotes_and_exports_its_envelope(tmp_path: Path) -> None:
+    """Task 7.10 item 6: a segmented book (task 7.7) runs through `promote_cp1` to a promoted
+    head whose envelope places `segment-allocation` in Module Handoff and exports.
+
+    `segmented_book()` discloses a `partial` schedule, a BLOCK gap per period that blocks the
+    narrative and so QA (an analytical outcome); a complete schedule is the promotable case."""
+    from tests.product.test_envelope import segmented_book  # it imports `staged` from here
+
+    partial = segmented_book()
+    disclosure = partial.segment_disclosure.model_copy(update={"status": "complete"})
+    book = FinancialBook.model_validate({**partial.model_dump(), "segment_disclosure": disclosure})
+    store, attempt = staged(tmp_path / "journal", book=book)
+    inputs = cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+    slot = next(f for f in inputs.coverage if f.field_id == "canonical-handoff")
+    assert slot.present, slot.rationale
+    finished = promote_cp1(store, attempt.ticket_id, at_ceiling(inputs).model_dump_json())
+    assert finished.status == "finished" and not finished.issues
+    head = next(h for h in store.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    module = store.head_module(head)
+    assert "segment-allocation" in {t.table_id for t in module.tables}
+    path = write_cp1_envelope(store, tmp_path / "envelope")
+    markdown = path.read_text()
+    envelope = read_envelope(markdown, (path.parent / "envelope.json").read_text())
+    assert envelope.module.content_hash() == head.result_sha256
+    handoff = markdown.split("\n## Module Handoff\n", 1)[1]
+    assert "segment-allocation — " in handoff
 
 
 def test_envelope_export_requires_a_promoted_cp1_head(tmp_path: Path) -> None:

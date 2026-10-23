@@ -6,8 +6,9 @@ handoff, task 6.4) settles CP-1.
 """
 
 import json
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field, ValidationError
 
@@ -49,7 +50,13 @@ from deploy_vii.narrative import (
     validate_narrative_review,
 )
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.quality import QualityReport, QualityReview, assess_quality, validate_quality_review
+from deploy_vii.quality import (
+    Band,
+    QualityReport,
+    QualityReview,
+    assess_quality,
+    validate_quality_review,
+)
 from deploy_vii.readiness import shape_issues
 from deploy_vii.registry import plan
 from deploy_vii.source_context import SourceContextReview, source_context, validate_source_context
@@ -332,6 +339,29 @@ class CP1Handoff(Contract):
 PROMOTED = Qualification(implementation="implemented")
 
 
+# The Blocked verdict `_quality_stage` returns (task 7.10 item 1): one text, and the one check
+# `live.cli` reads it with, so the two cannot drift.
+_QA_BLOCKED_HEAD = "CP-1 QA Blocked: confidence "
+_QA_BLOCKED_TAIL = "; a Blocked handoff is not promoted"
+_QA_BLOCKED = re.compile(
+    re.escape(_QA_BLOCKED_HEAD)
+    + r"[0-9]+ \((?:"
+    + "|".join(re.escape(band) for band in get_args(Band))
+    + r")\)"
+    + re.escape(_QA_BLOCKED_TAIL)
+)
+
+
+def qa_blocked_issue(score: int, band: Band) -> str:
+    """The issue a Blocked QA review refuses promotion with (`_quality_stage`)."""
+    return f"{_QA_BLOCKED_HEAD}{score} ({band}){_QA_BLOCKED_TAIL}"
+
+
+def is_qa_blocked(issue: str) -> bool:
+    """True when `issue` is exactly a QA Blocked verdict `qa_blocked_issue` builds."""
+    return _QA_BLOCKED.fullmatch(issue) is not None
+
+
 def _candidate(registers: CanonicalTables, attempt: Attempt, quality: QualityReport) -> Module:
     """The promoted CP-1 candidate: the registers' module bound to the journal attempt.
 
@@ -391,10 +421,7 @@ def _quality_stage(
     quality = assess_quality(inputs, review)
     confidence = quality.confidence
     if confidence.qa_status == "Blocked":
-        blocked = (
-            f"CP-1 QA Blocked: confidence {confidence.confidence_score} "
-            f"({confidence.confidence_band}); a Blocked handoff is not promoted"
-        )
+        blocked = qa_blocked_issue(confidence.confidence_score, confidence.confidence_band)
         return StepValidation(issues=(blocked,)), None
     candidate = _candidate(registers, attempt, quality)
     ledger = registers.downstream.inputs.narrative.inputs.ledger
@@ -466,8 +493,48 @@ def promote_cp1(store: Execution, ticket_id: str, payload: str) -> Attempt:
     )
 
 
+def _recheck_handoff(
+    store: Execution, snapshot: ExecutionSnapshot, attempt: Attempt, handoff: CP1Handoff
+) -> None:
+    """Render the handoff envelope again exactly as `_quality_stage` bound it and require the
+    recorded hashes (task 7.10 item 5); any difference raises, naming both hashes.
+
+    The handoff rendered the promoted candidate (status `candidate`), retained as the attempt's
+    payload; the export renders the settled head, so its own files never hash as the handoff's.
+    """
+    if attempt.payload_sha256 is None:
+        raise ValueError("CP-1 promoted attempt retains no candidate")
+    candidate = Module.model_validate_json(store.payload(attempt.payload_sha256))
+    if candidate.content_hash() != handoff.candidate_sha256:
+        raise ValueError(
+            f"CP-1 retained candidate differs from its handoff: {candidate.content_hash()} "
+            f"against the handoff's {handoff.candidate_sha256}"
+        )
+    markdown, sidecar = write_envelope(
+        Envelope(
+            run=snapshot.run,
+            module=candidate,
+            registers_sha256=handoff.registers_sha256,
+            gap_limitations=handoff.gap_limitations,
+            quality=handoff.quality,
+            journal=attempt.inputs,
+        )
+    )
+    for name, raw, recorded in (
+        ("envelope.md", markdown, handoff.envelope_sha256),
+        ("envelope.json", sidecar, handoff.sidecar_sha256),
+    ):
+        if text_sha256(raw) != recorded:
+            raise ValueError(
+                f"CP-1 handoff {name} renders as {text_sha256(raw)}, not as the "
+                f"{recorded} its promotion recorded"
+            )
+
+
 def write_cp1_envelope(store: Execution, destination: Path) -> Path:
-    """Write the promoted CP-1 head's canonical envelope, verified before any file is written.
+    """Write the promoted CP-1 head's canonical envelope, verified before any file is written:
+    the handoff renders again as its promotion recorded it (`_recheck_handoff`), then the head's
+    own envelope round-trips.
 
     Files: `envelope.md`, `envelope.json` (the typed sidecar) and a last-written receipt
     `complete.json` (`cp1-envelope/1`). An existing directory is refused.
@@ -482,6 +549,7 @@ def write_cp1_envelope(store: Execution, destination: Path) -> Path:
     if attempt is None or step is None or step.step_id != "quality" or step.output_sha256 is None:
         raise ValueError("CP-1 head was not promoted through a verified handoff")
     handoff = CP1Handoff.model_validate_json(store.step_output(step.output_sha256))
+    _recheck_handoff(store, snapshot, attempt, handoff)
     envelope = Envelope(
         run=snapshot.run,
         module=store.head_module(head),

@@ -579,11 +579,14 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
             else "ticket interrupted during the repair: no repair remains and the module is "
             "blocked for these inputs"
         )
+    # An in-flight 402 `dispatch` re-sends (task 7.8) is no model try: on the last allowed try
+    # the re-send follows, so the refused attempt exhausts nothing (task 7.10 item 7).
+    resent = run.credit is not None and run.credit.transient and run.credit.exhausted is None
     return {
         "attempt_number": plan.attempt_number,
         "step_try": plan.step_try,
         "max_retries": plan.max_retries,
-        "exhausted": plan.exhausted,
+        "exhausted": plan.exhausted and not resent,
         "ticket_interrupted": run.ticket_interrupted,
         "journal_consequence": consequence,
     }

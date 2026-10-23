@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from deploy_vii import cp1_workflow
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Execution, StepValidation
 from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient
@@ -21,12 +22,15 @@ from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
 from deploy_vii.live.ledger import Ledger
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import StepSpec
-from deploy_vii.live.submission import SUPERSEDED_SHAPE
+from deploy_vii.live.submission import SUPERSEDED_SHAPE, quality_inputs
 from deploy_vii.preparation import PreparedPack, load_pack
 from tests.product import replay_support
 from tests.product.live_support import FakeTransport, fixture_pool, make_rtf_key, ok
 from tests.product.replay_support import OK, corpus_entries, replay_entry
+from tests.product.test_cp1_workflow import at_ceiling
+from tests.product.test_execution import step_text
 from tests.product.test_live_runner import CP0, NOW, Rig, make_rig, reply
+from tests.product.test_narrative import populated
 from tests.product.test_readiness import readiness_fixture
 
 
@@ -53,7 +57,12 @@ def load_entry(path: Path) -> dict[str, Any]:
 
 
 def test_corpus_holds_labelled_synthetic_seed_entries_and_real_probe_entries() -> None:
-    assert {p.parent.name for p in ENTRIES} == {"source_readiness", "source_context", "financials"}
+    assert {p.parent.name for p in ENTRIES} == {
+        "source_readiness",
+        "source_context",
+        "financials",
+        "quality",  # task 7.10: the promotion and the QA Blocked verdict
+    }
     assert {load_entry(p)["expected"]["validator_outcome"] for p in ENTRIES} == {
         "accepted",
         "rejected",
@@ -440,6 +449,75 @@ def test_cp1_attempts_become_entries_with_pack_and_upstream_that_replay(tmp_path
         (corpus_root / "source_context" / "live-context.json").read_text("utf-8")
     )
     assert "upstream" not in first_entry
+
+
+def model_review(store: Execution, ticket_id: str, *, critical: bool = False) -> str:
+    """What a model returns for `quality`: the at-ceiling review without the binding Python
+    fills; with `critical`, one open CRITICAL finding, so QA is Blocked."""
+    review = json.loads(at_ceiling(quality_inputs(store, ticket_id)).model_dump_json())
+    del review["inputs_sha256"]
+    if critical:
+        review["findings"] = [
+            {
+                "finding_id": "qa.synthetic-critical",
+                "severity": "CRITICAL",
+                "status": "open",
+                "description": "Synthetic critical defect",
+                "references": [],
+                "resolution": None,
+            }
+        ]
+    return json.dumps(review)
+
+
+def run_quality(rig: Rig, context: str, financials: str, *, critical: bool) -> list[Path]:
+    """The five CP-1 steps dispatched through the runner on one ticket (fake transport)."""
+    directories = list(run_cp1(rig, context, financials))
+    store = rig.store
+
+    def valid(step_id: str) -> str:
+        attempt = next(a for a in store.read().attempts if a.ticket_id == rig.ticket_id)
+        return step_text(store, next(s for s in attempt.steps if s.step_id == step_id))
+
+    stage = cp1_workflow.FinancialStage.model_validate_json(valid("financials"))
+    narrative = populated(stage.narrative_inputs).model_dump_json()
+    for step_id, payload in (
+        ("narrative", lambda: narrative),
+        ("readiness", lambda: readiness_review(valid("narrative"))),
+        ("quality", lambda: model_review(store, rig.ticket_id, critical=critical)),
+    ):
+        result = rig.run(ChatClient(FakeTransport(ok(payload()))), step=StepSpec(step_id, "c1", ()))
+        assert result.status == ("rejected" if critical and step_id == "quality" else "accepted")
+        directories.append(result.directory)
+    return directories
+
+
+def readiness_review(narrative_output: str) -> str:
+    inputs = DownstreamInputs.model_validate_json(narrative_output)
+    return DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+
+
+@pytest.mark.parametrize("critical", [False, True], ids=["accepted", "qa-blocked"])
+def test_a_quality_attempt_becomes_an_entry_with_four_upstream_steps_that_replays(
+    tmp_path: Path, critical: bool
+) -> None:
+    """Task 7.10 item 4: a `quality` attempt is recorded and replayed like the other steps,
+    the promotion (accepted) and the QA Blocked verdict (rejected) alike."""
+    rig, context, financials = cp1_rig(tmp_path)
+    *_, quality = run_quality(rig, context, financials, critical=critical)
+    target = write_entry(quality, "live-quality", root=tmp_path / "corpus")
+    entry = json.loads(target.read_text(encoding="utf-8"))
+    assert entry["step_id"] == "quality" and entry["pack"] == "synthetic-cp1"
+    assert set(entry["upstream"]) == set(cp1_workflow.CP1_STEPS)
+    assert entry["upstream"]["source_context"] == context
+    if critical:
+        (blocked,) = entry["expected"]["issues"]
+        assert entry["expected"]["validator_outcome"] == "rejected"
+        assert cp1_workflow.is_qa_blocked(blocked)
+    else:
+        assert entry["expected"] == {"validator_outcome": "accepted", "issues": []}
+    verdict = replay_entry(target, tmp_path / "replay")
+    assert verdict.passed, str(verdict)
 
 
 def test_missing_upstream_attempt_is_refused_not_guessed(tmp_path: Path) -> None:

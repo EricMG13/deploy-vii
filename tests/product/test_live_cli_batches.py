@@ -2016,10 +2016,19 @@ def test_a_blocked_qa_verdict_stands_and_ends_the_cell_without_a_module_repair(
 def test_a_validator_rejection_beside_a_blocked_line_still_takes_the_module_repair() -> None:
     blocked = "CP-1 QA Blocked: confidence 12 (Insufficient Information); "
     blocked += "a Blocked handoff is not promoted"
-    assert cli.qa_blocked_only((blocked,))
-    assert not cli.qa_blocked_only(())
-    assert not cli.qa_blocked_only((blocked, "QA review does not bind current inputs"))
-    assert not cli.qa_blocked_only(("QA review does not bind current inputs",))
+    assert cli.qa_blocked_only("quality", (blocked,))
+    assert not cli.qa_blocked_only("quality", ())
+    assert not cli.qa_blocked_only("quality", (blocked, "QA review does not bind current inputs"))
+    assert not cli.qa_blocked_only("quality", ("QA review does not bind current inputs",))
+
+
+@pytest.mark.parametrize("step_id", [s for s in cli.FULL_CHAIN + cli.CP1A_CHAIN if s != "quality"])
+def test_a_blocked_looking_issue_on_another_step_is_an_ordinary_rejection(step_id: str) -> None:
+    """Task 7.10 item 2: only the `quality` step emits the QA Blocked verdict, so only there does
+    it stand unrepaired; the same text on any other step takes the module repair as usual."""
+    blocked = "CP-1 QA Blocked: confidence 12 (Insufficient Information); "
+    blocked += "a Blocked handoff is not promoted"
+    assert not cli.qa_blocked_only(step_id, (blocked,))
 
 
 def test_a_truncated_quality_review_finishes_the_attempt_and_ends_the_cell(

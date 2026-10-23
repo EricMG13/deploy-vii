@@ -2220,7 +2220,13 @@ def test_an_in_flight_402_on_the_last_allowed_try_still_gets_its_one_re_send(
     transport = FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))
     result = rig.run(ChatClient(transport), max_retries=0, sleep=waits)
     assert result.status == "accepted" and waits.seconds == [120]
-    assert load(attempt_dir(result) / "manifest.json")["retries"]["attempt_number"] == 1
+    retries = load(attempt_dir(result) / "manifest.json")["retries"]
+    assert retries["attempt_number"] == 1 and retries["exhausted"] is True  # the real value
+    # Task 7.10 item 7: the refused attempt is followed by its re-send, so it exhausts nothing.
+    assert result.retried is not None
+    refused = load(attempt_dir(result.retried) / "manifest.json")["retries"]
+    assert refused["attempt_number"] == 1 and refused["exhausted"] is False
+    assert refused["ticket_interrupted"] is False
 
 
 def test_an_in_flight_refusal_uses_up_no_model_try(tmp_path: Path) -> None:
@@ -2249,6 +2255,109 @@ def test_an_in_flight_refusal_uses_up_no_model_try(tmp_path: Path) -> None:
     assert "Retries exhausted after 3 attempts" in ticket.interruption
     with pytest.raises(ValueError, match="finished"):
         rig.run(ChatClient(FakeTransport()))
+
+
+REDACTED_ACCOUNT = '"user_id": "<redacted>"'
+
+
+def stored_body(directory: Path) -> tuple[dict[str, Any], str]:
+    response = load(directory / "response.json")
+    text = response["body_text"]
+    assert isinstance(text, str)
+    assert response["body_sha256"] == hashlib.sha256(text.encode()).hexdigest()  # stored text
+    assert response["body_bytes"] == len(text.encode())
+    assert response["body_redactions"] == ["user_id"]
+    assert load(directory / "manifest.json")["body_redactions"] == ["user_id"]
+    assert ACCOUNT not in (directory / "response.json").read_text(encoding="utf-8")
+    return response, text
+
+
+def test_a_stored_402_body_keeps_everything_but_the_account_id(tmp_path: Path) -> None:
+    """Task 7.10 item 8: the in-flight 402 of batch e1-cp1-8 is stored with its `user_id` value
+    replaced (key kept) and nothing else changed; the hash is the stored text's."""
+    rig = make_rig(tmp_path)
+    result = rig.run(
+        ChatClient(FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))), sleep=Waits()
+    )
+    assert result.retried is not None
+    _, text = stored_body(attempt_dir(result.retried))
+    raw = IN_FLIGHT_402.decode()
+    assert text == raw.replace(f'"user_id": "{ACCOUNT}"', REDACTED_ACCOUNT)
+    assert json.loads(text) == {**json.loads(raw), "user_id": "<redacted>"}
+    # The refusal was still read from the body as received (task 7.8).
+    assert load(attempt_dir(result.retried) / "manifest.json")["credit"]["retry_after_s"] == 120
+
+
+def test_a_stored_200_body_is_redacted_the_same_way(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    body = reply(rig).body.decode()
+    assert body.endswith("}")
+    raw = body[:-1] + f', "user_id": "{ACCOUNT}"}}'
+    result = rig.run(ChatClient(FakeTransport(Response(200, raw.encode()))))
+    assert result.status == "accepted"
+    _, text = stored_body(attempt_dir(result))
+    assert text == raw.replace(f'"user_id": "{ACCOUNT}"', REDACTED_ACCOUNT)
+
+
+def test_a_body_without_an_account_id_is_stored_byte_for_byte(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    sent = reply(rig)
+    result = rig.run(ChatClient(FakeTransport(sent)))
+    response = load(attempt_dir(result) / "response.json")
+    assert response["body_text"] == sent.body.decode()
+    assert response["body_sha256"] == hashlib.sha256(sent.body).hexdigest()
+    assert "body_redactions" not in response
+    assert "body_redactions" not in load(attempt_dir(result) / "manifest.json")
+
+
+@pytest.mark.parametrize(
+    ("raw", "stored"),
+    [
+        (b'{"user_id":"u-1","a":1}', b'{"user_id":"<redacted>","a":1}'),
+        (b'{"x": {"user_id" :\n 42}, "user_id": null}', None),
+        (b'{"n": "a \\"user_id\\": \\"keep\\""}', b'{"n": "a \\"user_id\\": \\"keep\\""}'),
+        (b'{"\\"user_id": "keep"}', b'{"\\"user_id": "keep"}'),
+        (b'{"user_id": "a\\"b\\\\"}', b'{"user_id": "<redacted>"}'),
+        (b'\xff{"user_id": "u-1"}', b'\xff{"user_id": "<redacted>"}'),
+    ],
+)
+def test_the_account_id_redaction_replaces_only_user_id_values(
+    raw: bytes, stored: bytes | None
+) -> None:
+    from deploy_vii.live.retention import redact_account_id
+
+    if stored is None:
+        stored = b'{"x": {"user_id" :\n "<redacted>"}, "user_id": "<redacted>"}'
+    redacted, applied = redact_account_id(raw)
+    assert redacted == stored
+    assert applied == (("user_id",) if stored != raw else ())
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"user\\u005fid": "u-1", "a": 1}',
+        # The escaped key first: `json.loads` keeps only the last duplicate (rewrite tournament).
+        b'{"user\\u005fid": "u-1", "user_id": "u-2"}',
+        # Too deep to parse, so the redaction cannot be verified (rewrite tournament).
+        b"[" * 100_000 + b'{"user\\u005fid": "u-1"}' + b"]" * 100_000,
+    ],
+    ids=["escaped-key", "escaped-duplicate", "too-deep"],
+)
+def test_an_account_id_the_redaction_cannot_reach_withholds_the_body(raw: bytes) -> None:
+    """A key spelled with a JSON escape is the same `user_id` but no in-place match: the body
+    is withheld rather than stored with the account id (fail closed)."""
+    from deploy_vii.live.client import ChatResult, parse_usage
+    from deploy_vii.live.retention import response_envelope
+
+    refused = ChatResult(
+        "http_error", 402, raw, False, None, None, None, None, None, False, None,
+        parse_usage(None), 0.1, None,
+    )  # fmt: skip
+    envelope = response_envelope(refused)
+    assert envelope["body_text"] is None and "body_base64" not in envelope
+    assert "body_sha256" not in envelope and envelope["body_redactions"] == ["user_id"]
+    assert "u-1" not in json.dumps(envelope) and "user_id" in envelope["body_withheld"]
 
 
 def test_a_check_in_flight_402_stops_with_its_reason_and_no_wait(tmp_path: Path) -> None:
