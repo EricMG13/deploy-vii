@@ -28,6 +28,7 @@ from deploy_vii.execution import Execution, NotAuthorized
 from deploy_vii.live import prompts, runner, submission
 from deploy_vii.live.catalog import Catalog, ModelSelection, PinnedPool, parse_selection
 from deploy_vii.live.client import ChatClient, Response, TransportError, urllib_transport
+from deploy_vii.live.context import step_sources
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import draw
@@ -325,7 +326,7 @@ def test_unavailable_sources_and_repairs_and_upstream_are_data_blocks() -> None:
         }
     )
     gone = pack.model_copy(update={"sources": (missing,)})
-    up = prompts.UpstreamInput("step:source_context", "a" * 64, '{"x":1}')
+    up = prompts.UpstreamInput("step:source_context", "a" * 64, '{"x":1}', "full")
     user = prompts.build(
         "financials",
         gone,
@@ -336,7 +337,8 @@ def test_unavailable_sources_and_repairs_and_upstream_are_data_blocks() -> None:
     )[1].content
     assert "UNAVAILABLE (missing): file not supplied" in user
     assert "<<<SOURCE id=filing sha256=none>>>" in user and "0" * 64 not in user
-    assert f'<<<SOURCE id=step:source_context sha256={"a" * 64}>>>\n{{"x":1}}\n<<<END>>>' in user
+    header = f"<<<SOURCE id=step:source_context sha256={'a' * 64} projection=full>>>"
+    assert f'{header}\n{{"x":1}}\n<<<END>>>' in user
     assert "<<<REPAIR id=prior-validation-issues" in user and "- second issue" in user
     spreadsheet = pack.sources[0].model_copy(
         update={
@@ -858,7 +860,8 @@ def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
 
 
 def cp1_spec(rig: Rig, step_id: str) -> StepSpec:
-    return StepSpec(step_id, "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    sources = tuple(s.source_id for s in rig.store.pack().sources)
+    return StepSpec(step_id, "case-cp1", step_sources(step_id, sources))
 
 
 def user_prompt(transport: FakeTransport) -> str:
@@ -910,8 +913,11 @@ def test_a_rejected_cp1_step_is_re_sent_within_its_attempt_with_its_own_issues(
         "issue_count": len(failed.issues),
     }
     assert not events_of(failed, "repair_prompt")
-    # The next step's request (retained before the eligibility check) carries no REPAIR block.
-    following = rig.run(ChatClient(FakeTransport()), step=cp1_spec(rig, "narrative"))
+    # The next step's request carries no REPAIR block. (Task 7.5: its bounded prompt now fits
+    # the drawn model, so the request is sent; before, the raw upstream made it ineligible.)
+    reply = FakeTransport(ok("not json", model=LUNA))
+    following = rig.run(ChatClient(reply), step=cp1_spec(rig, "narrative"))
+    assert following.status == "rejected"
     request = load(following.directory / "request.json")
     assert "<<<REPAIR" not in request["body"]["messages"][1]["content"]
 
@@ -1063,7 +1069,9 @@ def test_cp1_step_dispatch_carries_the_retained_step_as_upstream_data(tmp_path: 
     ]
     held = store.read().attempts[-1].steps[0]
     user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
-    assert f"<<<SOURCE id=step:source_context sha256={held.content_hash()}>>>" in user
+    # R5 (task 7.5): the source-context report is sent whole; the header names the projection.
+    header = f"<<<SOURCE id=step:source_context sha256={held.content_hash()} projection=full>>>"
+    assert f"{header}\n{{" in user and user.count("<<<SOURCE id=step:") == 1
     assert extraction.context_step_sha256 == held.content_hash()
     # Only the `quality` manifest names QA inputs (task 7.4 fix round 1).
     assert "quality_inputs_sha256" not in load(attempt_dir(result) / "manifest.json")["hashes"]
@@ -1091,22 +1099,66 @@ def test_the_readiness_dispatch_shows_no_binding_hash_and_python_fills_it(
     assert [s.status for s in narrative.steps] == ["valid", "valid", "valid"]
     held = narrative.steps[-1]
     required = DownstreamInputs.model_validate_json(step_text(store, held)).content_hash()
-    upstream = runner._upstream(store, narrative)
-    sources = tuple(s.source_id for s in store.pack().sources)
+    upstream = runner._upstream(store, narrative, "readiness")
     system, user = (
         message.content
         for message in prompts.build(
-            "readiness", store.pack(), sources, DownstreamReview, upstream=upstream
+            "readiness", store.pack(), (), DownstreamReview, upstream=upstream
         )
     )
-    assert f"<<<SOURCE id=step:narrative sha256={held.content_hash()}>>>\n{{" in user
+    # Task 7.5: the narrative step's inputs projected for readiness, the only block sent.
+    header = f"<<<SOURCE id=step:narrative sha256={held.content_hash()} projection=readiness-inputs"
+    assert f"{header}>>>\nprojection=readiness-inputs: " in user
+    assert user.count("<<<SOURCE id=") == 1 and "record_json" not in user
     assert "step_output_sha256" not in user and required not in user
     assert "inputs_sha256" not in system
+    for producer in ("source_context", "financials"):  # R3: not sent to readiness
+        assert f"<<<SOURCE id=step:{producer} " not in user
     submitted = submission.submit_model_payload(store, ticket.ticket_id, "readiness", "{}")
     assert submitted.prefilled == ("inputs_sha256",)
     assert json.loads(submitted.payload) == {"inputs_sha256": required}
     assert submitted.journal.steps[-1].step_id == "readiness"
     assert submitted.journal.steps[-1].status == "valid", submitted.journal.steps[-1].issues
+
+
+def test_the_narrative_dispatch_sends_the_evidence_projection_and_no_pack_source(
+    tmp_path: Path,
+) -> None:
+    """Task 7.5 (R1, R2, R6): the narrative prompt carries the financial stage projected to its
+    evidence table under the retained step's content hash, no raw output, no `record_json`, no
+    source-context block and no pack SOURCE block; the review the model returns is accepted."""
+    store, ticket, extraction = cp1_case(tmp_path)
+    finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    raw = step_text(store, finances.steps[-1])
+    stage = FinancialStage.model_validate_json(raw)
+    rig = Rig(
+        store=store,
+        ticket_id=ticket.ticket_id,
+        ledger=Ledger(tmp_path / "ledger" / "l.jsonl", Decimal("5"), clock=lambda: NOW),
+        pool=fixture_pool("batch-n"),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(_keys(tmp_path)),
+        review=readiness_fixture()[1],
+        root=tmp_path,
+    )
+    review = json.loads(draft(stage.narrative_inputs).model_dump_json())
+    del review["inputs_sha256"]  # Python fills the binding
+    transport = FakeTransport(ok(json.dumps(review), model=LUNA))
+    result = rig.run(ChatClient(transport), step=cp1_spec(rig, "narrative"))
+    assert result.status == "accepted", result.issues
+    user = user_prompt(transport)
+    held = finances.steps[-1]
+    header = (
+        f"<<<SOURCE id=step:financials sha256={held.content_hash()} projection=narrative-evidence"
+    )
+    assert user.count(f"{header}>>>\nprojection=narrative-evidence: ") == 1
+    assert user.count("<<<SOURCE id=") == 1  # no pack source, no source-context block
+    assert "record_json" not in user and '"quote"' not in user
+    assert len(user) < len(raw) // 10
+    assert all(r.evidence_id in user for r in stage.narrative_inputs.catalogue)
+    request = load(attempt_dir(result) / "request.json")
+    assert load(result.directory / "manifest.json")["hashes"]["declared_inputs"] == []
+    assert request["body"]["messages"][1]["content"] == user
 
 
 def _keys(tmp_path: Path) -> Path:
@@ -2232,7 +2284,7 @@ def model_review(inputs: QualityInputs, **update: object) -> dict[str, Any]:
 
 
 def quality_step(rig: Rig) -> StepSpec:
-    return StepSpec("quality", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    return StepSpec("quality", "case-cp1", ())  # R6 (task 7.5): the QA review checks no span
 
 
 def test_the_fifth_cp1_step_is_quality_and_its_dispatch_promotes_cp1(tmp_path: Path) -> None:
@@ -2257,7 +2309,7 @@ def test_the_fifth_cp1_step_is_quality_and_its_dispatch_promotes_cp1(tmp_path: P
     system, user = (message["content"] for message in body["messages"])
     assert prompts.QUALITY_LINEAGE_RULE in system and "inputs_sha256" not in system
     assert user.count(f"<<<CONTEXT id={prompts.QUALITY_BLOCK_ID} sha256=") == 1
-    assert "<<<SOURCE id=step:" not in user  # the QA scope stands in for the stage outputs
+    assert "<<<SOURCE id=" not in user  # the QA scope stands in for stage outputs and pack
     assert inputs.content_hash() not in user  # nothing is left to copy
     request = load(attempt_dir(result) / "request.json")
     assert result.prompt_tokens_upper_bound == runner.prompt_token_bound(

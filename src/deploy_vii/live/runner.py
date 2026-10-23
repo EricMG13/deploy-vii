@@ -43,6 +43,7 @@ from deploy_vii.live.client import (
     ChatResult,
     TransportError,
 )
+from deploy_vii.live.context import OMITTED, projection_name, upstream_text
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
@@ -304,16 +305,20 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
     return CP1_PROMOTION[done]
 
 
-def _upstream(store: Execution, attempt: Attempt) -> tuple[UpstreamInput, ...]:
-    return tuple(
-        UpstreamInput(
-            "step:" + item.step_id,
-            item.content_hash(),
-            store.step_output(item.output_sha256),
-        )
-        for item in attempt.steps
-        if item.status == "valid" and item.output_sha256 is not None
-    )
+def _upstream(store: Execution, attempt: Attempt, step_id: str) -> tuple[UpstreamInput, ...]:
+    """The retained valid steps `step_id` is sent, each as its `live.context` projection under
+    its content hash (task 7.5); an omitted step sends nothing, an unlisted pair raises."""
+    blocks = []
+    for item in attempt.steps:
+        if item.status != "valid" or item.output_sha256 is None:
+            continue
+        projection = projection_name(step_id, item.step_id)
+        if projection == OMITTED:
+            continue
+        output = store.step_output(item.output_sha256)
+        text = upstream_text(step_id, item.step_id, output)
+        blocks.append(UpstreamInput("step:" + item.step_id, item.content_hash(), text, projection))
+    return tuple(blocks)
 
 
 def step_try(attempt: Attempt, step_id: str) -> int:
@@ -382,7 +387,8 @@ def _plan(
     decision = candidate.effort_for(effort)
     repair = repair_prompt(snapshot, attempt, step.step_id)
     # Task 7.4: the QA review reads the QA scope of the recomputed registers (registers that do
-    # not stage raise here, before anything is spent), not the four retained stage outputs.
+    # not stage raise here, before anything is spent), not the four retained stage outputs
+    # (task 7.5: `live.context` omits them for `quality`).
     quality = step.step_id == QUALITY
     registers = cp1_registers(store, ticket_id) if quality else None
     inputs = cp1_quality_inputs(registers) if registers is not None else None
@@ -391,7 +397,7 @@ def _plan(
         store.pack(snapshot),
         step.declared_sources,
         step.schema,
-        upstream=() if quality else _upstream(store, attempt),
+        upstream=_upstream(store, attempt, step.step_id),
         repair_issues=repair.issues,
         # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
         cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),

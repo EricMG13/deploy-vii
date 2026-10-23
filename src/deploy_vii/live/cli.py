@@ -43,6 +43,7 @@ from deploy_vii.live.client import (
     urllib_transport,
 )
 from deploy_vii.live.cohort import ProxyResult, credit_state
+from deploy_vii.live.context import step_sources
 from deploy_vii.live.corpus import CORPUS_ROOT, REPOSITORY_ROOT, CorpusError, write_entry
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
@@ -494,7 +495,13 @@ def _run_cell(
 
     def send(step_id: str, attempt: Attempt) -> DispatchResult:
         result = dispatch(
-            StepSpec(step_id, cell.case_id, sources, max_tokens=max_tokens, timeout_s=timeout_s),
+            StepSpec(
+                step_id,
+                cell.case_id,
+                step_sources(step_id, sources),  # task 7.5: only where spans are checked
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+            ),
             store=store,
             ticket_id=attempt.ticket_id,
             ledger=ledger,

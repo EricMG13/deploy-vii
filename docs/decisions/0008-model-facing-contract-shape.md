@@ -445,3 +445,30 @@ unchanged.
 
 Not verified: provider acceptance of the `quality` sent schema (`live schema-check`); a live or
 proxy QA review on the real pack.
+
+## Amendment, 23 Oct 2026 (task 7.5)
+
+E1 batch 6 (proxy cohort, the first accepted `financials` on the real Caesars pack) built a
+`narrative` prompt of 8,900,941 characters of user content (about 2.2M tokens, above every pool
+model's context), because each later CP-1 step received every retained step's raw output: the
+`financials` output alone (the whole `FinancialStage`) was 8,023,867 characters, of which
+`narrative_inputs` 7.44 MB (catalogue 4.11 MB: 2,564 records with their full `record_json` and
+inlined citations; ledger 3.33 MB) and `model` 0.85 MB, with the 307 KB historical table three
+times. Rule: a later step is sent a bounded projection of each retained step, chosen per consumer
+and producer by `live.context.PROJECTIONS` (a pair it does not list raises); the block header
+keeps the retained step's content hash and names the projection (`projection=<name>`).
+`narrative` receives `narrative-evidence`, one evidence-table line per catalogue entry (its
+evidence id and a compact value summary, no `record_json`, no citation) with the scope, the
+ledger's limitations and context and the model's metrics; `readiness` receives
+`readiness-inputs` from the narrative step (consumers, the narrative review and added gaps, the
+same table with gap ids); `quality` receives none (its QA scope, task 7.4); `financials` keeps the
+source-context report whole. Pack SOURCE blocks go only to steps whose validators match quotes
+against the pack (`source_readiness`, `source_context`, `financials`, `business_context`); the
+`narrative`, `readiness` and `quality` validators check evidence and gap ids only, so `build`
+refuses pack sources for them. An execution boundary only (decision 0005): validators, retained
+outputs, hashes and acceptance are unchanged; they recompute from the retained artifacts, not
+from what a model saw. Synthetic CP-1 case: the narrative block is 5.2% of the raw output.
+
+Not verified: the real-pack block sizes (target: at most 600,000 characters for the narrative
+block; measured by the coordinator on the batch-6 journal); live or proxy uptake of the
+projections.

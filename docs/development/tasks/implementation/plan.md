@@ -367,7 +367,9 @@ live candidate.
 - [ ] **7.1 E1 for CP-0 and CP-1** on Caesars. This closes B's adopted condition: real
   readiness populates the header, Evidence and Limitations. It also closes C's CP-1
   condition: tables, capital structure and the Model grid reconcile to accepted
-  artifacts.
+  artifacts. Measured in E1 batch 6 (23 Oct 2026): after the first accepted `financials` the
+  `narrative` prompt held 8,900,941 characters (every retained step's raw output), so task 7.5
+  sends each later step a bounded projection instead (decision 0008 amendment, task 7.5).
 - [ ] **7.1a `dv-feature`: CP-MODEL deterministic publication.** Give CP-MODEL a head when CP-1 is promoted: publish the promoted envelope as the Model destination plus the calculation JSON (DC-5), Python only, no model call; required before M8's CP-5 case under any preset that requests CP-MODEL (decision 0009 amendment).
 - [ ] **7.2 CP-1A** business and transaction context: contract over prose runs,
   validator, Company profile bindings, then E1.

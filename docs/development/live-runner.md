@@ -43,6 +43,7 @@ from a pinned pool:
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4). |
+| `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5). |
 | `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
@@ -157,6 +158,29 @@ from a pinned pool:
   already retains a different QA review". The manifest's `hashes.quality_inputs_sha256` names
   the QA inputs the scope was projected from, which the review must bind. The proxy cohort
   (`accept_proxy_payload`) takes the same route.
+- **What each step receives (task 7.5).** The journal retains every step's full output and every
+  validator recomputes from it; a model is sent a bounded projection (`live.context`), never the
+  raw output of a later step's producer. Each retained block's header keeps the step's content
+  hash and names the projection: `<<<SOURCE id=step:<step> sha256=<content hash>
+  projection=<name>>>>`. A consumer/producer pair `PROJECTIONS` does not list raises before
+  anything is spent. Pack SOURCE blocks go only to a step whose validator matches quotes against
+  the pack text; `build` refuses them for any other step (`cli` declares none there).
+
+  | Consumer | Retained step | Projection | What it holds | Pack SOURCE blocks |
+  | --- | --- | --- | --- | --- |
+  | `source_context` | none | | | yes (spans checked) |
+  | `financials` | `source_context` | `full` | the source-context report, unchanged | yes (spans checked) |
+  | `narrative` | `source_context` | `omitted` | the same report is the ledger's `context` below | no: the review has evidence ids, no citations |
+  | `narrative` | `financials` | `narrative-evidence` | one evidence-table line per catalogue entry (its `evidence_id` and a compact value summary per kind: period, metric, amount, unit, status; gaps with severity, origin, metric, periods and a description of at most 120 characters), no `record_json`, no citation; the scope, calculation status and issues, the ledger's limitations, its source-context report without citations or hashes, the model's metrics (key, period, amount, unit, status) and limitations. Not sent: the audit, the period reconciliation, the gap rows, `historical` (the catalogue's historical_value, construction and source_period lines carry it), the model's values and computations | |
+  | `readiness` | `source_context`, `financials` | `omitted` | the validator reads the narrative step's output only, which holds the same catalogue | no: the review has evidence and gap ids, no citations |
+  | `readiness` | `narrative` | `readiness-inputs` | the requested consumers with their requirements and policy, the narrative status, limitations and review (without its binding), the gaps the narrative added, and the same evidence table with each gap line's `gap_id`. Not sent: the model readiness report (Python's CP-MODEL row) and the financial book | |
+  | `quality` | all four | `omitted` | the QA scope CONTEXT block (task 7.4) | no: the review has evidence ids and coverage field ids |
+  | `source_readiness`, `business_context` | none (one step per attempt) | | | yes (spans checked) |
+
+  Synthetic CP-1 case (`staged`, 2,913 catalogue entries): `narrative-evidence` is 5.2% of the
+  10.2 MB raw `financials` output (about 174 characters per evidence line on average);
+  `readiness-inputs` is 6.0% of the 9.9 MB raw `narrative` output. Tests hold every catalogue
+  evidence id (and, for readiness, every gap id) to exactly one line.
 - **A truncated completion is not repaired (task 7.0h).** A try classified `truncated` (cut at
   the `--max-tokens` budget) is a budget verdict, not a validator verdict the model can act on:
   the `module` driver neither re-sends the step (its one in-attempt repair stays unused, the
@@ -201,7 +225,8 @@ from a pinned pool:
 - **Prompts.** Source text appears only inside `<<<SOURCE id=... sha256=...>>>` blocks in the user
   message. A source that contains a delimiter is refused, not escaped (escaping would break verbatim
   citations). Declared inputs only: the prepared-pack identity, the named sources, and retained
-  earlier steps of the same ticket (`step:<id>`, with the step hash and the hash of its output).
+  earlier steps of the same ticket (`step:<id>`, with the step's content hash and, since task
+  7.5, the projection of its output the step is sent; see "What each step receives" below).
   The pack identity is a `<<<CONTEXT id=prepared-pack sha256=...>>>` block marked not citable; it lists each
   source with its extraction coverage (located spans, first and last locator, page numbers missing
   between them) and, for `source_readiness`, the exact consumer list. Since task 2.10 each consumer

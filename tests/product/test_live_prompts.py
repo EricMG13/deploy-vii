@@ -24,6 +24,7 @@ from deploy_vii.financial_contracts import (
 )
 from deploy_vii.financial_validation import book_issues
 from deploy_vii.live import prompts
+from deploy_vii.live.context import NARRATIVE_EVIDENCE, step_sources
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
     STEPS,
@@ -199,7 +200,8 @@ def composed(step_id: str) -> str:
     pack, _ = readiness_fixture()
     schema = STEPS[step_id].schema
     scope = prompts.quality_scope(staged_scope()[1]) if step_id == prompts.QUALITY else None
-    return prompts.build(step_id, pack, ("filing",), schema, scope=scope)[0].content
+    sources = step_sources(step_id, ("filing",))
+    return prompts.build(step_id, pack, sources, schema, scope=scope)[0].content
 
 
 def test_the_citation_rule_states_the_interleave_and_page_rules_once() -> None:
@@ -632,7 +634,7 @@ def quality_prompt() -> tuple[str, str]:
     pack, _ = readiness_fixture()
     scope = prompts.quality_scope(staged_scope()[1])
     system, user = (
-        m.content for m in prompts.build("quality", pack, ("filing",), QualityReview, scope=scope)
+        m.content for m in prompts.build("quality", pack, (), QualityReview, scope=scope)
     )
     return system, user
 
@@ -713,9 +715,9 @@ def test_the_quality_context_is_the_qa_scope_as_compact_json_with_its_hash() -> 
 def test_the_qa_scope_is_required_for_quality_and_refused_elsewhere() -> None:
     pack, _ = readiness_fixture()
     with pytest.raises(prompts.PromptError, match="needs its QA scope"):
-        prompts.build("quality", pack, ("filing",), QualityReview)
+        prompts.build("quality", pack, (), QualityReview)
     with pytest.raises(prompts.PromptError, match="not a declared input of step readiness"):
-        prompts.build("readiness", pack, ("filing",), STEPS["readiness"].schema, scope={})
+        prompts.build("readiness", pack, (), STEPS["readiness"].schema, scope={})
 
 
 def test_a_cell_slot_without_its_register_fact_is_refused(
@@ -758,3 +760,40 @@ def test_claim_evidence_without_its_register_record_is_refused(
     monkeypatch.setattr(prompts, "cp1_quality_inputs", lambda _: drifted)
     with pytest.raises(prompts.PromptError, match="gap:stray has no register record"):
         prompts.quality_scope(registers)
+
+
+# --- task 7.5: bounded projections of the retained steps; pack sources only where spans count --
+
+
+@pytest.mark.parametrize("step_id", ["narrative", "readiness", "quality"])
+def test_a_step_that_checks_no_span_is_refused_the_pack_sources(step_id: str) -> None:
+    """R6: these validators match no quote against the pack text, so the pack's SOURCE blocks
+    (837 KB on the real pack) are never sent to them; a caller declaring them is refused."""
+    pack, _ = readiness_fixture()
+    scope = prompts.quality_scope(staged_scope()[1]) if step_id == prompts.QUALITY else None
+    schema = STEPS[step_id].schema
+    with pytest.raises(prompts.PromptError, match=f"step {step_id} checks no span"):
+        prompts.build(step_id, pack, ("filing",), schema, scope=scope)
+    user = prompts.build(step_id, pack, (), schema, scope=scope)[1].content
+    assert "<<<SOURCE id=" not in user and user.count("<<<CONTEXT id=prepared-pack ") == 1
+
+
+def test_an_upstream_block_names_its_projection_after_the_retained_content_hash() -> None:
+    pack, _ = readiness_fixture()
+    up = prompts.UpstreamInput(
+        "step:financials", "b" * 64, "projection=narrative-evidence: x", NARRATIVE_EVIDENCE
+    )
+    user = prompts.build("narrative", pack, (), STEPS["narrative"].schema, upstream=(up,))[
+        1
+    ].content
+    header = f"<<<SOURCE id=step:financials sha256={'b' * 64} projection=narrative-evidence>>>"
+    assert f"{header}\nprojection=narrative-evidence: x\n<<<END>>>" in user
+
+
+def test_the_narrative_and_readiness_contracts_name_what_their_block_holds() -> None:
+    narrative = prompts.STEP_CONTRACTS["narrative"]
+    assert "id=step:financials" in narrative and "projection=narrative-evidence" in narrative
+    assert "evidence_id" in narrative and "cites the supplied spans" not in narrative
+    readiness = prompts.STEP_CONTRACTS["readiness"]
+    assert "id=step:narrative" in readiness and "projection=readiness-inputs" in readiness
+    assert "gap_id" in readiness

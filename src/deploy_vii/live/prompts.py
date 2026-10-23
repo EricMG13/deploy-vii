@@ -22,6 +22,11 @@ Task 7.4: `quality` gets a second CONTEXT block, `<<<CONTEXT id=quality-scope sh
 own hash>>>>`, holding the QA scope Python projects from the recomputed registers
 (`quality_scope`) as compact JSON, in place of the retained stage outputs the other CP-1 steps
 receive.
+
+Task 7.5: a retained step's block holds the projection `live.context` defines for the consumer
+step, never the raw output (except `full` for `financials`), and its header names it:
+`<<<SOURCE id=step:<step> sha256=<retained content hash> projection=<name>>>>`. Pack SOURCE
+blocks are refused for a step whose validator checks no span (`context.PACK_SOURCE_STEPS`).
 """
 
 import hashlib
@@ -40,6 +45,7 @@ from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import Fact
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.financial_periods import _id
+from deploy_vii.live.context import PACK_SOURCE_STEPS
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.quality import QualityInputs
@@ -308,11 +314,21 @@ STEP_CONTRACTS: Mapping[str, str] = {
     ),
     # Task 7.0i: the model supplies no hash. Every CP-1 hash binding is pre-filled by Python
     # (`live.submission.prefill`) and left out of the sent schema, so no rule asks for one.
+    # Task 7.5: each names the projection of the retained step its one SOURCE block holds.
     "narrative": (
-        "Write the narrative review from the supplied narrative inputs only. Every claim cites "
-        "the supplied spans."
+        "Write the narrative review from the supplied narrative inputs only. The SOURCE block "
+        "id=step:financials (projection=narrative-evidence) holds them: one evidence-table line "
+        "per evidence_id an evidence part may name, with its kind and a compact value summary, "
+        "then the scope, the ledger's limitations, the source-context report and the model's "
+        "metrics; a passage names evidence by its evidence_id and never quotes it."
     ),
-    "readiness": "Review downstream readiness from the supplied inputs only.",
+    "readiness": (
+        "Review downstream readiness from the supplied inputs only. The SOURCE block "
+        "id=step:narrative (projection=readiness-inputs) holds them: the requested consumers "
+        "with their requirements, the narrative review, its status and the gaps it added, and "
+        "one evidence-table line per evidence_id an assessment may name, each gap line also "
+        "carrying the gap_id a gap scope names."
+    ),
     # Task 7.4: the analyst's part of CP-1 QA (`quality.md`); Python owns the arithmetic.
     "quality": (
         "Review the CP-1 quality scope as the QA analyst. The CONTEXT block id=quality-scope "
@@ -363,18 +379,24 @@ class Message:
 
 @dataclass(frozen=True)
 class UpstreamInput:
-    """A retained earlier step of the same attempt, offered as data (e.g. `step:source_context`)."""
+    """A retained earlier step of the same attempt, offered as data (e.g. `step:source_context`):
+    its content hash and the projection of its output the consumer is sent (task 7.5,
+    `live.context`)."""
 
     input_id: str
     sha256: str
     text: str
+    projection: str
 
 
-def block(kind: str, input_id: str, sha256: str, body: str) -> str:
+def block(
+    kind: str, input_id: str, sha256: str, body: str, *, projection: str | None = None
+) -> str:
     for marker in DELIMITERS:
         if marker in body:
             raise PromptError(f"input {input_id} contains the reserved delimiter {marker}")
-    return f"<<<{kind} id={input_id} sha256={sha256}>>>\n{body}\n<<<END>>>"
+    shown = f" projection={projection}" if projection is not None else ""
+    return f"<<<{kind} id={input_id} sha256={sha256}{shown}>>>\n{body}\n<<<END>>>"
 
 
 def _source_body(pack: PreparedPack, source_id: str) -> tuple[str, str]:
@@ -544,6 +566,10 @@ def build(
         raise PromptError(f"step {QUALITY} needs its QA scope")
     if step_id != QUALITY and scope is not None:
         raise PromptError(f"the QA scope is not a declared input of step {step_id}")
+    if declared_inputs and step_id not in PACK_SOURCE_STEPS:  # task 7.5, R6
+        raise PromptError(
+            f"step {step_id} checks no span against the pack; it declares no pack sources"
+        )
     system = "\n".join(
         (
             f"You are one step of a credit-research evidence workflow. Step: {step_id}.",
@@ -573,8 +599,11 @@ def build(
         digest, body = _source_body(pack, source_id)
         blocks.append(block("SOURCE", source_id, digest, body))
     for item in upstream:
-        # Task 7.0i: no output-hash line; no binding is copied from the block any more.
-        blocks.append(block("SOURCE", item.input_id, item.sha256, item.text))
+        # Task 7.0i: no output-hash line; no binding is copied from the block any more. Task 7.5:
+        # the header names the projection of the retained output the body holds.
+        blocks.append(
+            block("SOURCE", item.input_id, item.sha256, item.text, projection=item.projection)
+        )
     if repair_issues:
         issues = "\n".join(f"- {issue}" for issue in repair_issues)
         digest = hashlib.sha256(issues.encode()).hexdigest()

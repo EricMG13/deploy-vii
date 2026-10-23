@@ -340,3 +340,29 @@ block is about 9.4 KB against 44,777 coverage slots and 48,836 references in the
 
 Not verified: provider acceptance of the `quality` sent schema (the coordinator runs
 `live schema-check --steps quality`); a live or proxy QA review on the real pack.
+
+## 7.5 Bounded upstream projections
+
+E1 batch 6 (proxy cohort, the first accepted `financials` on the real Caesars pack) could not
+send the next step: the `narrative` prompt held 8,900,941 characters because `runner._upstream`
+put every retained step's raw output (the 8,023,867-character `FinancialStage`) into a SOURCE
+block. Each later CP-1 step is now sent the projection `live.context.PROJECTIONS` names for its
+consumer/producer pair (an unlisted pair raises before anything is spent), under a header that
+keeps the retained content hash and names the projection: `narrative` gets `narrative-evidence`
+(one evidence-table line per catalogue entry, no `record_json` or citation, plus scope,
+limitations, source context and model metrics); `readiness` gets `readiness-inputs` from the
+narrative step (consumers, the narrative review and added gaps, the evidence table with gap
+ids); `quality` gets none (its QA scope); `financials` keeps the source-context report whole.
+Pack SOURCE blocks go only to the steps whose validators match quotes against the pack;
+`narrative`, `readiness` and `quality` declare none (`cli`), and `build` refuses them. Validators,
+retained outputs, hashes and acceptance are unchanged (decision 0008 amendment "23 Oct 2026
+(task 7.5)"; the table is in `docs/development/live-runner.md`, "What each step receives").
+
+Evidence: offline only. On the synthetic CP-1 case (2,913 catalogue entries) the narrative block
+is 528 KB against the 10.2 MB raw output (5.2%, about 174 characters per evidence line), the
+readiness block 599 KB against 9.9 MB (6.0%); each catalogue evidence id, and each gap id, is
+on exactly one line; a narrative dispatch that the raw upstream made ineligible is now sent and
+accepted.
+
+Not verified: the real-pack block sizes (narrative target at most 600,000 characters; the
+coordinator measures on the batch-6 journal); live or proxy uptake of the projections.
