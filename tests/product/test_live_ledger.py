@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 from deploy_vii.live import ledger as ledger_module
 from deploy_vii.live.ledger import (
     ADJUST_404_SOURCE,
+    ADJUST_NEXT_BEFORE_SOURCE,
     ADJUST_USAGE_SOURCE,
     CapExceeded,
     Ledger,
@@ -456,9 +457,11 @@ def test_a_generation_404_adjustment_is_zero_and_carries_its_evidence(tmp_path: 
 USAGE_EVIDENCE = {"usage_delta_usd": "0.0412", "held_attempts": ["a"], "other_attempts": []}
 
 
+@pytest.mark.parametrize("source", [ADJUST_USAGE_SOURCE, ADJUST_NEXT_BEFORE_SOURCE])
 def test_an_account_usage_adjustment_names_no_generation_and_carries_its_evidence(
-    tmp_path: Path,
+    tmp_path: Path, source: str
 ) -> None:
+    """Both usage-delta sources (task 7.13 adds the next-batch-before window) follow one rule."""
     ledger = Ledger(tmp_path / "l.jsonl", Decimal("1"), clock=lambda: "t")
     ledger.reserve("a", Decimal("0.28"))
     ledger.settle("a", None, "no response received; reservation held as worst case")
@@ -474,7 +477,7 @@ def test_an_account_usage_adjustment_names_no_generation_and_carries_its_evidenc
                 amount,
                 generation_id=generation,
                 checked_at="t",
-                source=ADJUST_USAGE_SOURCE,
+                source=source,
                 evidence=facts,
             )
     with pytest.raises(LedgerError, match="without a generation id"):
@@ -484,19 +487,19 @@ def test_an_account_usage_adjustment_names_no_generation_and_carries_its_evidenc
         Decimal("0.0412"),
         generation_id=None,
         checked_at="t",
-        source=ADJUST_USAGE_SOURCE,
+        source=source,
         evidence=USAGE_EVIDENCE,
     )
     assert (done.source, done.generation_id, done.evidence) == (
-        ADJUST_USAGE_SOURCE,
+        source,
         None,
         USAGE_EVIDENCE,
     )
     (record,) = ledger.state().attempts
     assert record.charged_usd == record.actual_usd == Decimal("0.0412")
-    assert record.basis == ADJUST_USAGE_SOURCE and ledger.state().spent == Decimal("0.0412")
+    assert record.basis == source and ledger.state().spent == Decimal("0.0412")
     line = json.loads(ledger.path.read_text(encoding="utf-8").splitlines()[-1])
-    assert line["source"] == ADJUST_USAGE_SOURCE and line["generation_id"] is None
+    assert line["source"] == source and line["generation_id"] is None
     assert line["evidence"] == USAGE_EVIDENCE
 
 

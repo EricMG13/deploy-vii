@@ -59,6 +59,7 @@ from deploy_vii.live.reconcile import (
     candidates,
     interrupted_attempts,
     lookup_order,
+    next_batch_window,
     read_usage,
     reconcile_attempt,
     reconcile_interrupted,
@@ -1202,10 +1203,20 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
                 reconcile_attempt(attempt, ledger, client, utc_stamp, batch=retained, usage=usage)
             )
         # Task 7.11: after every lookup, like a deadline hold (nothing to look up either).
-        for directory in interrupted_attempts(root, args.batch_id, ledger.state()):
+        interrupted = interrupted_attempts(root, args.batch_id, ledger.state())
+        # Task 7.13: a batch killed before its after-check may close at the next before-check.
+        killed = interrupted and not usage_path(root, args.batch_id, "after").is_file()
+        next_batch = next_batch_window(root, args.batch_id) if killed else None
+        for directory in interrupted:
             outcomes.append(
                 reconcile_interrupted(
-                    directory, ledger, client, utc_stamp, batch=retained, usage=usage
+                    directory,
+                    ledger,
+                    client,
+                    utc_stamp,
+                    batch=retained,
+                    usage=usage,
+                    next_batch=next_batch,
                 )
             )
     finally:

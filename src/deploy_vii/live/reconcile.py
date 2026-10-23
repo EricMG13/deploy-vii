@@ -45,6 +45,16 @@ the process ended before the reply) gets the one manifest that shape supports, w
 a new file (`interrupted_manifest`), and is then settled by the `account-usage-delta` rule above
 (settle held, then adjust) only where it holds; otherwise its reservation stays open and the
 outcome is unresolved. It is processed after every lookup, as a hold without an id is.
+
+Task 7.13: a batch killed before its after-check (e1-cp1-12) has no window of its own. Its
+window may then close at the earliest later batch's before-check under the same artifact root
+(`next_batch_window`), only when both checks read the same key token, the batch's own ledger
+ends before that check and no reservation of any other batch was opened between the two checks
+(every `.ledgers/*.jsonl` read). The same attribution settles the interrupted attempt, source
+`account-usage-delta/next-batch-before`, with both files, both times and the no-reservation fact
+in the evidence and the report. No reconcile-time reading can corroborate that window (later
+batches moved the usage), so a charge billed after the closing check is not seen. A manifest this
+path wrote earlier is reused only while the directory holds exactly it and `request.json`.
 """
 
 import hashlib
@@ -55,6 +65,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -63,6 +74,7 @@ from deploy_vii.live.client import CHAT_URL, GENERATION_ID, ChatClient, Response
 from deploy_vii.live.credit import from_key_response
 from deploy_vii.live.ledger import (
     ADJUST_404_SOURCE,
+    ADJUST_NEXT_BEFORE_SOURCE,
     ADJUST_SOURCE,
     ADJUST_USAGE_SOURCE,
     AttemptRecord,
@@ -202,36 +214,200 @@ def usage_path(artifact_root: Path, batch_id: str, phase: str) -> Path:
     return artifact_root / batch_id / USAGE_FILE.format(phase=phase)
 
 
+@dataclass(frozen=True)
+class _Check:
+    """One recorded `GET /api/v1/key` reading (`account-usage-<phase>.json`)."""
+
+    usage: Decimal
+    checked_at: object
+    key_file: object
+    recorded_by: object
+
+
+def _usage_check(path: Path, phase: str) -> tuple[_Check | None, str]:
+    """The reading `path` records, or None with the reason it cannot be used."""
+    if not path.is_file():
+        return None, f"no account usage was recorded {phase} the batch"
+    document = _read(path)
+    credit = document.get("credit")
+    usage = credit.get("usage") if isinstance(credit, dict) else None
+    try:
+        value = Decimal(usage) if isinstance(usage, str) else None
+    except ArithmeticError:
+        value = None
+    if value is None or not value.is_finite():
+        return None, f"account usage {phase} the batch is not a recorded number"
+    assert isinstance(credit, dict)
+    check = _Check(
+        value, credit.get("checked_at"), credit.get("key_file"), document.get("recorded_by")
+    )
+    return check, ""
+
+
 def read_usage(artifact_root: Path, batch_id: str) -> tuple[UsageWindow | None, str]:
     """The batch's recorded usage window, or None with the reason it cannot be used."""
-    found: dict[str, tuple[Decimal, object, object, object]] = {}
+    found: dict[str, _Check] = {}
     for phase in ("before", "after"):
-        path = usage_path(artifact_root, batch_id, phase)
-        if not path.is_file():
-            return None, f"no account usage was recorded {phase} the batch"
-        document = _read(path)
-        credit = document.get("credit")
-        usage = credit.get("usage") if isinstance(credit, dict) else None
-        try:
-            value = Decimal(usage) if isinstance(usage, str) else None
-        except ArithmeticError:
-            value = None
-        if value is None or not value.is_finite():
-            return None, f"account usage {phase} the batch is not a recorded number"
-        assert isinstance(credit, dict)
-        found[phase] = (
-            value,
-            credit.get("checked_at"),
-            credit.get("key_file"),
-            document.get("recorded_by"),
-        )
+        check, why = _usage_check(usage_path(artifact_root, batch_id, phase), phase)
+        if check is None:
+            return None, why
+        found[phase] = check
     before, after = found["before"], found["after"]
-    if before[2] != after[2]:
+    if before.key_file != after.key_file:
         return None, "the two account usage checks read different key tokens"
-    return (
-        UsageWindow(before[0], after[0], before[1], after[1], (before[3], after[3]), after[2]),
-        "",
+    window = UsageWindow(
+        before.usage,
+        after.usage,
+        before.checked_at,
+        after.checked_at,
+        (before.recorded_by, after.recorded_by),
+        after.key_file,
     )
+    return window, ""
+
+
+# Task 7.13: the window of a batch with no after-check may close at the next batch's
+# before-check. Times are `catalog.utc_stamp`'s, the clock of the ledger and the usage checks.
+STAMP = "%Y-%m-%dT%H:%M:%SZ"
+NEXT_BATCH_BEFORE = "next-batch-before"
+
+
+def _instant(value: object) -> datetime | None:
+    """A recorded `utc_stamp` time, or None for anything else."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, STAMP).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class NextBatchWindow:
+    """A batch's usage window closed at the next batch's before-check, the facts that close
+    it (ledger evidence) and the sentence the reconciled report gives them."""
+
+    window: UsageWindow
+    evidence: dict[str, Any]
+    reason: str
+
+
+def _next_before(
+    artifact_root: Path, batch_id: str, start: datetime
+) -> tuple[tuple[datetime, str, Path] | None, str]:
+    """The earliest before-check of another batch under the root after `start`, or None with
+    why it is not known (none; a check without a readable time; two in the same second)."""
+    later: list[tuple[datetime, str, Path]] = []
+    for path in sorted(artifact_root.glob(f"*/{USAGE_FILE.format(phase='before')}")):
+        if path.parent.name == batch_id:
+            continue
+        where = path.relative_to(artifact_root).as_posix()
+        try:
+            credit = _read(path).get("credit")
+        except ValueError:
+            return None, f"{where} is not a readable account usage check; the next batch is unknown"
+        at = _instant(credit.get("checked_at") if isinstance(credit, dict) else None)
+        if at is None:
+            return None, f"{where} records no check time; the next batch is unknown"
+        if at > start:
+            later.append((at, path.parent.name, path))
+    if not later:
+        return None, "no later batch recorded an account usage check before it"
+    later.sort()
+    if len(later) > 1 and later[1][0] == later[0][0]:
+        return None, (
+            f"batches {later[0][1]} and {later[1][1]} checked account usage in the same second; "
+            "the next batch is unknown"
+        )
+    return later[0], ""
+
+
+def _ledgers_between(
+    ledgers: Path, batch_id: str, next_id: str, start: datetime, end: datetime
+) -> tuple[list[str] | None, str]:
+    """The ledger files read, when no batch but `batch_id` reserved between `start` and `end`
+    (inclusive; the next batch's own lines at `end` follow its check, which it records before
+    its first reservation) and every line of `batch_id`'s precedes `end`; else None with why."""
+    read: list[str] = []
+    for path in sorted(ledgers.glob("*.jsonl")):
+        read.append(path.name)
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                entry = None
+            stamp = entry.get("at") if isinstance(entry, dict) else None
+            at = _instant(stamp)
+            if not isinstance(entry, dict) or at is None:
+                return None, f"{path.name} line {number} records no readable time"
+            if path.stem == batch_id:
+                if at > end:
+                    return None, (
+                        f"{path.name} line {number} at {stamp} follows the next batch's "
+                        "before-check; the window does not cover the batch"
+                    )
+                continue
+            if entry.get("event") != "reserve" or not start <= at <= end:
+                continue
+            if path.stem == next_id and at == end:
+                continue
+            return None, (
+                f"{path.name} reserved {entry.get('attempt_id')} at {stamp}, between the two "
+                "checks; the account usage delta is not this batch's alone"
+            )
+    return read, ""
+
+
+def next_batch_window(artifact_root: Path, batch_id: str) -> tuple[NextBatchWindow | None, str]:
+    """Task 7.13: the usage window of a batch that recorded no after-check (a killed run),
+    closed at the before-check of the earliest later batch under the same artifact root, only
+    when both checks read the same key token, no reservation of any other batch was opened
+    between the two checks (every `.ledgers/*.jsonl` is read) and the batch's own ledger ends
+    before the closing check. None with why otherwise. No reconcile-time reading is added, as
+    the in-batch rule does (`usage_unmoved`): later batches have moved the usage since."""
+    own_path = usage_path(artifact_root, batch_id, "before")
+    own, why = _usage_check(own_path, "before")
+    if own is None:
+        return None, why
+    start = _instant(own.checked_at)
+    if start is None:
+        return None, "the before-check records no check time"
+    found, why = _next_before(artifact_root, batch_id, start)
+    if found is None:
+        return None, why
+    end_at, next_id, next_path = found
+    closing = next_path.relative_to(artifact_root).as_posix()
+    end, why = _usage_check(next_path, "before")
+    if end is None:
+        return None, f"{closing}: {why}"
+    if end.key_file != own.key_file:
+        return None, f"{closing} read another key token than the before-check"
+    read, why = _ledgers_between(artifact_root / ".ledgers", batch_id, next_id, start, end_at)
+    if read is None:
+        return None, why
+    opening = own_path.relative_to(artifact_root).as_posix()
+    window = UsageWindow(
+        own.usage,
+        end.usage,
+        own.checked_at,
+        end.checked_at,
+        (own.recorded_by, end.recorded_by),
+        own.key_file,
+    )
+    evidence = {
+        "usage_window_closed_by": NEXT_BATCH_BEFORE,
+        "usage_before_file": opening,
+        "usage_after_file": closing,
+        "next_batch_id": next_id,
+        "reservations_between_checks": 0,
+        "ledgers_read": read,
+    }
+    reason = (
+        f"window from {opening} at {own.checked_at} to the next batch's before-check {closing} "
+        f"at {end.checked_at}; no reservation of any other batch was opened between the two "
+        f"checks ({len(read)} ledgers read)"
+    )
+    return NextBatchWindow(window, evidence, reason), ""
 
 
 def corroborate_404(
@@ -696,12 +872,18 @@ def reconcile_interrupted(
     *,
     batch: Sequence[RetainedAttempt],
     usage: tuple[UsageWindow | None, str],
+    next_batch: tuple[NextBatchWindow | None, str] | None = None,
 ) -> Outcome:
     """Record an interrupted attempt and settle it from the usage window, or say why not.
 
     Writes the manifest the directory supports (once), then, only where `attribute_usage` and
     `usage_unmoved` both hold, settles the open reservation as held and adjusts it by the
-    `account-usage-delta` rule; otherwise the reservation stays open (never a guessed figure)."""
+    `account-usage-delta` rule; otherwise the reservation stays open (never a guessed figure).
+    A manifest found from an earlier run is used only while the directory still holds exactly
+    it and `request.json` (task 7.13: anything more means the runner got further, so no usage
+    delta settles it). `next_batch` (task 7.13) is `next_batch_window`'s answer for a batch that
+    recorded no after-check: the residual over that window settles it as
+    `account-usage-delta/next-batch-before`, with no reconcile-time reading."""
     attempt_id = directory.name
     record = {item.attempt_id: item for item in ledger.state().attempts}[attempt_id]
     reserved = record.status == "reserved"
@@ -714,7 +896,15 @@ def reconcile_interrupted(
 
     path = directory / "manifest.json"
     if path.is_file():
+        names = sorted(item.name for item in directory.iterdir())
+        if names != ["manifest.json", "request.json"]:
+            return unresolved(
+                f"the attempt directory holds {', '.join(names)}, not manifest.json and "
+                "request.json only; not reconciled by this path"
+            )
         manifest = _read(path)
+        if manifest.get("recorded_by") != RECORDED_BY:
+            return unresolved("its manifest was not written by this path; not reconciled by it")
     elif not reserved:
         return unresolved("the ledger settled it, but no manifest was sealed")
     else:
@@ -724,15 +914,27 @@ def reconcile_interrupted(
         write_once(path, dump(written))
         manifest = written
     checked_at = clock()
-    found = attribute_usage(
-        RetainedAttempt(directory, manifest, {}), ledger.state().attempts, batch, usage
-    )
-    window = usage[0]
-    if found.amount is None or found.evidence is None or window is None:
-        return unresolved(found.reason)
-    now, why = usage_unmoved(client, clock, window)  # only once the delta attributes it
-    if now is None:
-        return unresolved(why)
+    attempts = ledger.state().attempts
+    retained = RetainedAttempt(directory, manifest, {})
+    source, closed = ADJUST_USAGE_SOURCE, ""
+    if usage[0] is None and next_batch is not None:
+        later, why = next_batch
+        if later is None:
+            return unresolved(f"{usage[1]}; {why}")
+        found = attribute_usage(retained, attempts, batch, (later.window, ""))
+        if found.amount is None or found.evidence is None:
+            return unresolved(f"{later.reason}; {found.reason}")
+        source, closed = ADJUST_NEXT_BEFORE_SOURCE, f"; {later.reason}"
+        evidence = {**found.evidence, **later.evidence}
+    else:
+        found = attribute_usage(retained, attempts, batch, usage)
+        window = usage[0]
+        if found.amount is None or found.evidence is None or window is None:
+            return unresolved(found.reason)
+        now, why = usage_unmoved(client, clock, window)  # only once the delta attributes it
+        if now is None:
+            return unresolved(why)
+        evidence = {**found.evidence, **now}
     if reserved:
         ledger.settle(attempt_id, None, INTERRUPTED_SETTLE)
     ledger.adjust(
@@ -740,14 +942,11 @@ def reconcile_interrupted(
         found.amount,
         generation_id=None,
         checked_at=checked_at,
-        source=ADJUST_USAGE_SOURCE,
-        evidence={**found.evidence, **now},
+        source=source,
+        evidence=evidence,
     )
-    reason = (
-        f"interrupted attempt ({INTERRUPTED_REASON}); settled by {ADJUST_USAGE_SOURCE}: "
-        f"{found.reason}"
-    )
-    return Outcome(attempt_id, None, "none", "reconciled", held, found.amount, reason)
+    reason = f"interrupted attempt ({INTERRUPTED_REASON}); settled by {source}: {found.reason}"
+    return Outcome(attempt_id, None, "none", "reconciled", held, found.amount, reason + closed)
 
 
 def candidates(artifact_root: Path, batch_id: str) -> list[RetainedAttempt]:

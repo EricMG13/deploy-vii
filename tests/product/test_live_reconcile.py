@@ -926,3 +926,170 @@ def test_another_unsealed_shape_is_reported_unresolved_and_nothing_is_written(
     report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
     (outcome,) = [line for line in report.splitlines() if line.startswith(f"| {directory.name}")]
     assert "| unresolved |" in outcome and reason in outcome
+
+
+def outcome_line(rig: Rig, attempt_id: str) -> str:
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    (line,) = [row for row in report.splitlines() if row.startswith(f"| {attempt_id}")]
+    return line
+
+
+def test_a_resumed_interrupted_path_never_settles_a_directory_the_runner_got_further_in(
+    rig: Rig,
+) -> None:
+    """7.11 review concern 1: the manifest this path wrote earlier is found again, but the
+    directory now holds a `response.json` (the runner got further), so no usage delta settles
+    it over a measured cost."""
+    responder, directory = interrupted(rig)
+    usage_after = rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-after.json"
+    kept = usage_after.read_bytes()
+    usage_after.unlink()
+    assert rig.run(reconcile_argv(rig), responder) == 0  # writes the manifest, stays open
+    assert load(directory / "manifest.json")["recorded_by"] == "deploy-vii live reconcile"
+    (directory / "response.json").write_text("{}", encoding="utf-8")
+    usage_after.write_bytes(kept)  # the batch's own window would now attribute it
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines  # no settle, no adjust
+    assert record_of(rig, directory.name).status == "reserved"
+    outcome = outcome_line(rig, directory.name)
+    assert "| unresolved |" in outcome
+    assert "holds manifest.json, request.json, response.json" in outcome
+    assert "not manifest.json and request.json only" in outcome
+
+
+# --- 7.13: the next batch's before-check closes an interrupted batch's window ----------------
+
+NEXT_SOURCE = "account-usage-delta/next-batch-before"
+
+
+def _stamp(seconds: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+def killed_batch(rig: Rig, *, held_cost: str = "0.0123") -> tuple[AllAnswered, Path, Path]:
+    """The e1-cp1-12 shape (synthetic): batch b1 was killed mid-step, so it has its
+    before-check and no after-check; batch b2's before-check follows a minute later, the
+    account having moved by b1's measured charges plus `held_cost`."""
+    responder, directory = interrupted(rig, unexplained="0")
+    model_tests = rig.root / "artifacts" / "model-tests"
+    (model_tests / "b1" / "account-usage-after.json").unlink()
+    before = load(model_tests / "b1" / "account-usage-before.json")
+    attempts = ledger(rig).state().attempts
+    charged = sum((a.charged_usd or Decimal(0) for a in attempts), Decimal(0))
+    later = json.loads(json.dumps(before))
+    usage = Decimal(before["credit"]["usage"]) + charged + Decimal(held_cost)
+    later["credit"]["usage"] = format(usage, "f")
+    later["credit"]["checked_at"] = _stamp(time.time() + 60)
+    (model_tests / "b2").mkdir()
+    next_before = model_tests / "b2" / "account-usage-before.json"
+    next_before.write_text(json.dumps(later), encoding="utf-8")
+    return responder, directory, next_before
+
+
+def test_a_killed_batch_is_settled_from_the_next_batchs_before_check_over_an_empty_gap(
+    rig: Rig,
+) -> None:
+    responder, directory, next_before = killed_batch(rig)
+    before = ledger(rig).state()
+    keys = responder.key_checks
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert responder.key_checks == keys  # no reconcile-time reading: later spend moved it
+    assert events_of(rig, directory.name) == ["reserve", "settle", "adjust"]
+    record = record_of(rig, directory.name)
+    assert record.charged_usd == Decimal("0.0123")
+    adjustment = record.adjustment
+    assert adjustment is not None and adjustment.source == NEXT_SOURCE
+    assert adjustment.generation_id is None
+    evidence = adjustment.evidence
+    assert evidence is not None
+    b1 = load(rig.root / "artifacts" / "model-tests" / "b1" / "account-usage-before.json")
+    assert evidence["usage_window_closed_by"] == "next-batch-before"
+    assert evidence["usage_before_file"] == "b1/account-usage-before.json"
+    assert evidence["usage_after_file"] == "b2/account-usage-before.json"
+    assert evidence["usage_before_checked_at"] == b1["credit"]["checked_at"]
+    assert evidence["usage_after_checked_at"] == load(next_before)["credit"]["checked_at"]
+    assert evidence["next_batch_id"] == "b2"
+    assert evidence["reservations_between_checks"] == 0
+    assert evidence["ledgers_read"] == ["b1.jsonl"]
+    assert evidence["held_attempts"] == [directory.name]
+    others = [a for a in before.attempts if a.attempt_id != directory.name]
+    assert Decimal(evidence["other_attempts_measured_usd"]) == sum(
+        (a.charged_usd or Decimal(0) for a in others), Decimal(0)
+    )
+    assert "usage_now_usd" not in evidence
+    outcome = outcome_line(rig, directory.name)
+    assert "| reconciled |" in outcome and f"settled by {NEXT_SOURCE}" in outcome
+    for fact in (
+        "b1/account-usage-before.json",
+        "b2/account-usage-before.json",
+        b1["credit"]["checked_at"],
+        "no reservation of any other batch was opened between the two checks",
+    ):
+        assert fact in outcome, fact
+
+
+def test_a_reservation_between_the_two_checks_leaves_the_killed_batch_unresolved(
+    rig: Rig,
+) -> None:
+    responder, directory, _ = killed_batch(rig)
+    gap = _stamp(time.time() + 30)  # after b1's lines, before b2's check
+    other = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b3.jsonl"
+    lines_b3 = [
+        {"seq": 1, "event": "open", "cap_usd": "1", "at": gap},
+        {"seq": 2, "event": "reserve", "attempt_id": "x-1", "usd": "0.1", "at": gap},
+    ]
+    other.write_text("".join(json.dumps(line) + "\n" for line in lines_b3), encoding="utf-8")
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines  # the reservation stays open
+    assert record_of(rig, directory.name).status == "reserved"
+    outcome = outcome_line(rig, directory.name)
+    assert "| unresolved |" in outcome
+    assert "no account usage was recorded after the batch" in outcome
+    assert f"b3.jsonl reserved x-1 at {gap}, between the two checks" in outcome
+
+
+def test_the_next_batchs_own_first_reservation_in_its_check_second_is_not_in_the_gap(
+    rig: Rig,
+) -> None:
+    """The runner records a batch's before-check before its first reservation, and both carry
+    second-resolution stamps: the next batch's own line in that second follows its check."""
+    responder, directory, next_before = killed_batch(rig)
+    at = load(next_before)["credit"]["checked_at"]
+    own = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b2.jsonl"
+    lines_b2 = [
+        {"seq": 1, "event": "open", "cap_usd": "1", "at": at},
+        {"seq": 2, "event": "reserve", "attempt_id": "y-1", "usd": "0.1", "at": at},
+    ]
+    own.write_text("".join(json.dumps(line) + "\n" for line in lines_b2), encoding="utf-8")
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    adjustment = record_of(rig, directory.name).adjustment
+    assert adjustment is not None and adjustment.source == NEXT_SOURCE
+    assert adjustment.evidence is not None
+    assert adjustment.evidence["ledgers_read"] == ["b1.jsonl", "b2.jsonl"]
+
+
+def test_a_next_check_before_the_killed_batchs_last_line_does_not_close_its_window(
+    rig: Rig,
+) -> None:
+    responder, directory, _ = killed_batch(rig)
+    late = Ledger(ledger(rig).path, Decimal("5.00"), clock=lambda: _stamp(time.time() + 120))
+    late.reserve("late-1", Decimal("0.1"))
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines
+    outcome = outcome_line(rig, directory.name)
+    assert "| unresolved |" in outcome
+    assert "follows the next batch's before-check; the window does not cover the batch" in outcome
+
+
+def test_a_killed_batch_with_no_later_batch_stays_unresolved(rig: Rig) -> None:
+    responder, directory, next_before = killed_batch(rig)
+    next_before.unlink()
+    lines = ledger(rig).path.read_bytes()
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines
+    outcome = outcome_line(rig, directory.name)
+    assert "| unresolved |" in outcome
+    assert "no later batch recorded an account usage check before it" in outcome

@@ -21,7 +21,10 @@ zero and carries both facts in `evidence`. Task 7.0 adds `account-usage-delta`: 
 with no generation id (a deadline expiry, nothing to look up) that is the batch's only held
 attempt, every other attempt's cost being measured, takes the account-usage delta less those
 costs. It names no generation (`generation_id` null), carries its facts in `evidence` and is at
-most the attempt's reservation (a larger residual is other spend, never attributed).
+most the attempt's reservation (a larger residual is other spend, never attributed). Task 7.13
+adds `account-usage-delta/next-batch-before`: the same residual for an interrupted attempt of a
+batch that recorded no after-check, over the window that closes at the next batch's
+before-check with no other batch's reservation between the two checks; the same rules apply.
 
 The first line records the cap the file was opened with; it is written together with the first
 reservation, so a file that exists is always bound. Opening the same file with another
@@ -43,9 +46,12 @@ from typing import Any, Literal
 ADJUST_SOURCE = "generation-endpoint"
 ADJUST_404_SOURCE = "generation-404+usage-delta"
 ADJUST_USAGE_SOURCE = "account-usage-delta"
-ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE, ADJUST_USAGE_SOURCE})
+ADJUST_NEXT_BEFORE_SOURCE = "account-usage-delta/next-batch-before"
+# The usage-delta sources: no generation, evidence required, at most the reservation.
+_USAGE_SOURCES = frozenset({ADJUST_USAGE_SOURCE, ADJUST_NEXT_BEFORE_SOURCE})
+ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE, *_USAGE_SOURCES})
 # Sources whose line must carry `evidence` (the facts behind the figure).
-_EVIDENCED = frozenset({ADJUST_404_SOURCE, ADJUST_USAGE_SOURCE})
+_EVIDENCED = frozenset({ADJUST_404_SOURCE, *_USAGE_SOURCES})
 
 
 class LedgerError(Exception):
@@ -84,7 +90,7 @@ class Adjustment:
 
     previous_charged_usd: Decimal
     reconciled_usd: Decimal
-    generation_id: str | None  # None only for an account-usage-delta adjustment
+    generation_id: str | None  # None only for a usage-delta adjustment (either source)
     checked_at: str
     seq: int
     source: str = ADJUST_SOURCE
@@ -267,7 +273,7 @@ class Ledger:
         """What each `adjust` source requires: a generation id except for the usage delta
         (which names none), evidence exactly for the 404 and usage-delta sources, zero for a
         404, at most the reservation for the usage delta."""
-        if source == ADJUST_USAGE_SOURCE:
+        if source in _USAGE_SOURCES:
             if generation is not None:
                 raise LedgerError(
                     f"ledger line {number}: a {source} adjustment names no generation"
@@ -279,12 +285,12 @@ class Ledger:
                 raise LedgerError(f"ledger line {number}: a {source} adjustment needs evidence")
         elif evidence is not None:
             raise LedgerError(
-                f"ledger line {number}: only {ADJUST_404_SOURCE} or {ADJUST_USAGE_SOURCE} "
+                f"ledger line {number}: only {ADJUST_404_SOURCE} or a usage-delta source "
                 "carries evidence"
             )
         if source == ADJUST_404_SOURCE and reconciled != 0:
             raise LedgerError(f"ledger line {number}: a {source} adjustment is always zero")
-        if source == ADJUST_USAGE_SOURCE and reconciled > held.reserved_usd:
+        if source in _USAGE_SOURCES and reconciled > held.reserved_usd:
             raise LedgerError(
                 f"ledger line {number}: a {source} adjustment above its reservation is not "
                 "attributable to the attempt"

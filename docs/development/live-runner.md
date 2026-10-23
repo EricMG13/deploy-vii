@@ -1162,7 +1162,31 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   path. The reconciled report lists the attempt in Steps (status, class and `reserved <amount>
   (open)` while open) and in Reconciliation (outcome and reason, which names the settlement
   source). The real e1-cp1-12 batch has no `account-usage-after.json` (the kill skipped the
-  after-check), so its reservation stays open there: no window, no figure.
+  after-check), so under 7.11 its reservation stays open there: no window, no figure.
+- **The next batch's before-check closes a killed batch's window (task 7.13).** When the batch
+  recorded no `account-usage-after.json`, `reconcile.next_batch_window` closes its usage window
+  at the `account-usage-before.json` of the earliest later batch under the same artifact root
+  (by `checked_at`; a later check without a readable time, or two in one second, leaves the next
+  batch unknown). It holds only when both checks read the same key token, the batch's own ledger
+  ends before the closing check, and no reservation of any other batch was opened between the
+  two checks: every `.ledgers/*.jsonl` is read, and the next batch's own lines in the second of
+  its check are after it (the runner records the check before its first reservation). The
+  `account-usage-delta` attribution then runs over that window (only held attempt, every other
+  charge measured, residual within the tolerance and at most the reservation) and writes the
+  settle and an `adjust` with `source: "account-usage-delta/next-batch-before"`; the evidence
+  adds `usage_window_closed_by`, `usage_before_file`, `usage_after_file` (paths under the
+  artifact root), `next_batch_id`, `reservations_between_checks: 0` and `ledgers_read`, and the
+  reconciled report's reason names both files, both times and the no-reservation fact. There is
+  no reconcile-time reading (later batches have moved the usage since), so unlike the in-batch
+  rule this one cannot see a charge the provider books after the next batch's before-check (see
+  the 7.13 review section). Anything short of it, a reservation in the gap above all, leaves the
+  attempt unresolved with the reason, as before. Read only on the real artifacts: e1-cp1-12's
+  window closes at e1-cp1-13's before-check (08:39:00Z to 08:43:18Z, 32 ledgers read, none
+  reserving between), usage moved US$0.8463945, exactly the two settled charges, so the
+  interrupted `financials` attempt would settle at US$0; the coordinator runs that reconcile.
+  A resumed run that finds the manifest this path wrote uses it only while the directory holds
+  exactly `manifest.json` and `request.json` (a `response.json` means the runner got
+  further, so no usage delta settles it).
 
 ## Not covered here
 
