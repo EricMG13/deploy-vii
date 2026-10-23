@@ -48,7 +48,7 @@ from deploy_vii.live.context import OMITTED, projection_name, upstream_text
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
-from deploy_vii.live.ledger import CapExceeded, Ledger, Settlement
+from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, Settlement
 from deploy_vii.live.prompts import (
     QUALITY,
     UpstreamInput,
@@ -74,6 +74,8 @@ TOKEN_OVERHEAD = 64
 # Task 7.8: the wait before the one retry of an in-flight 402 (`in_flight_wait_s`).
 IN_FLIGHT_DEFAULT_WAIT_S = 120  # when the refusal states no Retry-After
 IN_FLIGHT_MAX_WAIT_S = 300
+# Ends the ledger settle reason of an in-flight 402 (`in_flight_refused`).
+IN_FLIGHT_SETTLE_MARK = "; in-flight 402: not a model try"
 SUBMITTED = frozenset({"ok", "truncated"})
 POOLABLE_STATUSES = frozenset({"accepted", "rejected"})
 
@@ -360,6 +362,14 @@ def step_repair_of(names: list[str], ticket_id: str, step_id: str) -> str:
     return found
 
 
+def in_flight_refused(record: AttemptRecord) -> bool:
+    """Whether the ledger settled this attempt as an in-flight 402 (task 7.8, fix round 1):
+    credit is not a model failure, so such an attempt uses up no `max_retries` try. The mark is
+    the end of the settle reason `_close` writes; the charge is known zero, so no `adjust`
+    (held charges only) can replace it."""
+    return record.status == "settled" and (record.basis or "").endswith(IN_FLIGHT_SETTLE_MARK)
+
+
 def next_attempt_id(
     ledger: Ledger, writer: AttemptWriter, base: AttemptLocator, prefix: str
 ) -> tuple[str, str | None]:
@@ -432,8 +442,11 @@ def _plan(
     prefix = first_try if current == 1 else f"{first_try}-repair"
     base = AttemptLocator(pool.batch_id, step.case_id, candidate.slug, prefix)
     attempt_id, retry_of = next_attempt_id(ledger, writer, base, prefix)
-    known = [item.attempt_id for item in ledger.state().attempts]
-    tries = len(_tries(known, prefix))  # refusals are not tries
+    records = ledger.state().attempts
+    known = [item.attempt_id for item in records]
+    # Neither cap refusals (never reserved) nor in-flight 402s (task 7.8) are model tries.
+    in_flight = {item.attempt_id for item in records if in_flight_refused(item)}
+    tries = sum(name not in in_flight for name in _tries(known, prefix))
     if tries >= max_retries + 1:
         raise ValueError(
             f"{tries} attempts already used on this ticket step (max_retries={max_retries}); "
@@ -577,18 +590,13 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
 
 
 def _refusal(plan: _Plan, result: ChatResult) -> CreditState:
-    """The 402 as its body reads (task 7.8). An in-flight refusal is retried once, so on the
-    re-send itself, or on the last try the retry budget allows, it is exhaustion (DC-8)."""
+    """The 402 as its body reads (task 7.8). An in-flight refusal is re-sent once (also on the
+    last try: it used up none), so on the re-send itself it is exhaustion (DC-8)."""
     state = from_dispatch_402(plan.clock(), result.http_status, result.raw, result.retry_after)
-    if not state.transient:
-        return state
     retried = plan.links["in_flight_retry_of_attempt_id"]
-    if retried is not None:
-        why = f"in flight again after one retry of {retried} ({plan.in_flight_waited_s} s wait)"
-    elif plan.exhausted:
-        why = f"in flight on the last allowed try (max_retries={plan.max_retries}), no retry left"
-    else:
+    if not state.transient or retried is None:
         return state
+    why = f"in flight again after one retry of {retried} ({plan.in_flight_waited_s} s wait)"
     detail = f"{state.detail} on {plan.attempt_id}, {why}: treated as exhaustion"
     return replace(state, exhausted=True, detail=detail)
 
@@ -864,9 +872,10 @@ def _close(plan: _Plan, ledger: Ledger, writer: AttemptWriter, run: _Run, key: s
         _record_response(plan, writer, run)
     cost = _cost(plan.candidate, run.result)
     try:
-        run.settlement = ledger.settle(
-            plan.attempt_id, cost.amount, f"{cost.reason}; status={run.status}"
-        )
+        reason = f"{cost.reason}; status={run.status}"
+        if run.credit is not None and run.credit.transient:
+            reason += IN_FLIGHT_SETTLE_MARK  # `_plan` counts no try for it
+        run.settlement = ledger.settle(plan.attempt_id, cost.amount, reason)
         plan.event("ledger_settled", charged=run.settlement.charged, basis=cost.basis)
     finally:
         run.directory = _seal(plan, writer, run, cost)
@@ -900,6 +909,7 @@ def dispatch(
     credit: CreditState | None = None,
     schema_rejections: Mapping[tuple[str, str, str], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    on_in_flight: Callable[[DispatchResult], None] | None = None,
 ) -> DispatchResult:
     """Run one attempt of `step` on the model drawn from `pool` with `seed`.
 
@@ -911,9 +921,11 @@ def dispatch(
     CreditExhausted; the runner never switches model or cohort on its own (DC-8).
     An in-flight 402 (task 7.8) is the one exception: once that attempt is sealed and settled
     (at zero), `sleep(in_flight_wait_s(...))` and the step is re-sent once on the same drawn
-    model as the next try, reserved anew under the same cap. Its manifest names the refused try
-    (`links.in_flight_retry_of_attempt_id`). A second in-flight 402, or one on the last try
-    `max_retries` allows, is exhaustion.
+    model, reserved anew under the same cap. The refused attempt uses up no `max_retries` try
+    (`in_flight_refused`), so the re-send is the same model try, also on the last one. Its
+    manifest names the refused try (`links.in_flight_retry_of_attempt_id`). A second in-flight
+    402 is exhaustion. `on_in_flight` receives the sealed refused attempt before the wait, so a
+    caller can report it whatever the re-send then does (raises included).
     `key_index` is `[model_tests].credential_token_index`; a refused key (401) is never retried
     with another token from the file. `bytes_per_token` is
     `[model_tests].prompt_bytes_per_token_lower_bound` (the reservation's prompt bound). Both are
@@ -942,6 +954,8 @@ def dispatch(
     first = send(None)
     if first.in_flight is None:
         return first
+    if on_in_flight is not None:
+        on_in_flight(first)
     waited = in_flight_wait_s(first.in_flight)
     sleep(waited)
     # The re-send raises CreditExhausted on any further in-flight 402 (`_refusal`).

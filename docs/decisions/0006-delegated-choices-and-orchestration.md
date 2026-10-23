@@ -44,7 +44,8 @@ before any figure above these." The orchestrator pauses and asks before any figu
 A dispatch 402 is read for its reason before it is called exhaustion. OpenRouter's in-flight
 refusal (`in_flight_budget_exhausted`, limit source `openrouter_in_flight_budget`) waits out its
 Retry-After (at most 300 s, 120 s when absent) and is re-sent once as a new, separately
-reserved attempt; a second one is exhaustion. The credit refusal (`openrouter_credits`), and
+reserved attempt; like any credit refusal it uses up no model retry, and a second one is
+exhaustion. The credit refusal (`openrouter_credits`), and
 any 402 whose body cannot be read, is exhaustion as before, and the stop reports the requested
 and affordable max_tokens the body states. Nothing else in DC-8 changes: no model or cohort is
 switched, and the no-credit route stays a coordinator decision.

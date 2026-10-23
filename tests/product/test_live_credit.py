@@ -130,6 +130,20 @@ def test_the_http_retry_after_header_is_read_when_the_body_has_none() -> None:
     assert from_dispatch_402(NOW, 402, numeric).retry_after_s == 9
 
 
+def test_a_json_integer_retry_after_has_the_same_twelve_digit_bound() -> None:
+    """Fix round 1 (F3): a JSON number is held to the bound text numbers are."""
+    body = refusal(
+        "busy", {"reason": "in_flight_budget_exhausted", "headers": {"Retry-After": 10**12}}
+    )
+    state = from_dispatch_402(NOW, 402, body)
+    assert state.retry_after_s is None
+    assert state.to_record()["retry_after_s_reason"] == "Retry-After is not a number of seconds"
+    edge = refusal(
+        "busy", {"reason": "in_flight_budget_exhausted", "headers": {"Retry-After": 10**12 - 1}}
+    )
+    assert from_dispatch_402(NOW, 402, edge).retry_after_s == 10**12 - 1
+
+
 def test_oversized_numbers_are_not_read_and_never_raise() -> None:
     """Confidence review: `int()` refuses digit strings over 4,300 digits, so a provider body
     with one must leave the value null (the default wait applies), not fail the dispatch."""

@@ -143,8 +143,9 @@ def _error_object(body: bytes | None) -> tuple[Mapping[str, Any], str]:
 
 
 def _seconds(value: object) -> int | None:
-    """Retry-After as delta-seconds; an HTTP-date or anything else is not read."""
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+    """Retry-After as delta-seconds of at most 12 digits, a JSON number or text; an HTTP-date or
+    anything else is not read."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10**12:
         return value
     if isinstance(value, str) and _DIGITS.fullmatch(value.strip()):
         return int(value.strip())

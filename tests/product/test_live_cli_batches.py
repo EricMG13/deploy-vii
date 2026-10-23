@@ -564,6 +564,58 @@ def test_a_second_in_flight_402_aborts_naming_both_attempts(
     stopped = next(line for line in rig.report().splitlines() if line.startswith("- Stopped:"))
     assert stopped.startswith("- Stopped: aborted: CreditExhausted (reason in_flight_budget")
     assert len(served.requests) == 3
+    # The first refusal has its row; the raising re-send is named on the abort line.
+    rows = step_lines(rig.report(), "canary-")
+    assert [row[6:8] for row in rows] == [
+        ["accepted", "ok"],
+        ["no-response", "insufficient_credit"],
+    ]
+    assert rows[1][5] in out
+
+
+def first_refused_row(rig: Rig) -> list[str]:
+    rows = step_lines(rig.report(), "canary-")
+    assert len(rows) == 2 and rows[0][6] == "accepted"
+    assert rows[1][6:9] == ["no-response", "insufficient_credit", "0"]
+    return rows[1]
+
+
+def test_a_cap_refusal_on_the_re_send_still_reports_the_refused_attempt(rig: Rig) -> None:
+    """Fix round 1 (F1): the refused attempt is reported even when the re-send raises."""
+    served = Responder(rig.review)
+    ledger_path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b1.jsonl"
+
+    def elsewhere_takes_the_cap(seconds: float) -> None:
+        # Something outside this batch reserves what is left while the runner waits.
+        ledger = cli.open_ledger(ledger_path)
+        ledger.reserve("outside-this-batch", ledger.state().remaining)
+
+    code = rig.run(
+        rig.argv("canary"), refuses_after_first(served, IN_FLIGHT_402), elsewhere_takes_the_cap
+    )
+    assert code == cli.EXIT_CAP and len(served.requests) == 2  # the re-send was never sent
+    first_refused_row(rig)
+    assert "- Stopped: cap: " in rig.report()
+
+
+def test_a_transport_error_on_the_re_send_still_reports_the_refused_attempt(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    served = Responder(rig.review)
+    refusals = refuses_after_first(served, IN_FLIGHT_402)
+
+    def then_the_connection_drops(request: Request) -> Response:
+        if request.url != KEY_URL and len(served.requests) == 2:
+            served.requests.append(request)
+            raise ConnectionError("reset")
+        return refusals(request)
+
+    waits: list[float] = []
+    code = rig.run(rig.argv("canary"), then_the_connection_drops, waits.append)
+    assert code == cli.EXIT_FAILED and waits == [120] and len(served.requests) == 3
+    first_refused_row(rig)
+    assert "- Stopped: aborted: TransportError" in rig.report()
+    assert "TransportError" in capsys.readouterr().out
 
 
 def test_a_credit_402_aborts_with_the_affordable_budget_on_both_lines(

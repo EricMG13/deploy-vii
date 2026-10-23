@@ -700,13 +700,17 @@ leaves it unchanged.
   unchanged. Retry rule: `dispatch` seals the refused attempt (`no-response`,
   `insufficient_credit`, settled at zero, ticket pending, nothing interrupted), calls
   `sleep(min(Retry-After, 300))` (120 s when absent; `sleep` is injectable, the CLI passes
-  `time.sleep`) and re-sends once as the step's next try: the same drawn model and request, a new
-  attempt id and a new reservation under the same cap. Its manifest names the refused try in
-  `links.in_flight_retry_of_attempt_id` (and `retry_of_attempt_id`); its events start with
-  `in_flight_retry` (`retry_of`, `waited_s`). `DispatchResult.retried` holds the refused attempt,
-  and the batch report gives it its own row. A second in-flight 402, or one on the last try that
-  `max_retries` allows, is exhaustion: its credit block says `exhausted: true` and the detail
-  names both attempts. `live schema-check` does not retry: an in-flight 402 there stops the check
+  `time.sleep`) and re-sends once: the same drawn model and request, a new attempt id and a new
+  reservation under the same cap. Credit is not a model failure, so the refused attempt uses up
+  no `max_retries` try (fix round 1): its ledger settle reason ends with `; in-flight 402: not a
+  model try`, `_plan` leaves such ids out of its try count (`runner.in_flight_refused`), and the
+  re-send carries the same `retries.attempt_number`, also on the last allowed try. Its manifest
+  names the refused try in `links.in_flight_retry_of_attempt_id` (and `retry_of_attempt_id`);
+  its events start with `in_flight_retry` (`retry_of`, `waited_s`). `DispatchResult.retried`
+  holds the refused attempt; `dispatch(..., on_in_flight=)` hands it over before the wait, which
+  the CLI uses to give it its own report row even when the re-send raises (cap refusal,
+  connection failure, a second refusal). A second in-flight 402 is exhaustion: its credit block
+  says `exhausted: true` and the detail names both attempts. `live schema-check` does not retry: an in-flight 402 there stops the check
   as exhaustion, named as in flight. The CLI abort line and the report's `Stopped:` line carry
   `CreditState.summary()`, e.g. `Stopped: aborted: CreditExhausted (reason openrouter_credits;
   requested max_tokens 128000, affordable 91075; HTTP 402)`; `EXIT_CREDIT` stays 4.

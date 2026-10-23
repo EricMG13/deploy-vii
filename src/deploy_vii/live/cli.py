@@ -495,6 +495,25 @@ def _run_cell(
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
 
+    def row(step_id: str, attempt: Attempt, item: DispatchResult) -> None:
+        batch.rows.append(
+            Row(
+                cell.cell_id,
+                cell.case_id,
+                step_id,
+                item.draw.slug,
+                cell.seed,
+                item.attempt_id,
+                item.status,
+                item.classification or "none",
+                usd_cell(item.cost_usd, bool(item.settlement and item.settlement.unreconciled)),
+                len(item.issues),
+                prompt_bound=item.prompt_tokens_upper_bound,
+                repair=attempt.number,
+                step_try=item.step_try,
+            )
+        )
+
     def send(step_id: str, attempt: Attempt) -> DispatchResult:
         result = dispatch(
             StepSpec(
@@ -517,27 +536,11 @@ def _run_cell(
             effort=effort,
             schema_rejections=rejections,
             sleep=sleep,
+            # An in-flight 402 the runner waits out and re-sends (task 7.8) gets its own row
+            # before the re-send, so the row stands even when the re-send raises.
+            on_in_flight=partial(row, step_id, attempt),
         )
-        # An in-flight 402 the runner waited out and re-sent (task 7.8) is a row of its own.
-        sent = (result.retried, result) if result.retried is not None else (result,)
-        batch.rows.extend(
-            Row(
-                cell.cell_id,
-                cell.case_id,
-                step_id,
-                item.draw.slug,
-                cell.seed,
-                item.attempt_id,
-                item.status,
-                item.classification or "none",
-                usd_cell(item.cost_usd, bool(item.settlement and item.settlement.unreconciled)),
-                len(item.issues),
-                prompt_bound=item.prompt_tokens_upper_bound,
-                repair=attempt.number,
-                step_try=item.step_try,
-            )
-            for item in sent
-        )
+        row(step_id, attempt, result)
         return result
 
     cp0_attempt = None

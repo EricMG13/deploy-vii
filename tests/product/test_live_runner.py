@@ -2147,7 +2147,10 @@ def test_an_in_flight_402_waits_retry_after_and_retries_once_as_a_new_reservatio
     retried = load(attempt_dir(result) / "manifest.json")
     assert retried["links"]["in_flight_retry_of_attempt_id"] == first.attempt_id
     assert retried["links"]["retry_of_attempt_id"] == first.attempt_id
-    assert retried["retries"]["attempt_number"] == 2 and retried["credit"] is None
+    # Fix round 1 (F2): the refused attempt was no model try, so the re-send is still try 1.
+    assert retried["retries"]["attempt_number"] == 1 and retried["credit"] is None
+    (record,) = [r for r in rig.ledger.state().attempts if r.attempt_id == first.attempt_id]
+    assert runner.in_flight_refused(record)  # the settle reason carries the mark
     wait = [
         json.loads(line)
         for line in (attempt_dir(result) / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -2208,14 +2211,44 @@ def test_a_credit_402_does_not_wait_and_reports_the_affordable_budget(tmp_path: 
     assert credit["affordable_max_tokens"] == 91075 and ACCOUNT not in json.dumps(load(path))
 
 
-def test_an_in_flight_402_on_the_last_allowed_try_is_exhaustion(tmp_path: Path) -> None:
-    """No retry slot is left (max_retries=0), so the refusal fails closed: nothing waits."""
+def test_an_in_flight_402_on_the_last_allowed_try_still_gets_its_one_re_send(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 (F2): the refusal is not a try, so even max_retries=0 re-sends once."""
     rig = make_rig(tmp_path)
-    transport = FakeTransport(Response(402, IN_FLIGHT_402))
-    with pytest.raises(CreditExhausted) as raised:
-        rig.run(ChatClient(transport), max_retries=0)
-    assert len(transport.requests) == 1 and "no retry left" in str(raised.value)
-    assert [a.status for a in rig.store.read().attempts] == ["pending"]
+    waits = Waits()
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))
+    result = rig.run(ChatClient(transport), max_retries=0, sleep=waits)
+    assert result.status == "accepted" and waits.seconds == [120]
+    assert load(attempt_dir(result) / "manifest.json")["retries"]["attempt_number"] == 1
+
+
+def test_an_in_flight_refusal_uses_up_no_model_try(tmp_path: Path) -> None:
+    """Fix round 1 (F2, DC-8: credit is not a model failure): a refusal on try 1, then
+    timeouts on the re-send and the next tries, interrupts the ticket after the same three model
+    tries as a run without the refusal."""
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    first = rig.run(
+        ChatClient(FakeTransport(Response(402, IN_FLIGHT_402), TimeoutError("slow"))),
+        sleep=waits,
+    )
+    assert first.status == "no-response" and first.classification == "timeout"
+    assert first.retried is not None and not first.ticket_interrupted
+    numbers = [
+        load(attempt_dir(item) / "manifest.json")["retries"]["attempt_number"]
+        for item in (first.retried, first)
+    ]
+    assert numbers == [1, 1]  # the refused attempt and its re-send are the same model try
+    second = rig.run(ChatClient(FakeTransport(TimeoutError("slow"))))
+    assert not second.ticket_interrupted
+    third = rig.run(ChatClient(FakeTransport(TimeoutError("slow"))))
+    assert third.ticket_interrupted
+    ticket = rig.store.read().attempts[0]
+    assert ticket.interruption is not None
+    assert "Retries exhausted after 3 attempts" in ticket.interruption
+    with pytest.raises(ValueError, match="finished"):
+        rig.run(ChatClient(FakeTransport()))
 
 
 def test_a_check_in_flight_402_stops_with_its_reason_and_no_wait(tmp_path: Path) -> None:
