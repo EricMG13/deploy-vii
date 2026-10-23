@@ -906,11 +906,13 @@ def test_agreement_holds_across_every_financial_source_of_the_review() -> None:
     )
 
 
+# The case's own value three times in five, so contexts that pass, and ones that differ only in
+# a stated string or only by a null, are all frequent draws.
 _POOLS: dict[str, tuple[str | None, ...]] = {
-    "currency": ("USD", "EUR", None),
-    "unit": ("MILLIONS", "THOUSANDS", None),
-    "entity_perimeter": ("Consolidated", "Consolidated ", None),
-    "accounting_basis": ("US GAAP", "IFRS", None),
+    "currency": ("USD", "USD", "USD", "EUR", None),
+    "unit": ("MILLIONS", "MILLIONS", "MILLIONS", "THOUSANDS", None),
+    "entity_perimeter": ("Consolidated", "Consolidated", "Consolidated", "Consolidated ", None),
+    "accounting_basis": ("US GAAP", "US GAAP", "US GAAP", "IFRS", None),
 }
 
 
