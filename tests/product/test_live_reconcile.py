@@ -468,7 +468,13 @@ def test_a_404_billed_after_the_after_check_stays_held(rig: Rig) -> None:
         ("delete-before", "no account usage was recorded before the batch"),
         ("delete-after", "no account usage was recorded after the batch"),
         ("null-usage", "is not a recorded number"),
-        ("other-token", "different key tokens"),
+        # 7.14 addendum: the refusals use the documented "key-file note" wording.
+        ("other-token", "the two account usage checks record different key-file notes"),
+        (
+            "other-note-now",
+            "the usage check now records another key-file note than the after-check; "
+            "not attributed",
+        ),
     ],
 )
 def test_a_404_without_a_usable_usage_record_stays_unresolved(
@@ -482,6 +488,11 @@ def test_a_404_without_a_usable_usage_record_stays_unresolved(
         before.unlink()
     elif edit == "delete-after":
         after.unlink()
+    elif edit == "other-note-now":  # both checks agree; the one-token reading now has no note
+        for path in (before, after):
+            record = load(path)
+            record["credit"]["key_file"] = {"key_tokens_found": 2, "key_token_used": 2}
+            path.write_text(json.dumps(record), encoding="utf-8")
     else:
         record = load(after)
         if edit == "null-usage":
@@ -1035,7 +1046,9 @@ def test_a_killed_batch_is_settled_from_the_next_batchs_before_check_over_an_emp
         "b1/account-usage-before.json",
         "b2/account-usage-before.json",
         b1["credit"]["checked_at"],
-        "no reservation of any other batch was opened between the two checks",
+        # 7.14 addendum: the reason states the full window rule.
+        "no other batch held a reservation open at the before-check, nor reserved or settled "
+        "inside the window",
         f"no reconcile-time reading: a charge booked after {closing_at} is not seen",
     ):
         assert fact in outcome, fact
@@ -1368,7 +1381,7 @@ def test_an_unusable_origin_or_ledger_shows_no_figure_and_reads_no_key(
     ("usage", "note", "reason"),
     [
         (None, NOTE, "the account usage now is not reported"),
-        ("11", None, "the usage check now reads another key-file note than the origin check"),
+        ("11", None, "the usage check now records another key-file note than the origin check"),
     ],
 )
 def test_a_reading_now_that_cannot_be_compared_shows_no_figure(

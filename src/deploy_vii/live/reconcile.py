@@ -49,12 +49,21 @@ outcome is unresolved. It is processed after every lookup, as a hold without an 
 Task 7.13: a batch killed before its after-check (e1-cp1-12) has no window of its own. Its
 window may then close at the earliest later batch's before-check under the same artifact root
 (`next_batch_window`), only when both checks record the same key-file note, the batch's own ledger
-ends before that check and no reservation of any other batch was opened between the two checks
-(every `.ledgers/*.jsonl` read). The same attribution settles the interrupted attempt, source
+ends before that check, and no other batch held a reservation open at the before-check (reserved
+before it, settled after it or never) nor reserved or settled inside the window (every
+`.ledgers/*.jsonl` read). The same attribution settles the interrupted attempt, source
 `account-usage-delta/next-batch-before`, with both files, both times and the no-reservation fact
-in the evidence and the report. No reconcile-time reading can corroborate that window (later
-batches moved the usage), so a charge billed after the closing check is not seen. A manifest this
-path wrote earlier is reused only while the directory holds exactly it and `request.json`.
+in the evidence and the report. A reservation another batch's ledger never settled therefore
+leaves every later killed batch's window unresolved until it is settled (fail closed). No
+reconcile-time reading can corroborate that window (later batches moved the usage), so a charge
+billed after the closing check is not seen. A manifest this path wrote earlier is reused only
+while the directory holds exactly it and `request.json`.
+
+Task 7.14: neither window sees a charge billed after it closes (batch e1-cp1-13's after-check
+lagged its settled charges by US$1.0737551). The reconciled report therefore ends with a spend
+cross-check (`spend_cross_check`): the key's usage now less the earliest ledger's before-check
+usage, against every ledger's settled charges, the difference named unattributed USD. It is
+reported only; nothing is settled or adjusted from it.
 """
 
 import hashlib
@@ -254,7 +263,7 @@ def read_usage(artifact_root: Path, batch_id: str) -> tuple[UsageWindow | None, 
         found[phase] = check
     before, after = found["before"], found["after"]
     if before.key_file != after.key_file:
-        return None, "the two account usage checks read different key tokens"
+        return None, "the two account usage checks record different key-file notes"
     window = UsageWindow(
         before.usage,
         after.usage,
@@ -431,9 +440,9 @@ def next_batch_window(artifact_root: Path, batch_id: str) -> tuple[NextBatchWind
     }
     reason = (
         f"window from {opening} at {own.checked_at} to the next batch's before-check {closing} "
-        f"at {end.checked_at}; no reservation of any other batch was opened between the two "
-        f"checks ({len(read)} ledgers read); no reconcile-time reading: a charge booked after "
-        f"{end.checked_at} is not seen"
+        f"at {end.checked_at}; no other batch held a reservation open at the before-check, nor "
+        f"reserved or settled inside the window ({len(read)} ledgers read); no reconcile-time "
+        f"reading: a charge booked after {end.checked_at} is not seen"
     )
     return NextBatchWindow(window, evidence, reason), ""
 
@@ -598,7 +607,9 @@ def usage_unmoved(
     if state.usage is None:
         return None, f"the account usage now is not reported; {retry}"
     if key_file != window.key_file:
-        return None, f"the usage check now reads another key token than the after-check; {retry}"
+        return None, (
+            f"the usage check now records another key-file note than the after-check; {retry}"
+        )
     moved = state.usage - window.after
     if abs(moved) > USAGE_TOLERANCE_USD:
         return None, (
@@ -725,7 +736,7 @@ def spend_cross_check(
     if state.usage is None:
         return None, "the account usage now is not reported"
     if key_file != spent.origin.key_file:
-        return None, "the usage check now reads another key-file note than the origin check"
+        return None, "the usage check now records another key-file note than the origin check"
     attempts = [a for s in spent.states for a in s.attempts]
     return SpendCrossCheck(
         origin_file=spent.origin_file,

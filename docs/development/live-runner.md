@@ -883,6 +883,22 @@ are in that scope's `unit` and `currency`; a period with no such scope, or a boo
 periods' scopes differ, is a rejection. No batch has yet run with these sentences (batch 14 ran
 on 92b249b, before them).
 
+Task 7.14 (batches `e1-cp1-13` and `-14`; decision 0005, user-approved 23 Oct 2026): three of the
+four `source_context` outputs left `currency` null on every scope and worded the FY2025
+`entity_perimeter` unlike the comparative years, so the `financials` prefill could bind no book.
+`validate_source_context` now rejects that at the step the model can repair, fail closed and
+compared exactly: every `historical_duration` and `period_end` scope of a `financial` source
+states `currency`, `unit`, `entity_perimeter` and `accounting_basis` (`Financial scope lacks
+<field>: <scope_id>`, one per field and scope), and all such scopes of one entity across every
+financial source state the same four strings (`Financial scopes of one entity disagree on
+<field>: <entity_id> <scope ids> vs <scope ids>`, one per entity and field, grouped by value; a
+null is the first rule's alone). Forecast and unspecified scopes, and scopes of a non-financial
+source, are held to neither. That is the scope set `live.submission._period_scopes` and
+`context_binding` choose from, so a context that passes leaves each book one complete tuple and
+makes the prefill's `Bound source scopes disagree` rejection and its dimension `Field required`
+messages unreachable (a property test holds this; both stay as defence in depth). `source_context` rule d (`SCOPE_DIMENSION_RULE`) states both
+rules once; no other step carries it.
+
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:
 - `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;
@@ -1116,8 +1132,9 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   `reconciled_usd` 0 and an `evidence` object (status 404, both usage figures and times, the
   delta, the other attempts and their sum, the difference, the tolerance, who recorded the
   usage). Replay refuses that source with a non-zero figure or without evidence. A missing
-  record, a usage that is not a number, checks with different key-file notes or a difference
-  above the tolerance leave the attempt unresolved with the reason. Probe-2 predates the
+  record, a usage that is not a number, checks with different key-file notes (`the two account
+  usage checks record different key-file notes`) or a difference above the tolerance leave the
+  attempt unresolved with the reason. Probe-2 predates the
   records: its holds stay unresolved until the coordinator writes the two files from the
   recorded checks (25.7172663 before, 25.724167155 after).
 - **Account usage and a hold without a generation id (task 7.0).** A held pool attempt with no
@@ -1144,12 +1161,13 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   includes every charge of the batch; the provider may bill a 404'd or given-up call later,
   which the delta would then omit. So either adjust also needs a fresh `GET /api/v1/key` reading
   at reconcile time, taken only once the rule's own conditions hold, equal to the recorded
-  after-figure within US$0.000001 and read through the same key-file token
+  after-figure within US$0.000001 and recording the same key-file note
   (`reconcile.usage_unmoved`; the evidence adds `usage_now_usd` and `usage_now_checked_at`).
   Otherwise the attempt stays held with `usage moved since the after-check (<after> then, <now>
-  now); not attributed; a later reconcile may retry` (or that the usage now is not reported, or
-  records another key-file note), after `HTTP 404 ...;` or `no provider_request_id
-  recorded; nothing to look up;` (decision 0008, task 7.0 amendment).
+  now); not attributed; a later reconcile may retry` (or `the account usage now is not
+  reported; ...`, or `the usage check now records another key-file note than the after-check;
+  ...`, with the same ending), after `HTTP 404 ...;` or `no provider_request_id recorded;
+  nothing to look up;` (decision 0008, task 7.0 amendment).
 - **An interrupted attempt (task 7.11).** A process killed after its reservation and before the
   reply (batch e1-cp1-12, stopped by the user mid-`financials`) leaves an open `reserve` with no
   `settle` and an attempt directory holding `request.json` only; before 7.11 reconcile saw
@@ -1210,7 +1228,32 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   interrupted `financials` attempt would settle at US$0; the coordinator runs that reconcile.
   A resumed run that finds the manifest this path wrote uses it only while the directory holds
   exactly `manifest.json` and `request.json` (a `response.json` means the runner got
-  further, so no usage delta settles it).
+  further, so no usage delta settles it). The reason states the full window rule (`no other
+  batch held a reservation open at the before-check, nor reserved or settled inside the window
+  (<n> ledgers read)`). A reservation another batch's ledger never settled therefore leaves
+  every later killed batch's window unresolved until it is settled (fail closed).
+- **Spend cross-check (task 7.14).** Neither window sees a charge billed after it closes:
+  batch e1-cp1-13's after-check lagged its settled charges by US$1.0737551, which had caught up
+  by e1-cp1-14's before-check. After every lookup and adjust, `live reconcile` ends the
+  reconciled report with a `## Spend cross-check` section (`reconcile.spend_cross_check`):
+  the key's usage now, from one `GET /api/v1/key` read as `usage_unmoved` reads it (DC-7: the
+  key is read for that call, in memory, never printed), less the origin, the
+  `account-usage-before.json` of the earliest ledger's batch (by the ledgers' opening times),
+  against the sum of every settled charge across `<artifact-root>/.ledgers/*.jsonl` (each
+  ledger replayed: an adjusted attempt counts its adjusted figure, a hold of unknown cost its
+  whole reservation, shown separately; open reservations are not counted, their number is
+  shown). The difference is `Unattributed USD` (positive: billed but in no ledger, late billing
+  or spend outside the runner; negative: settled but not billed, refunds or lag), with both
+  inputs, their times and the ledger count. It is reported only: nothing is settled or
+  adjusted from it. No figure is shown, with `- No figure: <reason>`, when there is no ledger,
+  a ledger does not replay or records no opening time, the two earliest ledgers opened in the
+  same second, the origin file is missing, unreadable or recorded after that ledger opened, the
+  usage now is not reported, or the reading `records another key-file note than the origin
+  check`; the key is read only when the ledgers and the origin can be used. A connection
+  failure propagates after the report is written (`not checked; the reconcile stopped before the
+  cross-check`). On the real artifact root the earliest ledger is `probe-1`, which recorded no
+  before-check (account-usage checks began with probe-2), so as built the section shows no
+  figure there.
 
 ## Not covered here
 
