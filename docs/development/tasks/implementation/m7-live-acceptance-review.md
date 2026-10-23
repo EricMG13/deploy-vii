@@ -366,3 +366,11 @@ accepted.
 
 Not verified: the real-pack block sizes (narrative target at most 600,000 characters; the
 coordinator measures on the batch-6 journal); live or proxy uptake of the projections.
+
+## 7.6 The narrative and readiness prompts state the rules their validators enforce
+
+The `narrative` contract now states, as step rules a to e, the prose rule, the passage parts (an issuer part in every finding, no blank or separator parts), dimension coverage, funding rows (only `statement_BS` evidence with a `line_id`, never a definition row) and required stories (only `subsequent_event`, `multi_figure_event` and material funding rows, each citing the story's evidence id); the `readiness` contract states the prose rule, the consumer and requirement keys, the evidence tag groups per requirement key, the action and `kpi_dashboard` rules and the gap-scope rules. The dimension, financial-dimension, standard balance-sheet item and evidence-group lists are rendered from the validators' constants, and tests hold each rule to the exact issue the validator raises, with no validator, contract, projection or hash change (decision 0005).
+
+Evidence: E1 batch 6 (DC-8 proxy cohort, 23 October 2026): the first `narrative` submission past shape validation drew 21 semantic issues (6 missing issuer bindings, 2 funding rows that were not located balance-sheet rows, 9 unknown required stories, 3 stories whose finding lacked the story's evidence, and on the first try 1 blank prose part used as a separator).
+
+Not verified: proxy uptake (the next proxy narrative and readiness runs); the real-pack `readiness` prompt size (the rules add about 6,400 characters in all to the two system messages; the evidence table is unchanged).

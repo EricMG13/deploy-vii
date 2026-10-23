@@ -774,6 +774,18 @@ is `conflicting` with `alternatives`; a conflicting line leaves the account amou
 `SEGMENT_ALLOCATION_RULE` (every segment allocated exactly once, keeping its presentation row).
 Prompt text only; no validator or contract change.
 
+Task 7.6 (E1 batch 6, proxy cohort): the `narrative` and `readiness` contracts carry lettered step
+rules (a to e) stating what `validate_narrative_review` and `validate_downstream_review` enforce,
+in the terms of the evidence table: the prose rule (`REVIEW_PROSE_RULE`: nonblank, no bare
+figure), the passage parts (an issuer part per finding, no separator parts), dimension coverage
+(rendered from `narrative._DIMENSIONS` and `_FINANCIAL`), funding rows (only `statement_BS`
+evidence with a `line_id`; the standard items rendered from `REQUIRED_ITEMS` and
+`OPTIONAL_ITEMS`), required stories (only `subsequent_event`, `multi_figure_event` and material
+funding rows), and for readiness the consumer and requirement keys, the evidence tag groups
+(rendered from `downstream_readiness._EVIDENCE_GROUPS`), the action and dashboard rules and the
+gap-scope rules. Prompt text only; the evidence table already carried every column the rules
+name (no projection change); no validator or contract change.
+
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:
 - `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;

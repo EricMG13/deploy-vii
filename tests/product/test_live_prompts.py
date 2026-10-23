@@ -7,7 +7,7 @@ import tempfile
 from functools import cache
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -16,6 +16,16 @@ from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import Fact
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
+from deploy_vii.downstream_readiness import (
+    _EVIDENCE_GROUPS,
+    ConsumerAssessment,
+    DownstreamInputs,
+    DownstreamReview,
+    GapAssessment,
+    RequirementAssessment,
+    downstream_inputs,
+    validate_downstream_review,
+)
 from deploy_vii.financial_contracts import (
     FinancialBook,
     SegmentAllocation,
@@ -24,13 +34,33 @@ from deploy_vii.financial_contracts import (
 )
 from deploy_vii.financial_validation import book_issues
 from deploy_vii.live import prompts
-from deploy_vii.live.context import NARRATIVE_EVIDENCE, step_sources
+from deploy_vii.live.context import (
+    KINDS,
+    NARRATIVE_EVIDENCE,
+    evidence_table,
+    step_sources,
+)
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
     STEPS,
     ReadinessSubmission,
     compose_payload,
     rejection_issues,
+)
+from deploy_vii.narrative import (
+    _DIMENSIONS,
+    _FINANCIAL,
+    EvidencePart,
+    Finding,
+    FundingAssessment,
+    IssuerPart,
+    NarrativeInputs,
+    NarrativeReview,
+    ProsePart,
+    StoryCoverage,
+    canonical_narrative,
+    narrative_inputs,
+    validate_narrative_review,
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
@@ -44,9 +74,15 @@ from deploy_vii.statement_validation import (
     statement_issues,
 )
 from tests.product.test_business_context import cp1_fact
+from tests.product.test_canonical_gaps import case
+from tests.product.test_downstream_readiness import evidence
 from tests.product.test_financials import _C, book, conflict, observed
 from tests.product.test_live_submission import paged_pack
+from tests.product.test_model_readiness import ready_case
+from tests.product.test_narrative import draft, populated
 from tests.product.test_readiness import as_submission, readiness_fixture
+from tests.product.test_source_context import event_case
+from tests.product.test_statements import line as bs_line
 
 SHARED = (prompts.SOURCES_ONCE_RULE, prompts.CITATION_RULE, prompts.COVERAGE_RULE)
 
@@ -797,3 +833,449 @@ def test_the_narrative_and_readiness_contracts_name_what_their_block_holds() -> 
     readiness = prompts.STEP_CONTRACTS["readiness"]
     assert "id=step:narrative" in readiness and "projection=readiness-inputs" in readiness
     assert "gap_id" in readiness
+
+
+# --- 7.6: the narrative and readiness steps state the rules their validators enforce ----------
+
+NARRATIVE_RULES = (
+    prompts.REVIEW_PROSE_RULE,
+    prompts.NARRATIVE_PARTS_RULE,
+    prompts.NARRATIVE_COVERAGE_RULE,
+    prompts.NARRATIVE_FUNDING_RULE,
+    prompts.NARRATIVE_STORIES_RULE,
+)
+READINESS_RULES = (
+    prompts.REVIEW_PROSE_RULE,
+    prompts.READINESS_CONSUMERS_RULE,
+    prompts.READINESS_EVIDENCE_RULE,
+    prompts.READINESS_STATUS_RULE,
+    prompts.READINESS_GAPS_RULE,
+)
+
+
+@pytest.mark.parametrize(
+    ("step_id", "rules"), [("narrative", NARRATIVE_RULES), ("readiness", READINESS_RULES)]
+)
+def test_the_review_steps_letter_their_rules_and_state_each_once(
+    step_id: str, rules: tuple[str, ...]
+) -> None:
+    contract = prompts.STEP_CONTRACTS[step_id]
+    lettered = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
+    assert lettered == ["a. ", "b. ", "c. ", "d. ", "e. "]
+    system = composed(step_id)
+    for letter, rule in zip("abcde", rules, strict=True):
+        assert f"{letter}. {rule}" in contract
+        assert system.count(rule) == 1, rule
+    own_only = [r for r in rules if r is not prompts.REVIEW_PROSE_RULE]
+    other = "readiness" if step_id == "narrative" else "narrative"
+    for step in ("source_readiness", "source_context", "financials", "quality", other):
+        assert not [r for r in own_only if r in composed(step)], step
+    for step in ("source_readiness", "source_context", "financials", "quality"):
+        assert prompts.REVIEW_PROSE_RULE not in composed(step), step
+
+
+def test_the_prose_rule_matches_what_the_prose_validator_rejects() -> None:
+    for text in (" ", "", "Debt rose 12%", "Debt {narrative-evidence:x|US$ m}", "See [x]"):
+        with pytest.raises(ValueError):
+            ProsePart(text=text)
+    assert ProsePart(text=" faces refinancing in FY2025 after the 10-K").text
+    assert ProsePart(text="Item 7A and Q3 2025 are read as labels").text
+    for phrase in ("nonblank", "no bare figure", "`FY2025`", "`10-K`", "`{ref|unit}`", "`[ref]`"):
+        assert phrase in prompts.REVIEW_PROSE_RULE, phrase
+
+
+def test_the_parts_rule_matches_the_issues_the_validator_raises() -> None:
+    inputs = narrative_inputs(*case())
+    good = populated(inputs)
+    assert validate_narrative_review(inputs, good) == ()
+    one = good.findings[0]
+
+    def issues_of(**update: tuple[object, ...]) -> tuple[str, ...]:
+        changed = one.model_copy(update=update)
+        return validate_narrative_review(inputs, good.model_copy(update={"findings": (changed,)}))
+
+    # Batch 6: six findings with no issuer part in any of their three passages.
+    assert issues_of(risk_mechanic=one.risk_mechanic[1:]) == (
+        "Finding lacks explicit issuer binding: liquidity",
+    )
+    assert issues_of(credit_implication=(IssuerPart(),)) == (
+        "Finding lacks credit reasoning: liquidity",
+    )
+    assert issues_of(evidence=(IssuerPart(),)) == (
+        "Finding lacks prior-register evidence: liquidity",
+    )
+    unknown = EvidencePart(evidence_id="narrative-evidence:nope")
+    assert issues_of(evidence=(*one.evidence, unknown)) == (
+        "Unknown narrative evidence: narrative-evidence:nope",
+    )
+    twice = good.model_copy(update={"findings": (one, one)})
+    assert "Duplicate narrative finding identity" in validate_narrative_review(inputs, twice)
+    shape = {**one.model_dump(mode="json"), "evidence": [{"kind": "issuer"}] * 100}
+    assert Finding.model_validate_json(json.dumps(shape))
+    with pytest.raises(ValueError):
+        Finding.model_validate_json(json.dumps({**shape, "evidence": [{"kind": "issuer"}] * 101}))
+    with pytest.raises(ValueError):
+        Finding.model_validate_json(json.dumps({**shape, "evidence": []}))
+    for phrase in (
+        "1 to 100 parts",
+        '{"kind":"prose","text":…}',
+        '{"kind":"evidence","evidence_id":…}',
+        '{"kind":"issuer"}',
+        "Never add a part as a separator",
+        "at least one evidence part",
+        "at least one issuer part",
+        "at least one prose part",
+        "`finding_id` is unique",
+    ):
+        assert phrase in prompts.NARRATIVE_PARTS_RULE, phrase
+
+
+def test_the_coverage_rule_lists_the_validators_dimensions_and_financial_subset() -> None:
+    rule = prompts.NARRATIVE_COVERAGE_RULE
+    dimensions = rule.split("dimensions (", 1)[1].split(")", 1)[0].split(", ")
+    assert dimensions == [f"`{d}`" for d in _DIMENSIONS]
+    financial = rule.split("financial dimension (", 1)[1].split(")", 1)[0].split(", ")
+    assert financial == [f"`{d}`" for d in _DIMENSIONS if d in _FINANCIAL]
+    for phrase in ("`addressed`", "`not_applicable`", "`data_quality_only`", "exactly the"):
+        assert phrase in rule, phrase
+    source = files("deploy_vii").joinpath("live", "prompts.py").read_text(encoding="utf-8")
+    # `coverage` is also a field name, so only the other names show nothing is hand-copied.
+    assert not [d for d in _DIMENSIONS if d != "coverage" and f'"{d}"' in source]
+    inputs = narrative_inputs(*case())
+    review = populated(inputs)
+    moved = review.coverage[0].model_copy(
+        update={"dimension": "leverage", "finding_ids": ("liquidity",)}
+    )
+    other = review.model_copy(update={"coverage": (moved,)})
+    assert "Invalid dimension findings: leverage" in validate_narrative_review(inputs, other)
+    na = review.coverage[0].model_copy(update={"status": "not_applicable"})
+    issues = validate_narrative_review(inputs, review.model_copy(update={"coverage": (na,)}))
+    assert "Inapplicable dimension lacks evidence: liquidity" in issues
+
+
+def funding_case() -> tuple[tuple[Any, ...], NarrativeInputs, str]:
+    value = book().model_copy(
+        update={
+            "statement_lines": (
+                bs_line("deposits", "other:customer_deposits", "20", 1, statement="BS"),
+            )
+        }
+    )
+    args = case(value)
+    inputs = narrative_inputs(*args)
+    bs = next(
+        r.evidence_id
+        for r in inputs.catalogue
+        if r.kind == "statement_BS" and "customer_deposits" in r.record_json
+    )
+    return args, inputs, bs
+
+
+def with_funding(
+    review: NarrativeReview, reviewed: tuple[str, ...], material: tuple[str, ...]
+) -> NarrativeReview:
+    funding = FundingAssessment(
+        status="material_items" if material else "no_material_items",
+        reviewed_statement_ids=reviewed,
+        material_statement_ids=material,
+        rationale=(ProsePart(text="Prior balance sheet evidence needs funding analysis"),),
+    )
+    return review.model_copy(update={"funding": funding})
+
+
+def test_the_funding_rule_lists_the_standard_balance_sheet_items_from_the_validator() -> None:
+    rule = prompts.NARRATIVE_FUNDING_RULE
+    listed = rule.split("standard balance-sheet items (", 1)[1].split(")", 1)[0].split(", ")
+    assert listed == [f"`{i}`" for i in (*REQUIRED_ITEMS["BS"], *OPTIONAL_ITEMS["BS"])]
+    source = files("deploy_vii").joinpath("live", "prompts.py").read_text(encoding="utf-8")
+    for item_id in (*REQUIRED_ITEMS["BS"], *OPTIONAL_ITEMS["BS"]):
+        assert f'"{item_id}"' not in source and f"`{item_id}`" not in source, item_id
+    for phrase in (
+        "`kind=statement_BS`",
+        "`line_id` column is not null",
+        "`line_kind` is `detail`",
+        "`other:`",
+        "`material_items`",
+        "`unassessed`",
+        "every material id",
+    ):
+        assert phrase in rule, phrase
+
+
+def test_the_funding_rule_holds_for_a_non_balance_sheet_id_and_a_standard_row() -> None:
+    _, inputs, bs = funding_case()
+    definition = next(r.evidence_id for r in inputs.catalogue if r.kind == "definition")
+    review = populated(inputs)
+    # Batch 6: a definition row put in the funding lists.
+    wrong = "Funding assessment requires distinct located prior balance-sheet rows"
+    issues = validate_narrative_review(inputs, with_funding(review, (definition,), (definition,)))
+    assert wrong in issues
+    assert validate_narrative_review(inputs, with_funding(review, (bs,), (bs,))) == ()
+    standard = next(
+        r.evidence_id
+        for r in inputs.catalogue
+        if r.kind == "statement_BS" and f'"item_id":"{REQUIRED_ITEMS["BS"][0]}"' in r.record_json
+    )
+    issues = validate_narrative_review(inputs, with_funding(review, (standard,), (standard,)))
+    assert f"Funding story requires named non-debt liability detail: {standard}" in issues
+    issues = validate_narrative_review(inputs, with_funding(review, (), (bs,)))
+    assert "Material funding rows must be part of the reviewed scope" in issues
+    assert wrong in validate_narrative_review(inputs, with_funding(review, (bs, bs), (bs,)))
+
+
+def test_the_stories_rule_admits_the_kinds_the_validator_requires_a_story_for() -> None:
+    rule = prompts.NARRATIVE_STORIES_RULE
+    for phrase in (
+        "`kind=subsequent_event`",
+        "`kind=multi_figure_event`",
+        "`material_statement_ids`",
+        "At most one story",
+        "cites that same evidence id",
+        "blocks the narrative",
+        "empty array",
+    ):
+        assert phrase in rule, phrase
+    args, inputs, bs = funding_case()
+    definition = next(r.evidence_id for r in inputs.catalogue if r.kind == "definition")
+    kpi = next(r.evidence_id for r in inputs.catalogue if r.kind == "kpi")
+    review = populated(inputs)
+
+    def stories(*ids: str) -> NarrativeReview:
+        entries = tuple(StoryCoverage(evidence_id=i, finding_ids=("liquidity",)) for i in ids)
+        return review.model_copy(update={"stories": entries})
+
+    # Batch 6: stories written for a definition, a statement cell or a KPI.
+    for evidence_id in (definition, bs, kpi):
+        assert f"Unknown required story: {evidence_id}" in validate_narrative_review(
+            inputs, stories(evidence_id)
+        )
+    funded = with_funding(review, (bs,), (bs,))
+    assert validate_narrative_review(inputs, funded) == ()
+    report = canonical_narrative(*args, funded)  # no story: Python blocks, no validator issue
+    assert report.status == "blocked" and bs in report.required_story_ids
+    entry = StoryCoverage(evidence_id=bs, finding_ids=("liquidity",))
+    lacking = funded.model_copy(update={"stories": (entry,)})  # finding cites the KPI, not bs
+    assert f"Story finding lacks its required evidence: {bs} liquidity" in (
+        validate_narrative_review(inputs, lacking)
+    )
+    twice = funded.model_copy(update={"stories": (entry, entry)})
+    assert "Duplicate required-story coverage" in validate_narrative_review(inputs, twice)
+
+
+def test_a_subsequent_event_is_a_story_kind_the_rule_names() -> None:
+    pack, context, financial, definition, binding = case()
+    _, event_context = event_case()
+    context = context.model_copy(
+        update={
+            "events": event_context.events,
+            "sources": (
+                context.sources[0].model_copy(
+                    update={
+                        "event_scan": "events_identified",
+                        "event_ids": (event_context.events[0].event_id,),
+                    }
+                ),
+            ),
+        }
+    )
+    binding = binding.model_copy(update={"source_context_review_sha256": context.content_hash()})
+    args = pack, context, financial, definition, binding
+    inputs = narrative_inputs(*args)
+    event = next(r.evidence_id for r in inputs.catalogue if r.kind == "subsequent_event")
+    report = canonical_narrative(*args, populated(inputs))
+    assert event in report.required_story_ids
+    assert "`kind=subsequent_event`" in prompts.NARRATIVE_STORIES_RULE
+
+
+# --- 7.6: readiness ---------------------------------------------------------------------------
+
+
+@cache
+def readiness_case(entries: tuple[str, ...]) -> DownstreamInputs:
+    args = case(ready_case())
+    return downstream_inputs(*args, draft(narrative_inputs(*args)), entries)
+
+
+def review_of(
+    inputs: DownstreamInputs, *assessments: ConsumerAssessment
+) -> tuple[DownstreamReview, tuple[str, ...]]:
+    review = DownstreamReview(inputs_sha256=inputs.content_hash(), consumers=assessments)
+    return review, validate_downstream_review(inputs, review)
+
+
+def requirement(
+    key: str,
+    status: Literal["sufficient", "limited", "missing"],
+    ids: tuple[str, ...],
+    *actions: str,
+) -> RequirementAssessment:
+    return RequirementAssessment(
+        requirement=key,
+        status=status,
+        evidence_ids=ids,
+        rationale="Synthetic readiness judgment for the prompt rules",
+        actions=actions,
+    )
+
+
+def test_the_consumers_rule_matches_the_validator() -> None:
+    inputs = readiness_case(("CP-2A",))
+    keys = inputs.consumers[0].requirements
+    for phrase in ("`entry`", "last column", "no other entry", "at most once", "unassessed"):
+        assert phrase in prompts.READINESS_CONSUMERS_RULE, phrase
+    ok = requirement(keys[0], "missing", (), "Obtain the missing source")
+    assert review_of(inputs, ConsumerAssessment(entry="CP-2A", requirements=(ok,)))[1] == ()
+    twice = ConsumerAssessment(entry="CP-2A", requirements=(ok, ok))
+    assert f"Duplicate or unknown requirement: CP-2A {keys[0]}" in review_of(inputs, twice)[1]
+    other = ConsumerAssessment(entry="CP-2D")
+    assert "Unrequested consumer assessment: CP-2D" in review_of(inputs, other)[1]
+    again = ConsumerAssessment(entry="CP-2A")
+    assert "Duplicate consumer assessment" in review_of(inputs, again, again)[1]
+
+
+def test_the_evidence_rule_renders_every_group_key_from_the_validators_table() -> None:
+    rule = prompts.READINESS_EVIDENCE_RULE
+    rendered = {
+        key: groups
+        for key, _, groups in (
+            text.removeprefix("- ").partition(": ")
+            for text in rule.splitlines()
+            if text.startswith("- ")
+        )
+    }
+    assert set(rendered) == set(_EVIDENCE_GROUPS)
+    for key, groups in _EVIDENCE_GROUPS.items():
+        parsed = [set(group.split(" | ")) for group in rendered[key].split("; ")]
+        assert parsed == [set(g) for g in groups], key
+    source = files("deploy_vii").joinpath("live", "prompts.py").read_text(encoding="utf-8")
+    assert not [k for k in _EVIDENCE_GROUPS if f'"{k}"' in source]
+    for phrase in ("`kpi:<key>`", "`observation:<register_id>`", "amount` is null", "`kind=gap`"):
+        assert phrase in rule, phrase
+
+
+def test_the_evidence_rule_holds_for_missing_ids_wrong_groups_and_null_values() -> None:
+    inputs = readiness_case(("CP-2A",))
+    fcf, entity = evidence(inputs, "kpi", "fcf"), evidence(inputs, "entity")
+    gap = evidence(inputs, "gap")
+
+    def run(
+        key: str, status: Literal["sufficient", "limited", "missing"], *ids: str
+    ) -> tuple[str, ...]:
+        done = requirement(key, status, ids, "Obtain the missing source amount")
+        return review_of(inputs, ConsumerAssessment(entry="CP-2A", requirements=(done,)))[1]
+
+    assert run("cash_flow_metrics", "sufficient", fcf) == ()
+    assert run("cash_flow_metrics", "missing") == ()
+    assert "Sufficiency requires prior evidence: CP-2A cash_flow_metrics" in (
+        run("cash_flow_metrics", "limited")
+    )
+    wrong = "Incompatible or unavailable dependency evidence: CP-2A cash_flow_metrics"
+    assert wrong in run("cash_flow_metrics", "sufficient", entity)
+    assert "Invalid requirement evidence: CP-2A cash_flow_metrics" in run(
+        "cash_flow_metrics", "sufficient", fcf, fcf
+    )
+    assert run("cash_flow_metrics", "sufficient", fcf, gap) == ()
+
+
+def test_a_key_without_groups_needs_a_cited_line_that_is_not_a_gap() -> None:
+    inputs = readiness_case(("CP-8",))
+    key = inputs.consumers[0].requirements[0]
+    assert key not in _EVIDENCE_GROUPS
+    entry = inputs.consumers[0].entry
+    only_gap = f"Sufficiency requires register evidence: {entry} {key}"
+    gap, entity = evidence(inputs, "gap"), evidence(inputs, "entity")
+
+    def run(*ids: str) -> tuple[str, ...]:
+        done = requirement(key, "sufficient", ids)
+        return review_of(inputs, ConsumerAssessment(entry=entry, requirements=(done,)))[1]
+
+    assert only_gap in run(gap)
+    assert run(entity) == ()
+    assert "at least one cited line" in prompts.READINESS_EVIDENCE_RULE
+
+
+def test_the_status_rule_requires_actions_and_a_complete_dashboard() -> None:
+    inputs = readiness_case(("CP-2",))
+    fcf = evidence(inputs, "kpi", "fcf")
+    for phrase in ("not `sufficient`", "`actions`", "`kpi_dashboard`", "non-null `amount`"):
+        assert phrase in prompts.READINESS_STATUS_RULE, phrase
+    limited = requirement("kpi_dashboard", "limited", (fcf,))
+    review = ConsumerAssessment(entry="CP-2", requirements=(limited,))
+    assert "Incomplete requirement needs action: CP-2 kpi_dashboard" in review_of(inputs, review)[1]
+    kpis = inputs.narrative.inputs.ledger.kpis
+    assert kpis is not None and any(k.value.amount is None for k in kpis.kpis)
+    full = requirement("kpi_dashboard", "sufficient", (fcf,))
+    issues = review_of(inputs, ConsumerAssessment(entry="CP-2", requirements=(full,)))[1]
+    assert "Complete KPI dashboard has unavailable values: CP-2" in issues
+
+
+def test_the_gaps_rule_matches_the_validator() -> None:
+    inputs = readiness_case(("CP-2A",))
+    gap_ids = [g.gap_id for g in inputs.narrative.gaps]
+    assert len(gap_ids) >= 2
+    entity = evidence(inputs, "entity")
+
+    def scope(
+        ids: tuple[str, ...], relevance: Literal["relevant", "not_relevant"], *refs: str
+    ) -> GapAssessment:
+        return GapAssessment(
+            gap_ids=ids,
+            relevance=relevance,
+            evidence_ids=refs,
+            rationale="Synthetic relevance judgment over the named scope",
+        )
+
+    def run(*scopes: GapAssessment) -> tuple[str, ...]:
+        return review_of(inputs, ConsumerAssessment(entry="CP-2A", gaps=scopes))[1]
+
+    assert run(scope((gap_ids[0],), "relevant", entity)) == ()
+    again = run(scope((gap_ids[0],), "relevant"), scope((gap_ids[0], gap_ids[1]), "relevant"))
+    assert "Duplicate or unknown gap scope: CP-2A" in again
+    assert "Duplicate or unknown gap scope: CP-2A" in run(scope(("nope",), "relevant"))
+    assert "Duplicate or unknown gap scope: CP-2A" in run(
+        scope((gap_ids[0], gap_ids[0]), "relevant")
+    )
+    assert "Invalid gap-scope evidence: CP-2A" in run(
+        scope((gap_ids[0],), "relevant", entity, entity)
+    )
+    assert "Excluding gaps requires prior evidence: CP-2A" in run(
+        scope((gap_ids[0],), "not_relevant")
+    )
+    blocking = [
+        g
+        for g in inputs.narrative.gaps
+        if g.severity == "BLOCK" and g.origin in {"context_binding", "context"}
+    ]
+    for g in blocking:
+        issues = run(scope((g.gap_id,), "not_relevant", entity))
+        assert "A source-integrity block cannot be excluded: CP-2A" in issues
+    for phrase in (
+        "`gap_id` column",
+        "`narrative_gaps`",
+        "`evidence_id` of a gap line is not its `gap_id`",
+        "`not_relevant`",
+        "`BLOCK`",
+        "`context_binding` or `context`",
+    ):
+        assert phrase in prompts.READINESS_GAPS_RULE, phrase
+
+
+def test_the_readiness_table_carries_the_columns_its_rules_refer_to() -> None:
+    inputs = readiness_case(("CP-2A",))
+    lines = evidence_table(inputs.narrative.inputs.catalogue, gap_ids=True)
+    header = {
+        h.split(" ")[0].removeprefix("kind="): json.loads(h.split("columns=", 1)[1])
+        for h in lines
+        if h.startswith("kind=")
+    }
+    assert "key" in header["kpi"] and "amount" in header["kpi"]
+    assert {"register_id", "amount"} <= set(header["observation"])
+    for kind in ("statement_IS", "statement_CFS", "statement_BS"):
+        assert {"line_id", "line_kind", "item_id", "amount"} <= set(header[kind])
+    assert header["gap"][:4] == ["evidence_id", "gap_id", "severity", "origin"]
+    assert set(KINDS) >= set(header)
+
+
+def test_the_rules_of_both_review_steps_stay_inside_their_budget() -> None:
+    assert sum(len(rule) for rule in NARRATIVE_RULES) < 4000  # characters, about 1,000 tokens
+    assert sum(len(rule) for rule in READINESS_RULES) < 3200  # characters, about 800 tokens

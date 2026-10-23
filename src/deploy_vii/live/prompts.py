@@ -44,9 +44,11 @@ from deploy_vii.business_context import context_block
 from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import Fact
 from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.downstream_readiness import _EVIDENCE_GROUPS
 from deploy_vii.financial_periods import _id
 from deploy_vii.live.context import PACK_SOURCE_STEPS
 from deploy_vii.live.schema import strict_schema
+from deploy_vii.narrative import _DIMENSIONS, _FINANCIAL
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.quality import QualityInputs
 from deploy_vii.readiness import extraction_coverage, live_consumers
@@ -264,6 +266,104 @@ QUALITY_REPAIR_RULE = (
     "finding the CONTEXT block supports."
 )
 
+# Task 7.6 (E1 batch 6, proxy cohort: 21 narrative issues the prompt never stated): the rules
+# `narrative.validate_narrative_review` and `downstream_readiness.validate_downstream_review`
+# apply, as the model sees them in the evidence table. Every list is rendered from the
+# validator's own constant; the two story kinds are written out because `narrative` keeps them
+# inline (a test holds them to `canonical_narrative`).
+REVIEW_PROSE_RULE = (
+    "Every free-text field (a prose part's `text`, a `title`, `rationale`, `action` or "
+    "`limitation`) is nonblank run text with no bare figure: digits appear only in period, filing "
+    "and section labels (`FY2025`, `Q3 2025`, `10-K`, `Item 7A`); a number stays in the evidence "
+    "it comes from and is never written out, and `{ref|unit}` and `[ref]` references are never "
+    "written. A space or an empty string is not prose."
+)
+
+
+def _ticked(names: Sequence[str]) -> str:
+    return ", ".join(f"`{name}`" for name in names)
+
+
+NARRATIVE_PARTS_RULE = (
+    "A passage (`evidence`, `risk_mechanic`, `credit_implication`, a `rationale`) is an array of "
+    '1 to 100 parts: {"kind":"prose","text":…}, {"kind":"evidence","evidence_id":…} naming one '
+    'evidence_id from the evidence table, or {"kind":"issuer"} (the issuer, bound explicitly). '
+    "Never add a part as a separator or spacer. Each finding's `finding_id` is unique; its "
+    "`evidence` passage holds at least one evidence part, its `risk_mechanic` and its "
+    "`credit_implication` each at least one prose part, and at least one issuer part appears "
+    "among its three passages. Every evidence_id you name, anywhere, is in the evidence table."
+)
+NARRATIVE_COVERAGE_RULE = (
+    "`coverage`: one entry for each of the dimensions ("
+    + ", ".join(f"`{d}`" for d in _DIMENSIONS)
+    + "), never two for one dimension (a dimension left out, or `unassessed`, is recorded as a "
+    "gap); its `finding_ids` are exactly the `findings` whose `dimension` is that dimension, each "
+    "once and none from another. `status` is `addressed` exactly when that list is non-empty; "
+    "`not_applicable` also needs an evidence part in its `rationale`; every "
+    "`rationale` holds a prose part. When the scope line reads `data_quality_only`, no finding "
+    "takes a financial dimension ("
+    + ", ".join(f"`{d}`" for d in _DIMENSIONS if d in _FINANCIAL)
+    + ")."
+)
+NARRATIVE_FUNDING_RULE = (
+    "`funding`: `reviewed_statement_ids` and `material_statement_ids` name only evidence ids of "
+    "`kind=statement_BS` whose `line_id` column is not null (a definition, KPI or any other kind "
+    "is not admitted), each id once, and every material id is also reviewed; review every such "
+    "row, or the narrative records a coverage gap. A material row's `line_kind` is `detail` and "
+    "its `item_id` is outside the standard balance-sheet items ("
+    + _ticked((*REQUIRED_ITEMS["BS"], *OPTIONAL_ITEMS["BS"]))
+    + "), so it carries an `other:` id. `status` is `material_items` exactly when "
+    "`material_statement_ids` is non-empty; any status but `unassessed` needs a non-empty "
+    "`reviewed_statement_ids`; its `rationale` holds a prose part."
+)
+NARRATIVE_STORIES_RULE = (
+    "`stories`: a story is admitted only for an evidence id of `kind=subsequent_event` or "
+    "`kind=multi_figure_event` (find those headers in the evidence table; with none, there is no "
+    "event story) or for an id in `material_statement_ids`; a story for any other id (a "
+    "definition, a statement cell or a KPI, say) is an unknown story. At most one story per such "
+    "id, whose `finding_ids` are distinct findings whose `evidence` passage cites that same "
+    "evidence id. A required id without a story blocks the narrative, so write one for each; "
+    "with none required, `stories` is an empty array."
+)
+READINESS_CONSUMERS_RULE = (
+    "`consumers`: one assessment for each `entry` on the `consumers` lines (the requested "
+    "consumers), no other entry and none twice. Its `requirements` use only the requirement keys "
+    "on that consumer's line (the last column), each at most once; a key left out is recorded as "
+    "an unassessed dependency, so assess every key."
+)
+
+
+def _evidence_groups() -> str:
+    return "\n".join(
+        f"- {key}: " + "; ".join(" | ".join(sorted(group)) for group in groups)
+        for key, groups in _EVIDENCE_GROUPS.items()
+    )
+
+
+READINESS_EVIDENCE_RULE = (
+    "A requirement whose status is `sufficient` or `limited` names at least one evidence_id, each "
+    "once and each from the evidence table (`missing` may name none). Evidence is judged by tags: "
+    "a line's tags are its `kind`, plus `kpi:<key>` for a `kind=kpi` line (its `key` column) and "
+    "`observation:<register_id>` for a `kind=observation` line (its `register_id` column); a "
+    "`kind=kpi`, `kind=statement_*` or `kind=observation` line whose `amount` is null has no tag "
+    "at all. For the keys below, the cited lines together must carry at least one tag from every "
+    "group (groups are separated by `;`, the alternatives within a group by `|`):\n"
+    + _evidence_groups()
+    + "\nFor any other key, at least one cited line must carry a tag and not be a `kind=gap` line."
+)
+READINESS_STATUS_RULE = (
+    "A requirement whose status is not `sufficient` needs at least one `actions` entry. "
+    "`kpi_dashboard` is `sufficient` only when every `kind=kpi` line has a non-null `amount`."
+)
+READINESS_GAPS_RULE = (
+    "`gaps`: each scope's `gap_ids` are distinct and taken from the `gap_id` column of the "
+    "`kind=gap` lines or of the `narrative_gaps` lines (the `evidence_id` of a gap line is not "
+    "its `gap_id`), and no gap_id is in two scopes of one consumer; a gap left out stays "
+    "unassessed. Its `evidence_ids` are distinct evidence_ids from the evidence table. "
+    "`not_relevant` needs at least one evidence id and is never given to a gap whose `severity` "
+    "is `BLOCK` and whose `origin` is `context_binding` or `context`."
+)
+
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
         "Assess whether the supplied sources support the requested credit-research work. "
@@ -320,14 +420,26 @@ STEP_CONTRACTS: Mapping[str, str] = {
         "id=step:financials (projection=narrative-evidence) holds them: one evidence-table line "
         "per evidence_id an evidence part may name, with its kind and a compact value summary, "
         "then the scope, the ledger's limitations, the source-context report and the model's "
-        "metrics; a passage names evidence by its evidence_id and never quotes it."
+        "metrics; a passage names evidence by its evidence_id and never quotes it.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {REVIEW_PROSE_RULE}\n"
+        f"b. {NARRATIVE_PARTS_RULE}\n"
+        f"c. {NARRATIVE_COVERAGE_RULE}\n"
+        f"d. {NARRATIVE_FUNDING_RULE}\n"
+        f"e. {NARRATIVE_STORIES_RULE}"
     ),
     "readiness": (
         "Review downstream readiness from the supplied inputs only. The SOURCE block "
         "id=step:narrative (projection=readiness-inputs) holds them: the requested consumers "
         "with their requirements, the narrative review, its status and the gaps it added, and "
         "one evidence-table line per evidence_id an assessment may name, each gap line also "
-        "carrying the gap_id a gap scope names."
+        "carrying the gap_id a gap scope names.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {REVIEW_PROSE_RULE}\n"
+        f"b. {READINESS_CONSUMERS_RULE}\n"
+        f"c. {READINESS_EVIDENCE_RULE}\n"
+        f"d. {READINESS_STATUS_RULE}\n"
+        f"e. {READINESS_GAPS_RULE}"
     ),
     # Task 7.4: the analyst's part of CP-1 QA (`quality.md`); Python owns the arithmetic.
     "quality": (
