@@ -13,7 +13,8 @@ import pytest
 
 from deploy_vii.business_context import BusinessContextSubmission, Conflict, cp1a_consumers
 from deploy_vii.canonical_tables import CanonicalTables
-from deploy_vii.contracts import Fact
+from deploy_vii.context_binding import validate_financial_context
+from deploy_vii.contracts import Fact, Span
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.downstream_readiness import (
@@ -32,11 +33,13 @@ from deploy_vii.financial_contracts import (
     SegmentObservation,
     StatementLine,
 )
-from deploy_vii.financial_validation import book_issues
+from deploy_vii.financial_validation import book_issues, validate_financial_review
 from deploy_vii.live import prompts
 from deploy_vii.live.context import (
+    FULL,
     KINDS,
     NARRATIVE_EVIDENCE,
+    PROJECTIONS,
     evidence_table,
     step_sources,
     upstream_text,
@@ -72,6 +75,7 @@ from deploy_vii.quality import (
     QualityReview,
     assess_quality,
 )
+from deploy_vii.quotes import quoted
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
 from deploy_vii.statement_validation import (
@@ -88,6 +92,7 @@ from tests.product.test_live_submission import paged_pack
 from tests.product.test_model_readiness import ready_case
 from tests.product.test_narrative import draft, populated
 from tests.product.test_readiness import as_submission, readiness_fixture
+from tests.product.test_source_context import case as context_case
 from tests.product.test_source_context import event_case
 from tests.product.test_statements import line as bs_line
 
@@ -547,7 +552,7 @@ REGISTER_RULES = (
 def test_the_financials_step_letters_the_register_rules_e_to_h_once_each() -> None:
     contract = prompts.STEP_CONTRACTS["financials"]
     rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
-    assert rules == ["a. ", "b. ", "c. ", "d. ", "e. ", "f. ", "g. ", "h. "]
+    assert rules == ["a. ", "b. ", "c. ", "d. ", "e. ", "f. ", "g. ", "h. ", "i. "]  # 7.11: i
     for letter, rule in zip("efgh", REGISTER_RULES, strict=True):
         assert f"{letter}. {rule}" in contract
         assert composed("financials").count(rule) == 1, rule
@@ -1596,3 +1601,101 @@ def test_the_cp1a_rules_state_the_label_forms_conflicts_and_behaviour_flags() ->
     )
     assert flag.kind == "behaviour_flag"
     assert issues_of(changed(base, governance_and_sponsor=(governance(), flag))) == ()
+
+
+# --- 7.11: what E1 batch e1-cp1-13 (GPT-6.1 Sol at high) had to guess -------------------------
+
+ALL_STEPS = (
+    "source_readiness",
+    "source_context",
+    "financials",
+    "narrative",
+    "readiness",
+    "quality",
+    "business_context",
+)
+
+
+def test_the_financials_step_states_the_bound_scope_rule_once_as_rule_i() -> None:
+    rule = prompts.BOUND_SCOPE_RULE
+    contract = prompts.STEP_CONTRACTS["financials"]
+    assert f"h. {prompts.SEGMENT_ALLOCATION_RULE}\ni. {rule}" in contract
+    assert composed("financials").count(rule) == 1
+    for step_id in set(ALL_STEPS) - {"financials"}:
+        assert rule not in composed(step_id), step_id
+    for phrase in (
+        "`currency`, `unit`, `accounting_basis` and `entity_perimeter` verbatim",
+        "step:source_context `scopes` entry",
+        "into every one of its `periods`",
+        "exactly equal",
+        "is a rejection",
+    ):
+        assert phrase in rule, phrase
+    # The scopes the rule points at are in the block the financials prompt shows, whole.
+    assert PROJECTIONS[("financials", "source_context")] == FULL
+
+
+def _one_character_off(text: str) -> str:
+    return text[:-1] + ("x" if text[-1] != "x" else "y")
+
+
+def test_a_one_character_perimeter_difference_is_rejected_with_the_rules_two_messages() -> None:
+    """Book against scope: only the binding message; book against period: only the mixed one."""
+    pack, context, financial, binding = context_case()
+    assert validate_financial_context(pack, context, financial, binding) == ()
+    (source,) = context.sources
+    scopes = tuple(
+        s.model_copy(update={"entity_perimeter": _one_character_off(s.entity_perimeter)})
+        for s in source.scopes
+    )
+    changed = context.model_copy(
+        update={"sources": (source.model_copy(update={"scopes": scopes}),)}
+    )
+    rebound = binding.model_copy(update={"source_context_review_sha256": changed.content_hash()})
+    (value,) = financial.books
+    assert validate_financial_context(pack, changed, financial, rebound) == tuple(
+        f"No matching entity/date/basis source scope: {value.book_id} {p.period_id} S1"
+        for p in value.periods
+    )
+    first, *rest = value.periods
+    off = first.model_copy(update={"entity_perimeter": _one_character_off(first.entity_perimeter)})
+    mixed = financial.model_copy(
+        update={"books": (value.model_copy(update={"periods": (off, *rest)}),)}
+    )
+    assert validate_financial_review(pack, mixed) == (
+        f"{value.book_id}: Mixed units, currency, accounting basis or perimeter: {first.period_id}",
+    )
+
+
+def test_the_page_and_hyphen_rules_sit_once_in_the_preamble_every_step_receives() -> None:
+    """`CITATION_RULE` does not reach `financials`, where batch 13 cited `page:95` for text in
+    the `page:94` span and wrapped `first-` onto a new line; the preamble does."""
+    for rule in (prompts.PAGE_SPAN_RULE, prompts.HYPHEN_COPY_RULE):
+        assert rule not in prompts.CITATION_RULE
+        assert not [s for s, contract in prompts.STEP_CONTRACTS.items() if rule in contract]
+        for step_id in ALL_STEPS:
+            assert composed(step_id).count(rule) == 1, (step_id, rule)
+    assert "`locator=` marker that opens that span, above the text" in prompts.PAGE_SPAN_RULE
+    assert "`first-priority`, never `first-` then a line break" in prompts.HYPHEN_COPY_RULE
+
+
+def test_the_page_rule_is_true_of_how_a_span_is_rendered() -> None:
+    """Each span is one `locator=<locator> | <text>` entry: the marker opens the span and its
+    text, line breaks included, follows it until the next marker."""
+    pack = paged_pack(range(94, 96))
+    (source,) = pack.sources
+    spans = (
+        Span(locator="page:94", text="Total revenue\nReconciliation"),
+        Span(locator="page:95", text="Next page text"),
+    )
+    pack = pack.model_copy(update={"sources": (source.model_copy(update={"spans": spans}),)})
+    _, body = prompts._source_body(pack, source.source_id)
+    assert body == (
+        "locator=page:94 | Total revenue\nReconciliation\nlocator=page:95 | Next page text"
+    )
+
+
+def test_the_hyphen_guidance_is_a_quote_the_matcher_accepts_from_a_wrapped_span() -> None:
+    span = "and\nfuture first-\npriority lien obligations"
+    assert quoted("future first-priority lien obligations", span)
+    assert not quoted("future first priority lien obligations", span)  # the hyphen is kept
