@@ -422,3 +422,23 @@ Closed, one line per item (analytical meaning unchanged, decision 0005; no valid
 Deferred: the `FinancialSubmission` split (decision 0008); turning `WITHIN_ATTEMPT_REPAIR` into a `repairable` argument; reducing the 7.4 QA scope, which inlines `record_json` (270 KB on the real pack, inside budget, not reduced).
 
 Not verified: real-pack replay (the corpus replays CP-1 entries on the synthetic pack only); a live stored body through the real transport.
+
+## 7.11 Batch e1-cp1-13 findings (first GPT-6.1 Sol at high chain)
+
+Batch e1-cp1-13 (DC-8 pool, GPT-6.1 Sol at `high`, cap US$12, 23 October 2026): 7 steps, 3 accepted (one `source_readiness`, two `source_context`) and 4 rejected (both input sets ended at `financials`, first try and step repair each), US$4.875576 spent, CP-1 not promoted. Two rejection families, each a fact the prompt left unsaid:
+
+1. **Dimension strings.** Six `Mixed units, currency, accounting basis or perimeter` issues (both first tries: each period's `accounting_basis` and `entity_perimeter` differed from its book's) and three `No matching entity/date/basis source scope` issues (one repair: the book's `entity_perimeter` paraphrased the closest scope's string). The other repair, rejected for one quote only, also wrote a book whose `currency` and `entity_perimeter` match no scope; the binding check runs only once both reviews validate, so it was not reached. `context_binding` and `book_issues` compare the four strings exactly; the prompt showed the scopes but never said to copy them.
+2. **Quotes.** Both first tries cited a heading under `page:95` that sits in the `page:94` span (the next span's marker read as its page); one repair quoted `first-` + newline + `priority` where the span prints `first-priority`, which the matcher rejected (it joined wraps on the span side only).
+
+What each item closes:
+
+1. Financials rule i (`prompts.BOUND_SCOPE_RULE`): copy the bound scope's four strings verbatim into the book and every period (family 1); a validator test holds both messages to a one-character difference.
+2. `prompts.PAGE_SPAN_RULE` in the common preamble: a locator's page is the span that contains the text, read from the marker that opens it (family 2, page:95). The preamble is used because `CITATION_RULE` does not reach `financials`.
+3. `prompts.HYPHEN_COPY_RULE` in the common preamble: copy a hyphenated word whole (family 2, guidance beside item 4).
+4. `quotes.quoted` joins a hyphen line wrap on the quote side too (decision 0005 row, adopted, widening only). Read-only check on the batch-13 repair: its one wrapped quote among 489 citations now matches and no citation of that payload fails; the attempt would still be rejected by the binding check (family 1), which item 1 addresses.
+5. `live reconcile` recognises an interrupted attempt (batch e1-cp1-12, stopped mid-`financials`: an open US$3.237196 reservation, `request.json` only), writes the manifest that shape supports and settles it by the `account-usage-delta` rule only where that rule holds. Batch e1-cp1-12 recorded no after-check, so there its reservation stays open (unresolved, no figure); the coordinator runs that reconcile.
+6. A reply body in which `user_id` survives outside a redacted pair (OpenRouter's `error.metadata.raw` string, a non-JSON body) is withheld, and a withheld body records `body_redactions: []` (from the 7.10 review).
+7. `live-runner.md` records that the DC-8 cohort path stores the proxy payload unredacted, hashed as received; `plan.md` ticks 7.1a and 7.2.
+8. This section; decision 0005 also records candidate 7.11 (Python prefills the four dimension strings from the bound scope), not adopted.
+
+Not verified: live uptake of the new sentences; reconciling the real e1-cp1-12 reservation (the coordinator runs it); the account-usage window on the real key.

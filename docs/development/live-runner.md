@@ -326,7 +326,11 @@ the 7.10 review), the byte sequence `user_id` left anywhere outside a redacted p
 `\"user_id\"` inside a JSON string, as in OpenRouter's `error.metadata.raw` copy of the upstream
 body, or a body that is not JSON, such as `user_id=` in a form-encoded echo); or, in a JSON body,
 a `user_id` the in-place match cannot reach (a key spelled with a JSON escape, duplicates
-included) or a body too deep to parse. Python reads a 402 from the body as received, before
+included) or a body too deep to parse. The DC-8 cohort path (`cohort.accept_proxy_payload`)
+stores the coordinator-supplied proxy payload unredacted, with `body_sha256` the hash of the
+payload as received: it is model output, not a provider reply, and that hash must equal the
+hash of `output.md` and of the journal's retained output, so it is not redacted (by design,
+recorded in task 7.11 from the 7.10 review). Python reads a 402 from the body as received, before
 retention (`credit.from_dispatch_402`). Unknown metrics are `null` with a `_reason` sibling; provider values, local measurements
 and estimates are separate objects.
 

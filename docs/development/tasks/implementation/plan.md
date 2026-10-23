@@ -386,8 +386,11 @@ business and transaction context; 7.4 adds the live `quality` step that promotes
 sends later CP-1 steps bounded upstream projections; 7.6 states the narrative and readiness
 validator rules in their prompts; 7.7 places the `segment-allocation` table in the r14
 envelope; 7.8 reads a 402 for its reason before calling it exhaustion; 7.9 refines the
-prompts from the first full proxy chain; 7.10 closes the review follow-ups. Not landed: 7.1
-(E1 for CP-0 and CP-1, its box below still open) and 7.3 (E2, pending credit).
+prompts from the first full proxy chain; 7.10 closes the review follow-ups; 7.11 closes what
+E1 batch e1-cp1-13 (the first GPT-6.1 Sol at high chain) found: three prompt facts, a
+quote-side hyphen wrap, reconciling an interrupted attempt and withholding a reply body whose
+account id survives redaction. Not landed: 7.1 (E1 for CP-0 and CP-1, its box below still
+open) and 7.3 (E2, pending credit).
 
 - [ ] **7.1 E1 for CP-0 and CP-1** on Caesars. This closes B's adopted condition: real
   readiness populates the header, Evidence and Limitations. It also closes C's CP-1
@@ -395,8 +398,8 @@ prompts from the first full proxy chain; 7.10 closes the review follow-ups. Not 
   artifacts. Measured in E1 batch 6 (23 Oct 2026): after the first accepted `financials` the
   `narrative` prompt held 8,900,941 characters (every retained step's raw output), so task 7.5
   sends each later step a bounded projection instead (decision 0008 amendment, task 7.5).
-- [ ] **7.1a `dv-feature`: CP-MODEL deterministic publication.** Give CP-MODEL a head when CP-1 is promoted: publish the promoted envelope as the Model destination plus the calculation JSON (DC-5), Python only, no model call; required before M8's CP-5 case under any preset that requests CP-MODEL (decision 0009 amendment).
-- [ ] **7.2 CP-1A** business and transaction context: contract over prose runs,
+- [x] **7.1a `dv-feature`: CP-MODEL deterministic publication.** Give CP-MODEL a head when CP-1 is promoted: publish the promoted envelope as the Model destination plus the calculation JSON (DC-5), Python only, no model call; required before M8's CP-5 case under any preset that requests CP-MODEL (decision 0009 amendment).
+- [x] **7.2 CP-1A** business and transaction context: contract over prose runs,
   validator, Company profile bindings, then E1.
 - [ ] **7.3 E2 for the milestone:** matched three-model comparison over CP-0, CP-1 and
   CP-1A.
