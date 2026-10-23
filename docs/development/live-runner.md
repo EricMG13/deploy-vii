@@ -894,10 +894,12 @@ financial source state the same four strings (`Financial scopes of one entity di
 <field>: <entity_id> <scope ids> vs <scope ids>`, one per entity and field, grouped by value; a
 null is the first rule's alone). Forecast and unspecified scopes, and scopes of a non-financial
 source, are held to neither. That is the scope set `live.submission._period_scopes` and
-`context_binding` choose from, so a context that passes leaves each book one complete tuple and
-makes the prefill's `Bound source scopes disagree` rejection and its dimension `Field required`
-messages unreachable (a property test holds this; both stay as defence in depth). `source_context` rule d (`SCOPE_DIMENSION_RULE`) states both
-rules once; no other step carries it.
+`context_binding` choose from, so after a passing `source_context` only two prefill rejections
+become unreachable: `Bound source scopes disagree` and the `Field required` the prefill records
+for a null scope dimension (a property test holds this; both stay as defence in depth). A
+period whose dates match no scope is still left unfilled and still gets the shape check's
+`Field required` (or `context_binding`'s wording where it cites a source). `source_context`
+rule d (`SCOPE_DIMENSION_RULE`) states both rules once; no other step carries it.
 
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:

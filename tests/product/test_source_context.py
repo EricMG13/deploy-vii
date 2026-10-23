@@ -5,9 +5,10 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import find, given, settings
 from hypothesis import strategies as st
 
+import deploy_vii.source_context as source_context_module
 from deploy_vii.context_binding import (
     BookEntityBinding,
     FinancialContextBinding,
@@ -906,47 +907,90 @@ def test_agreement_holds_across_every_financial_source_of_the_review() -> None:
     )
 
 
-# The case's own value three times in five, so contexts that pass, and ones that differ only in
-# a stated string or only by a null, are all frequent draws.
-_POOLS: dict[str, tuple[str | None, ...]] = {
-    "currency": ("USD", "USD", "USD", "EUR", None),
-    "unit": ("MILLIONS", "MILLIONS", "MILLIONS", "THOUSANDS", None),
-    "entity_perimeter": ("Consolidated", "Consolidated", "Consolidated", "Consolidated ", None),
-    "accounting_basis": ("US GAAP", "US GAAP", "US GAAP", "IFRS", None),
+# Two stated values per field: the case's own and another (one perimeter differs by a trailing
+# space: compared exactly). Per field, half the draws give all three scopes one shared stated
+# value (that field passes both rules); the other half draw each scope's value on its own from
+# the two values and null, so they agree only by chance (2 in 27). A whole context passes in
+# about one draw in twelve (0.537 per field, four fields), so both directions of the property
+# are exercised in every run.
+_VALUES: dict[str, tuple[str, str]] = {
+    "currency": ("USD", "EUR"),
+    "unit": ("MILLIONS", "THOUSANDS"),
+    "entity_perimeter": ("Consolidated", "Consolidated "),
+    "accounting_basis": ("US GAAP", "IFRS"),
 }
+_SCOPES = 3  # the case's two duration scopes and one period-end scope
 
 
-@settings(max_examples=300, deadline=None)
-@given(st.data())
-def test_a_context_that_passes_leaves_the_prefill_one_complete_tuple_per_book(
-    data: st.DataObject,
-) -> None:
-    """Rules 1 and 2 are what `live.submission._dimensions` needs: over the scopes a passing
-    context holds, every period binds to at most one tuple of four stated strings and every
-    period of the book to the same one, so its "Bound source scopes disagree" and "Field
-    required" rejections cannot follow a context the validator accepted."""
+@st.composite
+def dimension_draws(draw: st.DrawFn) -> dict[str, tuple[str | None, ...]]:
+    """Per field, the values of the three scopes, in scope order."""
+    drawn: dict[str, tuple[str | None, ...]] = {}
+    for name, stated in _VALUES.items():
+        if draw(st.booleans()):  # all scopes agree on one stated value
+            drawn[name] = (draw(st.sampled_from(stated)),) * _SCOPES
+        else:
+            values = st.sampled_from((*stated, None))
+            drawn[name] = tuple(draw(values) for _ in range(_SCOPES))
+    return drawn
+
+
+def prefill_view(drawn: dict[str, tuple[str | None, ...]]) -> tuple[bool, bool, bool]:
+    """Whether the validator passes the context the draw describes, whether every period
+    binds to one shared tuple, and whether that tuple has no null (by `_period_scopes`)."""
     pack, review, _, _ = case()
     durations = review.sources[0].scopes
     closing = durations[-1].model_copy(
         update={"scope_id": "Q2-close", "period_kind": "period_end", "start_date": None}
     )
     scopes = tuple(
-        scope.model_copy(
-            update={name: data.draw(st.sampled_from(pool)) for name, pool in _POOLS.items()}
-        )
-        for scope in (*durations, closing)
+        scope.model_copy(update={name: values[index] for name, values in drawn.items()})
+        for index, scope in enumerate((*durations, closing))
     )
-    issues = validate_source_context(pack, with_scopes(review, *scopes))
+    passes = not validate_source_context(pack, with_scopes(review, *scopes))
     periods = [
         {"period_id": s.scope_id, "period_type": "QUARTER", **_iso(s)} for s in durations
     ] + [{"period_id": "close", "period_type": "PERIOD_END", **_iso(closing)}]
     found = [_period_scopes(period, scopes) for period in periods]
-    single = len(frozenset().union(*(f for f in found if f))) == 1
+    assert all(found)  # every period's dates match a scope: only the strings vary
+    single = len(frozenset[tuple[str | None, ...]]().union(*(f for f in found if f))) == 1
     complete = all(None not in strings for f in found if f for strings in f)
-    if not issues:
-        assert single and complete and all(found)
-    if not (single and complete):
-        assert issues
+    return passes, single, complete
+
+
+@settings(max_examples=300, deadline=None)
+@given(dimension_draws())
+def test_a_context_that_passes_leaves_the_prefill_one_complete_tuple_per_book(
+    drawn: dict[str, tuple[str | None, ...]],
+) -> None:
+    """Rules 1 and 2 are what `live.submission._dimensions` needs: over the scopes a passing
+    context holds, every period binds to one tuple of four stated strings, the same for every
+    period of the book, so its "Bound source scopes disagree" rejection and its null-dimension
+    "Field required" cannot follow a context the validator accepted; and a context whose
+    periods would not share one complete tuple is rejected."""
+    passes, single, complete = prefill_view(drawn)
+    assert passes == (single and complete)
+
+
+def _passes_unbindable(drawn: dict[str, tuple[str | None, ...]]) -> bool:
+    passes, single, complete = prefill_view(drawn)
+    return passes and not (single and complete)
+
+
+@pytest.mark.parametrize("rule", ["_lacks", "_disagreements"])
+def test_the_property_detects_either_rule_disabled(
+    monkeypatch: pytest.MonkeyPatch, rule: str
+) -> None:
+    """With rule 1 (`_lacks`) or rule 2 (`_disagreements`) switched off, the same draws find
+    a context the validator passes whose periods do not share one complete tuple."""
+    assert hasattr(source_context_module, rule)
+    monkeypatch.setattr(source_context_module, rule, lambda *_: iter(()))
+    found = find(
+        dimension_draws(),
+        _passes_unbindable,
+        settings=settings(max_examples=2000, deadline=None, database=None),
+    )
+    assert _passes_unbindable(found)
 
 
 def _iso(scope: ReportingScope) -> dict[str, str | None]:

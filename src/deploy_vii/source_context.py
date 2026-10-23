@@ -252,12 +252,7 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
                 issues.append(
                     f"Historical reporting scope ends after publication: {scope.scope_id}"
                 )
-            if assessment.classification == "financial" and scope.period_kind in _STATED_KINDS:
-                issues.extend(
-                    f"Financial scope lacks {name}: {scope.scope_id}"
-                    for name in _DIMENSIONS
-                    if getattr(scope, name) is None
-                )
+            issues.extend(_lacks(assessment, scope))
         source_event_ids = set(assessment.event_ids)
         if (
             len(source_event_ids) != len(assessment.event_ids)
@@ -313,6 +308,16 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
                 )
     issues.extend(absence_issues(pack, _prose_scopes(review)))
     return tuple(issues)
+
+
+def _lacks(assessment: SourceContext, scope: ReportingScope) -> Iterator[str]:
+    """Task 7.14, rule 1: a historical or period-end scope of a financial source states all
+    four dimensions; one issue per missing field. Forecast and unspecified scopes, and a
+    non-financial source's scopes, are not held to it."""
+    if assessment.classification == "financial" and scope.period_kind in _STATED_KINDS:
+        for name in _DIMENSIONS:
+            if getattr(scope, name) is None:
+                yield f"Financial scope lacks {name}: {scope.scope_id}"
 
 
 def _disagreements(review: SourceContextReview) -> Iterator[str]:
