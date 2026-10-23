@@ -61,9 +61,10 @@ while the directory holds exactly it and `request.json`.
 
 Task 7.14: neither window sees a charge billed after it closes (batch e1-cp1-13's after-check
 lagged its settled charges by US$1.0737551). The reconciled report therefore ends with a spend
-cross-check (`spend_cross_check`): the key's usage now less the earliest ledger's before-check
-usage, against every ledger's settled charges, the difference named unattributed USD. It is
-reported only; nothing is settled or adjusted from it.
+cross-check (`spend_cross_check`): the key's usage now less the earliest recorded before-check
+usage, against the settled charges of every ledger opened since that check (earlier ledgers are
+named, not counted), the difference named unattributed USD. It is reported only; nothing is
+settled or adjusted from it, and a failed key read for it leaves the exit code unchanged.
 """
 
 import hashlib
@@ -634,12 +635,15 @@ def open_ledger(path: Path) -> Ledger:
 
 @dataclass(frozen=True)
 class SpendCrossCheck:
-    """Task 7.14: the key's total usage now against every settled charge under the artifact
-    root, from the earliest ledger's before-check (the origin). Reported only.
+    """Task 7.14: the key's total usage now against the settled charges under the artifact
+    root, from the earliest recorded before-check (the origin). Reported only.
 
-    `settled_usd` is the sum of the ledgers' own `spent` (each replayed: a reconciled attempt
-    counts its adjusted figure, a hold of unknown cost its whole reservation, `held_usd` of
-    it); reservations still open are not in it (`open_reservations`)."""
+    `settled_usd` is the sum of the own `spent` of every ledger opened at or after the origin
+    (each replayed: a reconciled attempt counts its adjusted figure, a hold of unknown cost its
+    whole reservation, `held_usd` of it); reservations still open are not in it
+    (`open_reservations`). Ledgers opened before the origin are not in the figure; they are
+    named in `excluded`, with their settled sum in `excluded_usd` (fix round 1: probe-1, the
+    real root's first ledger, predates every recorded check)."""
 
     origin_file: str
     origin_usd: Decimal
@@ -650,6 +654,8 @@ class SpendCrossCheck:
     held_usd: Decimal
     open_reservations: int
     ledgers: tuple[str, ...]
+    excluded: tuple[str, ...]
+    excluded_usd: Decimal
 
     @property
     def billed_usd(self) -> Decimal:
@@ -657,65 +663,68 @@ class SpendCrossCheck:
 
     @property
     def unattributed_usd(self) -> Decimal:
-        """Positive: billed but in no ledger (late billing, spend outside the runner);
+        """Positive: billed but in no counted ledger (late billing, spend outside the runner);
         negative: settled but not billed (refunds, lag). Exact; never rounded."""
         return self.billed_usd - self.settled_usd
 
 
 @dataclass(frozen=True)
-class _Spent:
-    origin: _Check
-    origin_file: str
-    states: tuple[LedgerState, ...]
-    ledgers: tuple[str, ...]
+class _Origin:
+    check: _Check
+    where: str
+    at: datetime
 
 
-def _spent(artifact_root: Path) -> tuple[_Spent | None, str]:
-    """Every ledger replayed and the origin check, or None with why no figure can be shown:
-    no ledger; a ledger that does not replay or records no opening time; two earliest
-    ledgers opened in the same second; the earliest ledger's batch without a usable
-    before-check, or one recorded after that ledger opened."""
+def _origin(artifact_root: Path) -> tuple[_Origin | None, str]:
+    """The earliest recorded before-check under the root, or None with why it is not known.
+    Fail closed: every recorded check must be readable, with a usage figure and a time, and
+    the earliest must be alone in its second."""
+    found: list[_Origin] = []
+    for path in sorted(artifact_root.glob(f"*/{USAGE_FILE.format(phase='before')}")):
+        where = path.relative_to(artifact_root).as_posix()
+        unknown = "the origin is unknown"
+        try:
+            check, why = _usage_check(path, "before")
+        except ValueError:  # not JSON, or not an object (`_read`)
+            return None, f"{where} is not a readable account usage check; {unknown}"
+        if check is None:
+            return None, f"{where}: {why}; {unknown}"
+        at = _instant(check.checked_at)
+        if at is None:
+            return None, f"{where} records no check time; {unknown}"
+        found.append(_Origin(check, where, at))
+    if not found:
+        return None, "no batch under the artifact root recorded an account usage check before it"
+    found.sort(key=lambda origin: (origin.at, origin.where))
+    if len(found) > 1 and found[1].at == found[0].at:
+        return None, (
+            f"{found[0].where} and {found[1].where} checked account usage in the same second; "
+            "the origin is unknown"
+        )
+    return found[0], ""
+
+
+def _ledgers(artifact_root: Path) -> tuple[list[tuple[datetime, str, LedgerState]] | None, str]:
+    """Every ledger's opening time, name and replayed state, or None with why: no ledger, or
+    one that does not replay or records no opening time."""
     paths = sorted((artifact_root / ".ledgers").glob("*.jsonl"))
     if not paths:
         return None, "no ledger under .ledgers"
-    opened: list[tuple[datetime, str, Path]] = []
-    states: list[LedgerState] = []
+    read: list[tuple[datetime, str, LedgerState]] = []
     for path in paths:
         try:
             ledger = open_ledger(path)
         except LedgerError as error:
             return None, str(error)
         try:
-            states.append(ledger.state())
+            state = ledger.state()
         except LedgerError as error:
             return None, f"{path.name}: {error}"
-        first = json.loads(path.read_bytes().split(b"\n", 1)[0])
-        at = _instant(first.get("at"))
+        at = _instant(json.loads(path.read_bytes().split(b"\n", 1)[0]).get("at"))
         if at is None:
             return None, f"{path.name} records no opening time"
-        opened.append((at, first["at"], path))
-    opened.sort()
-    if len(opened) > 1 and opened[1][0] == opened[0][0]:
-        return None, (
-            f"ledgers {opened[0][2].name} and {opened[1][2].name} opened in the same second; "
-            "the earliest ledger is unknown"
-        )
-    start, stamp, earliest = opened[0]
-    path = usage_path(artifact_root, earliest.stem, "before")
-    where = path.relative_to(artifact_root).as_posix()
-    try:
-        origin, why = _usage_check(path, "before")
-    except ValueError:  # not JSON, or not an object (`_read`)
-        return None, f"{where} is not a readable account usage check"
-    if origin is None:
-        return None, f"{where}: {why}"
-    at = _instant(origin.checked_at)
-    if at is None or at > start:
-        return None, (
-            f"the origin check {where} at {origin.checked_at} is after the earliest ledger "
-            f"{earliest.name} opened ({stamp})"
-        )
-    return _Spent(origin, where, tuple(states), tuple(p.name for p in paths)), ""
+        read.append((at, path.name, state))
+    return read, ""
 
 
 def spend_cross_check(
@@ -725,31 +734,39 @@ def spend_cross_check(
     shown. The key's usage now is read once with `GET /api/v1/key`, as `usage_unmoved` reads
     it (DC-7: the key is read for this call, in memory, never printed), and only when the
     ledgers and the origin can be used. It must carry the origin check's key-file note. A
-    connection failure propagates (it stops the reconcile, as for every lookup). Nothing is
-    settled or adjusted from the figure."""
-    spent, why = _spent(artifact_root)
-    if spent is None:
+    ledger opened before the origin's second is left out of the settled sum and named. A
+    connection or credential failure propagates; `live reconcile` reports it as "not checked"
+    without changing its exit code (fix round 1). Nothing is settled or adjusted from it."""
+    ledgers, why = _ledgers(artifact_root)
+    if ledgers is None:
         return None, why
+    origin, why = _origin(artifact_root)
+    if origin is None:
+        return None, why
+    counted = [(name, state) for at, name, state in ledgers if at >= origin.at]
+    excluded = [(name, state) for at, name, state in ledgers if at < origin.at]
     fetched = client.fetch_key_status()
-    state = from_key_response(fetched.response, clock())
+    reading = from_key_response(fetched.response, clock())
     key_file = dict(fetched.key_note) if fetched.key_note else None
-    if state.usage is None:
+    if reading.usage is None:
         return None, "the account usage now is not reported"
-    if key_file != spent.origin.key_file:
+    if key_file != origin.check.key_file:
         return None, "the usage check now records another key-file note than the origin check"
-    attempts = [a for s in spent.states for a in s.attempts]
+    attempts = [a for _, state in counted for a in state.attempts]
     return SpendCrossCheck(
-        origin_file=spent.origin_file,
-        origin_usd=spent.origin.usage,
-        origin_at=spent.origin.checked_at,
-        now_usd=state.usage,
-        now_at=state.checked_at,
-        settled_usd=sum((s.spent for s in spent.states), Decimal(0)),
+        origin_file=origin.where,
+        origin_usd=origin.check.usage,
+        origin_at=origin.check.checked_at,
+        now_usd=reading.usage,
+        now_at=reading.checked_at,
+        settled_usd=sum((state.spent for _, state in counted), Decimal(0)),
         held_usd=sum(
             (a.charged_usd or Decimal(0) for a in attempts if a.actual_usd is None), Decimal(0)
         ),
         open_reservations=sum(a.status == "reserved" for a in attempts),
-        ledgers=spent.ledgers,
+        ledgers=tuple(name for name, _ in counted),
+        excluded=tuple(name for name, _ in excluded),
+        excluded_usd=sum((state.spent for _, state in excluded), Decimal(0)),
     ), ""
 
 

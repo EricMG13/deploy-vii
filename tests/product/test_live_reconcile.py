@@ -31,7 +31,7 @@ from deploy_vii.live.reconcile import (
     spend_cross_check,
 )
 from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, make_rtf_key, ok
-from tests.product.test_live_cli_batches import DEEPSEEK, Rig, key_status, step_lines
+from tests.product.test_live_cli_batches import DEEPSEEK, Responder, Rig, key_status, step_lines
 
 FIXTURE = Path(__file__).parent / "fixtures" / "live" / "deepseek-504-in-200-1.json"
 TIMEOUT_BODY = json.loads(FIXTURE.read_text(encoding="utf-8"))["body_text"]
@@ -1297,6 +1297,7 @@ def test_the_cross_check_names_billed_less_settled_as_unattributed_usd(
     assert (found.now_usd, found.now_at) == (Decimal(now), NOW)
     assert found.settled_usd == Decimal("1.0")
     assert found.ledgers == ("b-early.jsonl", "b-late.jsonl")
+    assert (found.excluded, found.excluded_usd) == ((), Decimal(0))
     assert found.billed_usd == Decimal(now) - Decimal("10")
     assert found.unattributed_usd == Decimal(unattributed)
     # Exact Decimal arithmetic: billed less settled, with no rounding.
@@ -1337,33 +1338,101 @@ def test_held_charges_count_at_their_reservation_and_open_reservations_not_at_al
     assert found.unattributed_usd == Decimal("0.05")
 
 
+def test_the_origin_is_the_earliest_recorded_before_check_and_earlier_ledgers_are_named(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 (coordinator): the real root's earliest ledger, probe-1, has no before-check.
+    The origin is the earliest recorded one; a ledger opened before it is not in the figure and
+    is named with its settled sum."""
+    root = tmp_path / "model-tests"
+    spent_ledger(root, "p1", T0, *charge("p-1", "0.3", T0))  # no before-check recorded
+    before_check(root, "b-late", "10.9", T1)
+    spent_ledger(root, "b-late", T2, *charge("b-1", "0.6", T2))
+    found, why = spend_cross_check(two_token_client(tmp_path, KeyOnly("11.6")), lambda: NOW, root)
+    assert why == "" and found is not None
+    assert (found.origin_file, found.origin_usd, found.origin_at) == (
+        "b-late/account-usage-before.json",
+        Decimal("10.9"),
+        T1,
+    )
+    assert (found.ledgers, found.settled_usd) == (("b-late.jsonl",), Decimal("0.6"))
+    assert (found.excluded, found.excluded_usd) == (("p1.jsonl",), Decimal("0.3"))
+    assert found.unattributed_usd == Decimal("0.1")
+
+
+def test_a_ledger_opened_in_the_origins_second_is_counted(tmp_path: Path) -> None:
+    """The runner records the before-check before its first reservation, in the same second
+    as the ledger's opening line (e1-cp1-13: 08:43:18Z for both)."""
+    root = tmp_path / "model-tests"
+    before_check(root, "b1", "10", T1)
+    spent_ledger(root, "b1", T1, *charge("a-1", "0.4", T1))
+    found, _ = spend_cross_check(two_token_client(tmp_path, KeyOnly("10.4")), lambda: NOW, root)
+    assert found is not None and found.ledgers == ("b1.jsonl",) and found.excluded == ()
+    assert found.unattributed_usd == Decimal(0)
+
+
+def unreadable(path: Path) -> None:
+    path.write_text("[]", encoding="utf-8")
+
+
+def usage_of(path: Path, value: object) -> None:
+    record = load(path)
+    record["credit"]["usage"] = value
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+EARLY = "b-early/account-usage-before.json"
+LATE = "b-late/account-usage-before.json"
+
+
 @pytest.mark.parametrize(
     ("arrange", "reason"),
     [
         (
-            lambda root: (root / "b-early" / "account-usage-before.json").unlink(),
-            "b-early/account-usage-before.json: no account usage was recorded before the batch",
+            lambda root: [p.unlink() for p in root.glob("*/account-usage-before.json")],
+            "no batch under the artifact root recorded an account usage check before it",
         ),
         (
-            lambda root: before_check(root, "b-early", "10", T2),
-            "the origin check b-early/account-usage-before.json at 2026-10-23T09:00:00Z is after "
-            "the earliest ledger b-early.jsonl opened (2026-10-23T08:00:05Z)",
+            lambda root: unreadable(root / LATE),
+            f"{LATE} is not a readable account usage check; the origin is unknown",
         ),
         (
-            lambda root: spent_ledger(root, "b-tie", T1),
-            "ledgers b-early.jsonl and b-tie.jsonl opened in the same second; the earliest "
-            "ledger is unknown",
+            lambda root: usage_of(root / LATE, None),
+            f"{LATE}: account usage before the batch is not a recorded number; the origin is "
+            "unknown",
+        ),
+        (
+            lambda root: before_check(root, "b-late", "10.9", "late morning"),
+            f"{LATE} records no check time; the origin is unknown",
+        ),
+        (
+            lambda root: before_check(root, "b-tie", "10", T0),
+            f"{EARLY} and b-tie/account-usage-before.json checked account usage in the same "
+            "second; the origin is unknown",
         ),
         (
             lambda root: (root / ".ledgers" / "b-late.jsonl").write_text("{}\n", encoding="utf-8"),
             "b-late.jsonl has no readable opening line",
         ),
         (
+            lambda root: spent_ledger(root, "b-late", "noon"),
+            "b-late.jsonl records no opening time",
+        ),
+        (
             lambda root: [p.unlink() for p in (root / ".ledgers").glob("*.jsonl")],
             "no ledger under .ledgers",
         ),
     ],
-    ids=["missing-origin", "origin-after-ledger", "tie", "unreadable-ledger", "no-ledger"],
+    ids=[
+        "no-before-check",
+        "unreadable-check",
+        "check-without-usage",
+        "check-without-time",
+        "tie",
+        "unreadable-ledger",
+        "ledger-without-time",
+        "no-ledger",
+    ],
 )
 def test_an_unusable_origin_or_ledger_shows_no_figure_and_reads_no_key(
     tmp_path: Path, arrange: Callable[[Path], object], reason: str
@@ -1427,8 +1496,9 @@ def test_the_reconciled_report_carries_the_section_with_both_inputs_and_no_key(
     assert lines[0] == "Reported only: nothing is settled or adjusted from this figure."
     assert (
         f"- Origin: b1/account-usage-before.json, usage {origin['usage']} USD at "
-        f"{origin['checked_at']} (the earliest ledger's before-check)"
+        f"{origin['checked_at']} (the earliest recorded before-check)"
     ) in lines
+    assert "- Not covered: no ledger opened before the origin" in lines
     assert any(line.startswith(f"- Key usage now: {format(now, 'f')} USD at ") for line in lines)
     assert (
         f"- Settled in 1 ledger (.ledgers/*.jsonl): {format(state.spent, 'f')} USD, of which "
@@ -1450,8 +1520,32 @@ def test_without_an_origin_the_section_says_so_and_shows_no_figure(rig: Rig) -> 
     assert lines == [
         "Reported only: nothing is settled or adjusted from this figure.",
         "",
-        "- No figure: b1/account-usage-before.json: no account usage was recorded before the batch",
+        "- No figure: no batch under the artifact root recorded an account usage check before it",
     ]
+
+
+def test_the_section_names_a_ledger_opened_before_the_origin_with_its_settled_sum(
+    rig: Rig,
+) -> None:
+    responder = ProbeResponder(rig.review)
+    run_probe(rig, responder)
+    early = _stamp(time.time() - 3600)
+    other_ledger(
+        rig,
+        "p0",
+        [
+            {"event": "open", "cap_usd": "1", "at": early},
+            *charge("z-1", "0.07", early),
+        ],
+    )
+    responder.generations = {responder.ids[0]: generation(0.002)}
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    lines = spend_section((rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8"))
+    assert (
+        "- Not covered: 1 ledger opened before the origin (p0.jsonl), settled 0.07 USD; not in "
+        "the figure"
+    ) in lines
+    assert any(line.startswith("- Settled in 1 ledger (.ledgers/*.jsonl): ") for line in lines)
 
 
 def test_a_reconcile_stopped_before_the_cross_check_says_it_was_not_checked(rig: Rig) -> None:
@@ -1460,4 +1554,37 @@ def test_a_reconcile_stopped_before_the_cross_check_says_it_was_not_checked(rig:
     responder.generations = {responder.ids[0]: OSError(f"reset {FAKE_KEY}")}
     assert rig.run(reconcile_argv(rig), responder) == cli.EXIT_FAILED
     lines = spend_section((rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8"))
-    assert lines[-1] == "- No figure: not checked; the reconcile stopped before the cross-check"
+    assert lines[-1] == "- No figure: not checked: the reconcile stopped before the cross-check"
+
+
+class KeyDownAfterBatch(Responder):
+    """Every chat call answered (nothing to look up later); the reconcile-time key read, the
+    third, fails at the connection level."""
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL and len(self.key_requests) >= 2:
+            raise TransportError(f"connection reset {FAKE_KEY}")
+        return super().__call__(request)
+
+
+@pytest.mark.parametrize("failure", ["credential", "transport"])
+def test_a_failed_cross_check_read_leaves_the_exit_code_to_the_lookups(
+    rig: Rig, failure: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fix round 1 (coordinator): the cross-check only reports. With nothing to look up, an
+    unreadable credential file or a connection failure on its key read exits 0, and the
+    section says "not checked" with the reason (no key text)."""
+    responder = KeyDownAfterBatch(rig.review)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    lines = ledger(rig).path.read_bytes()
+    if failure == "credential":
+        rig.key.write_text("no key here\n", encoding="utf-8")
+    assert rig.run(reconcile_argv(rig), responder) == 0
+    assert ledger(rig).path.read_bytes() == lines
+    report = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
+    (line,) = [x for x in spend_section(report) if x.startswith("- No figure: ")]
+    expected = "CredentialError: " if failure == "credential" else "TransportError: "
+    assert line.startswith(f"- No figure: not checked: {expected}"), line
+    out = capsys.readouterr().out
+    assert "spend cross-check not checked: " in out
+    assert "sk-or-" not in report + out and "TESTONLY" not in report + out

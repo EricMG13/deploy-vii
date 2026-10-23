@@ -1166,12 +1166,26 @@ def render_reconciliation(
     return "\n".join(lines)
 
 
-SPEND_NOT_CHECKED = "not checked; the reconcile stopped before the cross-check"
+SPEND_NOT_CHECKED = "not checked: the reconcile stopped before the cross-check"
+
+
+def _checked_spend(client: ChatClient, root: Path) -> tuple[SpendCrossCheck | None, str]:
+    """The cross-check, or "not checked" with why when its key read fails. Documented
+    fail-open (fix round 1): the cross-check only reports, so a credential or connection
+    failure on its own read is printed and recorded in the section, and leaves the exit code
+    to the lookups and settlements (it is read after all of them, so it changes none)."""
+    try:
+        return spend_cross_check(client, utc_stamp, root)
+    except (TransportError, CredentialError) as problem:
+        why = f"not checked: {type(problem).__name__}: {problem}"
+        print(f"spend cross-check {why}")
+        return None, why
 
 
 def _spend_section(spend: tuple[SpendCrossCheck | None, str]) -> list[str]:
-    """Task 7.14: the key's usage now against every ledger's settled charges, both inputs with
-    their times and the ledger count; without a figure, why. Reported only."""
+    """Task 7.14: the key's usage now against the settled charges of the ledgers opened since
+    the origin, both inputs with their times and the ledger count, and the earlier ledgers it
+    leaves out; without a figure, why. Reported only."""
     found, why = spend
     lines = [
         "## Spend cross-check",
@@ -1181,11 +1195,19 @@ def _spend_section(spend: tuple[SpendCrossCheck | None, str]) -> list[str]:
     ]
     if found is None:
         return [*lines, f"- No figure: {why}", ""]
-    count = len(found.ledgers)
+    count, left = len(found.ledgers), len(found.excluded)
+    not_covered = (
+        f"- Not covered: {left} ledger{'' if left == 1 else 's'} opened before the origin "
+        f"({', '.join(found.excluded)}), settled {format(found.excluded_usd, 'f')} USD; not in "
+        "the figure"
+        if left
+        else "- Not covered: no ledger opened before the origin"
+    )
     return [
         *lines,
         f"- Origin: {found.origin_file}, usage {format(found.origin_usd, 'f')} USD at "
-        f"{found.origin_at} (the earliest ledger's before-check)",
+        f"{found.origin_at} (the earliest recorded before-check)",
+        not_covered,
         f"- Key usage now: {format(found.now_usd, 'f')} USD at {found.now_at} "
         "(`GET /api/v1/key` at reconcile time)",
         f"- Billed since the origin: {format(found.billed_usd, 'f')} USD",
@@ -1252,7 +1274,7 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
                 )
             )
         # Task 7.14: after every adjust of this run, so the settled sum includes them.
-        spend = spend_cross_check(client, utc_stamp, root)
+        spend = _checked_spend(client, root)
     finally:
         cells, notes = _cell_names(args.directory / "live" / args.batch_id)
         content = render_reconciliation(

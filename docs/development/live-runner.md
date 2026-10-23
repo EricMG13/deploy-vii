@@ -1237,23 +1237,26 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   by e1-cp1-14's before-check. After every lookup and adjust, `live reconcile` ends the
   reconciled report with a `## Spend cross-check` section (`reconcile.spend_cross_check`):
   the key's usage now, from one `GET /api/v1/key` read as `usage_unmoved` reads it (DC-7: the
-  key is read for that call, in memory, never printed), less the origin, the
-  `account-usage-before.json` of the earliest ledger's batch (by the ledgers' opening times),
-  against the sum of every settled charge across `<artifact-root>/.ledgers/*.jsonl` (each
-  ledger replayed: an adjusted attempt counts its adjusted figure, a hold of unknown cost its
-  whole reservation, shown separately; open reservations are not counted, their number is
-  shown). The difference is `Unattributed USD` (positive: billed but in no ledger, late billing
-  or spend outside the runner; negative: settled but not billed, refunds or lag), with both
-  inputs, their times and the ledger count. It is reported only: nothing is settled or
-  adjusted from it. No figure is shown, with `- No figure: <reason>`, when there is no ledger,
-  a ledger does not replay or records no opening time, the two earliest ledgers opened in the
-  same second, the origin file is missing, unreadable or recorded after that ledger opened, the
-  usage now is not reported, or the reading `records another key-file note than the origin
-  check`; the key is read only when the ledgers and the origin can be used. A connection
-  failure propagates after the report is written (`not checked; the reconcile stopped before the
-  cross-check`). On the real artifact root the earliest ledger is `probe-1`, which recorded no
-  before-check (account-usage checks began with probe-2), so as built the section shows no
-  figure there.
+  key is read for that call, in memory, never printed), less the origin, against the sum of the
+  settled charges of the `<artifact-root>/.ledgers/*.jsonl` ledgers opened at or after the
+  origin (each ledger replayed: an adjusted attempt counts its adjusted figure, a hold of
+  unknown cost its whole reservation, shown separately; open reservations are not counted,
+  their number is shown). The origin is the earliest recorded `account-usage-before.json` under
+  the artifact root (today `probe-2`), and the section names every ledger opened before it
+  with their settled sum (today `probe-1`), which the figure does not cover (coordinator
+  ruling, fix round 1). The difference is `Unattributed USD` (positive: billed but in no
+  counted ledger, late billing or spend outside the runner; negative: settled but not billed,
+  refunds or lag), with both inputs, their times and the ledger count. It is reported only:
+  nothing is settled or adjusted from it. No figure is shown, with `- No figure: <reason>`,
+  when there is no ledger, a ledger does not replay or records no opening time, no batch
+  recorded a before-check, any recorded before-check is unreadable or lacks a usage figure or a
+  time, the two earliest checks fall in the same second, the usage now is not reported, or the
+  reading `records another key-file note than the origin check`; the key is read only when the
+  ledgers and the origin can be used. A failed key read for the cross-check (credential or
+  connection) leaves the section `not checked: <reason>`, is printed, and does not change the
+  reconcile's exit code, which stays what the lookups and settlements make it (coordinator
+  ruling, fix round 1); a reconcile stopped earlier says `not checked: the reconcile stopped
+  before the cross-check`.
 
 ## Not covered here
 
