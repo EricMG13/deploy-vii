@@ -7,7 +7,7 @@ Product code is not changed: the runner keeps "the model gets no tools". The one
 is the recorded probe-5 Sol result, not re-run here (coordinator scope change, 23 Oct 2026).
 
 Reused from `deploy_vii.live`: the chat client (transport, key scrubbing, classification and
-`parse_usage`), the ledger, `prompt_token_bound`/`reservation_usd`, `committed_elsewhere` and
+`parse_usage`), the ledger, `prompt_token_bound`/`reservation_usd`, `open_ledger` and
 the catalog pin. `ToolChatRequest` extends `ChatRequest.body` with `tools` and the conversation;
 tool calls are read from the client's key-scrubbed raw body. `span_line` copies the per-span
 line of the private `prompts._source_body` (a test holds the two equal).
@@ -22,6 +22,12 @@ Money: a reservation of `reservation_usd(candidate, prompt_token_bound(body), MA
 committed before every call; the call settles with `usage.cost`, or holds the whole reservation
 when the cost is missing. A reservation the cap refuses stops the batch. The key is read once,
 held in memory and never written, printed or logged.
+
+Prior spend (user decision, 23 Oct 2026): the cumulative-ceiling check sums every prior ledger
+as `committed_elsewhere` does. A ledger this code cannot replay only because it holds `adjust`
+lines from a source this code does not know (M7's `account-usage-delta`) is replayed without
+those lines, so each such attempt counts at its pre-adjust charge (worst case); each line is
+printed and recorded. Anything else unreadable still refuses the batch.
 """
 
 import argparse
@@ -29,6 +35,7 @@ import json
 import re
 import statistics
 import sys
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -40,7 +47,7 @@ from typing import Any
 from deploy_vii.contracts import Span  # type: ignore[import-untyped]
 from deploy_vii.execution import Execution  # type: ignore[import-untyped]
 from deploy_vii.live.catalog import Catalog, CatalogError, ModelSelection, PinnedCandidate  # type: ignore[import-untyped]
-from deploy_vii.live.cli import committed_elsewhere  # type: ignore[import-untyped]
+from deploy_vii.live.cli import open_ledger  # type: ignore[import-untyped]
 from deploy_vii.live.client import (  # type: ignore[import-untyped]
     DEFAULT_TIMEOUT_SECONDS,
     ChatClient,
@@ -52,6 +59,7 @@ from deploy_vii.live.client import (  # type: ignore[import-untyped]
 )
 from deploy_vii.live.credential import load_key_with_note  # type: ignore[import-untyped]
 from deploy_vii.live.ledger import (  # type: ignore[import-untyped]
+    ADJUST_SOURCES,
     CapExceeded,
     Ledger,
     LedgerError,
@@ -401,6 +409,83 @@ def shrinkage(submits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {"flag": bool(dropped), "dropped": dropped, "basis": "each later submit vs the first"}
 
 
+# --- prior spend -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PriorSpend:
+    total: Decimal
+    worst_case_adjusts: tuple[dict[str, object], ...]
+
+
+def prior_committed(directory: Path) -> PriorSpend:
+    """Held plus settled spend over every ledger under `directory`, as `committed_elsewhere`
+    sums it, except that unknown-source `adjust` lines count at their pre-adjust charge."""
+    total, logged = Decimal(0), []
+    for path in sorted(directory.glob("*.jsonl")):
+        try:
+            state = open_ledger(path).state()
+        except LedgerError:
+            state, lines = _replay_without_unknown_adjusts(path)
+            logged += lines
+        total += state.reserved + state.spent
+    return PriorSpend(total, tuple(logged))
+
+
+def _replay_without_unknown_adjusts(path: Path) -> tuple[Any, list[dict[str, object]]]:
+    """The ledger's state without its unknown-source `adjust` lines (renumbered, replayed by the
+    ledger's own rules), and those lines. Raises LedgerError on anything else unreadable."""
+    raw = path.read_bytes()
+    if raw and not raw.endswith(b"\n"):
+        raise LedgerError(f"{path.name} ends in a torn line")
+    kept: list[dict[str, Any]] = []
+    logged: list[dict[str, object]] = []
+    for number, line in enumerate(raw.splitlines(), start=1):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            raise LedgerError(f"{path.name} line {number} is not valid JSON") from None
+        if not isinstance(entry, dict) or entry.get("seq") != number:
+            raise LedgerError(f"{path.name} line {number} breaks the sequence")
+        if entry.get("event") != "adjust" or entry.get("source") in ADJUST_SOURCES:
+            kept.append(entry)
+            continue
+        previous = entry.get("previous_charged_usd")
+        try:
+            charge = Decimal(str(previous))
+        except InvalidOperation:
+            charge = Decimal("NaN")
+        if previous is None or not charge.is_finite() or charge < 0:
+            raise LedgerError(
+                f"{path.name} line {number}: an unknown-source adjust without a "
+                "previous_charged_usd"
+            )
+        logged.append(
+            {
+                "ledger": path.name,
+                "seq": number,
+                "attempt_id": entry.get("attempt_id"),
+                "source": entry.get("source"),
+                "previous_charged_usd": str(previous),
+            }
+        )
+    if not logged:  # not an unknown-source adjust: the ledger's own error stands
+        open_ledger(path).state()
+    renumbered = "".join(json.dumps(e | {"seq": n}) + "\n" for n, e in enumerate(kept, start=1))
+    with tempfile.TemporaryDirectory() as scratch:
+        copy = Path(scratch) / path.name
+        copy.write_text(renumbered, encoding="utf-8")
+        state = open_ledger(copy).state()
+    charged = {record.attempt_id: record.charged_usd for record in state.attempts}
+    for item in logged:
+        if charged.get(str(item["attempt_id"])) != Decimal(str(item["previous_charged_usd"])):
+            raise LedgerError(
+                f"{path.name} line {item['seq']} does not start from the settled charge of "
+                f"{item['attempt_id']}"
+            )
+    return state, logged
+
+
 # --- the batch -------------------------------------------------------------------------------
 
 
@@ -744,7 +829,9 @@ def draw_metrics(draw: Draw, cap: Decimal) -> dict[str, Any]:
     return metrics
 
 
-def run_batch(harness: Harness, draws: Sequence[Draw]) -> dict[str, Any]:
+def run_batch(
+    harness: Harness, draws: Sequence[Draw], *, prior: PriorSpend | None = None
+) -> dict[str, Any]:
     """Run the draws in order; a BatchStop ends the batch and is recorded, never raised."""
     stopped: str | None = None
     for draw in draws:
@@ -764,6 +851,9 @@ def run_batch(harness: Harness, draws: Sequence[Draw]) -> dict[str, Any]:
     state = harness.ledger.state()
     summary = {
         "stopped": stopped,
+        "prior_committed": None
+        if prior is None
+        else {"total_usd": prior.total, "worst_case_adjusts": list(prior.worst_case_adjusts)},
         "ledger": {
             "path": harness.ledger.path,
             "cap": state.cap,
@@ -844,11 +934,19 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
     ledger_path = ledgers / f"{args.batch_id}.jsonl"
     batch_directory = args.artifact_root / args.batch_id
     try:
-        prior = committed_elsewhere(ledgers)
+        spend = prior_committed(ledgers)
     except LedgerError as error:
         # Fail closed: an unreadable prior ledger leaves the cumulative ceiling unknown.
-        print(f"refused: prior ledgers cannot be replayed by this code: {error}", file=sys.stderr)
+        print(f"refused: prior ledgers cannot be counted: {error}", file=sys.stderr)
         return 2
+    for item in spend.worst_case_adjusts:
+        print(
+            f"worst case: {item['ledger']} seq {item['seq']} attempt {item['attempt_id']} "
+            f"source {item['source']} counted at previous_charged_usd "
+            f"{item['previous_charged_usd']}",
+            file=sys.stderr,
+        )
+    prior = spend.total
     ceiling = settings.caps.cumulative_ceiling
     refusal = None
     if prior + args.cap > ceiling:
@@ -910,6 +1008,7 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
         "money": {
             "cap_usd": args.cap,
             "prior_committed_usd": prior,
+            "prior_worst_case_adjusts": list(spend.worst_case_adjusts),
             "cumulative_ceiling_usd": ceiling,
             "ledger": ledger_path,
             "first_call": {
@@ -938,7 +1037,7 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
         bytes_per_token=settings.prompt_bytes_per_token_lower_bound,
         batch_directory=batch_directory,
     )
-    print(_json(run_batch(harness, draws)), end="")
+    print(_json(run_batch(harness, draws, prior=spend)), end="")
     return 0
 
 

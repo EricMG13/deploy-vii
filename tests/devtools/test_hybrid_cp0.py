@@ -10,8 +10,9 @@ from typing import Any
 import pytest
 
 from deploy_vii.contracts import Span
+from deploy_vii.live.cli import committed_elsewhere
 from deploy_vii.live.client import ChatClient, Request, Response
-from deploy_vii.live.ledger import Ledger, Reservation, Settlement
+from deploy_vii.live.ledger import Ledger, LedgerError, Reservation, Settlement
 from deploy_vii.live.prompts import _source_body, block, build
 from deploy_vii.live.submission import ReadinessSubmission, SubmittedCitation, rejection_issues
 from deploy_vii.preparation import PreparedPack
@@ -578,16 +579,10 @@ def test_the_command_refuses_a_model_without_tools(
     assert "['tools', 'tool_choice']" in capsys.readouterr().err
 
 
-def test_a_prior_ledger_this_code_cannot_replay_refuses_the_batch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Fail closed with a reason (the real e1-cp1-2 ledger holds an M7-only adjust source)."""
-    ledgers = tmp_path / "root" / ".ledgers"
-    ledger = Ledger(ledgers / "newer.jsonl", Decimal(5))
-    ledger.reserve("a", Decimal(1))
-    ledger.settle("a", None, "held")
-    line = {
-        "seq": 4,
+def unknown_adjust(seq: int, **changes: object) -> dict[str, object]:
+    """An `adjust` from a source this code's ledger cannot replay (M7's account-usage-delta)."""
+    line: dict[str, object] = {
+        "seq": seq,
         "event": "adjust",
         "attempt_id": "a",
         "previous_charged_usd": "1",
@@ -597,12 +592,100 @@ def test_a_prior_ledger_this_code_cannot_replay_refuses_the_batch(
         "checked_at": "2026-10-23T00:00:00Z",
         "at": "2026-10-23T00:00:00Z",
     }
-    with (ledgers / "newer.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(line) + "\n")
+    return line | changes
+
+
+def newer_ledger(ledgers: Path, adjust: dict[str, object] | None = None) -> Path:
+    """a held at 1 (then adjusted from an unknown source), b settled at 0.5, c open at 0.25."""
+    ledger = Ledger(ledgers / "newer.jsonl", Decimal(5))
+    ledger.reserve("a", Decimal(1))
+    ledger.settle("a", None, "held")
+    ledger.reserve("b", Decimal(2))
+    ledger.settle("b", Decimal("0.5"), "usage.cost")
+    lines = ledger.path.read_text(encoding="utf-8").splitlines()
+    lines.append(json.dumps(unknown_adjust(6) if adjust is None else adjust))
+    lines.append(
+        json.dumps({"seq": 7, "event": "reserve", "attempt_id": "c", "usd": "0.25", "at": "x"})
+    )
+    ledger.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return ledger.path
+
+
+def test_an_unknown_adjust_counts_at_its_pre_adjust_charge_and_is_logged(tmp_path: Path) -> None:
+    ledgers = tmp_path / ".ledgers"
+    plain = Ledger(ledgers / "plain.jsonl", Decimal(5))
+    plain.reserve("x", Decimal(3))
+    plain.settle("x", Decimal(2), "usage.cost")
+    assert committed_elsewhere(ledgers) == Decimal(2)  # the runner's own sum agrees
+    assert hybrid.prior_committed(ledgers) == hybrid.PriorSpend(Decimal(2), ())
+    newer_ledger(ledgers)
+    with pytest.raises(LedgerError, match="unknown source"):
+        committed_elsewhere(ledgers)  # the runner's code cannot replay it
+    prior = hybrid.prior_committed(ledgers)
+    assert prior.total == Decimal("3.75")  # 1 (worst case) + 0.5 + 0.25 open + 2
+    assert prior.worst_case_adjusts == (
+        {
+            "ledger": "newer.jsonl",
+            "seq": 6,
+            "attempt_id": "a",
+            "source": "account-usage-delta",
+            "previous_charged_usd": "1",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("torn", "torn line"),
+        ("bad-json", "not valid JSON"),
+        ("no-previous", "without a previous_charged_usd"),
+        ("wrong-previous", "does not start from the settled charge"),
+        ("other-error", "settles z without an open reservation"),
+    ],
+)
+def test_any_other_unreadable_ledger_still_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], damage: str, message: str
+) -> None:
+    ledgers = tmp_path / "root" / ".ledgers"
+    adjust = {
+        "no-previous": {k: v for k, v in unknown_adjust(6).items() if k != "previous_charged_usd"},
+        "wrong-previous": unknown_adjust(6, previous_charged_usd="0.9"),
+    }.get(damage)
+    path = newer_ledger(ledgers, adjust)
+    text = path.read_text(encoding="utf-8")
+    if damage == "torn":
+        path.write_text(text + '{"seq": 8', encoding="utf-8")
+    elif damage == "bad-json":
+        path.write_text(text + "not json\n", encoding="utf-8")
+    elif damage == "other-error":
+        line = {"seq": 8, "event": "settle", "attempt_id": "z", "charged_usd": "1", "reason": "r"}
+        path.write_text(text + json.dumps(line) + "\n", encoding="utf-8")
+    with pytest.raises(LedgerError, match=message):
+        hybrid.prior_committed(ledgers)
     assert hybrid.main(cli_args(tmp_path, "--dry-run"), transport=unexpected_send) == 2
-    err = capsys.readouterr().err
-    assert err.startswith("refused: prior ledgers cannot be replayed by this code")
-    assert "adjusts from an unknown source" in err
+    assert capsys.readouterr().err.startswith("refused: prior ledgers cannot be counted")
+
+
+def test_the_dry_run_starts_and_prints_the_worst_case_lines(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    newer_ledger(tmp_path / "root" / ".ledgers")
+    assert hybrid.main(cli_args(tmp_path, "--dry-run"), transport=unexpected_send) == 0
+    captured = capsys.readouterr()
+    plan = json.loads(captured.out)
+    assert plan["money"]["prior_committed_usd"] == "1.75"
+    assert plan["money"]["prior_worst_case_adjusts"][0]["seq"] == 6
+    assert "worst case: newer.jsonl seq 6 attempt a source account-usage-delta" in captured.err
+    assert not (tmp_path / "root" / "hybrid-cp0-1").exists()
+
+
+def test_the_batch_summary_records_the_worst_case_lines(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, FakeTransport(reply(("s", "submit_readiness", submission()))))
+    prior = hybrid.prior_committed(newer_ledger(tmp_path / "prior").parent)
+    summary = hybrid.run_batch(harness, draws(harness), prior=prior)
+    assert summary["prior_committed"]["total_usd"] == Decimal("1.75")
+    assert summary["prior_committed"]["worst_case_adjusts"][0]["attempt_id"] == "a"
 
 
 def test_a_call_cut_short_by_the_draw_deadline_is_the_limit(tmp_path: Path) -> None:
