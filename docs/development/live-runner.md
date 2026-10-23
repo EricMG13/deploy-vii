@@ -280,7 +280,8 @@ from a pinned pool:
   not matched, so a quote stitched across it fails; so do case changes and wrong-page
   citations. A quote that joins one wrap and copies another as a space matches neither reading.
 - **Mismatch text (task 7.0).** `quotes.explain` says why a quote failed; it never accepts one
-  (`quoted` is unchanged, and a property test holds that no classified quote is accepted). Over
+  (`explain` leaves `quoted`'s verdict as it is, and a property test holds that no classified
+  quote is accepted; `quoted` itself was widened by task 7.11's quote-side join above). Over
   both span readings, in order, it appends to the issue: a case or lookalike difference (the
   quote matches once case and a closed set of quote-mark and dash lookalikes the normalisation
   leaves alone are folded) `: the quote matches the span only ignoring case and character
@@ -864,6 +865,23 @@ keeps a consumer `not_ready` (scope by class within the completion budget); for 
 joiners `prose` admits, a single-source self-contradiction as one conflict with two citations, and
 the `other` behaviour type with its `dimension`. Prompt text only; no validator, contract,
 projection or hash change.
+
+Task 7.11 (E1 batch `e1-cp1-13`, GPT-6.1 Sol at high) added three prompt sentences, each true to
+the code. In the common preamble every step receives (rule 3, because `CITATION_RULE` does not
+reach `financials`): `PAGE_SPAN_RULE`, a locator names the span that contains the quoted text,
+its page taken from the `locator=` marker that opens that span, above the text, never from a
+printed page number or the next span's marker (both batch 13 first tries cited `page:95` for a
+heading in the `page:94` span); and `HYPHEN_COPY_RULE`, copy a hyphenated word whole, with no
+line break after its hyphen (guidance beside the quote-side join in `quotes.quoted`). And
+`financials` rule i (`BOUND_SCOPE_RULE`), which 7.11 wrote as "copy the bound scope's four
+strings verbatim" and task 7.13 rewords now that Python fills them: the book's and periods'
+`currency`, `unit`, `accounting_basis` and `entity_perimeter` are not in the schema; the
+model's `binding.books[].entity_id` and each period's `period_type`, `start_date` and
+`end_date` select the scope (a `historical_duration` or `period_end` scope with the end date,
+and unless `PERIOD_END` a `historical_duration` scope with the start date too); money amounts
+are in that scope's `unit` and `currency`; a period with no such scope, or a book whose
+periods' scopes differ, is a rejection. No batch has yet run with these sentences (batch 14 ran
+on 92b249b, before them).
 
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:

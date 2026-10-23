@@ -26,7 +26,8 @@ every quote accepted before task 7.11 still is. A quote with no visible text (on
 soft hyphens) matches nothing.
 
 Task 7.0: `explain` says why a quote that does not match failed, for the issue text only; it
-never changes acceptance (`quoted` decides that, unchanged). In the order tried, over both span
+never changes acceptance (`quoted` decides that; `explain` does not alter its verdict, while task
+7.11 widened `quoted` itself with the quote-side join above). In the order tried, over both span
 readings: a case or character variant (the quote matches once case and a closed set of lookalike
 quote marks and dashes, `_VARIANTS`, are folded; the first difference is named), a page straddle
 (the quote's first run ends the span, at most `PAGE_EDGE_CHARS` of page furniture after it, and
