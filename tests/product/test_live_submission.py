@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shutil
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from deploy_vii.canonical_audit import DefinitionReview
+from deploy_vii.context_binding import FinancialContextBinding
 from deploy_vii.contracts import Contract, Source, Span
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
@@ -23,7 +26,7 @@ from deploy_vii.cp1_workflow import (
 )
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
-from deploy_vii.financial_contracts import FinancialReview
+from deploy_vii.financial_contracts import FinancialBook, FinancialReview
 from deploy_vii.financial_validation import validate_financial_review
 from deploy_vii.live.schema import (
     PREFILLED_MARKER,
@@ -57,7 +60,7 @@ from deploy_vii.readiness import (
     live_consumers,
     validate_review,
 )
-from deploy_vii.source_context import SourceContextReview
+from deploy_vii.source_context import ReportingScope, SourceContextReview
 from tests.product.test_readiness import as_submission, readiness_fixture, submission_fixture
 
 FIXTURES = Path(__file__).parent / "fixtures" / "live"
@@ -549,14 +552,21 @@ def retained(store: Execution, ticket_id: str) -> str:
     return store.payload(attempt.steps[-1].payload_sha256)
 
 
-def without_bindings(model: type[Contract], value: Contract) -> tuple[str, tuple[str, ...]]:
-    """`value` as its sent schema lets a model write it (every marked binding left out), and the
-    paths of the bindings left out."""
+def without_bindings(
+    model: type[Contract], value: Contract, *, keep: frozenset[str] = frozenset()
+) -> tuple[str, tuple[str, ...]]:
+    """`value` as its sent schema lets a model write it (every marked binding left out, except
+    those of a kind in `keep`), and the paths of the bindings left out."""
     document = json.loads(value.model_dump_json())
-    marked = marked_fields(model, document)
+    marked = [item for item in marked_fields(model, document) if item.kind not in keep]
     for item in marked:
         del item.holder[item.name]
     return json.dumps(document), tuple(item.path for item in marked)
+
+
+# A bare `FinancialReview` names no bound entity (the binding is the submission's), so Python
+# cannot fill its dimension strings: the book-scoped hash tests keep them as the model sent them.
+BOOK_ONLY = frozenset({"scope-dimension"})
 
 
 def known_for(pack: PreparedPack) -> Known:
@@ -595,6 +605,11 @@ def test_the_bindings_filled_per_step_are_the_ones_its_validators_check(tmp_path
         ("source_sha256", "source"),
         ("financial_review_sha256", "financial-review"),
         ("source_context_review_sha256", "source-context-review"),
+        # Task 7.13: the book's and each period's four strings, from the bound source scope.
+        ("currency", "scope-dimension"),
+        ("unit", "scope-dimension"),
+        ("accounting_basis", "scope-dimension"),
+        ("entity_perimeter", "scope-dimension"),
     }  # this fixture has no FX conversion or audit explanation (tested below)
     assert kinds["narrative"] == kinds["readiness"] == {("inputs_sha256", "step-inputs")}
 
@@ -645,7 +660,7 @@ def test_facility_and_audit_observation_hashes_are_the_validators_values(case: s
 
     pack, review = freeze_fx(fx_case()) if case == "facility" else frozen(explain(differing()))
     assert validate_financial_review(pack, review) == ()
-    payload, paths = without_bindings(FinancialReview, review)
+    payload, paths = without_bindings(FinancialReview, review, keep=BOOK_ONLY)
     wanted = {"facility"} if case == "facility" else {"annual-observation", "quarter-observations"}
     document = json.loads(review.model_dump_json())
     assert wanted <= {item.kind for item in marked_fields(FinancialReview, document)}
@@ -658,7 +673,7 @@ def test_an_unknown_facility_or_source_is_unbound_with_the_validators_wording() 
     from tests.product.test_facility_fx import freeze_fx, fx_case
 
     pack, review = freeze_fx(fx_case())
-    payload, _ = without_bindings(FinancialReview, review)
+    payload, _ = without_bindings(FinancialReview, review, keep=BOOK_ONLY)
     document = json.loads(payload)
     conversions = document["books"][0]["facility_fx_conversions"]
     conversions[0]["facility_id"] = "no-such-facility"
@@ -685,7 +700,7 @@ def test_the_last_of_duplicate_facility_rows_is_bound_as_the_validator_reads_it(
     from tests.product.test_facility_fx import freeze_fx, fx_case
 
     pack, review = freeze_fx(fx_case())
-    payload, _ = without_bindings(FinancialReview, review)
+    payload, _ = without_bindings(FinancialReview, review, keep=BOOK_ONLY)
     document = json.loads(payload)
     book = document["books"][0]
     conversion = book["facility_fx_conversions"][0]
@@ -720,7 +735,7 @@ def test_an_unbindable_audit_explanation_is_unbound_with_the_validators_wording(
     from tests.product.test_audit_basis import differing, explain, frozen
 
     pack, review = frozen(explain(differing()))
-    payload, _ = without_bindings(FinancialReview, review)
+    payload, _ = without_bindings(FinancialReview, review, keep=BOOK_ONLY)
     document = json.loads(payload)
     item = document["books"][0]["audit_basis_explanations"][0]
     if change == "unknown-period":
@@ -990,6 +1005,250 @@ def test_every_marked_kind_is_one_python_fills_for_that_step() -> None:
         assert kinds == set(PREFILLED.get(step_id, frozenset())), step_id
         assert text.count(PREFILLED_MARKER) == len(re.findall(f'"{PREFILLED_MARKER}": "', text))
     assert set(PREFILLED) == {*CP1, "quality"}
+
+
+# --- task 7.13: Python copies the four dimension strings of the bound source scope ----------
+
+DIMENSIONS = ("currency", "unit", "accounting_basis", "entity_perimeter")
+type Case = tuple[
+    PreparedPack, SourceContextReview, FinancialReview, DefinitionReview, FinancialContextBinding
+]
+# What a source_context model wrote in batch e1-cp1-13 is free text; these stand in for it
+# (synthetic wording, not filing text).
+SCOPE_PERIMETER = "Synthetic group and consolidated subsidiaries, intercompany eliminated"
+SCOPE_BASIS = "U.S. GAAP (synthetic)"
+PARAPHRASE = "Synthetic group and subsidiaries, intercompany eliminated"
+MIXED = "Mixed units, currency, accounting basis or perimeter"
+NO_SCOPE = "No matching entity/date/basis source scope"
+
+
+def scoped_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: Callable[[ReportingScope], ReportingScope | None] | None = None,
+) -> tuple[Execution, str, FinancialSubmission, SourceContextReview]:
+    """A CP-1 ticket whose retained source_context scopes carry free-text strings (every scope
+    `SCOPE_PERIMETER` / `SCOPE_BASIS`, then `change(scope)` where given, a scope it maps to
+    None being left out), and the financial submission the synthetic case builds (its own
+    strings: "Consolidated", "US GAAP")."""
+    from tests.product import test_workflow
+
+    real = test_workflow.case
+
+    def scoped(value: FinancialBook | None = None) -> Case:
+        pack, context, financial, definition, binding = real(value)
+        (source,) = context.sources
+        scopes = []
+        for scope in source.scopes:
+            worded = scope.model_copy(
+                update={"entity_perimeter": SCOPE_PERIMETER, "accounting_basis": SCOPE_BASIS}
+            )
+            changed = worded if change is None else change(worded)
+            if changed is not None:
+                scopes.append(changed)
+        update = {"sources": (source.model_copy(update={"scopes": tuple(scopes)}),)}
+        return pack, context.model_copy(update=update), financial, definition, binding
+
+    monkeypatch.setattr(test_workflow, "case", scoped)
+    store, ticket, extraction = test_workflow.cp1_case(tmp_path)
+    held = store.read().attempts[-1].steps[0]
+    context = SourceContextReview.model_validate_json(store.payload(held.payload_sha256))
+    binding = extraction.binding.model_copy(
+        update={"source_context_review_sha256": context.content_hash()}
+    )
+    return store, ticket.ticket_id, extraction.model_copy(update={"binding": binding}), context
+
+
+def rebound(document: dict[str, Any]) -> str:
+    """`document` with its two financial-review hashes recomputed, as a payload that reaches
+    the journal without the prefill must carry them."""
+    digest = FinancialReview.model_validate_json(json.dumps(document["financial"])).content_hash()
+    document["binding"]["financial_review_sha256"] = digest
+    document["definition"]["financial_review_sha256"] = digest
+    return json.dumps(document)
+
+
+def dimension_paths(document: dict[str, Any]) -> list[str]:
+    marked = marked_fields(FinancialSubmission, document)
+    return [item.path for item in marked if item.kind == "scope-dimension"]
+
+
+def set_strings(document: dict[str, Any], *, book: str, periods: str) -> None:
+    """Write `book` / `periods` as the book's / every period's perimeter (a model's copy)."""
+    (value,) = document["financial"]["books"]
+    value["entity_perimeter"] = book
+    for period in value["periods"]:
+        period["entity_perimeter"] = periods
+
+
+def strings_of(payload: str) -> set[tuple[str, ...]]:
+    """The distinct four-string tuples the book and its periods carry in `payload`."""
+    (value,) = json.loads(payload)["financial"]["books"]
+    return {tuple(item.get(name) for name in DIMENSIONS) for item in (value, *value["periods"])}
+
+
+def test_the_dimension_strings_leave_the_sent_schema_of_the_book_and_its_periods() -> None:
+    definitions = strict_schema(FinancialSubmission)["$defs"]
+    for name in ("FinancialBook", "FinancialPeriod"):
+        properties = definitions[name]["properties"]
+        assert not set(DIMENSIONS) & set(properties), name
+        assert not set(DIMENSIONS) & set(definitions[name]["required"]), name
+    # Other registers keep their own unit or currency (a facility's, a KPI's): not the book's.
+    assert "currency" in definitions["FacilityObservation"]["properties"]
+    assert "unit" in definitions["KpiObservation"]["properties"]
+
+
+def test_python_writes_the_bound_scopes_strings_into_the_book_and_every_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, ticket_id, value, context = scoped_journal(tmp_path, monkeypatch)
+    payload, _ = without_bindings(FinancialSubmission, value)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    step = submitted.journal.steps[-1]
+    assert (step.step_id, step.status) == ("financials", "valid"), step.issues
+    (scope, *_) = context.sources[0].scopes
+    assert strings_of(submitted.payload) == {("USD", "MILLIONS", SCOPE_BASIS, SCOPE_PERIMETER)}
+    assert (scope.entity_perimeter, scope.accounting_basis) == (SCOPE_PERIMETER, SCOPE_BASIS)
+    # Provenance: every one of the 4 x (1 book + 6 periods) strings Python wrote is recorded.
+    pairs = zip(submitted.prefilled, submitted.prefilled_kinds, strict=True)
+    filled = [path for path, kind in pairs if kind == "scope-dimension"]
+    assert sorted(filled) == sorted(dimension_paths(json.loads(submitted.payload)))
+    assert len(filled) == 4 * 7
+    assert retained(store, ticket_id) == submitted.payload
+
+
+@pytest.mark.parametrize(
+    ("book", "periods", "unfilled_issue"),
+    [
+        (PARAPHRASE, PARAPHRASE, NO_SCOPE),  # book and periods agree, scope paraphrased
+        (PARAPHRASE, SCOPE_PERIMETER, MIXED),  # batch e1-cp1-13/14: book differs from periods
+    ],
+    ids=["paraphrased-scope", "book-differs-from-periods"],
+)
+def test_the_exact_match_rules_still_reject_drift_that_bypasses_the_prefill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, book: str, periods: str, unfilled_issue: str
+) -> None:
+    """Item 4: `context_binding` and `book_issues` are untouched. A model's own copy of the
+    strings is rejected by them when it reaches the journal unfilled, and accepted once Python
+    has written the scope's strings over it."""
+    store, ticket_id, value, _ = scoped_journal(tmp_path, monkeypatch)
+    document = json.loads(value.model_dump_json())
+    set_strings(document, book=book, periods=periods)
+    raw = rebound(document)
+    bypassed = submit_cp1_step(store, ticket_id, "financials", raw)
+    (rejected,) = bypassed.step_repairs
+    assert rejected.issues and all(unfilled_issue in issue for issue in rejected.issues), (
+        rejected.issues
+    )
+    submitted = submit_model_payload(store, ticket_id, "financials", raw)
+    assert submitted.journal.steps[-1].status == "valid", submitted.journal.steps[-1].issues
+    assert strings_of(submitted.payload) == {("USD", "MILLIONS", SCOPE_BASIS, SCOPE_PERIMETER)}
+    assert "financial.books.0.entity_perimeter" in submitted.prefilled
+
+
+def test_a_book_whose_periods_scopes_disagree_is_rejected_with_one_issue_and_no_book_strings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: no majority and no first-wins. Each period keeps its own scope's strings;
+    the book gets none, and one issue names the periods and the field."""
+
+    def q1_differs(scope: ReportingScope) -> ReportingScope:
+        if scope.scope_id != "Q1":
+            return scope
+        return scope.model_copy(update={"entity_perimeter": PARAPHRASE})
+
+    store, ticket_id, value, _ = scoped_journal(tmp_path, monkeypatch, q1_differs)
+    payload, _ = without_bindings(FinancialSubmission, value)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0] == (
+        "Bound source scopes disagree on entity_perimeter: consolidated OPEN, Q1, Q2, Q3, Q4, FY"
+    )
+    assert not [issue for issue in rejected.issues if "Field required" in issue], rejected.issues
+    (book,) = json.loads(submitted.payload)["financial"]["books"]
+    assert not set(DIMENSIONS) & set(book)  # nothing filled for the book
+    perimeters = {p["period_id"]: p["entity_perimeter"] for p in book["periods"]}
+    assert perimeters.pop("Q1") == PARAPHRASE
+    assert set(perimeters.values()) == {SCOPE_PERIMETER}
+
+
+def test_a_period_without_a_matching_scope_is_left_unfilled_and_rejected_by_the_existing_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, ticket_id, value, _ = scoped_journal(
+        tmp_path, monkeypatch, lambda scope: None if scope.scope_id == "Q2" else scope
+    )
+    payload, _ = without_bindings(FinancialSubmission, value)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0] == f"{NO_SCOPE}: consolidated Q2 S1"
+    assert not [issue for issue in rejected.issues if "Field required" in issue], rejected.issues
+    assert not [issue for issue in rejected.issues if "disagree" in issue], rejected.issues
+    (book,) = json.loads(submitted.payload)["financial"]["books"]
+    (q2,) = [p for p in book["periods"] if p["period_id"] == "Q2"]
+    assert not set(DIMENSIONS) & set(q2)
+    assert book["entity_perimeter"] == SCOPE_PERIMETER  # the other periods' common strings
+
+
+def test_a_scope_without_a_currency_leaves_the_currency_to_the_validators_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E1 batch e1-cp1-14: every scope's `currency` was null. Python writes no currency; the
+    stored contract requires one, so the step is rejected with that field's message."""
+    store, ticket_id, value, _ = scoped_journal(
+        tmp_path, monkeypatch, lambda scope: scope.model_copy(update={"currency": None})
+    )
+    payload, _ = without_bindings(FinancialSubmission, value)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    (rejected,) = submitted.journal.step_repairs
+    assert "financial.books.0.currency: Field required" in rejected.issues
+    (book,) = json.loads(submitted.payload)["financial"]["books"]
+    for item in (book, *book["periods"]):
+        assert "currency" not in item
+        assert (item["unit"], item["entity_perimeter"]) == ("MILLIONS", SCOPE_PERIMETER)
+
+
+@pytest.mark.parametrize(
+    ("rows", "issue"),
+    [
+        ([], "Bind every financial book exactly once"),
+        (
+            [{"book_id": "consolidated", "entity_id": "issuer"}] * 2,
+            "Bind every financial book exactly once",
+        ),
+        (
+            [{"book_id": "consolidated", "entity_id": "no-such-entity"}],
+            "Unknown bound entity: consolidated no-such-entity",
+        ),
+    ],
+    ids=["unbound", "bound-twice", "unknown-entity"],
+)
+def test_a_book_bound_to_no_single_known_entity_names_the_binding_validators_issue(
+    tmp_path: Path, rows: list[dict[str, str]], issue: str
+) -> None:
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    document["binding"]["books"] = rows
+    known = known_bindings(store, ticket_id, "financials")
+    result = prefill(FinancialSubmission, json.dumps(document), known, PREFILLED["financials"])
+    assert [text for _, text in result.unbound] == [issue]
+    assert not {k for k in result.kinds if k == "scope-dimension"}
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0] == issue, rejected.issues
+    assert not [i for i in rejected.issues if "Field required" in i], rejected.issues
+
+
+def test_a_known_without_the_source_context_fills_no_dimension(tmp_path: Path) -> None:
+    """Only the financials step's bindings carry the retained scopes; anything else leaves the
+    strings as sent."""
+    _, _, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    known = Known(pack_sha256=ZERO, sources={}, step={})
+    result = prefill(FinancialSubmission, payload, known, PREFILLED["financials"])
+    assert "scope-dimension" not in result.kinds
+    assert set(dimension_paths(json.loads(result.payload))) <= set(result.unset)
 
 
 # --- task 7.4: the `quality` step: the model supplies the QA review, Python promotes ---------

@@ -142,13 +142,20 @@ DECLARED_PERIOD_RULE = "Every `period_id` an entry uses must be declared in its 
 # Task 7.11 (E1 batch e1-cp1-13): `context_binding.validate_financial_context` binds a book only to
 # a source scope whose four dimension strings equal the book's, and
 # `financial_validation.book_issues` holds every period to the book's four; both compare exactly.
+# Task 7.13 (batches e1-cp1-13 and -14 still drifted): Python fills the eight strings from the
+# bound scope (`live.submission`, kind `scope-dimension`), so the sent schema leaves them out and
+# the rule says what the model's own fields select (`_period_scopes`' date and kind rule).
 BOUND_SCOPE_RULE = (
-    "Copy each book's `currency`, `unit`, `accounting_basis` and `entity_perimeter` verbatim "
-    "from the step:source_context `scopes` entry it is bound to (its entity, end dates and "
-    "period kind), and the same four strings into every one of its `periods`: a book is bound "
-    "only to a scope whose four strings are exactly equal, and every period must repeat the "
-    'book\'s four exactly, so a paraphrase ("subsidiaries, intercompany accounts" for the '
-    'scope\'s "subsidiaries, with intercompany accounts") is a rejection.'
+    "Python fills each book's and each period's `currency`, `unit`, `accounting_basis` and "
+    "`entity_perimeter` (they are not in the schema) with the strings of the "
+    "step:source_context `scopes` entry they bind to: a `historical_duration` or `period_end` "
+    "scope of the entity in the book's `binding.books[].entity_id` with the period's "
+    "`end_date`, and, unless `period_type` is `PERIOD_END`, a `historical_duration` scope with "
+    "the period's `start_date` too (a book takes the four strings its periods share). Choose that "
+    "entity and each period's `period_type`, `start_date` and `end_date` so that they name such "
+    "a scope, write money amounts in that scope's `unit` and `currency`, and keep in one book "
+    "only periods whose scopes carry the same four strings: a period with no such scope, or a "
+    "book whose periods' scopes differ, is a rejection."
 )
 # Task 7.0j (E1 batch 6, proxy cohort: 98 semantic issues the prompt never stated): the register
 # rules `statement_validation.statement_issues` and `financial_validation._series_issues` apply.

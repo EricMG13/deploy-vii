@@ -44,6 +44,16 @@ step's validator compares it against (`PREFILLED`, `known_bindings`, `prefill`):
 - `quality-inputs` (task 7.4): `cp1_quality_inputs` of the ticket's recomputed registers, the
   scope `validate_quality_review` binds the review to. Registers that do not stage raise
   ValueError with the staging issue before anything is written.
+- `scope-dimension` (task 7.13, user-approved, decision 0005): a book's and each period's
+  `currency`, `unit`, `accounting_basis` and `entity_perimeter`, copied from the retained
+  source-context scopes the model's own choices select (the book's `binding.books[].entity_id`,
+  each period's `period_type`, `start_date` and `end_date`, by `context_binding`'s date and kind
+  rule over the financial sources' scopes). A book takes the one tuple its bound periods share;
+  where they share none (or more than one) the book is left unfilled and one issue names the
+  periods and fields; a period no scope matches is left unfilled and rejected in
+  `context_binding`'s wording per cited source; a scope's null dimension is never written, so
+  the stored contract's "Field required" names it. The validators' exact-match rules are
+  unchanged: they pass because the strings are the scope's.
 
 Task 7.4: `quality` is the fifth CP-1 step. Its model-facing shape is the stored `QualityReview`
 (materiality, lineage within each ceiling, findings; never a score, band or status). After null
@@ -63,12 +73,13 @@ step raises ValueError before anything is written. The validators' binding check
 """
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from functools import cached_property
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from deploy_vii.business_context import BusinessContextSubmission, submit_cp1a_step
 from deploy_vii.contracts import Contract
@@ -101,7 +112,7 @@ from deploy_vii.readiness import (
     shape_issues,
     validate_review,
 )
-from deploy_vii.source_context import SourceContextReview
+from deploy_vii.source_context import ReportingScope, SourceContextReview
 from deploy_vii.statement_validation import effective_accounts
 
 SUPERSEDED_SHAPE = "schema: pre-0008 submission shape"
@@ -206,6 +217,7 @@ PREFILLED: Mapping[str, frozenset[str]] = {
             "annual-observation",
             "quarter-observations",
             "financial-review",
+            "scope-dimension",
         }
     ),
     "narrative": frozenset({"step-inputs"}),
@@ -221,10 +233,13 @@ BOUND_STEPS: Mapping[str, tuple[str, ...]] = {
 }
 # Fill order: a phase reads only values that are sent or that earlier phases wrote (a facility
 # row and an observation hash cover their citations; the financial review hash covers them all).
+# The dimension strings (task 7.13) read only sent fields, and the observation hashes parse the
+# book, which needs them.
 PHASES = (
     frozenset(
         {"context-step", "pack", "source", "source-context-review", "step-inputs", "quality-inputs"}
     ),
+    frozenset({"scope-dimension"}),
     frozenset({"facility"}),
     frozenset({"annual-observation", "quarter-observations"}),
     frozenset({"financial-review"}),
@@ -392,11 +407,14 @@ def _validate_uncomposable(
 @dataclass(frozen=True)
 class Known:
     """The values Python binds a step's payload to, read from the journal before any write:
-    the pack's hash, each ready source's hash and the step-level kinds (`STEP_KINDS`)."""
+    the pack's hash, each ready source's hash, the step-level kinds (`STEP_KINDS`) and, for
+    `financials`, the retained source-context review whose scopes the dimension strings come
+    from (task 7.13; None elsewhere, so nothing fills them)."""
 
     pack_sha256: str
     sources: Mapping[str, str]
     step: Mapping[str, str]
+    context: SourceContextReview | None = None
 
 
 def _held_output(store: Execution, step: StepSubmission) -> str:
@@ -430,6 +448,7 @@ def known_bindings(store: Execution, ticket_id: str, step_id: str) -> Known:
             raise ValueError(f"Ticket {ticket_id} retains no valid {wanted} step to bind")
     pack = store.pack(snapshot)
     step: dict[str, str] = {}
+    context: SourceContextReview | None = None
     if step_id == "financials":
         step["context-step"] = held[0].content_hash()
         context = SourceContextReview.model_validate_json(store.payload(held[0].payload_sha256))
@@ -447,6 +466,7 @@ def known_bindings(store: Execution, ticket_id: str, step_id: str) -> Known:
         pack_sha256=pack.content_hash(),
         sources={s.source_id: s.sha256 for s in pack.sources if s.status == "ready" and s.sha256},
         step=step,
+        context=context,
     )
 
 
@@ -470,6 +490,62 @@ class _Book:
     observations: Mapping[tuple[str, str], str]
 
 
+# Task 7.13: the four strings `context_binding` and `book_issues` compare exactly, in one order.
+SCOPE_DIMENSIONS = ("currency", "unit", "accounting_basis", "entity_perimeter")
+type Dimensions = tuple[str | None, str | None, str | None, str | None]
+# Parsed as the stored contract parses a period's dates (`Contract`: strict, from JSON).
+_DAY: TypeAdapter[date | None] = TypeAdapter(date | None, config=ConfigDict(strict=True))
+
+
+def _book_path(item: Marked) -> str:
+    """The JSON path of the book that holds a marked dimension field: the field's own path
+    less its name, less `periods.<n>` too for a period's."""
+    head = item.path[: -len(item.name)].rstrip(".")
+    return (
+        head if item.holder is item.enclosing("FinancialBook") else head.rsplit(".periods.", 1)[0]
+    )
+
+
+def _scope_strings(scope: ReportingScope) -> Dimensions:
+    return scope.currency, scope.unit, scope.accounting_basis, scope.entity_perimeter
+
+
+def _period_scopes(
+    period: dict[str, Any], scopes: Sequence[ReportingScope]
+) -> frozenset[Dimensions] | None:
+    """The distinct strings of the scopes a period binds to, by `context_binding`'s own date
+    and kind rule (a `PERIOD_END` period: a duration or period-end scope with its end date;
+    any other: a duration scope with its start and end dates). None when the period's type or
+    dates (or its id) do not parse as the contract parses them: the shape rejection names them."""
+    kind = period.get("period_type")
+    if (
+        not isinstance(kind, str)
+        or not isinstance(period.get("period_id"), str)
+        or not {"start_date", "end_date"} <= period.keys()
+    ):
+        return None
+    try:
+        start = _DAY.validate_json(exact_json(period["start_date"]))
+        end = _DAY.validate_json(exact_json(period["end_date"]))
+    except ValidationError:
+        return None
+    return frozenset(
+        _scope_strings(scope)
+        for scope in scopes
+        if end is not None
+        and scope.end_date == end
+        and scope.period_kind in {"historical_duration", "period_end"}
+        and (
+            kind == "PERIOD_END"
+            or (
+                scope.period_kind == "historical_duration"
+                and scope.start_date is not None
+                and scope.start_date == start
+            )
+        )
+    )
+
+
 class _Resolver:
     """The value of one marked binding, or None when Python cannot know it from what was sent.
     A reference Python cannot resolve (an unknown or not-ready source, an unknown facility, an
@@ -480,6 +556,7 @@ class _Resolver:
         self.known = known
         self.document = document
         self.books: dict[int, _Book | None] = {}
+        self.dimensions: dict[int, Mapping[int, Dimensions]] = {}
         self.unbound: list[tuple[str, str]] = []
 
     @cached_property
@@ -506,11 +583,126 @@ class _Resolver:
         book = item.enclosing("FinancialBook")
         if book is None:
             return None
+        if kind == "scope-dimension":
+            if id(book) not in self.dimensions:
+                self.dimensions[id(book)] = self._dimensions(item, book)
+            strings = self.dimensions[id(book)].get(id(item.holder))
+            return None if strings is None else strings[SCOPE_DIMENSIONS.index(item.name)]
         if kind == "facility":
             return self._facility(item, book)
         if kind in {"annual-observation", "quarter-observations"}:
             return self._observation(item, book)
         raise ValueError(f"No pre-fill for the marked binding kind {kind!r}")
+
+    def _dimensions(self, item: Marked, book: dict[str, Any]) -> Mapping[int, Dimensions]:
+        """Task 7.13: the four strings of the book and of each period, keyed by the object's
+        id; an object left out is not filled.
+
+        A period takes the strings of the scopes it binds to (`_period_scopes`, over the
+        financial sources' scopes of the book's bound entity). The book takes the one tuple
+        every period that binds to a scope shares, and each such period takes it too. Where
+        there is no single shared tuple, nothing is filled for the book (no majority, no first
+        wins), each period with one tuple keeps its own, and one issue names the periods and
+        the fields. A period that binds to no scope is left unfilled and rejected with
+        `context_binding`'s wording for each source it cites; a binding that names no single
+        known entity, with the wording of that validator's binding checks."""
+        context, book_id, periods = self.known.context, book.get("book_id"), book.get("periods")
+        if context is None or not isinstance(book_id, str) or not isinstance(periods, list):
+            return {}
+        where = _book_path(item)
+        entity = self._bound_entity(where, book_id, context)
+        if entity is None:
+            return {}
+        classes = {source.source_id: source.classification for source in context.sources}
+        scopes = [
+            scope
+            for source in context.sources
+            if source.classification == "financial"
+            for scope in source.scopes
+            if scope.entity_id == entity
+        ]
+        filled: dict[int, Dimensions] = {}
+        bound: list[tuple[str, frozenset[Dimensions], dict[str, Any]]] = []
+        for index, period in enumerate(periods):
+            found = _period_scopes(period, scopes) if isinstance(period, dict) else None
+            if found is None:
+                continue  # the shape rejection names what does not parse
+            period_id = period["period_id"]
+            if not found:
+                self._no_scope(f"{where}.periods.{index}", book_id, period_id, period, classes)
+                continue
+            bound.append((period_id, found, period))
+            if len(found) == 1:
+                (filled[id(period)],) = found
+        if not bound:
+            return filled
+        shared = frozenset.intersection(*(found for _, found, _ in bound))
+        if len(shared) == 1:
+            (strings,) = shared
+            return {**{id(period): strings for _, _, period in bound}, id(book): strings}
+        differing = [
+            name
+            for index, name in enumerate(SCOPE_DIMENSIONS)
+            if len({strings[index] for _, found, _ in bound for strings in found}) > 1
+        ]
+        issue = (
+            f"Bound source scopes disagree on {', '.join(differing)}: "
+            f"{book_id} {', '.join(period_id for period_id, _, _ in bound)}"
+        )
+        self.unbound.append((where, issue))
+        return filled
+
+    def _bound_entity(self, where: str, book_id: str, context: SourceContextReview) -> str | None:
+        """The one entity `binding.books` binds `book_id` to, or None. A count other than one
+        and an entity the source context lacks are recorded in `validate_financial_context`'s
+        wording; a binding that does not parse is left to the shape rejection."""
+        binding = self.document.get("binding")
+        rows = binding.get("books") if isinstance(binding, dict) else None
+        if not isinstance(rows, list):
+            return None
+        named = [
+            r.get("entity_id") for r in rows if isinstance(r, dict) and r.get("book_id") == book_id
+        ]
+        if len(named) != 1:
+            self.unbound.append((where, "Bind every financial book exactly once"))
+            return None
+        (entity,) = named
+        if not isinstance(entity, str):
+            return None
+        if entity not in {known.entity_id for known in context.entities}:
+            self.unbound.append((where, f"Unknown bound entity: {book_id} {entity}"))
+            return None
+        return entity
+
+    def _no_scope(
+        self,
+        where: str,
+        book_id: str,
+        period_id: str,
+        period: dict[str, Any],
+        classes: Mapping[str, str],
+    ) -> None:
+        """`validate_financial_context`'s issue for each source the unbound period cites: no
+        matching scope in a financial source, or a source not classified financial. A source
+        the context lacks is skipped (its citation's own binding names it)."""
+        citations = period.get("citations")
+        cited = sorted(
+            {
+                c["source_id"]
+                for c in (citations if isinstance(citations, list) else ())
+                if isinstance(c, dict) and isinstance(c.get("source_id"), str)
+            }
+        )
+        for source_id in cited:
+            if source_id not in classes:
+                continue
+            if classes[source_id] == "financial":
+                issue = (
+                    f"No matching entity/date/basis source scope: {book_id} {period_id} {source_id}"
+                )
+            else:
+                issue = f"Financial evidence source not classified financial: {book_id} {source_id}"
+            self.unbound.append((where, issue))
 
     def _facility(self, item: Marked, book: dict[str, Any]) -> str | None:
         # `fx_conversion_issues` keys rows by (facility_id, period_id); the last one wins.

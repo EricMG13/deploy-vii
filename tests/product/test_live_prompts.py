@@ -16,7 +16,7 @@ from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.context_binding import validate_financial_context
 from deploy_vii.contracts import Fact, Span
 from deploy_vii.cp1_quality import cp1_quality_inputs
-from deploy_vii.cp1_workflow import cp1_registers
+from deploy_vii.cp1_workflow import FinancialSubmission, cp1_registers
 from deploy_vii.downstream_readiness import (
     _EVIDENCE_GROUPS,
     ConsumerAssessment,
@@ -1623,16 +1623,32 @@ def test_the_financials_step_states_the_bound_scope_rule_once_as_rule_i() -> Non
     assert composed("financials").count(rule) == 1
     for step_id in set(ALL_STEPS) - {"financials"}:
         assert rule not in composed(step_id), step_id
+    # Task 7.13: Python fills the four strings, so the rule says what selects the scope instead
+    # of asking for a copy (7.11's "verbatim" sentence is gone).
+    assert "verbatim" not in rule and "Copy" not in rule
     for phrase in (
-        "`currency`, `unit`, `accounting_basis` and `entity_perimeter` verbatim",
+        "Python fills each book's and each period's `currency`, `unit`, `accounting_basis` and "
+        "`entity_perimeter` (they are not in the schema)",
         "step:source_context `scopes` entry",
-        "into every one of its `periods`",
-        "exactly equal",
+        "`binding.books[].entity_id`",
+        "unless `period_type` is `PERIOD_END`, a `historical_duration` scope",
+        "Choose that entity and each period's `period_type`, `start_date` and `end_date`",
+        "money amounts in that scope's `unit` and `currency`",
         "is a rejection",
     ):
         assert phrase in rule, phrase
     # The scopes the rule points at are in the block the financials prompt shows, whole.
     assert PROJECTIONS[("financials", "source_context")] == FULL
+
+
+def test_the_financials_schema_the_prompt_prints_asks_for_no_dimension_string() -> None:
+    """The rule's first claim: the sent schema leaves the eight strings out (the facility's own
+    currency and a KPI's own unit stay; they are not the book's)."""
+    sent = strict_schema(FinancialSubmission)["$defs"]
+    for name in ("FinancialBook", "FinancialPeriod"):
+        assert not {"currency", "unit", "accounting_basis", "entity_perimeter"} & set(
+            sent[name]["properties"]
+        ), name
 
 
 def _one_character_off(text: str) -> str:

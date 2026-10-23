@@ -44,7 +44,7 @@ from a pinned pool:
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4). |
 | `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5). |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
 
@@ -121,7 +121,7 @@ from a pinned pool:
   | # | Step | The model supplies | Python fills or computes | Enters the journal through |
   | --- | --- | --- | --- | --- |
   | 1 | `source_context` | source descriptions, citations | pack and source hashes | `submit_cp1_step` |
-  | 2 | `financials` | statement values, definition review, context binding | every hash binding (task 7.0i) | `submit_cp1_step` |
+  | 2 | `financials` | statement values, definition review, context binding | every hash binding (task 7.0i); each book's and period's four dimension strings from the bound scope (task 7.13) | `submit_cp1_step` |
   | 3 | `narrative` | the narrative review | `inputs_sha256` | `submit_cp1_step` |
   | 4 | `readiness` | the downstream review | `inputs_sha256` | `submit_cp1_step` |
   | 5 | `quality` | per claim `material` and a rationale; per evidence id a `lineage_class` at or below its ceiling with a rationale; findings with severity, status and resolution | `inputs_sha256` (`cp1_quality_inputs` of the recomputed registers), the confidence score, band and QA status | `promote_cp1` |
@@ -897,6 +897,35 @@ that already holds every value is kept byte for byte, and a reply that is not a 
 handed on as received. The changed paths are in `Submitted.prefilled` and in a
 `payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`). The
 validators still reject a mismatched binding.
+
+Task 7.13 (E1 batches `e1-cp1-13` and `-14`, decision 0005 row 7.13, user-approved 23 Oct 2026):
+identity strings are Python's to fill, not the model's to retype. `FinancialBook` and
+`FinancialPeriod` mark `currency`, `unit`, `accounting_basis` and `entity_perimeter` with the
+binding kind `scope-dimension`, so the sent `financials` schema leaves them out. In its own
+phase, after the hashes that read only sent fields and before the facility and observation
+hashes (which parse the book), `prefill` takes the retained `SourceContextReview`
+(`Known.context`) and, for each book, the one entity `binding.books[]` names for it. A period
+binds to the scopes of that entity in the financial sources by `context_binding`'s rule: a
+`historical_duration` or `period_end` scope with the period's `end_date`, and unless
+`period_type` is `PERIOD_END` a `historical_duration` scope with its `start_date` too. The book
+and each bound period take the one four-string tuple every bound period shares. Where they
+share none (or more than one) the book is left unfilled, each period with a single scope tuple
+keeps its own, and the attempt is rejected with one issue, `Bound source scopes disagree on
+<fields>: <book> <periods>` (fail closed: no majority, no first-wins). A period with no such
+scope is left unfilled and rejected with `context_binding`'s own wording for each source it
+cites (`No matching entity/date/basis source scope: <book> <period> <source>`); a binding that
+names no single entity, or an entity the context lacks, with that validator's binding wording.
+A scope's null dimension is never written, so the stored contract's `Field required` names it
+(E1 batch 14: every scope's `currency` was null). These issues reach the journal first through
+`_validate_unbound`, without the `Field required` of the strings left unset. A payload whose
+strings already equal the scope's is unchanged (the recorded corpus, `test_replay.py`). The
+filled paths appear in `Submitted.prefilled` and the `payload_prefilled` event (`by_kind`
+`scope-dimension`); output.md keeps what the model sent. `context_binding` and `book_issues`
+are untouched and still reject a payload that reaches the journal with drifted strings. Read
+only on the recorded payloads: batch 13's input set caad83cc is filled and bound; batch 13's
+c8272a66 and both batch 14 input sets carry source scopes whose `entity_perimeter` differs between
+FY2025 and the comparative years, so the prefill rejects them with the disagreement issue,
+which a `financials` repair cannot fix (the strings are the source-context step's).
 
 Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
 `"(211)"`), which the stored contract refused, and the sent schema allowed them. The

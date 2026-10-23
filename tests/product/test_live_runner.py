@@ -1706,6 +1706,36 @@ def test_the_prefilled_context_binding_is_recorded_beside_the_raw_output(tmp_pat
     assert "context_step_sha256" not in system
 
 
+def test_the_dimension_strings_python_wrote_are_recorded_beside_the_raw_output(
+    tmp_path: Path,
+) -> None:
+    """Task 7.13 provenance: the model sends no book or period dimension string; the attempt's
+    `payload_prefilled` event names every path Python wrote (kind `scope-dimension`), output.md
+    keeps what the model sent, and the journal keeps the filled payload."""
+    rig, extraction = cp1_rig(tmp_path)
+    document = json.loads(extraction.model_dump_json())
+    dimensions = ("currency", "unit", "accounting_basis", "entity_perimeter")
+    (book,) = document["financial"]["books"]
+    for item in (book, *book["periods"]):
+        for name in dimensions:
+            del item[name]
+    raw = json.dumps(document)
+    step = StepSpec("financials", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    result = rig.run(ChatClient(FakeTransport(ok(raw, model=LUNA))), step=step)
+    assert result.status == "accepted", result.issues
+    assert (result.directory / "output.md").read_text(encoding="utf-8") == raw
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    periods = len(book["periods"])
+    assert filled["by_kind"] == {"scope-dimension": 4 * (1 + periods)}
+    assert "financial.books.0.entity_perimeter" in filled["paths"]
+    assert f"financial.books.0.periods.{periods - 1}.currency" in filled["paths"]
+    kept = json.loads(rig.store.payload(rig.store.read().attempts[-1].steps[-1].payload_sha256))
+    assert kept == json.loads(extraction.model_dump_json())  # the scope's strings, as built
+
+
 def test_a_pre_0008_review_shaped_payload_is_rejected_and_retained_as_received(
     tmp_path: Path,
 ) -> None:

@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from deploy_vii import cp1_workflow
+from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Execution, StepValidation
 from deploy_vii.live import corpus
@@ -22,7 +23,14 @@ from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
 from deploy_vii.live.ledger import Ledger
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import StepSpec
-from deploy_vii.live.submission import SUPERSEDED_SHAPE, quality_inputs
+from deploy_vii.live.schema import marked_fields
+from deploy_vii.live.submission import (
+    PREFILLED,
+    SUPERSEDED_SHAPE,
+    known_bindings,
+    prefill,
+    quality_inputs,
+)
 from deploy_vii.preparation import PreparedPack, load_pack
 from tests.product import replay_support
 from tests.product.live_support import FakeTransport, fixture_pool, make_rtf_key, ok
@@ -158,6 +166,40 @@ def test_corpus_entry_replays_as_recorded(path: Path, tmp_path: Path) -> None:
     if verdict.status == replay_support.SKIPPED:
         pytest.skip(str(verdict))  # counted and listed by `make replay`; never a pass
     assert verdict.passed, str(verdict)
+
+
+def test_the_dimension_prefill_leaves_every_recorded_financials_payload_as_recorded(
+    tmp_path: Path,
+) -> None:
+    """Task 7.13: every accepted `financials` payload the corpus records (an entry's own or a
+    later entry's upstream) already carries its bound scopes' strings, so the prefill writes
+    none of them and finds nothing it cannot bind."""
+    recorded = []
+    for path in ENTRIES:
+        entry = load_entry(path)
+        if entry.get("pack") != "synthetic-cp1":
+            continue
+        if (
+            entry["step_id"] == "financials"
+            and entry["expected"]["validator_outcome"] == "accepted"
+        ):
+            recorded.append((path, entry, entry["payload"]))
+        elif "financials" in entry.get("upstream", {}):
+            recorded.append((path, entry, entry["upstream"]["financials"]))
+    assert {path.parent.name for path, _, _ in recorded} == {"financials", "quality"}
+    for index, (path, entry, payload) in enumerate(recorded):
+        store, ticket = replay_support.PACKS[entry["pack"]](tmp_path / str(index))
+        upstream = entry.get("upstream", {})["source_context"]
+        assert not replay_support._submit(store, ticket, "source_context", upstream), path
+        known = known_bindings(store, ticket.ticket_id, "financials")
+        result = prefill(FinancialSubmission, payload, known, PREFILLED["financials"])
+        assert "scope-dimension" not in result.kinds and result.unbound == (), path
+        dimensions = [
+            item.path
+            for item in marked_fields(FinancialSubmission, json.loads(payload))
+            if item.kind == "scope-dimension"
+        ]
+        assert dimensions and not set(dimensions) & set(result.unset), path
 
 
 def seed(step: str, name: str) -> Path:

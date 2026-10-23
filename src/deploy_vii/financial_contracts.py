@@ -61,6 +61,12 @@ def _statement_items(*statements: str) -> Callable[[JsonDict], None]:
 
 
 Currency = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
+# Task 7.13 (E1 batches e1-cp1-13 and -14): a book's and each period's `currency`, `unit`,
+# `accounting_basis` and `entity_perimeter` are the strings of the source scope the model's
+# entity and period dates bind them to; Python copies them (`live.submission.prefill`), so the
+# sent schema leaves them out. The stored contract still requires them, and `context_binding` and
+# `financial_validation.book_issues` still compare them exactly.
+SCOPE_DIMENSION: JsonDict = {PREFILLED_MARKER: "scope-dimension"}
 Unit = Literal["UNITS", "THOUSANDS", "MILLIONS"]
 Located = Annotated[tuple[Citation, ...], Field(min_length=1)]
 ACCOUNT_IDS = FLOW_METRICS | BALANCE_METRICS | {"effective_tax_rate"}
@@ -112,10 +118,11 @@ class FinancialPeriod(Contract):
     end_date: date | None
     day_count: int | None = Field(ge=1, le=110000)
     audit_status: Text
-    currency: Currency
-    unit: Unit
-    accounting_basis: Text
-    entity_perimeter: Text
+    # Task 7.13: Python copies these from the bound source scope (`live.submission`); never sent.
+    currency: Currency = Field(json_schema_extra=SCOPE_DIMENSION)
+    unit: Unit = Field(json_schema_extra=SCOPE_DIMENSION)
+    accounting_basis: Text = Field(json_schema_extra=SCOPE_DIMENSION)
+    entity_perimeter: Text = Field(json_schema_extra=SCOPE_DIMENSION)
     citations: tuple[Citation, ...]
     component_period_ids: tuple[Identifier, ...] = ()
     expense_presentation: Literal["by_function", "by_nature", "unknown"] = "unknown"
@@ -425,10 +432,11 @@ class AuditBasisExplanation(Contract):
 
 class FinancialBook(Contract):
     book_id: Identifier
-    entity_perimeter: Text
-    accounting_basis: Text
-    currency: Currency
-    unit: Unit
+    # Task 7.13: the common strings of its periods' bound source scopes (`live.submission`).
+    entity_perimeter: Text = Field(json_schema_extra=SCOPE_DIMENSION)
+    accounting_basis: Text = Field(json_schema_extra=SCOPE_DIMENSION)
+    currency: Currency = Field(json_schema_extra=SCOPE_DIMENSION)
+    unit: Unit = Field(json_schema_extra=SCOPE_DIMENSION)
     periods: Annotated[tuple[FinancialPeriod, ...], Field(min_length=1, max_length=200)]
     accounts: Annotated[tuple[AccountObservation, ...], Field(max_length=20000)]
     addbacks: Annotated[tuple[AddbackObservation, ...], Field(max_length=20000)]
