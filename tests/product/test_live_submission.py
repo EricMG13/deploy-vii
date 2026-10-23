@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -9,21 +10,32 @@ from typing import Any
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
-from deploy_vii.contracts import Source, Span
-from deploy_vii.cp1_workflow import submit_cp1_step
+from deploy_vii.contracts import Contract, Source, Span
+from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission, submit_cp1_step
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Execution, StepSubmission
-from deploy_vii.live.schema import PREFILLED_MARKER, strict_schema, unverified_keywords
+from deploy_vii.financial_contracts import FinancialReview
+from deploy_vii.financial_validation import validate_financial_review
+from deploy_vii.live.schema import (
+    PREFILLED_MARKER,
+    marked_fields,
+    strict_schema,
+    unverified_keywords,
+)
 from deploy_vii.live.submission import (
     NOT_ASSESSED,
     PREFILLED,
     STEPS,
     SUPERSEDED_SHAPE,
     ConsumerJudgment,
+    Known,
     ReadinessSubmission,
     SubmittedCitation,
     compose,
     compose_payload,
+    known_bindings,
     prefill,
     rejection_issues,
     submit_model_payload,
@@ -36,6 +48,7 @@ from deploy_vii.readiness import (
     live_consumers,
     validate_review,
 )
+from deploy_vii.source_context import SourceContextReview
 from tests.product.test_readiness import as_submission, readiness_fixture, submission_fixture
 
 FIXTURES = Path(__file__).parent / "fixtures" / "live"
@@ -485,22 +498,41 @@ def test_an_absence_claim_about_a_source_without_page_locators_is_not_judged() -
     assert coverage_issues(pack, changed) == ()
 
 
-# --- task 7.0i: Python fills the financials step's `context_step_sha256` (MC-1) ---------------
+# --- task 7.0i: the model supplies no hash; Python fills every CP-1 binding (MC-1) ----------
 
-BINDING = "context_step_sha256"
+CP1 = ("source_context", "financials", "narrative", "readiness")
+ZERO = "0" * 64
 NOT_BOUND = "Financial extraction does not bind the retained source step"
 
 
-def financials_case(tmp_path: Path) -> tuple[Execution, str, dict[str, Any], StepSubmission]:
-    """A CP-1 ticket whose `source_context` step is valid, a financial payload as a document
-    and that retained source step (whose content hash the binding must equal)."""
-    # Imported here: test_workflow reaches this module through test_source_context.
+def journal_at(tmp_path: Path, step_id: str) -> tuple[Execution, str, Contract]:
+    """A CP-1 ticket whose earlier steps are retained valid, and the valid stored contract that
+    Python builds for `step_id` (every binding right)."""
+    # Imported here: these fixtures reach this module through test_source_context.
+    from tests.product.replay_support import PACKS, cp1_seed_payloads
+    from tests.product.test_narrative import draft
     from tests.product.test_workflow import cp1_case
 
+    if step_id == "source_context":
+        store, ticket = PACKS["synthetic-cp1"](tmp_path)
+        seed = cp1_seed_payloads(tmp_path / "seed")["source_context"]
+        return store, ticket.ticket_id, SourceContextReview.model_validate_json(seed)
     store, ticket, extraction = cp1_case(tmp_path)
-    source = store.read().attempts[-1].steps[0]
-    assert (source.step_id, source.status) == ("source_context", "valid")
-    return store, ticket.ticket_id, json.loads(extraction.model_dump_json()), source
+    if step_id == "financials":
+        return store, ticket.ticket_id, extraction
+    finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    stage = FinancialStage.model_validate_json(output_of(store, finances.steps[-1]))
+    narrative = draft(stage.narrative_inputs)
+    if step_id == "narrative":
+        return store, ticket.ticket_id, narrative
+    held = submit_cp1_step(store, ticket.ticket_id, "narrative", narrative.model_dump_json())
+    inputs = DownstreamInputs.model_validate_json(output_of(store, held.steps[-1]))
+    return store, ticket.ticket_id, DownstreamReview(inputs_sha256=inputs.content_hash())
+
+
+def output_of(store: Execution, step: StepSubmission) -> str:
+    assert step.status == "valid" and step.output_sha256 is not None, step.issues
+    return store.step_output(step.output_sha256)
 
 
 def retained(store: Execution, ticket_id: str) -> str:
@@ -508,61 +540,159 @@ def retained(store: Execution, ticket_id: str) -> str:
     return store.payload(attempt.steps[-1].payload_sha256)
 
 
-def test_a_payload_without_the_binding_is_filled_from_the_retained_source_step(
-    tmp_path: Path,
+def without_bindings(model: type[Contract], value: Contract) -> tuple[str, tuple[str, ...]]:
+    """`value` as its sent schema lets a model write it (every marked binding left out), and the
+    paths of the bindings left out."""
+    document = json.loads(value.model_dump_json())
+    marked = marked_fields(model, document)
+    for item in marked:
+        del item.holder[item.name]
+    return json.dumps(document), tuple(item.path for item in marked)
+
+
+def known_for(pack: PreparedPack) -> Known:
+    ready = {s.source_id: s.sha256 for s in pack.sources if s.status == "ready" and s.sha256}
+    return Known(pack_sha256=pack.content_hash(), sources=ready, step={})
+
+
+@pytest.mark.parametrize("step_id", CP1)
+def test_a_payload_without_any_hash_is_bound_by_python_and_accepted(
+    tmp_path: Path, step_id: str
 ) -> None:
-    store, ticket_id, document, source = financials_case(tmp_path)
-    del document[BINDING]
-    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
-    assert submitted.journal.steps[-1].step_id == "financials"
+    store, ticket_id, value = journal_at(tmp_path, step_id)
+    model = STEPS[step_id].schema
+    payload, paths = without_bindings(model, value)
+    assert paths and "sha256" not in payload  # nothing is left for the model to copy
+    submitted = submit_model_payload(store, ticket_id, step_id, payload)
+    step = submitted.journal.steps[-1]
+    assert (step.step_id, step.status) == (step_id, "valid"), step.issues
+    assert sorted(submitted.prefilled) == sorted(paths)
+    assert retained(store, ticket_id) == submitted.payload
+    assert model.model_validate_json(submitted.payload) == value
+
+
+def test_the_bindings_filled_per_step_are_the_ones_its_validators_check(tmp_path: Path) -> None:
+    kinds = {}
+    for step_id in CP1:
+        _, _, value = journal_at(tmp_path / step_id, step_id)
+        document = json.loads(value.model_dump_json())
+        kinds[step_id] = {
+            (item.name, item.kind) for item in marked_fields(STEPS[step_id].schema, document)
+        }
+    assert kinds["source_context"] == {("pack_sha256", "pack"), ("source_sha256", "source")}
+    assert kinds["financials"] == {
+        ("context_step_sha256", "context-step"),
+        ("pack_sha256", "pack"),
+        ("source_sha256", "source"),
+        ("financial_review_sha256", "financial-review"),
+        ("source_context_review_sha256", "source-context-review"),
+    }  # this fixture has no FX conversion or audit explanation (tested below)
+    assert kinds["narrative"] == kinds["readiness"] == {("inputs_sha256", "step-inputs")}
+
+
+@pytest.mark.parametrize("step_id", CP1)
+def test_wrong_hashes_are_overwritten_and_recorded(tmp_path: Path, step_id: str) -> None:
+    store, ticket_id, value = journal_at(tmp_path, step_id)
+    model = STEPS[step_id].schema
+    document = json.loads(value.model_dump_json())
+    marked = marked_fields(model, document)
+    for item in marked:
+        current = item.holder[item.name]
+        item.holder[item.name] = [ZERO] * len(current) if isinstance(current, list) else ZERO
+    submitted = submit_model_payload(store, ticket_id, step_id, json.dumps(document))
     assert submitted.journal.steps[-1].status == "valid", submitted.journal.steps[-1].issues
-    assert submitted.prefilled == (BINDING,)
-    kept = retained(store, ticket_id)
-    assert kept == submitted.payload
-    assert json.loads(kept)[BINDING] == source.content_hash()
-    assert {k: v for k, v in json.loads(kept).items() if k != BINDING} == document
+    assert sorted(submitted.prefilled) == sorted(item.path for item in marked)
+    assert model.model_validate_json(retained(store, ticket_id)) == value
 
 
-@pytest.mark.parametrize("wrong", ["output", "zeros", "not-a-hash", "number"])
-def test_a_stale_or_copied_binding_is_overwritten_and_recorded(tmp_path: Path, wrong: str) -> None:
-    """E1 batch 5: Sol copied the block's `step_output_sha256` body line (the output hash)."""
-    store, ticket_id, document, source = financials_case(tmp_path)
-    document[BINDING] = {
-        "output": source.output_sha256,
-        "zeros": "0" * 64,
-        "not-a-hash": "see the step:source_context block",
-        "number": 7,
-    }[wrong]
+def test_the_batch_5_copy_of_the_output_hash_is_overwritten(tmp_path: Path) -> None:
+    """E1 batch 5: Sol copied the block's `step_output_sha256` line (the output hash)."""
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    source = store.read().attempts[-1].steps[0]
+    document = json.loads(value.model_dump_json())
+    document["context_step_sha256"] = source.output_sha256
     submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
     assert submitted.journal.steps[-1].status == "valid", submitted.journal.steps[-1].issues
-    assert submitted.prefilled == (BINDING,)
-    assert json.loads(retained(store, ticket_id))[BINDING] == source.content_hash()
+    assert submitted.prefilled == ("context_step_sha256",)
+    assert json.loads(retained(store, ticket_id))["context_step_sha256"] == source.content_hash()
 
 
-def test_a_payload_already_bound_to_the_source_step_is_kept_byte_for_byte(
-    tmp_path: Path,
-) -> None:
-    store, ticket_id, document, source = financials_case(tmp_path)
-    assert document[BINDING] == source.content_hash()
-    payload = json.dumps(document, indent=1)  # any spelling: nothing is rewritten
-    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+@pytest.mark.parametrize("step_id", CP1)
+def test_a_payload_already_bound_right_is_kept_byte_for_byte(tmp_path: Path, step_id: str) -> None:
+    store, ticket_id, value = journal_at(tmp_path, step_id)
+    payload = value.model_dump_json(indent=1)  # any spelling: nothing is rewritten
+    submitted = submit_model_payload(store, ticket_id, step_id, payload)
     assert submitted.journal.steps[-1].status == "valid"
     assert submitted.prefilled == ()
     assert retained(store, ticket_id) == payload == submitted.payload
 
 
+@pytest.mark.parametrize("case", ["facility", "audit"])
+def test_facility_and_audit_observation_hashes_are_the_validators_values(case: str) -> None:
+    """The book-scoped bindings: an FX conversion binds its facility row; an audit explanation
+    binds the effective account values of its periods (fixtures the validators accept)."""
+    from tests.product.test_audit_basis import differing, explain, frozen
+    from tests.product.test_facility_fx import freeze_fx, fx_case
+
+    pack, review = freeze_fx(fx_case()) if case == "facility" else frozen(explain(differing()))
+    assert validate_financial_review(pack, review) == ()
+    payload, paths = without_bindings(FinancialReview, review)
+    wanted = {"facility"} if case == "facility" else {"annual-observation", "quarter-observations"}
+    document = json.loads(review.model_dump_json())
+    assert wanted <= {item.kind for item in marked_fields(FinancialReview, document)}
+    text, filled = prefill(FinancialReview, payload, known_for(pack), PREFILLED["financials"])
+    assert sorted(filled) == sorted(paths)
+    assert FinancialReview.model_validate_json(text) == review
+
+
+def test_an_unknown_facility_or_source_is_left_for_the_validators() -> None:
+    from tests.product.test_facility_fx import freeze_fx, fx_case
+
+    pack, review = freeze_fx(fx_case())
+    payload, _ = without_bindings(FinancialReview, review)
+    document = json.loads(payload)
+    conversions = document["books"][0]["facility_fx_conversions"]
+    conversions[0]["facility_id"] = "no-such-facility"
+    conversions[1]["citations"][0]["source_id"] = "no-such-source"
+    known = known_for(pack)
+    text, _ = prefill(FinancialReview, json.dumps(document), known, PREFILLED["financials"])
+    filled = json.loads(text)["books"][0]["facility_fx_conversions"]
+    assert "facility_sha256" not in filled[0]  # nothing Python could bind it to
+    assert "source_sha256" not in filled[1]["citations"][0]
+    assert all("facility_sha256" in item for item in filled[1:])
+    with pytest.raises(ValidationError, match=r"facility_sha256|source_sha256"):
+        FinancialReview.model_validate_json(text)
+
+
+def test_a_financial_review_that_does_not_parse_leaves_its_two_hashes_unset(
+    tmp_path: Path,
+) -> None:
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    document["financial"]["books"] = "not books"
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    kept = json.loads(submitted.payload)
+    assert "financial_review_sha256" not in kept["definition"]
+    assert "financial_review_sha256" not in kept["binding"]
+    assert kept["binding"]["source_context_review_sha256"] and kept["context_step_sha256"]
+    (rejected,) = submitted.journal.step_repairs  # the shape rejection stands (task 7.0g)
+    assert any(issue.startswith("financial.books") for issue in rejected.issues), rejected.issues
+
+
 def test_a_rewritten_payload_keeps_every_number_and_text_exactly() -> None:
     digest = "a" * 64
     payload = '{"amount":3624.10,"tiny":1e-7,"n":-0,"text":"caf\\u00e9 \\u2013 \\"q\\"","x":[1,2]}'
-    text, filled = prefill(payload, {BINDING: digest})
-    assert filled == (BINDING,)
+    known = Known(pack_sha256=ZERO, sources={}, step={"step-inputs": digest})
+    text, filled = prefill(DownstreamReview, payload, known, PREFILLED["readiness"])
+    assert filled == ("inputs_sha256",)
     assert text == (
         f'{{"amount":3624.10,"tiny":1E-7,"n":0,"text":"café {EN_DASH} \\"q\\"","x":[1,2],'
-        f'"{BINDING}":"{digest}"}}'
+        f'"inputs_sha256":"{digest}"}}'
     )
     assert json.loads(text, parse_float=Decimal) == {
         **json.loads(payload, parse_float=Decimal),
-        BINDING: digest,
+        "inputs_sha256": digest,
     }
 
 
@@ -581,8 +711,9 @@ def test_a_rewritten_payload_keeps_every_number_and_text_exactly() -> None:
 def test_a_payload_that_is_not_a_json_object_is_handed_on_untouched(
     tmp_path: Path, payload: str
 ) -> None:
-    store, ticket_id, _, _ = financials_case(tmp_path)
-    assert prefill(payload, {BINDING: "a" * 64}) == (payload, ())
+    store, ticket_id, _ = journal_at(tmp_path, "financials")
+    known = known_bindings(store, ticket_id, "financials")
+    assert prefill(FinancialSubmission, payload, known, PREFILLED["financials"]) == (payload, ())
     submitted = submit_model_payload(store, ticket_id, "financials", payload)
     assert (submitted.payload, submitted.prefilled) == (payload, ())
     (rejected,) = submitted.journal.step_repairs  # the step's first rejection (task 7.0g)
@@ -590,40 +721,55 @@ def test_a_payload_that_is_not_a_json_object_is_handed_on_untouched(
     assert rejected.issues and NOT_BOUND not in rejected.issues
 
 
-def test_no_valid_source_step_raises_before_anything_is_written(tmp_path: Path) -> None:
-    from tests.product import replay_support  # imported here, as cp1_case above
+@pytest.mark.parametrize("step_id", ["financials", "narrative", "readiness"])
+def test_a_missing_bound_step_raises_before_anything_is_written(
+    tmp_path: Path, step_id: str
+) -> None:
+    from tests.product.replay_support import PACKS  # imported here, as in journal_at
 
-    store, ticket = replay_support.PACKS["synthetic-cp1"](tmp_path)
-    payload = json.dumps(financials_case(tmp_path / "other")[2])
+    store, ticket = PACKS["synthetic-cp1"](tmp_path)
     rejected = submit_cp1_step(store, ticket.ticket_id, "source_context", "{}")
     assert rejected.steps == () and rejected.step_repairs[0].status == "invalid"
     for ticket_id in (ticket.ticket_id, "absent-ticket"):
         before = store.read().content_hash()
         with pytest.raises(ValueError, match="no valid source_context step"):
-            submit_model_payload(store, ticket_id, "financials", payload)
+            submit_model_payload(store, ticket_id, step_id, "{}")
         assert store.read().content_hash() == before
+
+
+def test_narrative_needs_the_retained_financial_step(tmp_path: Path) -> None:
+    store, ticket_id, _ = journal_at(tmp_path, "financials")
+    before = store.read().content_hash()
+    with pytest.raises(ValueError, match="no valid financials step"):
+        submit_model_payload(store, ticket_id, "narrative", "{}")
+    assert store.read().content_hash() == before
+
+
+def test_a_marked_kind_nothing_fills_raises(tmp_path: Path) -> None:
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    known = known_bindings(store, ticket_id, "financials")
+    with pytest.raises(ValueError, match="No pre-fill for the marked binding kinds"):
+        prefill(FinancialSubmission, value.model_dump_json(), known, frozenset({"pack"}))
 
 
 def test_the_validator_still_rejects_a_mismatched_binding_that_bypasses_the_prefill(
     tmp_path: Path,
 ) -> None:
-    store, ticket_id, document, source = financials_case(tmp_path)
-    document[BINDING] = source.output_sha256
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    source = store.read().attempts[-1].steps[0]
+    document = json.loads(value.model_dump_json())
+    document["context_step_sha256"] = source.output_sha256
     journal = submit_cp1_step(store, ticket_id, "financials", json.dumps(document))
     (rejected,) = journal.step_repairs
     assert rejected.issues == (NOT_BOUND,)
 
 
-def test_every_marked_field_is_one_python_fills_and_only_the_financials_step_has_one() -> None:
-    """The sent schema drops exactly the fields the composer fills: a marked field nothing fills
-    would be required by the stored contract and never sent."""
+def test_every_marked_kind_is_one_python_fills_for_that_step() -> None:
+    """The sent schema drops exactly the bindings the composer fills: a marked kind nothing
+    fills would be required by the stored contract and never sent."""
     for step_id, definition in STEPS.items():
-        stored = definition.schema.model_json_schema()
-        marked = tuple(
-            name
-            for name, node in stored.get("properties", {}).items()
-            if node.get(PREFILLED_MARKER) is True
-        )
-        assert marked == PREFILLED.get(step_id, ()), step_id
-        assert PREFILLED_MARKER not in json.dumps(stored.get("$defs", {})), step_id
-    assert PREFILLED == {"financials": (BINDING,)}
+        text = json.dumps(definition.schema.model_json_schema())
+        kinds = set(re.findall(f'"{PREFILLED_MARKER}": "([a-z-]+)"', text))
+        assert kinds == set(PREFILLED.get(step_id, frozenset())), step_id
+        assert text.count(PREFILLED_MARKER) == len(re.findall(f'"{PREFILLED_MARKER}": "', text))
+    assert set(PREFILLED) == set(CP1)

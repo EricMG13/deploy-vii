@@ -296,7 +296,6 @@ def _upstream(store: Execution, attempt: Attempt) -> tuple[UpstreamInput, ...]:
         UpstreamInput(
             "step:" + item.step_id,
             item.content_hash(),
-            item.output_sha256,
             store.step_output(item.output_sha256),
         )
         for item in attempt.steps

@@ -12,7 +12,15 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, field_validator, model_validator
 from pydantic.config import JsonDict
 
-from deploy_vii.contracts import Citation, Claim, Contract, Hash, Identifier, Text
+from deploy_vii.contracts import (
+    PREFILLED_MARKER,
+    Citation,
+    Claim,
+    Contract,
+    Hash,
+    Identifier,
+    Text,
+)
 from deploy_vii.model.dates import fiscal_year_number
 from deploy_vii.model.history import BALANCE_METRICS, FLOW_METRICS
 
@@ -34,10 +42,6 @@ Number = Annotated[
 # states that as `anyOf` [enum, pattern] (`live.schema`, "prefixed-enum"). Python keeps deciding,
 # including the per-statement split the flat enum does not state.
 PREFIXED_ENUM_MARKER = "x-deploy-vii-prefixed-enum"
-# Task 7.0i: marks a property Python fills before the journal validates (`live.submission`
-# `PREFILLED`); the sent copy leaves it out (`live.schema`, "drop-prefilled"). The stored contract
-# still requires it, so the validator still checks the value Python wrote.
-PREFILLED_MARKER = "x-deploy-vii-prefilled"
 # Exactly what `Identifier` (^[A-Za-z0-9][A-Za-z0-9_.:-]*$) accepts that `startswith("other:")`:
 # the leading "o" satisfies its first class and every later character its second.
 OTHER_ITEM_PATTERN = r"^other:[A-Za-z0-9_.:-]*$"
@@ -263,7 +267,7 @@ class FacilityFxConversion(Contract):
     conversion_id: Identifier
     facility_id: Identifier
     period_id: Identifier
-    facility_sha256: Hash
+    facility_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "facility"})
     source_currency: Currency
     target_currency: Currency
     rate_date: date
@@ -406,8 +410,15 @@ class AuditBasisExplanation(Contract):
     annual_period_id: Identifier
     metric_id: Identifier
     quarter_period_ids: Annotated[tuple[Identifier, ...], Field(min_length=4, max_length=4)]
-    annual_observation_sha256: Hash
-    quarter_observation_sha256: Annotated[tuple[Hash, ...], Field(min_length=4, max_length=4)]
+    annual_observation_sha256: Hash = Field(
+        json_schema_extra={PREFILLED_MARKER: "annual-observation"}
+    )
+    quarter_observation_sha256: Annotated[
+        tuple[Hash, ...],
+        Field(
+            min_length=4, max_length=4, json_schema_extra={PREFILLED_MARKER: "quarter-observations"}
+        ),
+    ]
     explanation: Text
     citations: Located
 
@@ -453,7 +464,7 @@ class FinancialBook(Contract):
 
 class FinancialReview(Contract):
     schema_version: Literal["financial-review/5"] = "financial-review/5"
-    pack_sha256: Hash
+    pack_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "pack"})
     run_id: Identifier
     issuer_id: Identifier
     as_of: date

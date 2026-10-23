@@ -316,24 +316,54 @@ E1 batch `e1-cp1-5` (Sol) lost three `financials` attempts (about US$3) to one 6
 The retained-step block showed two hashes: the header `sha256=` (the step's content hash,
 `f56a66…`, which the validator binds) and the body line `step_output_sha256=` (its output hash,
 `fc55f2…`). Rule c said only "the sha256 shown on the step:source_context block". The three
-attempts wrote three values, none of them the header's; the last (46,020 completion tokens,
-587 s, US$0.90, 85 statement lines, 55 observations, no shape issue) was rejected on one issue
-alone, "Financial extraction does not bind the retained source step". MC-1 now covers this
-binding. `FinancialSubmission.context_step_sha256` carries the marker `x-deploy-vii-prefilled`.
-The new `drop-prefilled` relaxation leaves a marked property out of the sent schema's
-`properties` and `required`, and a marker anywhere else raises `ValueError`. Rule c and
-`CONTEXT_STEP_RULE` are removed. After null resolution, `live.submission.submit_model_payload`
-sets the field to the content hash of the ticket's valid retained `source_context` step and
-overwrites any value the payload carries. The journal retains that pre-filled payload, rewritten
-with every number's digits kept; output.md keeps the raw reply. A payload that already holds
-the value is kept byte for byte. A payload that is not a JSON object is handed on as received.
-No valid source step raises before any write. The overwrite is recorded in `Submitted.prefilled`
-and in the attempt's `payload_prefilled` event (`paths`, `retained_payload_sha256`). The stored
-contract, the validator's binding check and its message are unchanged, so analytical meaning is
-unchanged (decision 0005). The `step_output_sha256=` body line stays because `readiness` binds
-`DownstreamReview.inputs_sha256` to the narrative step's output hash, which only that line shows.
-Not verified: provider acceptance of the changed `financials` sent schema (`live schema-check`)
-and live uptake (E1 batch 7).
+attempts wrote three values, none of them the header's. The last one (46,020 completion tokens,
+587 s, US$0.90, 85 statement lines, 55 observations, no shape issue) was rejected on that issue
+alone, "Financial extraction does not bind the retained source step". The validator returns on
+that check first. Behind it the payload still bound the model's own `FinancialReview` by hash,
+twice, a value no model can compute.
+
+MC-1 now covers every hash binding of the CP-1 steps. The model supplies no hash; Python fills
+these bindings (`kind`: field, value):
+
+- `context-step`: `FinancialSubmission.context_step_sha256`, the content hash of the ticket's
+  valid retained `source_context` step;
+- `pack`: `SourceContextReview.pack_sha256` and `FinancialReview.pack_sha256`, the prepared
+  pack's hash;
+- `source`: every `Citation.source_sha256` (in `source_context` and `financials`), the hash of
+  the ready pack source the citation's `source_id` names;
+- `source-context-review`: `FinancialContextBinding.source_context_review_sha256`, the hash of
+  the retained `SourceContextReview`;
+- `financial-review`: `FinancialContextBinding.financial_review_sha256` and
+  `DefinitionReview.financial_review_sha256`, the hash of the submitted `financial` object
+  parsed as `FinancialReview`;
+- `facility`: `FacilityFxConversion.facility_sha256`, the hash of the book's facility row with
+  the conversion's facility and period (the last such row, as `fx_conversion_issues` reads it);
+- `annual-observation` and `quarter-observations`: `AuditBasisExplanation.
+  annual_observation_sha256` and `quarter_observation_sha256`, the hashes of the book's effective
+  account values for the explanation's periods and metric;
+- `step-inputs`: `NarrativeReview.inputs_sha256` (the financial stage's `NarrativeInputs`) and
+  `DownstreamReview.inputs_sha256` (the narrative step's `DownstreamInputs`).
+
+Each field carries `x-deploy-vii-prefilled: <kind>`. The new `drop-prefilled` relaxation leaves
+a marked property out of the sent schema's `properties` and `required`. A marker anywhere else,
+or one that names no kind, raises `ValueError`. No CP-1 sent schema has a hash-typed property
+any more. Rule c, `CONTEXT_STEP_RULE`, the `source_context` sentence on `pack_sha256` and the
+retained-step block's `step_output_sha256=` line are removed; the block header `sha256=` stays.
+
+After null resolution, `live.submission.submit_model_payload` fills each binding with the value
+its validator compares against and overwrites any value the payload carries. Phases keep the
+dependencies: citations and step values first, then facility rows, then observations, then the
+financial review. A binding Python cannot know is left as sent, so the existing shape or
+validator rejection stands: an unknown source, facility or observation, or a sub-object that
+does not parse. A payload that already holds every right value is kept byte for byte; a payload
+that is not a JSON object is handed on as received. A missing retained step raises before any
+write. The journal retains the pre-filled payload, rewritten with every number's digits kept,
+and output.md keeps the raw reply. Every changed JSON path is recorded in `Submitted.prefilled`
+and in the attempt's `payload_prefilled` event (`paths`, `retained_payload_sha256`).
+
+The stored contracts, the validators' binding checks and their messages are unchanged, so
+analytical meaning is unchanged (decision 0005). Not verified: provider acceptance of the changed
+CP-1 sent schemas (`live schema-check`) and live uptake (E1 batch 7).
 
 ## Evidence
 

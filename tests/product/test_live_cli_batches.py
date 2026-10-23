@@ -1133,8 +1133,8 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     others = [rows[key] for key in rows if key != (LUNA, "source_context")]
     assert [row[2:6] for row in others] == [["accepted", "truncated", "200", "0.0000123"]] * 3
     assert rows[(GLM, "source_context")][8] == (
-        "nullable-enum, const-to-enum, drop-length, nullable-array-anyof"
-    )
+        "nullable-enum, const-to-enum, drop-length, nullable-array-anyof, drop-prefilled"
+    )  # task 7.0i: pack_sha256 and every citation's source_sha256 are filled by Python
     readiness = rows[(GLM, "source_readiness")]
     assert readiness[8] == "none" and readiness[10:] == ["-", "-"]
     # The Keywords column: every JSON-Schema keyword of the sent schema, annotations left out.
@@ -1164,6 +1164,7 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
         "const-to-enum",
         "drop-length",
         "nullable-array-anyof",
+        "drop-prefilled",
     ]
     assert record["journal"] == "none: schema-check submits nothing"
     # Nothing was submitted: no journal copy, the execution journal is unchanged.

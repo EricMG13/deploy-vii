@@ -211,8 +211,10 @@ def test_the_financials_step_asks_for_no_hash_and_letters_its_four_rules() -> No
     printed below it names the field (E1 batch 5 copied the wrong 64-hex value three times)."""
     contract = prompts.STEP_CONTRACTS["financials"]
     assert not hasattr(prompts, "CONTEXT_STEP_RULE")
-    assert "context_step_sha256" not in composed("financials")
-    assert "sha256" not in contract
+    # Fix 1: no CP-1 step asks for any hash, in its text or in the schema printed below it.
+    for step_id in ("source_context", "financials", "narrative", "readiness"):
+        assert "sha256" not in prompts.STEP_CONTRACTS[step_id], step_id
+        assert "sha256" not in composed(step_id).split("JSON Schema:")[1], step_id
     rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
     assert rules == ["a. ", "b. ", "c. ", "d. "]
     assert f"c. {prompts.DECLARED_PERIOD_RULE}" in contract

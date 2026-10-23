@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Run, Text
+from deploy_vii.contracts import PREFILLED_MARKER, Citation, Contract, Hash, Identifier, Run, Text
 from deploy_vii.financial_contracts import Currency, Located, Unit
 from deploy_vii.financial_periods import _id
 from deploy_vii.financial_validation import records
@@ -95,7 +95,7 @@ class SubsequentEvent(Contract):
 
 class SourceContextReview(Contract):
     schema_version: Literal["source-context-review/1"] = "source-context-review/1"
-    pack_sha256: Hash
+    pack_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "pack"})
     entities: Annotated[tuple[EntityContext, ...], Field(max_length=2000)]
     sources: Annotated[tuple[SourceContext, ...], Field(max_length=2000)]
     events: Annotated[tuple[SubsequentEvent, ...], Field(max_length=20000)] = ()

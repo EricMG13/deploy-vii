@@ -42,8 +42,8 @@ from a pinned pool:
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts. |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED` and `prefill` (the `financials` binding Python fills, task 7.0i), `submit_model_payload` (decision 0008). |
-| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `unverified_keywords`. |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i), `submit_model_payload` (decision 0008). |
+| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
 
 ## Rules and where they are enforced
@@ -684,7 +684,7 @@ pass over the strict copy (`strict_schema = relax(strict_copy)`):
 | `oneof-anyof` (round 3) | `{"oneOf": [...], "discriminator": {...}}` | `{"anyOf": [...]}` (no discriminator) |
 | `decimal-number-only` (task 7.0d) | a `Number` amount: `{"anyOf": [{"type": "number", ...bounds}, {"type": "string"}], "x-deploy-vii-decimal": true}` (null joins when nullable) | `{"type": "number", ...bounds}`, or `{"anyOf": [{"type": "number", ...bounds}, {"type": "null"}]}` |
 | `prefixed-enum` (task 7.0d fix 1) | an id: `{"type": "string", "pattern": P, "x-deploy-vii-prefixed-enum": {"enum": [...], "pattern": "^other:..."}}` | `{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern": "^other:..."}]}` |
-| `drop-prefilled` (task 7.0i) | a property Python fills: `{"type": "string", "pattern": "^[0-9a-f]{64}$", "x-deploy-vii-prefilled": true}` under `properties`, named in `required` | left out of `properties` and `required` (a marker anywhere else raises `ValueError`) |
+| `drop-prefilled` (task 7.0i) | a hash binding Python fills: `{"type": "string", "pattern": "^[0-9a-f]{64}$", "x-deploy-vii-prefilled": "<kind>"}` under `properties`, named in `required` | left out of `properties` and `required` (a marker anywhere else, or one naming no kind, raises `ValueError`) |
 
 Task 7.0f (E1 batch `e1-cp1-4`): the `financials` contract carries a fifth step rule
 (`prompts.SIGN_RULE`): `sign_convention` is `signed` when the amount carries the statement's
@@ -693,18 +693,33 @@ located `sign_citations` span showing the printed positive magnitude; a negative
 `outflow_magnitude` is a contradiction. The two `StatementLine.sign_evidence` messages now name
 their remedy; the validator's semantics are unchanged.
 
-Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the `financials`
-model is no longer asked for `context_step_sha256`. The sent schema leaves it out
-(`drop-prefilled`) and the step rules are four: a amounts, b account metrics, c declared
-periods, d sign convention (`CONTEXT_STEP_RULE` is gone). `submission.submit_model_payload`
-fills the field after null resolution with the content hash of the ticket's valid retained
-`source_context` step, the value on that block's header, and overwrites any value the reply
-carries. The journal retains the pre-filled payload; output.md keeps the raw reply. A reply that
-already holds the value is kept byte for byte, and a reply that is not a JSON object is handed on
-as received. The fields set are in `Submitted.prefilled` and in a `payload_prefilled` event
-(`paths`, `retained_payload_sha256`). `cp1_workflow` still rejects a mismatched binding. The
-block's `step_output_sha256=` line stays: `readiness` binds `inputs_sha256` to the narrative
-step's output hash, which only that line shows.
+Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
+supplies no hash. Python fills these bindings:
+- `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;
+- `SourceContextReview.pack_sha256` and `FinancialReview.pack_sha256`, from the pack;
+- every `Citation.source_sha256`, from the ready pack source the citation names;
+- `FinancialContextBinding.source_context_review_sha256`, from the retained `SourceContextReview`;
+- `FinancialContextBinding.financial_review_sha256` and `DefinitionReview.financial_review_sha256`,
+  from the submitted `financial` parsed as `FinancialReview`;
+- `FacilityFxConversion.facility_sha256`, from the book's facility row;
+- `AuditBasisExplanation.annual_observation_sha256` and `quarter_observation_sha256`, from the
+  book's effective account values;
+- `NarrativeReview.inputs_sha256` and `DownstreamReview.inputs_sha256`, from the financial stage's
+  `NarrativeInputs` and the narrative step's `DownstreamInputs`.
+
+Each field is marked `x-deploy-vii-prefilled: <kind>`. The sent schemas leave it out
+(`drop-prefilled`), so no CP-1 sent schema has a hash-typed property. The `financials` step rules
+are four: a amounts, b account metrics, c declared periods, d sign convention
+(`CONTEXT_STEP_RULE` is gone). `source_context` no longer states the `pack_sha256` rule, and the
+retained-step block is the header `sha256=` and the step output, with no `step_output_sha256=`
+line.
+
+`submission.submit_model_payload` fills each binding after null resolution and overwrites any
+value the reply carries; a binding Python cannot know is left as sent for the validators. The
+journal retains the pre-filled payload, and output.md keeps the raw reply. A reply that already
+holds every value is kept byte for byte, and a reply that is not a JSON object is handed on as
+received. The changed paths are in `Submitted.prefilled` and in a `payload_prefilled` event
+(`paths`, `retained_payload_sha256`). The validators still reject a mismatched binding.
 
 Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
 `"(211)"`), which the stored contract refused, and the sent schema allowed them. The

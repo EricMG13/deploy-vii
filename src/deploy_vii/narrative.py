@@ -8,7 +8,7 @@ from deploy_vii import prose
 from deploy_vii.canonical_audit import DefinitionReview
 from deploy_vii.canonical_gaps import CanonicalGapReport, GapDetail, LedgerGap, canonical_gaps
 from deploy_vii.context_binding import FinancialContextBinding
-from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
+from deploy_vii.contracts import PREFILLED_MARKER, Citation, Contract, Hash, Identifier, Text
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_periods import _id
 from deploy_vii.financial_validation import records
@@ -122,7 +122,7 @@ class FundingAssessment(Contract):
 
 class NarrativeReview(Contract):
     schema_version: Literal["narrative-review/1"] = "narrative-review/1"
-    inputs_sha256: Hash
+    inputs_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "step-inputs"})
     findings: Annotated[tuple[Finding, ...], Field(max_length=20000)] = ()
     coverage: tuple[DimensionCoverage, ...] = ()
     stories: tuple[StoryCoverage, ...] = ()

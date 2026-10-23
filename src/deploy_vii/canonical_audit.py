@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Text
+from deploy_vii.contracts import PREFILLED_MARKER, Citation, Contract, Hash, Identifier, Text
 from deploy_vii.facility_fx import FacilityNormalization, normalize_facilities
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview, Located, Observation
 from deploy_vii.financial_periods import _id
@@ -50,7 +50,7 @@ class MultiFigureEvent(Contract):
 
 class DefinitionReview(Contract):
     schema_version: Literal["definition-review/1"] = "definition-review/1"
-    financial_review_sha256: Hash
+    financial_review_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "financial-review"})
     book_id: Identifier
     assessments: Annotated[tuple[DefinitionAssessment, ...], Field(max_length=20000)] = ()
     events: Annotated[tuple[MultiFigureEvent, ...], Field(max_length=20000)] = ()

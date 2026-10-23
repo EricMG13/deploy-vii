@@ -288,19 +288,22 @@ Evidence: batch 5 `financials` was cut at 64,000 completion tokens twice (US$2.2
 and the module repair cost about US$1.6 more. Not verified: a live truncation under the guard and
 the compact rule's live effect (E1 batch 6).
 
-## 7.0i Python pre-fills the financials context binding
+## 7.0i The model supplies no hash
 
-The `financials` model is no longer asked for `context_step_sha256`: the sent schema leaves it
-out (`drop-prefilled`, marker `x-deploy-vii-prefilled`), and rule c and `CONTEXT_STEP_RULE` are
-gone. Python sets it after null resolution from the ticket's valid retained `source_context`
-step, overwriting any value, and records the fields in `Submitted.prefilled` and the
-`payload_prefilled` event (decision 0008 amendment "23 Oct 2026 (task 7.0i)"). The stored
-contract and the validator's binding check are unchanged, and the `step_output_sha256=` line
-stays because `readiness` binds its `inputs_sha256` to it.
+Python fills every hash binding of the CP-1 steps: the context step, the pack, each citation's
+source, the source-context review, the financial review (twice), FX facility rows, audit
+observations, and the narrative and readiness inputs (decision 0008 amendment "23 Oct 2026
+(task 7.0i)" lists them). Each binding is marked `x-deploy-vii-prefilled: <kind>` and left out of
+the sent schemas (`drop-prefilled`). Rule c, the `source_context` `pack_sha256` sentence and the
+block's `step_output_sha256=` line are gone, and every changed path is recorded in
+`Submitted.prefilled` and the `payload_prefilled` event; the stored contracts and validator
+checks are unchanged.
 
 Evidence: E1 batch `e1-cp1-5` (23 October 2026, Sol) lost three `financials` attempts (about
-US$3) to the binding; the last (46,020 tokens, 587 s, US$0.90, no shape issue) copied the
-block's `step_output_sha256` (`fc55f2…`) where the header's `f56a66…` was required.
+US$3) to the context binding. The last one (46,020 tokens, 587 s, US$0.90, no shape issue)
+copied the block's `step_output_sha256` (`fc55f2…`) where the header's `f56a66…` was required.
+Behind that check, the payload still bound the model's own `FinancialReview` by hash.
 
-Not verified: provider acceptance of the changed `financials` sent schema (the coordinator runs
-`live schema-check --steps financials`) and live uptake (E1 batch 7).
+Not verified: provider acceptance of the changed CP-1 sent schemas (the coordinator runs
+`live schema-check --steps source_context,financials,narrative,readiness`) and live uptake (E1
+batch 7).

@@ -182,8 +182,7 @@ STEP_CONTRACTS: Mapping[str, str] = {
     ),
     "source_context": (
         "Describe what each supplied financial source is (entity, period, statement kind, units, "
-        "currency, version relationship) and whether it can support extraction. Cite spans only. "
-        "`pack_sha256` must equal the sha256 shown on the prepared-pack CONTEXT block.\n"
+        "currency, version relationship) and whether it can support extraction. Cite spans only.\n"
         "Step rules (the validator enforces each one):\n"
         f"a. {SOURCES_ONCE_RULE}\n"
         f"b. {CITATION_RULE}\n"
@@ -199,10 +198,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"c. {DECLARED_PERIOD_RULE}\n"
         f"d. {SIGN_RULE}"
     ),
-    # Task 7.0i: `context_step_sha256` is pre-filled by Python (`live.submission.prefill`) and
-    # left out of the sent schema, so no rule asks the model for it.
-    # The narrative and readiness hash bindings are not model-computable from the step hash
-    # alone; Python pre-fills them in the contract-shape work (plan 2.7, MC-1).
+    # Task 7.0i: the model supplies no hash. Every CP-1 hash binding is pre-filled by Python
+    # (`live.submission.prefill`) and left out of the sent schema, so no rule asks for one.
     "narrative": (
         "Write the narrative review from the supplied narrative inputs only. Every claim cites "
         "the supplied spans."
@@ -245,7 +242,6 @@ class UpstreamInput:
 
     input_id: str
     sha256: str
-    output_sha256: str
     text: str
 
 
@@ -361,10 +357,8 @@ def build(
         digest, body = _source_body(pack, source_id)
         blocks.append(block("SOURCE", source_id, digest, body))
     for item in upstream:
-        # Kept (task 7.0i, R4): `readiness` binds `inputs_sha256` to the step:narrative output,
-        # whose hash this line alone shows; the header is the step's own content hash.
-        body = f"step_output_sha256={item.output_sha256}\n{item.text}"
-        blocks.append(block("SOURCE", item.input_id, item.sha256, body))
+        # Task 7.0i: no output-hash line; no binding is copied from the block any more.
+        blocks.append(block("SOURCE", item.input_id, item.sha256, item.text))
     if repair_issues:
         issues = "\n".join(f"- {issue}" for issue in repair_issues)
         digest = hashlib.sha256(issues.encode()).hexdigest()

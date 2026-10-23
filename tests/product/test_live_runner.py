@@ -316,7 +316,7 @@ def test_unavailable_sources_and_repairs_and_upstream_are_data_blocks() -> None:
         }
     )
     gone = pack.model_copy(update={"sources": (missing,)})
-    up = prompts.UpstreamInput("step:source_context", "a" * 64, "b" * 64, '{"x":1}')
+    up = prompts.UpstreamInput("step:source_context", "a" * 64, '{"x":1}')
     user = prompts.build(
         "financials",
         gone,
@@ -327,7 +327,7 @@ def test_unavailable_sources_and_repairs_and_upstream_are_data_blocks() -> None:
     )[1].content
     assert "UNAVAILABLE (missing): file not supplied" in user
     assert "<<<SOURCE id=filing sha256=none>>>" in user and "0" * 64 not in user
-    assert f"<<<SOURCE id=step:source_context sha256={'a' * 64}>>>\nstep_output_sha256=" in user
+    assert f'<<<SOURCE id=step:source_context sha256={"a" * 64}>>>\n{{"x":1}}\n<<<END>>>' in user
     assert "<<<REPAIR id=prior-validation-issues" in user and "- second issue" in user
     spreadsheet = pack.sources[0].model_copy(
         update={
@@ -1065,13 +1065,12 @@ def test_cp1_step_dispatch_carries_the_retained_step_as_upstream_data(tmp_path: 
     assert idle.requests == [] and rig.ledger.state().lines == before
 
 
-def test_the_step_output_line_is_the_only_place_the_readiness_binding_is_shown(
+def test_the_readiness_dispatch_shows_no_binding_hash_and_python_fills_it(
     tmp_path: Path,
 ) -> None:
-    """Task 7.0i, R4: the `step_output_sha256=` body line has a consumer, so it stays. The
-    `readiness` step's `DownstreamReview.inputs_sha256` must equal the content hash of the
-    `DownstreamInputs` the narrative step retained as its output, which is that step's
-    `output_sha256`; the block header shows the step's own content hash, a different value."""
+    """Task 7.0i fix 1: `readiness` binds `inputs_sha256` to the narrative step's retained
+    `DownstreamInputs`. The `step_output_sha256=` line that alone showed it is gone; Python
+    fills the binding, so the prompt shows only each block's header hash."""
     store, ticket, extraction = cp1_case(tmp_path)
     finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
     stage = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
@@ -1081,15 +1080,22 @@ def test_the_step_output_line_is_the_only_place_the_readiness_binding_is_shown(
     assert [s.status for s in narrative.steps] == ["valid", "valid", "valid"]
     held = narrative.steps[-1]
     required = DownstreamInputs.model_validate_json(step_text(store, held)).content_hash()
-    assert held.output_sha256 == required != held.content_hash()
     upstream = runner._upstream(store, narrative)
     sources = tuple(s.source_id for s in store.pack().sources)
-    user = prompts.build("readiness", store.pack(), sources, DownstreamReview, upstream=upstream)[
-        1
-    ].content
-    assert f"<<<SOURCE id=step:narrative sha256={held.content_hash()}>>>" in user
-    assert f"step_output_sha256={required}" in user
-    assert user.count(required) == 1
+    system, user = (
+        message.content
+        for message in prompts.build(
+            "readiness", store.pack(), sources, DownstreamReview, upstream=upstream
+        )
+    )
+    assert f"<<<SOURCE id=step:narrative sha256={held.content_hash()}>>>\n{{" in user
+    assert "step_output_sha256" not in user and required not in user
+    assert "inputs_sha256" not in system
+    submitted = submission.submit_model_payload(store, ticket.ticket_id, "readiness", "{}")
+    assert submitted.prefilled == ("inputs_sha256",)
+    assert json.loads(submitted.payload) == {"inputs_sha256": required}
+    assert submitted.journal.steps[-1].step_id == "readiness"
+    assert submitted.journal.steps[-1].status == "valid", submitted.journal.steps[-1].issues
 
 
 def _keys(tmp_path: Path) -> Path:

@@ -31,10 +31,12 @@ Fix round 1: an id node marked `PREFIXED_ENUM_MARKER` (`StatementLine.item_id`,
 {type: string, pattern}] from the marker's lists ("prefixed-enum"): a listed r14 statement item
 or an `other:` id. The flat list is a superset per statement; Python still enforces the split.
 Task 7.0i (E1 batch e1-cp1-5: three `financials` attempts copied a wrong 64-hex
-`context_step_sha256`): a property marked `PREFILLED_MARKER` (`FinancialSubmission.
-context_step_sha256`) is left out of its object's `properties` and `required` ("drop-prefilled"),
-because Python fills it before the journal validates (`live.submission.prefill`). A marker
-anywhere but on an object's property raises ValueError, so it never reaches the provider.
+`context_step_sha256`): the model supplies no hash. A property marked `PREFILLED_MARKER` (its
+value names the binding kind; every hash binding of the CP-1 step contracts carries one) is left
+out of its object's `properties` and `required` ("drop-prefilled"), because Python fills it before
+the journal validates (`live.submission.prefill`, which finds the marked properties of a payload
+with `marked_fields`). A marker anywhere but on an object's property, or one whose value is not a
+kind name, raises ValueError, so it never reaches the provider.
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
 widens what the provider is asked to enforce: the reply is still validated by the unchanged
 Pydantic contract, so every dropped constraint is still enforced on the way in.
@@ -51,13 +53,14 @@ relaxations applied (`schema_relaxations`).
 import copy
 import json
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
 
+from deploy_vii.contracts import PREFILLED_MARKER as PREFILLED_MARKER
 from deploy_vii.financial_contracts import DECIMAL_MARKER as DECIMAL_MARKER
-from deploy_vii.financial_contracts import PREFILLED_MARKER as PREFILLED_MARKER
 from deploy_vii.financial_contracts import PREFIXED_ENUM_MARKER as PREFIXED_ENUM_MARKER
 
 ANNOTATIONS = ("title", "description")
@@ -225,6 +228,12 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
     return _drop_prefilled(_prefixed_enum(_number_only(_array_to_any_of(_one_of_to_any_of(node)))))
 
 
+def prefilled_kind(node: object) -> str | None:
+    """The binding kind a schema node's `PREFILLED_MARKER` names (a non-empty string), or None."""
+    kind = node.get(PREFILLED_MARKER) if isinstance(node, dict) else None
+    return kind if isinstance(kind, str) and kind else None
+
+
 def _drop_prefilled(node: dict[str, Any]) -> dict[str, Any]:
     """An object node without its `PREFILLED_MARKER` properties and their `required` entries
     ("drop-prefilled"); any other node is returned as it is. Children are relaxed first, so a
@@ -233,11 +242,7 @@ def _drop_prefilled(node: dict[str, Any]) -> dict[str, Any]:
     properties = node.get("properties")
     if not isinstance(properties, dict):
         return node
-    kept = {
-        name: child
-        for name, child in properties.items()
-        if not (isinstance(child, dict) and child.get(PREFILLED_MARKER) is True)
-    }
+    kept = {name: child for name, child in properties.items() if prefilled_kind(child) is None}
     if len(kept) == len(properties):
         return node
     out = {**node, "properties": kept}
@@ -364,7 +369,7 @@ def relaxations(schema: dict[str, Any]) -> list[str]:
             found.add("decimal-number-only")
         if PREFIXED_ENUM_MARKER in node:
             found.add("prefixed-enum")
-        if node.get(PREFILLED_MARKER) is True:
+        if prefilled_kind(node) is not None:
             found.add("drop-prefilled")
     return [name for name in RELAXATIONS if name in found]
 
@@ -724,6 +729,54 @@ class _Walker:
             chosen = self.branch(schema, value)
             if chosen is not None:
                 self.fill(chosen, value, path)
+
+
+@dataclass(frozen=True)
+class Marked:
+    """One `PREFILLED_MARKER` property of a payload object, present or not: its JSON path, the
+    object that holds it, the binding kind and the enclosing objects by their `$defs` name
+    (outermost first)."""
+
+    path: str
+    holder: dict[str, Any]
+    name: str
+    kind: str
+    within: tuple[tuple[str, dict[str, Any]], ...]
+
+    def enclosing(self, definition: str) -> dict[str, Any] | None:
+        """The innermost enclosing object of `definition`, or None."""
+        return next((obj for name, obj in reversed(self.within) if name == definition), None)
+
+
+def marked_fields(model: type[BaseModel], document: dict[str, Any]) -> tuple[Marked, ...]:
+    """Every marked property of `document`, walked with `model`'s own schema as `normalise`
+    walks it (a union branch only where it is determined), in document order."""
+    schema = model.model_json_schema()
+    walker = _Walker(schema)
+    found: list[Marked] = []
+
+    def visit(node: object, value: object, path: str, within: tuple[Any, ...]) -> None:
+        name = _ref_name(node) if isinstance(node, dict) else None
+        if name is not None and isinstance(value, dict):
+            within = (*within, (name, value))
+        spec = walker.resolve(node)
+        if isinstance(value, dict) and "properties" in spec:
+            for key, prop in spec["properties"].items():
+                kind = prefilled_kind(prop)
+                if kind is not None:
+                    found.append(Marked(f"{path}{key}", value, key, kind, within))
+                elif key in value:
+                    visit(prop, value[key], f"{path}{key}.", within)
+        elif isinstance(value, list) and "items" in spec:
+            for index, item in enumerate(value):
+                visit(spec["items"], item, f"{path}{index}.", within)
+        elif "anyOf" in spec or "oneOf" in spec:
+            chosen = walker.branch(spec, value)
+            if chosen is not None:
+                visit(chosen, value, path, within)
+
+    visit(schema, document, "", ())
+    return tuple(found)
 
 
 def json_object(payload: str) -> dict[str, Any] | None:

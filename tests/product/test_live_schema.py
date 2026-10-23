@@ -173,14 +173,18 @@ def test_source_context_sent_schema_keeps_every_other_constraint() -> None:
     assert {"const", "minLength", "maxLength"} <= sent_keys(strict_copy)  # what 5ae16ef9 sent
     kept = {"pattern", "format", "maxItems", "anyOf", "$ref", "enum", "additionalProperties"}
     assert kept <= sent_keys(sent)
-    assert sent_keys(sent) == sent_keys(strict_copy) - {"const", "minLength", "maxLength"}
+    # Task 7.0i: the marked hash bindings (and so their marker and hash pattern) are left out.
+    dropped = {"const", "minLength", "maxLength", strict.PREFILLED_MARKER}
+    assert sent_keys(sent) == sent_keys(strict_copy) - dropped
     patterns = sorted({n["pattern"] for n in nodes(sent) if "pattern" in n})
-    assert patterns == sorted({n["pattern"] for n in nodes(strict_copy) if "pattern" in n})
+    hashes = {"^[0-9a-f]{64}$"}
+    assert patterns == sorted({n["pattern"] for n in nodes(strict_copy) if "pattern" in n} - hashes)
     assert strict.schema_relaxations(SCHEMAS["source_context"]) == [
         "nullable-enum",
         "const-to-enum",
         "drop-length",
         "nullable-array-anyof",
+        "drop-prefilled",
     ]
 
 
@@ -231,6 +235,7 @@ def test_relaxations_name_the_nullable_array_and_one_of_rewrites() -> None:
         "drop-length",
         "nullable-array-anyof",
         "oneof-anyof",
+        "drop-prefilled",  # task 7.0i: inputs_sha256 is filled by Python
     ]
     assert "nullable-array-anyof" in strict.schema_relaxations(SCHEMAS["readiness"])
     assert "nullable-array-anyof" in strict.schema_relaxations(SCHEMAS["financials"])
@@ -861,31 +866,52 @@ def test_prefixed_enum_is_named_where_it_applied_and_marked_nodes_of_another_sha
             strict.relax({"properties": {"x": node}})
 
 
-# --- task 7.0i: a field Python fills is left out of the sent schema ("drop-prefilled") --------
+# --- task 7.0i: the model supplies no hash; every binding Python fills is left out --------
+
+HASH_PATTERN = "^[0-9a-f]{64}$"
+CP1_STEPS = ("source_context", "financials", "narrative", "readiness")
 
 
-def test_the_financials_sent_schema_leaves_out_the_context_step_binding() -> None:
-    """E1 batch 5: the model copied the wrong 64-hex value three times; it is no longer asked."""
-    model = SCHEMAS["financials"]
+def hash_typed(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node that is, or is an array of, a 64-hex hash (`contracts.Hash`)."""
+    return [
+        node
+        for node in nodes(schema)
+        if node.get("pattern") == HASH_PATTERN
+        or (isinstance(node.get("items"), dict) and node["items"].get("pattern") == HASH_PATTERN)
+    ]
+
+
+@pytest.mark.parametrize("step", CP1_STEPS)
+def test_the_cp1_sent_schemas_carry_no_hash_typed_property(step: str) -> None:
+    """E1 batch 5 copied the wrong 64-hex value three times: no CP-1 step asks for a hash now."""
+    model = SCHEMAS[step]
     sent = strict.strict_schema(model)
-    assert "context_step_sha256" not in sent["properties"]
-    assert "context_step_sha256" not in sent["required"]
-    assert sent["required"] == list(sent["properties"])  # still strict-valid
-    assert sent["additionalProperties"] is False
+    assert hash_typed(model.model_json_schema())  # the stored contract still binds hashes
+    assert hash_typed(sent) == []
     assert strict.PREFILLED_MARKER not in json.dumps(sent)  # the marker is consumed
-    # The stored contract is unchanged: the field is still a required, marked Hash.
-    stored = model.model_json_schema()
+    for node in nodes(sent):
+        if "properties" in node:
+            assert node["required"] == list(node["properties"])  # still strict-valid
+    assert "drop-prefilled" in strict.schema_relaxations(model)
+
+
+def test_the_stored_contracts_still_require_every_binding() -> None:
+    stored = SCHEMAS["financials"].model_json_schema()
     assert "context_step_sha256" in stored["required"]
-    assert stored["properties"]["context_step_sha256"][strict.PREFILLED_MARKER] is True
-    assert stored["properties"]["context_step_sha256"]["pattern"] == "^[0-9a-f]{64}$"
+    binding = stored["properties"]["context_step_sha256"]
+    assert binding[strict.PREFILLED_MARKER] == "context-step"
+    assert binding["pattern"] == HASH_PATTERN
+    citation = stored["$defs"]["Citation"]
+    assert "source_sha256" in citation["required"]
+    assert citation["properties"]["source_sha256"][strict.PREFILLED_MARKER] == "source"
 
 
-def test_drop_prefilled_is_named_for_financials_only_and_other_steps_carry_no_marker() -> None:
+def test_drop_prefilled_is_named_where_it_applied() -> None:
     assert strict.RELAXATIONS[-2:] == ("prefixed-enum", "drop-prefilled")
-    assert "drop-prefilled" in strict.schema_relaxations(SCHEMAS["financials"])
     assert "drop-prefilled" in strict.RELAXATIONS_BASIS
     assert strict.PREFILLED_MARKER in strict.RELAXATIONS_BASIS
-    for step in sorted(set(SCHEMAS) - {"financials"}):
+    for step in sorted(set(SCHEMAS) - set(CP1_STEPS)):
         assert "drop-prefilled" not in strict.schema_relaxations(SCHEMAS[step]), step
         # The rule rewrites marked nodes only, so with no marker these sent schemas are unchanged.
         assert strict.PREFILLED_MARKER not in json.dumps(SCHEMAS[step].model_json_schema()), step
@@ -899,7 +925,7 @@ def test_a_marked_property_is_dropped_with_its_required_entry_and_nothing_else()
         "type": "object",
         "properties": {
             "a": {"type": "string"},
-            "h": {"type": "string", "pattern": "^x$", strict.PREFILLED_MARKER: True},
+            "h": {"type": "string", "pattern": "^x$", strict.PREFILLED_MARKER: "kind"},
             "b": {"type": "integer"},
         },
         "required": ["a", "h", "b"],
@@ -919,16 +945,19 @@ def test_a_marked_property_is_dropped_with_its_required_entry_and_nothing_else()
 @pytest.mark.parametrize(
     "schema",
     [
-        {"type": "string", strict.PREFILLED_MARKER: True},
-        {"type": "array", "items": {"type": "string", strict.PREFILLED_MARKER: True}},
-        {"anyOf": [{"type": "string", strict.PREFILLED_MARKER: True}, {"type": "null"}]},
-        {"$defs": {"H": {"type": "string", strict.PREFILLED_MARKER: True}}},
-        {"properties": {"h": {"type": "string", strict.PREFILLED_MARKER: False}}},
+        {"type": "string", strict.PREFILLED_MARKER: "kind"},
+        {"type": "array", "items": {"type": "string", strict.PREFILLED_MARKER: "kind"}},
+        {"anyOf": [{"type": "string", strict.PREFILLED_MARKER: "kind"}, {"type": "null"}]},
+        {"$defs": {"H": {"type": "string", strict.PREFILLED_MARKER: "kind"}}},
+        {"properties": {"h": {"type": "string", strict.PREFILLED_MARKER: True}}},
+        {"properties": {"h": {"type": "string", strict.PREFILLED_MARKER: ""}}},
     ],
-    ids=["root", "array-item", "union-branch", "definition", "marker-not-true"],
+    ids=["root", "array-item", "union-branch", "definition", "marker-true", "marker-empty"],
 )
-def test_a_marker_that_is_not_on_an_object_property_fails_closed(schema: dict[str, Any]) -> None:
-    """Only a property can be left out (its object drops it); a marker anywhere else would reach
-    the provider, so nothing is sent for it."""
+def test_a_marker_that_is_not_a_kind_on_an_object_property_fails_closed(
+    schema: dict[str, Any],
+) -> None:
+    """Only a property can be left out (its object drops it), and only under a kind name that
+    `live.submission` resolves; a marker anywhere else would reach the provider."""
     with pytest.raises(ValueError, match="cannot be relaxed"):
         strict.relax(schema)
