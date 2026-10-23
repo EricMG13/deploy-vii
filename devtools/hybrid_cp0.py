@@ -781,7 +781,7 @@ def _summed(calls: Sequence[CallRecord], name: str) -> dict[str, object]:
     return {name: sum(values)}
 
 
-def draw_metrics(draw: Draw, cap: Decimal) -> dict[str, Any]:
+def draw_metrics(draw: Draw, harness: Harness) -> dict[str, Any]:
     tools = draw.tools
     settled = [c.settlement for c in draw.calls if c.settlement]
     cited = cited_locators(draw.final_payload) if draw.final_payload else set()
@@ -797,7 +797,8 @@ def draw_metrics(draw: Draw, cap: Decimal) -> dict[str, Any]:
         "per_call": [call.to_record() for call in draw.calls],
         "cost_settled_usd": sum((s.charged for s in settled if not s.unreconciled), Decimal(0)),
         "cost_held_usd": sum((s.charged for s in settled if s.unreconciled), Decimal(0)),
-        "batch_cap_usd": cap,
+        "batch_cap_usd": harness.ledger.cap,
+        "effort_sent": harness.effort_sent,
         "submits": draw.submits,
         "submit_shrinkage": shrinkage(draw.submits),
         "issue_classes": dict(
@@ -845,12 +846,13 @@ def run_batch(
                 draw.verdict, draw.verdict_reason = "stopped", stopped
         finally:  # also when an unexpected error propagates: the evidence is kept
             if draw.directory.exists():
-                _write(draw.directory / "metrics.json", draw_metrics(draw, harness.ledger.cap))
-    rows = [draw_metrics(draw, harness.ledger.cap) for draw in draws]
+                _write(draw.directory / "metrics.json", draw_metrics(draw, harness))
+    rows = [draw_metrics(draw, harness) for draw in draws]
     finished = [row for row in rows if row["calls"]]
     state = harness.ledger.state()
     summary = {
         "stopped": stopped,
+        "effort_sent": harness.effort_sent,
         "prior_committed": None
         if prior is None
         else {"total_usd": prior.total, "worst_case_adjusts": list(prior.worst_case_adjusts)},
@@ -915,6 +917,7 @@ def parser() -> argparse.ArgumentParser:
     )
     command.add_argument("--dry-run", action="store_true", help="plan only: no key, no call")
     command.add_argument("--cap", type=_money, default=DEFAULT_CAP, help="batch cap in USD")
+    command.add_argument("--effort", choices=("high", "medium"), default=EFFORT)
     command.add_argument("--draws-hybrid", type=int, default=DEFAULT_DRAWS)
     command.add_argument("--batch-id", default=BATCH_ID)
     command.add_argument("--pack", type=Path, default=PACK_DIRECTORY)
@@ -959,9 +962,8 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
     pack = load_pack(args.pack)
     try:
         catalog = Catalog.from_file(args.catalog) if args.catalog else Catalog.fetch(transport)
-        candidate = catalog.pin_selected(args.batch_id, (ModelSelection(MODEL, EFFORT),)).candidate(
-            MODEL
-        )
+        selection = (ModelSelection(MODEL, args.effort),)
+        candidate = catalog.pin_selected(args.batch_id, selection).candidate(MODEL)
     except CatalogError as error:
         print(f"refused: {error}", file=sys.stderr)
         return 2
@@ -971,7 +973,10 @@ def main(argv: Sequence[str] | None = None, *, transport: Transport = urllib_tra
             f"refused: {MODEL} ineligible: {candidate.exclusion_reason or lacking}", file=sys.stderr
         )
         return 2
-    effort = candidate.effort_for(EFFORT)
+    effort = candidate.effort_for(args.effort)
+    if effort.sent != args.effort:  # never measure an effort other than the one asked for
+        print(f"refused: effort {args.effort} would be sent as {effort.sent}", file=sys.stderr)
+        return 2
     first = ToolChatRequest(
         model=candidate.slug,
         messages=(),

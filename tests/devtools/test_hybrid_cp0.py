@@ -12,6 +12,7 @@ import pytest
 from deploy_vii.contracts import Span
 from deploy_vii.live.cli import committed_elsewhere
 from deploy_vii.live.client import ChatClient, Request, Response
+from deploy_vii.live.credential import LoadedKey
 from deploy_vii.live.ledger import Ledger, LedgerError, Reservation, Settlement
 from deploy_vii.live.prompts import _source_body, block, build
 from deploy_vii.live.submission import ReadinessSubmission, SubmittedCitation, rejection_issues
@@ -784,3 +785,74 @@ def test_shrinkage_is_not_flagged_without_a_drop_or_a_second_submit() -> None:
     assert hybrid.shrinkage(unreadable)["flag"] is None
     broken = [{"submit": 1, "counts": counts}, {"submit": 2, "counts": None}]
     assert hybrid.shrinkage(broken)["dropped"] == [{"submit": 2, "not_a_json_object": True}]
+
+
+# --- effort and batch identity -----------------------------------------------------------------
+
+
+def three_effort_catalog(tmp_path: Path) -> None:
+    row = catalog_row(
+        hybrid.MODEL, parameters=PARAMETERS, pricing=PRICING, efforts=("low", "medium", "high")
+    )
+    (tmp_path / "models.json").write_text(json.dumps({"data": [row]}), encoding="utf-8")
+
+
+def test_a_medium_batch_sends_medium_and_writes_only_its_own_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    three_effort_catalog(tmp_path)
+    # The key loader needs macOS textutil; the test supplies the fake key in memory instead.
+    monkeypatch.setattr(hybrid, "load_key_with_note", lambda *_: LoadedKey(FAKE_KEY, 1, 1))
+    transport = FakeTransport(reply(("s1", "submit_readiness", submission())))
+    extra = (
+        "--effort",
+        "medium",
+        "--batch-id",
+        "hybrid-cp0-2",
+        "--cap",
+        "3",
+        "--draws-hybrid",
+        "1",
+    )
+    argv = cli_args(tmp_path, *extra)
+    assert hybrid.main(argv, transport=transport) == 0
+    root = tmp_path / "root"
+    body = json.loads(transport.requests[0].body or b"{}")
+    assert body["reasoning"] == {"effort": "medium"}
+    plan = json.loads((root / "hybrid-cp0-2" / "plan.json").read_text())
+    assert plan["effort"]["requested"] == "medium" and plan["effort"]["sent"] == "medium"
+    metrics = json.loads((root / "hybrid-cp0-2" / "hybrid-1" / "metrics.json").read_text())
+    assert metrics["effort_sent"] == "medium" and metrics["verdict"] == "accepted"
+    summary = json.loads((root / "hybrid-cp0-2" / "batch-summary.json").read_text())
+    assert summary["effort_sent"] == "medium"
+    assert Ledger(root / ".ledgers" / "hybrid-cp0-2.jsonl", Decimal(3)).state().lines == 3
+    assert not (root / "hybrid-cp0-1").exists()
+    assert not (root / ".ledgers" / "hybrid-cp0-1.jsonl").exists()
+    assert json.loads(capsys.readouterr().out.split("\n}\n", 1)[0] + "\n}")["batch_id"] == (
+        "hybrid-cp0-2"
+    )
+
+
+def test_the_default_effort_is_still_high(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    three_effort_catalog(tmp_path)
+    assert hybrid.main(cli_args(tmp_path, "--dry-run"), transport=unexpected_send) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["effort"]["requested"] == "high" and plan["effort"]["sent"] == "high"
+
+
+def test_an_effort_the_catalog_would_map_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The default fixture row lists only high and low: medium would be sent as low.
+    argv = cli_args(tmp_path, "--dry-run", "--effort", "medium")
+    assert hybrid.main(argv, transport=unexpected_send) == 2
+    assert "refused: effort medium would be sent as low" in capsys.readouterr().err
+
+
+def test_only_high_and_medium_are_offered() -> None:
+    assert hybrid.parser().parse_args([]).effort == "high"
+    assert hybrid.parser().parse_args(["--effort", "medium"]).effort == "medium"
+    with pytest.raises(SystemExit):
+        hybrid.parser().parse_args(["--effort", "low"])
