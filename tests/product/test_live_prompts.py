@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import pytest
 
-from deploy_vii.business_context import BusinessContextSubmission, cp1a_consumers
+from deploy_vii.business_context import BusinessContextSubmission, Conflict, cp1a_consumers
 from deploy_vii.canonical_tables import CanonicalTables
 from deploy_vii.contracts import Fact
 from deploy_vii.cp1_quality import cp1_quality_inputs
@@ -39,6 +39,7 @@ from deploy_vii.live.context import (
     NARRATIVE_EVIDENCE,
     evidence_table,
     step_sources,
+    upstream_text,
 )
 from deploy_vii.live.schema import strict_schema, unverified_keywords
 from deploy_vii.live.submission import (
@@ -64,7 +65,13 @@ from deploy_vii.narrative import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
-from deploy_vii.quality import CoverageField, EvidenceCeiling, QualityInputs, QualityReview
+from deploy_vii.quality import (
+    CoverageField,
+    EvidenceCeiling,
+    QualityInputs,
+    QualityReview,
+    assess_quality,
+)
 from deploy_vii.readiness import live_consumers, validate_review
 from deploy_vii.registry import modules
 from deploy_vii.statement_validation import (
@@ -844,6 +851,7 @@ NARRATIVE_RULES = (
     prompts.NARRATIVE_COVERAGE_RULE,
     prompts.NARRATIVE_FUNDING_RULE,
     prompts.NARRATIVE_STORIES_RULE,
+    prompts.NARRATIVE_FIGURES_RULE,
 )
 READINESS_RULES = (
     prompts.REVIEW_PROSE_RULE,
@@ -862,9 +870,9 @@ def test_the_review_steps_letter_their_rules_and_state_each_once(
 ) -> None:
     contract = prompts.STEP_CONTRACTS[step_id]
     lettered = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
-    assert lettered == ["a. ", "b. ", "c. ", "d. ", "e. "]
+    assert lettered == [f"{letter}. " for letter in "abcdef"[: len(rules)]]
     system = composed(step_id)
-    for letter, rule in zip("abcde", rules, strict=True):
+    for letter, rule in zip("abcdef"[: len(rules)], rules, strict=True):
         assert f"{letter}. {rule}" in contract
         assert system.count(rule) == 1, rule
     own_only = [r for r in rules if r is not prompts.REVIEW_PROSE_RULE]
@@ -932,7 +940,7 @@ def test_the_parts_rule_matches_the_issues_the_validator_raises() -> None:
         '{"kind":"prose","text":…}',
         '{"kind":"evidence","evidence_id":…}',
         '{"kind":"issuer"}',
-        "Never add a part as a separator",
+        "A part holding only punctuation or whitespace is a separator and is forbidden",
         "at least one evidence part",
         "at least one issuer part",
         "at least one prose part",
@@ -1331,5 +1339,250 @@ def test_the_readiness_table_carries_the_columns_its_rules_refer_to() -> None:
 
 
 def test_the_rules_of_both_review_steps_stay_inside_their_budget() -> None:
-    assert sum(len(rule) for rule in NARRATIVE_RULES) < 4000  # characters, about 1,000 tokens
-    assert sum(len(rule) for rule in READINESS_RULES) < 3200  # characters, about 800 tokens
+    assert sum(len(rule) for rule in NARRATIVE_RULES) < 5400  # characters, about 1,350 tokens
+    assert sum(len(rule) for rule in READINESS_RULES) < 4000  # characters, about 1,000 tokens
+
+
+# --- 7.9: wording the first full proxy chain (batch e1-cp1-7) had to guess ---------------------
+# Each sentence states a validator or contract fact once; the tests hold it to the code.
+
+
+@cache
+def retained_texts() -> dict[str, str]:
+    """The retained step outputs of the synthetic CP-1 case, by step id (built once)."""
+    from tests.product.test_cp1_workflow import staged
+    from tests.product.test_execution import step_text
+
+    with tempfile.TemporaryDirectory() as directory:
+        store, attempt = staged(Path(directory))
+        return {step.step_id: step_text(store, step) for step in attempt.steps}
+
+
+def stated_once(step_id: str, *phrases: str) -> None:
+    system = composed(step_id)
+    for phrase in phrases:
+        assert system.count(phrase) == 1, (step_id, phrase)
+    for other in {"narrative", "readiness", "quality", "business_context"} - {step_id}:
+        assert not [p for p in phrases if p in composed(other)], (step_id, other)
+
+
+def test_the_funding_rule_names_the_intent_the_validator_message_only_hints_at() -> None:
+    stated_once(
+        "narrative",
+        "A material row is a non-debt liability detail line",
+        "An equity row, an asset row or `other:long_term_debt` is not a material funding item: "
+        "the validator admits such a row, the review must not name it.",
+        "Each period's row is its own evidence id, so list the periods you will tell: "
+        "a story is required for every id in `material_statement_ids` and for no "
+        "unlisted id.",
+    )
+    # The validator admits a detail row under any `other:` id, whatever it is a row of ...
+    value = book().model_copy(
+        update={
+            "statement_lines": (
+                bs_line("ltd", "other:long_term_debt", "20", 1, statement="BS"),
+                bs_line("deposits", "other:customer_deposits", "30", 2, statement="BS"),
+            )
+        }
+    )
+    args = case(value)
+    inputs = narrative_inputs(*args)
+    ltd, deposits = (
+        next(
+            r.evidence_id
+            for r in inputs.catalogue
+            if r.kind == "statement_BS" and f'"item_id":"other:{name}"' in r.record_json
+        )
+        for name in ("long_term_debt", "customer_deposits")
+    )
+    both = with_funding(populated(inputs), (ltd, deposits), (ltd,))
+    assert validate_narrative_review(inputs, both) == ()
+    # ... and requires a story for exactly the ids listed as material, none for the others.
+    assert canonical_narrative(*args, both).required_story_ids == (ltd,)
+
+
+def test_the_parts_rule_states_separators_and_issuer_rendering_as_python_does_them() -> None:
+    stated_once(
+        "narrative",
+        "A part holding only punctuation or whitespace is a separator and is forbidden "
+        "(the validator rejects whitespace but admits a lone `.`, so this is the contract's "
+        "rule, not the validator's).",
+        "Put the spaces and sentence punctuation around an evidence part in the neighbouring "
+        "prose part: the parts are joined with nothing added between them.",
+        "An issuer part is replaced in place by the issuer's name, with no possessive or plural "
+        "(`For <issuer>, …`).",
+    )
+    from deploy_vii.narrative_projection import _passage
+
+    with pytest.raises(ValueError):
+        ProsePart(text=" ")
+    assert ProsePart(text=".").text == "."  # admitted by the validator; forbidden by the contract
+    record = next(r for r in base_inputs().catalogue if r.kind == "kpi")
+    text, _ = _passage(
+        (
+            ProsePart(text="For "),
+            IssuerPart(),
+            ProsePart(text=", liquidity is shown by "),
+            EvidencePart(evidence_id=record.evidence_id),
+            ProsePart(text="."),
+        ),
+        "Acme Corp",
+        {record.evidence_id: record},
+        {},
+        {record.evidence_id: "E1"},
+        "t",
+    )
+    assert text == "For Acme Corp, liquidity is shown by [E1]."
+
+
+def test_the_figures_rule_is_a_lettered_narrative_rule_true_to_prose_and_the_context() -> None:
+    assert f"f. {prompts.NARRATIVE_FIGURES_RULE}" in prompts.STEP_CONTRACTS["narrative"]
+    stated_once(
+        "narrative",
+        "The `model_metrics` lines carry no evidence_id, so no evidence part can name one; a "
+        "passage may say in prose that they are absent and no more.",
+        "A directional comparison of two cited figures (`exceeds`, `rose from` one evidence "
+        "part `to` another) is allowed.",
+        "A share, ratio or difference you work out is a figure Python did not compute: never "
+        "write it, in digits or in words.",
+        "As to figures the validator rejects only a digit outside a label",
+    )
+    # The context: model_metrics rows start with the metric key and carry no evidence id.
+    text = upstream_text("narrative", "financials", retained_texts()["financials"])
+    lines = text.split("\n")
+    start = next(i for i, line in enumerate(lines) if line.startswith("model_metrics: entries="))
+    end = next(i for i, line in enumerate(lines) if line.startswith("model_limitations:"))
+    assert end > start + 1
+    assert all("narrative-evidence:" not in line for line in lines[start:end])
+    # prose.check: a directional comparison passes; a derived digit and a spelt-out range fail.
+    assert ProsePart(text=", which exceeds ").text
+    for bad in ("a 12% share", "Items 10 to 14", "up 3 points"):
+        with pytest.raises(ValueError):
+            ProsePart(text=bad)
+
+
+def test_the_readiness_rules_state_the_sufficiency_request_gap_scoping_and_unlabelled_lines() -> (
+    None
+):
+    from deploy_vii.downstream_readiness import _requests
+
+    key = "consumer_specific_cp1_sufficiency"
+    requests = _requests(("CP-1A", "CP-6"))
+    assert [(r.requirements, r.policy) for r in requests] == [
+        ((key,), "consumer_specific_review")
+    ] * 2
+    assert key not in _EVIDENCE_GROUPS
+    stated_once(
+        "readiness",
+        "A consumer whose `policy` is `consumer_specific_review` (for example CP-1A or CP-6) has "
+        "the one requirement `consumer_specific_cp1_sufficiency`: judge whether the cited CP-1 "
+        "evidence suffices for that consumer's own use; it has no group, so one cited line that "
+        "carries a tag and is not a `kind=gap` line is enough for `limited` or `sufficient`.",
+        "A `kind=computation` line has no label (its columns are `operation`, `amount` and "
+        "`status`): recognise one only by an `amount` equal to a dashboard KPI's.",
+        "A gap left out of every scope keeps that consumer `not_ready` (its action reads "
+        '"Assess all retained gaps for this consumer"). The completion budget does not cover '
+        "every gap of every consumer, so scope those that matter to each consumer by class: "
+        "the `BLOCK` gaps first, then the gaps matched to that consumer's metrics. One scope "
+        "may list many gap_ids.",
+    )
+    assert KINDS["computation"][0] == ("operation", "amount", "status")
+    # A tagged, non-gap line is enough for the one request (the validator's no-group branch).
+    inputs = readiness_case(("CP-1A",))
+    tagged = next(
+        r.evidence_id for r in inputs.narrative.inputs.catalogue if r.kind == "source_period"
+    )
+    _, issues = review_of(
+        inputs,
+        ConsumerAssessment(
+            entry="CP-1A", requirements=(requirement(key, "sufficient", (tagged,)),)
+        ),
+    )
+    assert issues == ()
+
+
+def test_an_unscoped_gap_keeps_the_consumer_not_ready_whatever_else_is_assessed() -> None:
+    from deploy_vii.downstream_readiness import _assess_consumers
+
+    inputs = readiness_case(("CP-1A",))
+    key = "consumer_specific_cp1_sufficiency"
+    kpi = next(r.evidence_id for r in inputs.narrative.inputs.catalogue if r.kind == "kpi")
+    review, issues = review_of(
+        inputs,
+        ConsumerAssessment(entry="CP-1A", requirements=(requirement(key, "sufficient", (kpi,)),)),
+    )
+    assert issues == ()
+    (row,) = _assess_consumers(inputs, review)
+    assert row.unassessed_gap_ids and row.status == "not_ready"
+    assert "Assess all retained gaps for this consumer" in row.actions
+
+
+def test_the_quality_findings_rule_says_the_module_status_is_not_a_defect_to_record() -> None:
+    stated_once(
+        "quality",
+        "Add no finding for the CONTEXT block's `module_status` or `source_gate`: Python "
+        "already sets the QA status from them (`blocked` or a failed gate forces Blocked), so "
+        "the inputs carry them.",
+    )
+    inputs = QualityInputs(
+        artifact_sha256="a" * 64,
+        coverage_policy="p",
+        claims=(),
+        coverage=(CoverageField(field_id="f", present=True, rationale="Synthetic slot"),),
+        source_gate="pass",
+        module_status="blocked",
+        references=(),
+        ceilings=(),
+    )
+    report = assess_quality(
+        inputs, QualityReview(inputs_sha256=inputs.content_hash(), claims=(), findings=())
+    )
+    assert report.confidence.qa_status == "Blocked" and report.findings == ()
+
+
+def test_the_cp1a_rules_state_the_label_forms_conflicts_and_behaviour_flags() -> None:
+    from tests.product.test_business_context import (
+        QUOTE,
+        changed,
+        governance,
+        issues_of,
+        submission_fixture,
+    )
+
+    stated_once(
+        "business_context",
+        "A range or list of items uses a joiner the validator admits: `Items 10-14`, "
+        "`Items 7, 7A`, `Items 7/7A` or `Items 7 and 8`; a range written with the word `to` "
+        "is read as a bare figure and rejected.",
+        "A source that contradicts itself is one `conflicts` entry quoting both spans: the "
+        "validator needs two citations, not two sources.",
+        "When no behaviour type fits, set `behaviour_type` to `other` and still set "
+        "`dimension`; a type you chose by reading rather than the source naming it is an "
+        "Analyst Interpretation row.",
+    )
+    for good in ("Items 10-14", "Items 7, 7A", "Items 7/7A", "Items 7 and 8"):
+        assert bare_figures(good) == (), good
+    assert bare_figures("Items 10 to 14") == ("14",)
+    # Both spans of one source are a valid conflict (the validator counts citations).
+    base = submission_fixture()
+    twin = QUOTE.model_copy(update={"quote": "cash"})
+    assert twin.source_id == QUOTE.source_id
+    one_source = Conflict(
+        conflict_id="self-contradiction",
+        conflict="One source gives two descriptions of cash",
+        materiality="Minor",
+        downstream_impact="CP-1 keeps both descriptions",
+        citations=(QUOTE, twin),
+    )
+    assert issues_of(changed(base, conflicts=(one_source,))) == ()
+    # `other` with a dimension and the Analyst Interpretation tag is accepted.
+    flag = base.governance_and_sponsor[1].model_copy(
+        update={
+            "behaviour_type": "other",
+            "dimension": "Disclosure transparency",
+            "category": "Analyst Interpretation",
+            "citations": (QUOTE,),
+        }
+    )
+    assert flag.kind == "behaviour_flag"
+    assert issues_of(changed(base, governance_and_sponsor=(governance(), flag))) == ()

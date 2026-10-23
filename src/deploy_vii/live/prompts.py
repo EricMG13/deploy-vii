@@ -193,7 +193,10 @@ CP1A_RUN_TEXT_RULE = (
     "and section labels (`10-K`, `Item 7A`, `page:12`) and the issuer's name. A figure is "
     "written only as `{ref|unit}` with a `ref` and `unit` listed under `cp1_facts` in the "
     "CONTEXT block; with no `cp1_facts`, write no figure at all. Never a bare number, never a "
-    "`[ref]` chip; a figure belongs in a citation's quote, not in the text."
+    "`[ref]` chip; a figure belongs in a citation's quote, not in the text. "
+    "A range or list of items uses a joiner the validator admits: `Items 10-14`, "
+    "`Items 7, 7A`, `Items 7/7A` or `Items 7 and 8`; a range written with the word `to` "
+    "is read as a bare figure and rejected."
 )
 CP1A_CATEGORY_RULE = (
     "Every fact row carries one `category`: Documentary Fact, Management Language or Analyst "
@@ -208,7 +211,9 @@ CP1A_EVIDENCE_RULES = (
 )
 CP1A_CONFLICT_RULE = (
     "`conflicts`: when sources disagree, one entry quotes each conflicting span (at least two "
-    "citations); it is logged, not reconciled. A `conflict_id` is letters with `_` `.` `:` or "
+    "citations); it is logged, not reconciled. A source that contradicts itself is one "
+    "`conflicts` entry quoting both spans: the validator needs two citations, not two sources. "
+    "A `conflict_id` is letters with `_` `.` `:` or "
     "`-`; a credit translation's `countervailing_conflict_ids` name logged conflicts only."
 )
 CP1A_PROHIBITED_RULE = (
@@ -228,7 +233,9 @@ CP1A_CONSUMER_RULE = (
 CP1A_ROW_RULES = (
     "`company` states business_description, country and sector once each. A behaviour flag "
     "states `behaviour_type`, `amount_funding_source` and `legal_capacity_link`; a governance "
-    "topic leaves them null and is never Extraction-Oriented. An operating driver's `measure` "
+    "topic leaves them null and is never Extraction-Oriented. When no behaviour type fits, set "
+    "`behaviour_type` to `other` and still set `dimension`; a type you chose by reading rather "
+    "than the source naming it is an Analyst Interpretation row. An operating driver's `measure` "
     "is null exactly when its status is Not disclosed. At least one credit translation "
     "populates evidence, risk mechanic and credit implication."
 )
@@ -257,7 +264,10 @@ QUALITY_FINDINGS_RULE = (
     "(letters, digits and `_` `.` `:` `-`; never one of `inherited_findings`), a `severity` "
     "(CRITICAL, MATERIAL or MINOR), a `status` that is open unless the CONTEXT block shows the "
     "defect resolved (any other status needs its `resolution`), a `description`, and "
-    "`references` that name only evidence ids or coverage `field_id`s listed in the CONTEXT block."
+    "`references` that name only evidence ids or coverage `field_id`s listed in the CONTEXT block. "
+    "Add no finding for the CONTEXT block's `module_status` or `source_gate`: Python "
+    "already sets the QA status from them (`blocked` or a failed gate forces Blocked), so "
+    "the inputs carry them."
 )
 # Fix round 1 (coordinator ruling): a Blocked QA verdict is an analytical outcome, so a repair
 # prompt is no reason to soften the findings that produced it.
@@ -290,7 +300,12 @@ NARRATIVE_PARTS_RULE = (
     "A passage (`evidence`, `risk_mechanic`, `credit_implication`, a `rationale`) is an array of "
     '1 to 100 parts: {"kind":"prose","text":…}, {"kind":"evidence","evidence_id":…} naming one '
     'evidence_id from the evidence table, or {"kind":"issuer"} (the issuer, bound explicitly). '
-    "Never add a part as a separator or spacer. Each finding's `finding_id` is unique; its "
+    "A part holding only punctuation or whitespace is a separator and is forbidden "
+    "(the validator rejects whitespace but admits a lone `.`, so this is the contract's "
+    "rule, not the validator's). Put the spaces and sentence punctuation around an evidence "
+    "part in the neighbouring prose part: the parts are joined with nothing added between "
+    "them. An issuer part is replaced in place by the issuer's name, with no possessive or "
+    "plural (`For <issuer>, …`). Each finding's `finding_id` is unique; its "
     "`evidence` passage holds at least one evidence part, its `risk_mechanic` and its "
     "`credit_implication` each at least one prose part, and at least one issuer part appears "
     "among its three passages. Every evidence_id you name, anywhere, is in the evidence table."
@@ -311,10 +326,15 @@ NARRATIVE_FUNDING_RULE = (
     "`funding`: `reviewed_statement_ids` and `material_statement_ids` name only evidence ids of "
     "`kind=statement_BS` whose `line_id` column is not null (a definition, KPI or any other kind "
     "is not admitted), each id once, and every material id is also reviewed; review every such "
-    "row, or the narrative records a coverage gap. A material row's `line_kind` is `detail` and "
+    "row, or the narrative records a coverage gap. A material row is a non-debt liability "
+    "detail line: its `line_kind` is `detail` and "
     "its `item_id` is outside the standard balance-sheet items ("
     + _ticked((*REQUIRED_ITEMS["BS"], *OPTIONAL_ITEMS["BS"]))
-    + "), so it carries an `other:` id. `status` is `material_items` exactly when "
+    + "), so it carries an `other:` id. An equity row, an asset row or `other:long_term_debt` "
+    "is not a material funding item: the validator admits such a row, the review must not "
+    "name it. Each period's row is its own evidence id, so list the periods you will tell: "
+    "a story is required for every id in `material_statement_ids` and for no "
+    "unlisted id. `status` is `material_items` exactly when "
     "`material_statement_ids` is non-empty; any status but `unassessed` needs a non-empty "
     "`reviewed_statement_ids`; its `rationale` holds a prose part."
 )
@@ -326,6 +346,15 @@ NARRATIVE_STORIES_RULE = (
     "id, whose `finding_ids` are distinct findings whose `evidence` passage cites that same "
     "evidence id. A required id without a story blocks the narrative, so write one for each; "
     "with none required, `stories` is an empty array."
+)
+NARRATIVE_FIGURES_RULE = (
+    "The `model_metrics` lines carry no evidence_id, so no evidence part can name one; a "
+    "passage may say in prose that they are absent and no more. A directional comparison of "
+    "two cited figures (`exceeds`, `rose from` one evidence part `to` another) is allowed. A "
+    "share, ratio or difference you work out is a figure Python did not compute: never "
+    "write it, in digits or in words. As to figures the validator rejects only a digit outside a "
+    'label (an unlabelled digit fails; a phrase such as "about half" does not), so the '
+    "rule against arithmetic is yours to keep."
 )
 READINESS_CONSUMERS_RULE = (
     "`consumers`: one assessment for each `entry` on the `consumers` lines (the requested "
@@ -352,7 +381,13 @@ READINESS_EVIDENCE_RULE = (
     "at all. For the keys below, the cited lines together must carry at least one tag from every "
     "group (groups are separated by `;`, the alternatives within a group by `|`):\n"
     + _evidence_groups()
-    + "\nFor any other key, at least one cited line must carry a tag and not be a `kind=gap` line."
+    + "\nFor any other key, at least one cited line must carry a tag and not be a `kind=gap` line. "
+    "A consumer whose `policy` is `consumer_specific_review` (for example CP-1A or CP-6) has "
+    "the one requirement `consumer_specific_cp1_sufficiency`: judge whether the cited CP-1 "
+    "evidence suffices for that consumer's own use; it has no group, so one cited line that "
+    "carries a tag and is not a `kind=gap` line is enough for `limited` or `sufficient`. "
+    "A `kind=computation` line has no label (its columns are `operation`, `amount` and "
+    "`status`): recognise one only by an `amount` equal to a dashboard KPI's."
 )
 READINESS_STATUS_RULE = (
     "A requirement whose status is not `sufficient` needs at least one `actions` entry. "
@@ -365,7 +400,12 @@ READINESS_GAPS_RULE = (
     "its `gap_id`), and no gap_id is in two scopes of one consumer; a gap left out stays "
     "unassessed. Its `evidence_ids` are distinct evidence_ids from the evidence table. "
     "`not_relevant` needs at least one evidence id and is never given to a gap whose `severity` "
-    "is `BLOCK` and whose `origin` is `context_binding` or `context`."
+    "is `BLOCK` and whose `origin` is `context_binding` or `context`. "
+    "A gap left out of every scope keeps that consumer `not_ready` (its action reads "
+    '"Assess all retained gaps for this consumer"). The completion budget does not cover '
+    "every gap of every consumer, so scope those that matter to each consumer by class: "
+    "the `BLOCK` gaps first, then the gaps matched to that consumer's metrics. One scope "
+    "may list many gap_ids."
 )
 
 STEP_CONTRACTS: Mapping[str, str] = {
@@ -430,7 +470,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"b. {NARRATIVE_PARTS_RULE}\n"
         f"c. {NARRATIVE_COVERAGE_RULE}\n"
         f"d. {NARRATIVE_FUNDING_RULE}\n"
-        f"e. {NARRATIVE_STORIES_RULE}"
+        f"e. {NARRATIVE_STORIES_RULE}\n"
+        f"f. {NARRATIVE_FIGURES_RULE}"
     ),
     "readiness": (
         "Review downstream readiness from the supplied inputs only. The SOURCE block "

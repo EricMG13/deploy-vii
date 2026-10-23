@@ -382,3 +382,11 @@ Not verified: proxy uptake (the next proxy narrative and readiness runs); the re
 Evidence: E1 batch e1-cp1-7 (DC-8 proxy cohort, 23 October 2026), ticket c5d7cc31: `source_context`, `financials`, `narrative` and `readiness` accepted, then `quality` rejected by Python in `_sections` on the segmented Caesars book; offline, a segmented synthetic book now writes, verifies and fills the `canonical-handoff` slot.
 
 Not verified: the real-pack re-run of the `quality` step (the coordinator repairs attempt c5d7cc31's input set on e1-cp1-7); on that pack QA is expected to stay Blocked (narrative `blocked`), an analytical outcome this task does not change.
+
+## 7.9 Prompt refinements from the first full proxy chain
+
+Fourteen of the fifteen wording items are stated once in the step contracts, each true to the code it names and held to it by a test: `narrative` (funding rows are non-debt liability detail lines; the story requirement follows the listed material ids; separator parts, part joining and issuer rendering; `model_metrics` carry no evidence id and comparisons are directional only), `readiness` (the `consumer_specific_cp1_sufficiency` request, unlabelled computation lines, unscoped gaps keep a consumer `not_ready`), `quality` (the module status and source gate are not findings), and `business_context` (item-range joiners, a single-source conflict, the `other` behaviour type). Item 3 (located rows) was already stated by 7.6; item 15 (a `Pending` event versus a subsequent event) was dropped because neither the contract nor the validator defines the distinction. No validator, contract, projection or hash change (decision 0005). The narrative rules grew from 3,724 to 5,037 characters and the readiness rules from 2,996 to 3,850.
+
+Evidence: E1 batch e1-cp1-7 (DC-8 proxy cohort, 23 October 2026).
+
+Not verified: live or proxy uptake of the new wording; whether the grown narrative and readiness prompts change completion-budget use on the real pack.

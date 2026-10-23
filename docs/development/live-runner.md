@@ -786,6 +786,22 @@ funding rows), and for readiness the consumer and requirement keys, the evidence
 gap-scope rules. Prompt text only; the evidence table already carried every column the rules
 name (no projection change); no validator or contract change.
 
+Task 7.9 (E1 batch `e1-cp1-7`, DC-8 proxy cohort): each analyst step was accepted once its rules were
+stated, but the analysts had resolved some wording by guessing, so the contracts now also say, once
+each and true to the code: for `narrative` that a material funding row is a non-debt liability
+detail line (the validator admits equity, asset and `other:long_term_debt` rows; the review must
+not name them) and that a story is required for each listed material id and no unlisted one, that
+a separator part is the contract's rule (the validator rejects whitespace, not a lone `.`), that
+parts are joined with nothing between them and an issuer part renders as the issuer's name in
+place, and a new rule f (`model_metrics` lines carry no evidence id; directional comparisons of
+cited figures only); for `readiness` the single `consumer_specific_cp1_sufficiency` request of a
+`consumer_specific_review` consumer, the unlabelled `computation` line, and that an unscoped gap
+keeps a consumer `not_ready` (scope by class within the completion budget); for `quality` that
+`module_status` and `source_gate` are not defects to record; for `business_context` the item-range
+joiners `prose` admits, a single-source self-contradiction as one conflict with two citations, and
+the `other` behaviour type with its `dimension`. Prompt text only; no validator, contract,
+projection or hash change.
+
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:
 - `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;
