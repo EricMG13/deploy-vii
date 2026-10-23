@@ -79,18 +79,28 @@ authorize starting implementation or live tests.
   re-validation input. The other two costs are fixed by design: the validated copy of
   the envelope (about 0.18 GB with its input) and the returned sidecar str (about
   0.13 GB).
-- **Candidate** (measured, then reverted): hash the module and the registers from
-  `__pydantic_serializer__.to_json()` bytes, which are the bytes `content_hash()`
-  hashes, and validate from those bytes. It was byte-identical: 309 distinct
-  write/read/register inputs across 15 envelope test files and the replay corpus gave
-  the same outputs, refusal texts and issues. The `write_envelope` delta fell to 0.393
-  to 0.399 GB, a 25 % cut, below the brief's 30 % threshold. Ordering the sidecar dump
-  first had no effect.
-- **Outcome: no change.** Both fixed costs stay because they are the re-validation
-  trust boundary and the `(str, str)` API. Next action, for the coordinator to decide:
-  adopt the candidate on its other measured benefits. It takes the pipeline peak from
-  1.34 to 0.98 GB, the `register_envelope` delta from about 0.27 to 0.03 to 0.05 GB, and
-  the round-trip test process from 1.52 to 1.04 GB.
+- **Change (adopted, coordinator ruling, 23 October 2026).** The envelope writer
+  hashes the module and the registers from `__pydantic_serializer__.to_json()` bytes,
+  which are the bytes `content_hash()` hashes, and re-validates from those bytes.
+  Ordering the sidecar dump first had no effect and was dropped.
+- **Equivalence.** The change is byte-identical. 309 distinct write/read/register
+  inputs across 15 envelope test files and the replay corpus gave the same outputs,
+  refusal texts and issues. Tests pin `_content_hash` to `content_hash()` for the
+  synthetic case and for every envelope and register set the corpus replays.
+- **Comparison** (three stage runs each; two runs of the round-trip test process):
+  - `write_envelope` delta: 0.525 to 0.528 GB before, 0.393 to 0.399 GB after (-25 %).
+  - Pipeline peak: 1.34 GB before, 0.98 GB after (-27 %).
+  - `register_envelope` delta: about 0.27 GB before, 0.03 to 0.05 GB after.
+  - Round-trip test process: 1.52 GB before, 1.04 GB after (-31 %).
+  - tracemalloc peak bounds, with 25 % headroom, guard `register_envelope` (63.3 MB)
+    and `write_envelope` (382.2 MB). Only the first bound fails on the old code.
+- **Not kept: one session-scoped staging** (`conftest.py`) for the read-only fixtures.
+  Serial `test_envelope.py` plus `test_cp1_workflow.py` peaked at 3.74 and 4.03 GB with it
+  and at 3.77, 3.89 and 4.01 GB without it, after the change above (4.41 GB at base). Staging
+  reuses freed memory, so the peak comes from single heavy tests: the promotion test
+  adds 2.0 GB in one call. A shared staging does not move that.
+- **Kept fixed by design.** The re-validated copy (the trust boundary) and the
+  returned sidecar str (the `(str, str)` API).
 - **Uncertainty.** No Linux figure; no real pack (absent).
 
 Not verified: sweep duration, performance gain or maintained equivalence on real
