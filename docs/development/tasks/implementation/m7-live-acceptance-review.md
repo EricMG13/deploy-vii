@@ -398,3 +398,27 @@ Thirteen of the fifteen wording items are stated once in the step contracts, eac
 Evidence: E1 batch e1-cp1-7 (DC-8 proxy cohort, 23 October 2026).
 
 Not verified: live or proxy uptake of the new wording; whether the grown narrative and readiness prompts change completion-budget use on the real pack.
+
+## 7.10 Review follow-ups (fix and docs batch)
+
+Closed, one line per item (analytical meaning unchanged, decision 0005; no validator, scoring or promotion-rule change):
+
+1. The QA Blocked verdict has one source: `cp1_workflow.qa_blocked_issue` builds it and `is_qa_blocked` checks it (the bands from `quality.Band`); `cli.qa_blocked_only` uses that check, and a test round-trips a Blocked review's verdict.
+2. `qa_blocked_only(step_id, issues)` applies to a `quality` rejection only; the same text on any other step is an ordinary rejection that takes the module repair.
+3. `quality_scope(registers, inputs)` keeps its second argument (the runner also records the inputs' hash in the manifest, so it computes them once); a test asserts the scope with held inputs equals the computed one.
+4. The replay corpus records and replays `quality` attempts: the entry holds the four stages as `upstream` and replays through the promotion; two synthetic entries (`synthetic-cp1-quality-accepted`, `synthetic-cp1-quality-qa-blocked`) join the corpus.
+5. `write_cp1_envelope` renders the handoff envelope again (the retained candidate, checked against `candidate_sha256`) and requires the `quality` step's recorded Markdown and sidecar hashes before writing; a mismatch raises naming both hashes. The exported files themselves carry the settled status, so they never hash as the handoff did; the check is on the handoff rendering.
+6. A segmented book promotes and exports with `segment-allocation` in Module Handoff (no source change). `segmented_book()` discloses a `partial` schedule, whose BLOCK gaps make QA Blocked, so the test uses the same book with a complete schedule.
+7. The manifest of an in-flight-refused 402 attempt that a re-send follows records `retries.exhausted: false`; the re-send keeps the real value (tested on the last allowed try).
+8. Stored reply bodies (`response.json`) have every `user_id` value replaced by `"<redacted>"` in place, the key and every other byte kept; `body_sha256` and `body_bytes` describe the stored bytes, and `response.json` and the manifest carry `body_redactions: ["user_id"]`. A JSON body whose account id the in-place match cannot reach is withheld whole. DC-7 is unchanged.
+9. `plan.md`: the M7 lane state and the 6.4 real-pack measurements (prompt sizes, render timing, r14 statuses of the first full chain).
+10. Decision 0005: two methodology candidates recorded, not adopted (readiness gap scoping; BLOCK-gap extraction).
+11. `frontend-direction-c.md`: prose cells of the Front Page company panel render in monospace, recorded for the design pass.
+12. `live-runner.md`: `steps run` counts an in-flight-refused attempt, which is no model try.
+13. This section.
+14. Withdrawn (24 Oct 2026): the user kept Sol's pooled effort at `high`; nothing changed.
+15. A pre-existing `prose` defect, found by the property test `test_any_digit_outside_labels_and_references_is_rejected` (Hypothesis counterexample `1900%`): a year-shaped number followed by `%` passed as a year label. A bare year is now a detached token, so `1900%`, `2025%` and `1950%` are bare figures, as `1900x` and `1900bn` already were; `FY2025`, `2025` and the other labels are unchanged. Present since M6 (2e5a050).
+
+Deferred: the `FinancialSubmission` split (decision 0008); turning `WITHIN_ATTEMPT_REPAIR` into a `repairable` argument; reducing the 7.4 QA scope, which inlines `record_json` (270 KB on the real pack, inside budget, not reduced).
+
+Not verified: real-pack replay (the corpus replays CP-1 entries on the synthetic pack only); a live stored body through the real transport.

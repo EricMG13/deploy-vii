@@ -48,6 +48,15 @@ gain.
 | MC-9 | Accepted artifacts are reused when scope extends; only invalidated consumers rerun | execution | performance; cost | M9 |
 | MC-10 | Each module prompt carries only its declared inputs; prompt and token budgets come from measured external data, not inherited caps | packaging | performance | M2.6 onward |
 
+**Candidates, recorded and not adopted (M7 task 7.10, 24 Oct 2026).** Found on the real
+Caesars pack (proxy journal e1-cp1-7). The owner decides; nothing changes in code, and each
+needs its own decision (and a `docs/methodology-adaptation.md` row) before adoption.
+
+| ID | Observation | Options | Class | Status |
+| --- | --- | --- | --- | --- |
+| Candidate 7.10a: readiness gap scoping | An unscoped gap marks every consumer `not_ready`. Scoping all 1,251 gaps for 6 consumers is about 7,500 hex ids (about 560 KB), more than any 128k-token completion holds, so a model cannot reach `ready` on this pack through this route | gap scopes by gap class, resolved by Python; or Python pre-scoping with model confirmation (a contract change) | execution (contract change) | candidate, not adopted |
+| Candidate 7.10b: BLOCK-gap extraction | A `degraded` extraction yields 160 BLOCK gaps, which block the narrative and therefore QA whatever the analyst judges; CP-1 cannot be promoted on such a pack | improve the extraction; or change the BLOCK-gap methodology | analytical semantics (gap methodology) | candidate, not adopted |
+
 ## B. Regular internal and external testing
 
 **Internal.** No model calls or credentials. Runs locally; CI runs I1 and I2 once hosted

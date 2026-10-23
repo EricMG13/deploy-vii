@@ -355,6 +355,16 @@ measurements are recorded.
   (r14 ordered sections, `null` retained in the transport only), handoff verification
   and the reader. Promote CP-1 under the M4 status rules and the decision 0008 contract
   shape.
+  Measured on the real Caesars pack (proxy journal e1-cp1-7, 23 Oct 2026, coordinator's
+  ledger):
+  - prompt sizes: `source_context` about 840 KB of pack sources; `financials` about 840 KB
+    plus 38 KB; `narrative` user prompt 493,031 characters after task 7.5 (8,900,941
+    before); `readiness` 609,635; `quality` 270,167;
+  - render: the three heads in 0.28 s; HTML 1.47 MB for CP-0 (81 facts), 2.40 MB for CP-1A
+    (840 facts) and 1.33 MB for the blocked CP-1 (0 facts);
+  - r14 statuses after the first full chain, as the journal shows them: CP-0 restricted;
+    CP-1A restricted (qualification implemented / unrun / unrun / unrun); CP-1 blocked (QA
+    Blocked, confidence 0, Insufficient Information; 160 BLOCK gaps; source gate partial).
 - [x] **6.5 `dv-feature`: CP-1 bindings.** Bind the envelope to the Model destination and
   the Credit Snapshot blocks (Financials and credit metrics, capital structure, EBITDA
   adjustments, metric strip).
@@ -363,6 +373,21 @@ measurements are recorded.
 live candidate.
 
 ## M7. CP-1 live acceptance and CP-1A
+
+Lane state (24 Oct 2026; each task's result is in `m7-live-acceptance-review.md`). Landed:
+7.0 hardened the mismatch text, prompts and reports before E1; 7.0b runs the product suite
+in parallel (decision 0011); 7.0c made the request deadline configurable; 7.0d put the Python
+vocabularies into the `financials` sent schema; 7.0e lets the `module` driver dispatch the
+MC-7 repair; 7.0f states the sign-convention rule to the model; 7.0g repairs each CP-1 stage
+step once within its attempt; 7.0h stops a truncated try from consuming a repair; 7.0i has
+Python fill every hash binding; 7.0j states the statement-register rules in the `financials`
+prompt; 7.1a publishes CP-MODEL deterministically once CP-1 is promoted; 7.2 adds CP-1A
+business and transaction context; 7.4 adds the live `quality` step that promotes CP-1; 7.5
+sends later CP-1 steps bounded upstream projections; 7.6 states the narrative and readiness
+validator rules in their prompts; 7.7 places the `segment-allocation` table in the r14
+envelope; 7.8 reads a 402 for its reason before calling it exhaustion; 7.9 refines the
+prompts from the first full proxy chain; 7.10 closes the review follow-ups. Not landed: 7.1
+(E1 for CP-0 and CP-1, its box below still open) and 7.3 (E2, pending credit).
 
 - [ ] **7.1 E1 for CP-0 and CP-1** on Caesars. This closes B's adopted condition: real
   readiness populates the header, Evidence and Limitations. It also closes C's CP-1
