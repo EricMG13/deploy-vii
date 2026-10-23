@@ -2,6 +2,8 @@
 
 import hashlib
 import re
+import tracemalloc
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -374,6 +376,47 @@ def test_fixture_registers_round_trip_with_every_table_placed_once(
     line = next(x for x in markdown.split("\n") if x.startswith(f"- {claim.claim_id}: "))
     assert "interface-fact:" not in line and "{" not in line  # resolved, never raw tokens
     (tmp_path / "envelope.md").write_text(markdown)
+
+
+# Task 7.12: tracemalloc peaks (the Python heap) measured when adopted, plus 25 % headroom.
+WRITE_PEAK_BOUND = 478_000_000  # 382.2 MB measured (416.9 MB before)
+REGISTER_PEAK_BOUND = 79_000_000  # 63.3 MB measured (293.8 MB before task 7.12)
+
+
+def _traced_peak[A, T](call: Callable[[A], T], argument: A) -> tuple[T, int]:
+    tracemalloc.start()
+    try:
+        result = call(argument)
+        return result, tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_the_synthetic_case_hashes_its_json_bytes_within_its_memory_bounds(
+    fixture_envelope: tuple[Envelope, str, str], tmp_path: Path
+) -> None:
+    """The writer hashes ``__pydantic_serializer__.to_json()`` bytes and re-validates from them
+    (task 7.12). Those are the bytes ``content_hash()`` encodes back from ``model_dump_json()``,
+    which is ``to_json().decode()`` with the same defaults in pydantic 2.14.1 / pydantic-core
+    2.50.1 (read when adopted); a dependency bump that changes either fails here and in
+    ``test_replay``, never silently in a provenance hash.
+
+    The bounds are tracemalloc peaks, deterministic for one interpreter. ``ru_maxrss`` would be
+    vacuous here: it is the process's high-water mark, already reached when this module's
+    fixture wrote the same envelope.
+    """
+    envelope, markdown, sidecar = fixture_envelope
+    store, attempt = staged(tmp_path)
+    registers = cp1_registers(store, attempt.ticket_id)
+    for model in (registers, envelope, envelope.module):
+        assert envelope_writer._content_hash(model) == model.content_hash()
+    rebuilt, register_peak = _traced_peak(register_envelope, registers)
+    assert rebuilt == envelope
+    del registers, rebuilt
+    written, write_peak = _traced_peak(write_envelope, envelope)
+    assert written == (markdown, sidecar)
+    assert register_peak < REGISTER_PEAK_BOUND, register_peak
+    assert write_peak < WRITE_PEAK_BOUND, write_peak
 
 
 def test_fixture_tampering_with_a_statement_cell_is_detected(

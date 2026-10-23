@@ -12,9 +12,13 @@ from typing import Any
 
 import pytest
 
-from deploy_vii import cp1_workflow
+from deploy_vii import cp1_quality, cp1_workflow
+from deploy_vii import envelope as envelope_writer
+from deploy_vii.canonical_tables import CanonicalTables
+from deploy_vii.contracts import Contract
 from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
+from deploy_vii.envelope import Envelope
 from deploy_vii.execution import Execution, StepValidation
 from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient
@@ -166,6 +170,46 @@ def test_corpus_entry_replays_as_recorded(path: Path, tmp_path: Path) -> None:
     if verdict.status == replay_support.SKIPPED:
         pytest.skip(str(verdict))  # counted and listed by `make replay`; never a pass
     assert verdict.passed, str(verdict)
+
+
+def test_every_corpus_envelope_hashes_its_json_bytes_like_content_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 7.12: the envelope writer hashes ``to_json()`` bytes (``envelope._content_hash``).
+    For every envelope and register set the corpus replays write, that hash is
+    ``content_hash()``'s (pydantic 2.14.1 / pydantic-core 2.50.1 when adopted), so a dependency
+    bump that changes the dumped bytes fails here rather than moving a provenance hash."""
+    checked: dict[str, list[str]] = {}  # entry -> kinds checked; models are not retained
+    mismatched: list[str] = []
+    write, register = envelope_writer.write_envelope, envelope_writer.register_envelope
+
+    def check(kind: str, *models: Contract) -> None:
+        checked[current].append(kind)
+        mismatched.extend(
+            f"{current} {kind} {type(m).__name__}"
+            for m in models
+            if envelope_writer._content_hash(m) != m.content_hash()
+        )
+
+    def write_seen(envelope: Envelope) -> tuple[str, str]:
+        check("envelope", envelope, envelope.module)
+        return write(envelope)
+
+    def register_seen(registers: CanonicalTables) -> Envelope:
+        check("registers", registers)
+        return register(registers)
+
+    monkeypatch.setattr(envelope_writer, "write_envelope", write_seen)
+    monkeypatch.setattr(cp1_workflow, "write_envelope", write_seen)
+    monkeypatch.setattr(cp1_quality, "register_envelope", register_seen)
+    for number, path in enumerate(ENTRIES):
+        current = f"{path.parent.name}/{path.stem}"
+        checked[current] = []
+        verdict = replay_entry(path, tmp_path / str(number))
+        assert verdict.passed or verdict.status == replay_support.SKIPPED, str(verdict)
+    quality = [name for name in checked if name.startswith("quality/")]
+    assert quality and all("envelope" in checked[name] for name in quality), checked
+    assert mismatched == []
 
 
 def test_the_dimension_prefill_leaves_every_recorded_financials_payload_as_recorded(
