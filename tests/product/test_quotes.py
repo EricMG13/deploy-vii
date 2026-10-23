@@ -253,12 +253,18 @@ _TEXT = st.text(alphabet=_ALPHABET, max_size=40)
 _QUOTE = st.text(alphabet=_ALPHABET, min_size=1, max_size=40)  # Citation.quote is Text
 
 
-def contained(quote: str, text: str) -> bool:
-    """Independent oracle: the acceptance predicate written out from its definition (a
-    contiguous substring of the normalised span, or of it with hyphen wraps joined)."""
+def contained_before(quote: str, text: str) -> bool:
+    """The acceptance predicate before task 7.11: the normalised quote is a contiguous substring
+    of the normalised span, or of it with its hyphen wraps joined (span side only)."""
     needle = normalise(quote)
     joined = normalise(re.sub(r"-\n *", "-", text))
     return bool(needle) and (needle in normalise(text) or needle in joined)
+
+
+def contained(quote: str, text: str) -> bool:
+    """Independent oracle: the acceptance predicate written out from its definition (task 7.11:
+    the quote as written or with its own hyphen wraps joined, against either span reading)."""
+    return contained_before(quote, text) or contained_before(re.sub(r"-\n *", "-", quote), text)
 
 
 # (quote, cited span, next span, previous span, the clause each class appends)
@@ -343,3 +349,64 @@ def test_a_classified_issue_survives_the_journal_issue_bound() -> None:
     (issue,) = issues(source((104, TWO_COLUMN)), "page:104", LEFT_SENTENCE)
     assert len(prefix(LEFT_SENTENCE)) > 190 and issue.endswith("choose another locator")
     assert bounded_issues([issue]) == (issue,)
+
+
+# --- 7.11: a hyphen line wrap on the quote side (E1 batch e1-cp1-13) --------------------------
+
+# Synthetic text in the batch-13 shape (financials-repair-1, page:76): the span prints the word
+# whole after a line break elsewhere; the model's quote broke the line after the hyphen.
+LIEN_SPAN = "and\nfuture first-priority lien obligations"
+LIEN_QUOTE = "future first-\npriority lien obligations"
+
+
+def test_a_quote_that_wraps_a_hyphenated_word_the_span_prints_whole_passes() -> None:
+    assert not contained_before(LIEN_QUOTE, LIEN_SPAN)  # rejected before 7.11
+    assert quoted(LIEN_QUOTE, LIEN_SPAN)
+    assert issues(source((76, LIEN_SPAN)), "page:76", LIEN_QUOTE) == ()
+    assert quoted(LIEN_QUOTE, "future first-\n  priority lien obligations")  # both wrapped
+    assert quoted("first-\n   priority", "first-priority")  # the spaces after the break too
+
+
+def test_the_quote_side_join_keeps_every_hyphen_and_needs_one_in_the_span() -> None:
+    assert not quoted("first-\npriority", "first priority")  # no counterpart hyphen
+    assert not quoted("first-\npriority", "firstpriority")  # the hyphen is never dropped
+    assert not quoted("first-\npriority", "first-- priority")
+    assert quoted("first-\npriority", "first- priority")  # the break read as a space, as before
+    for blank in (" ", "\n", chr(0x00AD) + "\n "):
+        assert not quoted(blank, "any text at all")
+
+
+def test_a_quote_side_wrap_that_still_fails_names_hyphen_wrap_only_where_the_join_counts() -> None:
+    # The join carries the match past the wrap before it differs: the region needs it.
+    (near,) = issues(source((76, LIEN_SPAN)), "page:76", "future first-\npriority lien duties")
+    assert f"({WRAP_RULE}):" in near
+    # Classified only once joined: a case change, offsets counted in the joined quote.
+    cased = explain("Future First-\npriority lien", "future first-priority lien")
+    assert cased.label == WRAP_RULE
+    assert "first difference at offset 0" in cased.hint
+    # The quote fails before its wrap: joining it does not carry the match further.
+    (far,) = issues(source((76, LIEN_SPAN)), "page:76", "past first-\npriority lien obligations")
+    assert f"({RULE}):" in far
+    # No counterpart hyphen in the span: the attempted match stops before the wrap.
+    (none,) = issues(source((76, "future first priority lien")), "page:76", "first-\npriority")
+    assert f"({RULE}):" in none
+
+
+_WRAPPY = st.text(alphabet="ab -\n" + chr(0x2010), max_size=30)
+
+
+@given(_WRAPPY, _WRAPPY)
+@example(LIEN_QUOTE, LIEN_SPAN)
+@example("a-\nb", "a-b")
+def test_the_quote_side_join_only_widens(quote: str, text: str) -> None:
+    """Every quote accepted before 7.11 is still accepted, and acceptance is the oracle."""
+    if contained_before(quote, text):
+        assert quoted(quote, text)
+    assert quoted(quote, text) == contained(quote, text)
+
+
+@given(st.text(alphabet="ab -\n" + chr(0x00AD), min_size=1, max_size=30), st.text(alphabet="ab \n"))
+def test_a_quote_with_a_hyphen_never_matches_a_span_without_one(quote: str, text: str) -> None:
+    """No reading drops a hyphen: a quote holding one is in no reading of a dash-free span."""
+    if "-" in quote:
+        assert not quoted(quote, text)

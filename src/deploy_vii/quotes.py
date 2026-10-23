@@ -10,16 +10,20 @@ compared exactly, and the quote must still be one contiguous substring of the no
 the span its locator names: there is no fuzzy match and no search of other spans.
 
 Task 2.10 (probe-4, Sol 9594d016 p135): a word hyphenated across a line (`PUT-` then a newline,
-optionally spaces, then `CALL`) is copied by a careful model as `PUT-CALL`. On the span side
-only, `HYPHEN_WRAP` therefore also tries the span with each such wrap joined (`-`, newline and
-the spaces after it become `-`). The model's quote is normalised as before and its hyphens are
-never altered; the hyphen itself is never dropped. Both readings of the span are tried, so the
-quote is still a contiguous substring of one of them. A two-column layout that interleaves
+optionally spaces, then `CALL`) is copied by a careful model as `PUT-CALL`. `HYPHEN_WRAP`
+therefore also tries the span with each such wrap joined (`-`, newline and the spaces after it
+become `-`). Task 7.11 (E1 batch e1-cp1-13, decision 0005): the same join on the quote side, for
+a model that broke the line after a hyphen the span prints whole (`first-` then a newline and
+`priority` for `first-priority`); the quote is tried as written and with its wraps joined,
+against both readings of the span. A hyphen is never dropped or added, on either side, so a
+quote whose wrapped hyphen has no hyphen in the span (`first priority`) still fails, and the
+quote is still a contiguous substring of one reading. A two-column layout that interleaves
 another column inside a sentence (probe-4 Sol p104, Grok p102) is not matched: a quote stitched
 across it does not match (a known layout limit).
 
-Normalisation only widens matching: any exact substring with visible text still matches. A quote
-with no visible text (only whitespace or soft hyphens) matches nothing.
+Normalisation only widens matching: any exact substring with visible text still matches, and
+every quote accepted before task 7.11 still is. A quote with no visible text (only whitespace or
+soft hyphens) matches nothing.
 
 Task 7.0: `explain` says why a quote that does not match failed, for the issue text only; it
 never changes acceptance (`quoted` decides that, unchanged). In the order tried, over both span
@@ -33,7 +37,10 @@ text between them; named as columns or table cells only when at most `INTERLEAVE
 between the runs, else as two separate runs). Every run has at least `MIN_RUN_WORDS` words.
 Offsets count characters of the normalised quote. The `hyphen-wrap` label is printed only when
 a wrap lies inside the span region the classification (or, unclassified, the quote's longest
-matching prefix) occupies.
+matching prefix) occupies. Task 7.11: a quote with a wrap of its own is classified as written
+first, then with its wraps joined (offsets then count the joined quote); the label is also
+printed when the reported region exists only with the quote's wraps joined (a class that only
+the joined quote has, or a longest prefix the join makes longer).
 """
 
 import re
@@ -78,19 +85,31 @@ def normalise(text: str) -> str:
 
 
 def hyphen_wrapped(text: str) -> bool:
-    """Whether the raw span text holds a hyphenated line wrap (`HYPHEN_WRAP` applies to it)."""
+    """Whether the raw text (a span or a quote) holds a hyphenated line wrap (`HYPHEN_WRAP`)."""
     return _WRAP.search(text) is not None
+
+
+def _joined(text: str) -> str:
+    """`text` normalised with its hyphenated line wraps joined (each hyphen kept)."""
+    return normalise(_WRAP.sub("-", text))
+
+
+def _needles(quote: str) -> tuple[str, ...]:
+    """The normalised quote, then (task 7.11) the same with its own wraps joined, if it differs."""
+    plain = normalise(quote)
+    joined = _joined(quote) if hyphen_wrapped(quote) else plain
+    return (plain,) if joined == plain else (plain, joined)
 
 
 def quoted(quote: str, text: str) -> bool:
     """Whether `quote` is a contiguous substring of `text`, both normalised, or of `text` with
-    its hyphenated line wraps joined first (span side only)."""
-    needle = normalise(quote)
-    if not needle:
+    its hyphenated line wraps joined; the quote is tried as written and with its own wraps
+    joined (task 7.11). A quote with no visible text matches nothing."""
+    needles = _needles(quote)
+    if not needles[0]:
         return False
-    return needle in normalise(text) or (
-        hyphen_wrapped(text) and needle in normalise(_WRAP.sub("-", text))
-    )
+    readings = (normalise(text), _joined(text)) if hyphen_wrapped(text) else (normalise(text),)
+    return any(needle in reading for needle in needles for reading in readings)
 
 
 def prefix(quote: str) -> str:
@@ -330,18 +349,28 @@ def explain(
     nothing to explain."""
     if quoted(quote, text):
         raise ValueError("the quote matches its span; there is no mismatch to explain")
-    needle = normalise(quote)
+    needles = _needles(quote)
     spans = _readings(text)
-    found = (
-        _classify(needle, spans, _neighbour(following), _neighbour(preceding)) if needle else None
-    )
+    around = (_neighbour(following), _neighbour(preceding))
+    found: _Found | None = None
+    joined = False  # whether the reported region exists only with the quote's wraps joined
+    for index, needle in enumerate(needles if needles[0] else ()):
+        found = _classify(needle, spans, *around)
+        if found is not None:
+            joined = index > 0
+            break
     if found is not None:
         regions = [found]
     else:
-        # Unclassified: the attempted region is the quote's longest matching prefix.
-        attempts = [_longest_prefix(needle, span) for span in spans]
-        best = max(item.end - item.start for item in attempts)
-        regions = [item for item in attempts if item.end - item.start == best]
-    wrapped = any(_wrap_inside(text, region) for region in regions)
+        # Unclassified: the attempted region is the quote's longest matching prefix, from the
+        # joined quote only where joining carries the match further than the quote as written.
+        regions, best = [], -1
+        for index, needle in enumerate(needles):
+            attempts = [_longest_prefix(needle, span) for span in spans]
+            length = max(item.end - item.start for item in attempts)
+            if length > best:
+                best, joined = length, index > 0
+                regions = [item for item in attempts if item.end - item.start == length]
+    wrapped = joined or any(_wrap_inside(text, region) for region in regions)
     label = f"{NORMALISATION}; {HYPHEN_WRAP}" if wrapped else NORMALISATION
     return Explanation(label, found.hint if found is not None else "")

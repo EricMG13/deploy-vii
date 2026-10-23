@@ -47,6 +47,7 @@ gain.
 | MC-8 | Modules with disjoint, settled inputs dispatch concurrently (for example CP-1 ∥ CP-1A, CP-2 ∥ CP-4), adopted only after a measured latency gain | execution ordering | performance | M9 |
 | MC-9 | Accepted artifacts are reused when scope extends; only invalidated consumers rerun | execution | performance; cost | M9 |
 | MC-10 | Each module prompt carries only its declared inputs; prompt and token budgets come from measured external data, not inherited caps | packaging | performance | M2.6 onward |
+| 7.11 quote-side hyphen wrap | The quote matcher (`quotes.quoted`) also joins a hyphenated line wrap on the quote side (`-`, newline and the spaces after it become `-`), as it has on the span side since task 2.10. Adopted: it widens matching only (every quote accepted before still is, a hyphen is never dropped or added, a quote with no visible text matches nothing); the owner may revert. E1 batch e1-cp1-13: GPT-6.1 Sol wrote `first-` then a newline and `priority` where the span prints `first-priority` | execution (layout artefact; analytical meaning unchanged) | reliability | M7 task 7.11 |
 
 **Candidates, recorded and not adopted (M7 task 7.10, 24 Oct 2026).** Found on the real
 Caesars pack (proxy journal e1-cp1-7). The owner decides; nothing changes in code, and each

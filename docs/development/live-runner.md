@@ -263,14 +263,19 @@ from a pinned pool:
   then `…` (`no locator <locator> in <source>` when the locator does not exist). The absence rule skips a negated absence ("no pages missing", "none
   missing", "not missing") and the coverage field restated as empty; `source_context` applies it
   to every free-text value outside citations.
-- **Hyphen-wrap (task 2.10).** On the span side only, the matcher also tries the span with each
+- **Hyphen-wrap (task 2.10).** On the span side, the matcher also tries the span with each
   ASCII hyphen that ends a line (plus the spaces after the newline) joined to the next word:
   `PUT-\nCALL  RIGHT` reads `PUT-CALL RIGHT` (probe-4 Sol 9594d016 p135). Both readings are
-  tried, so matching only widens; the model's quote is normalised as before and never has its
-  hyphens altered. The mismatch issue says `(normalised whitespace, quote marks and dashes;
-  hyphen-wrap)` only when a wrap lies inside the span region the failed quote occupies (the
-  classified region below, else its longest matching prefix); a wrap elsewhere in the span is
-  not named (task 7.0; probe-5 Gemini p84 printed it for an unrelated wrap). Known layout limit:
+  tried, so matching only widens. Task 7.11 (E1 batch e1-cp1-13, decision 0005): the same join
+  on the quote side, for a model that breaks the line after a hyphen the span prints whole
+  (`first-\npriority` for `first-priority`); the quote is tried as written and with its wraps
+  joined, against both span readings. No hyphen is dropped or added on either side, so a wrapped
+  hyphen with no hyphen in the span (`first priority`) still fails, and every quote accepted
+  before still is (a property test). The mismatch issue says `(normalised whitespace, quote
+  marks and dashes; hyphen-wrap)` only when a wrap lies inside the span region the failed quote
+  occupies (the classified region below, else its longest matching prefix), or when that region
+  exists only with the quote's own wraps joined; a wrap elsewhere in the span is not named
+  (task 7.0; probe-5 Gemini p84 printed it for an unrelated wrap). Known layout limit:
   a two-column table that interleaves another column inside a sentence (Sol p104, Grok p102) is
   not matched, so a quote stitched across it fails; so do case changes and wrong-page
   citations. A quote that joins one wrap and copies another as a space matches neither reading.
@@ -289,8 +294,9 @@ from a pinned pool:
   `: the quote matches the span as two runs separated by interleaved text (columns or table
   cells) at offset N; quote one contiguous run or choose another locator` when at most 400
   normalised characters separate the runs (`quotes.INTERLEAVE_GAP_CHARS`), else `as two separate
-  runs on this page` with the same advice. Offsets count
-  characters of the normalised quote (for the interleave, the first run is its first N
+  runs on this page` with the same advice. A quote with a wrap of its own is classified as
+  written first, then with its wraps joined (task 7.11). Offsets count
+  characters of the normalised quote, joined where that reading was classified (for the interleave, the first run is its first N
   characters); every run has at least two words. Otherwise the issue is unchanged. Against the
   main checkout's pack this names Sol p104 (probe-4 and probe-6) and Grok p102 as interleaves,
   Sol p13 as a case change, Gemini p76 and p44 as straddles; wrong-page quotes, Gemini's p84 year
