@@ -2,13 +2,15 @@
 
 Order: the draw, effort and prompt are fixed before anything is spent; the cap is enforced by
 reserving first; the raw response is retained before the journal sees it; the payload reaches
-the journal only through submit_cp0_review / submit_cp1_step (the same validators as any other
-input; for source_readiness after Python composes the stored review from the model's
-submission, `live.submission`); the ledger is settled and the manifest sealed even if
-validation raises. A response
-from a model other than the drawn one (provider fallback) is retained and classified but never
-submitted, so a substitute can never be counted as the drawn model. The key is loaded here,
-used for the header and for scrubbing, and appears in no record.
+the journal only through `live.submission.submit_model_payload`: submit_cp0_review /
+submit_cp1_step (the same validators as any other input), or `store.submit_step` with the
+validator that rejects an uncomposable CP-0 submission or a CP-1 payload holding a reference
+Python cannot bind (task 7.0i). For source_readiness Python composes the stored review from the
+model's submission; for every CP-1 step it pre-fills the hash bindings. The ledger is settled
+and the manifest sealed even if validation raises. A response from a model other than the
+drawn one (provider fallback) is retained and classified but never submitted, so a substitute
+can never be counted as the drawn model. The key is loaded here, used for the header and for
+scrubbing, and appears in no record.
 """
 
 import hashlib

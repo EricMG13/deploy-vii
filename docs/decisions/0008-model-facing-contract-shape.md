@@ -374,12 +374,13 @@ keeps the raw reply. Every changed JSON path is recorded in `Submitted.prefilled
 attempt's `payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`).
 
 The stored contracts, the validators' binding checks and their messages are unchanged, so
-analytical meaning is unchanged (decision 0005). The facility, audit-observation and
-financial-review checks now compare values computed from the same payload, so on the live path
-they only re-check Python's own fill. The checks against independent artefacts remain real
-guards: the context step, the source-context review, the pack and the step inputs. Not
-verified: provider acceptance of the changed
-CP-1 sent schemas (`live schema-check`) and live uptake (E1 batch 7).
+analytical meaning is unchanged (decision 0005). On the live path every binding check
+re-checks Python's fill. Python fills the context-step, source-context-review, pack, source and
+step-input values from the same artefacts the validator compares against. Those five checks stay
+real guards on the direct `submit_cp1_step` / `execution_cli` route. The facility,
+audit-observation and financial-review checks are self-consistency checks of the payload. Not
+verified: provider acceptance of the changed CP-1 sent schemas (`live schema-check`) and live
+uptake (E1 batch 7).
 
 ## Evidence
 

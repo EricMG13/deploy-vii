@@ -720,7 +720,7 @@ own message first. The cases are an unknown or not-ready source ("Unavailable or
 <id>"), an unknown facility or period ("FX conversion <id>: unknown facility/period") and an audit
 explanation's missing period or observation. The stage's remaining issues follow, without the
 "Field required" of a field the sent schema never offers (`_validate_unbound`, recomputed on
-resume). The journal retains the pre-filled payload, and output.md keeps the raw reply. A reply
+resume; not on a manual `execution_cli` resume, which returns the plain stage issues). The journal retains the pre-filled payload, and output.md keeps the raw reply. A reply
 that already holds every value is kept byte for byte, and a reply that is not a JSON object is
 handed on as received. The changed paths are in `Submitted.prefilled` and in a
 `payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`). The

@@ -727,6 +727,41 @@ def test_an_unbindable_audit_explanation_is_unbound_with_the_validators_wording(
     assert "annual_observation_sha256" not in kept and "quarter_observation_sha256" not in kept
 
 
+@pytest.mark.parametrize("change", ["unknown-period", "no-observation"])
+def test_an_unbindable_audit_explanation_is_rejected_with_the_validators_wording_first(
+    tmp_path: Path, change: str
+) -> None:
+    """Fix 3 (C): through `submit_model_payload`, as the source and facility cases."""
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    book = document["financial"]["books"][0]
+    periods = {period["period_id"] for period in book["periods"]}
+    assert {"FY", "Q1", "Q2", "Q3", "Q4"} <= periods, periods
+    citation = next(
+        m.holder for m in marked_fields(FinancialSubmission, document) if m.kind == "source"
+    )
+    item = {
+        "explanation_id": "audit.unbindable",
+        "annual_period_id": "FY",
+        "metric_id": "cash_interest_paid",
+        "quarter_period_ids": ["Q1", "Q2", "Q3", "Q4"],
+        "explanation": "Synthetic audit explanation",
+        "citations": [dict(citation)],
+    }
+    if change == "unknown-period":
+        item["quarter_period_ids"] = ["Q1", "Q2", "Q3", "Q9"]
+        expected = "Unknown audit explanation period: audit.unbindable"
+    else:
+        item["metric_id"] = "no_such_metric"
+        expected = "Stale audit explanation observation: audit.unbindable FY"
+    book["audit_basis_explanations"] = [item]
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0] == expected, rejected.issues
+    assert not [issue for issue in rejected.issues if "Field required" in issue], rejected.issues
+
+
 def unknown_source(document: dict[str, Any], model: type[Contract]) -> str:
     """Point the first citation of `document` at a source the pack does not hold."""
     first = next(item for item in marked_fields(model, document) if item.kind == "source")
@@ -931,7 +966,9 @@ def test_the_validator_still_rejects_a_mismatched_binding_that_bypasses_the_pref
     holder[field[-1]] = store.read().attempts[-1].steps[0].output_sha256
     journal = submit_cp1_step(store, ticket_id, step_id, json.dumps(document))
     (rejected,) = journal.step_repairs
-    assert message in rejected.issues, rejected.issues
+    assert rejected.issues[0] == message, rejected.issues
+    if field == ("context_step_sha256",):
+        assert rejected.issues == (NOT_BOUND,)  # the check returns before any other
 
 
 def test_every_marked_kind_is_one_python_fills_for_that_step() -> None:
