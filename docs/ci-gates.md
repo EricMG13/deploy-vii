@@ -54,7 +54,8 @@ review Linux baselines before treating the pixel comparison as a CI gate.
 `artifacts/public-case/`, no attempt evidence and no macOS `textutil`. Local runs must not
 rely on any of them for coverage or for a green result. Where `textutil` is absent
 `tests/product/conftest.py` puts a test double (`tests/product/fake_textutil.py`, itself tested
-and compared with the real tool on macOS) first on PATH, so the credential loader and the
+and compared with the real tool on macOS) first on PATH (re-exported by `tests/devtools/conftest.py` for the devtools differential,
+which also builds RTF key fixtures), so the credential loader and the
 live-runner tests run on both platforms; real-pack replay entries stay counted skips
 (`skipped-pack-absent`) and are never a pass, while synthetic case packs cover the same code.
 To reproduce the hosted run, commit, write the committed tree to a tar under a directory the
