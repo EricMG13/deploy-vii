@@ -45,6 +45,11 @@ def classify(paths: list[str]) -> str:
         (["docs/sub/dir/x.md"], "false"),
         (["CHANGELOG.md"], "false"),
         (["LICENSE.txt", "LICENSE-MIT"], "false"),
+        # docs/templates/ holds the generated RV template and the README its tests pin.
+        (["docs/templates/rv-quotes.template.xlsx"], "true"),
+        (["docs/templates/README.md"], "true"),
+        (["docs/x.md", "docs/templates/sub/x.md"], "true"),
+        (["docs/templates.md", "docs/templates-old/x.md"], "false"),
     ],
 )
 def test_classification(paths: list[str], expected: str) -> None:

@@ -139,7 +139,8 @@ Missing private inputs or live access leave the relevant acceptance pending.
 
 On `pull_request` events the `changes` job runs
 `.github/scripts/code_changed.sh` over the changed paths and the static, shard and combine
-jobs are skipped (the `Product checks` gate, name and status unchanged, still reports success) only when every path matches the allow-list: anything under `docs/`, top-level
+jobs are skipped (the `Product checks` gate, name and status unchanged, still reports success) only when every path matches the allow-list: anything under `docs/` except
+`docs/templates/` (the generated RV template and its README, which product tests pin), top-level
 `*.md` (no slash), `LICENSE`, `LICENSE.*`, `LICENSE-*`, `.gitignore`, `.gitattributes`,
 `CODEOWNERS`. The default is fail-closed: an empty diff, a fetch or diff error, a non-PR
 event, any path with a slash outside `docs/` (so `src/.../x.md` counts as code) or any
