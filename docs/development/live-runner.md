@@ -152,13 +152,20 @@ off) and is the reference of the differential in `tests/devtools/test_loop_diffe
   legal_sources`, CP-3 only its ready market sources. A read or search of another pack source is
   refused by name; rule 5 lists the readable sources (or says there are none).
 - **CP-4 and the whole 10-K.** CP-4 is no longer sent its legal sources as one SOURCE block (about
-  841 KB on czr-fy2025-v2). The whole legal source stays searchable and readable on demand, five
-  pages a call, and `cp4_legal`'s declared-source rule still bounds what the tools may read
-  (decision 0005 row of 24 Oct 2026).
+  841 KB on czr-fy2025-v2). The whole legal source stays searchable and readable on demand, at
+  most five pages per `read_pages` call, and `cp4_legal`'s declared-source rule still bounds what
+  the tools may read (decision 0005 row of 24 Oct 2026).
+- **Limits.** 8.0d's per step, except the call limit, which follows the tool set
+  (`loop.limits_for`; user decision, 24 Oct 2026): 30 calls on a pack-tool step and 6 on a
+  submit-only step, so a model that keeps calling a refused tool stops early.
 - **Rules.** `tools.applicable_rules`: CP-1's four stages keep both 8.0d rules; CP-0, CP-1A, CP-3
-  and CP-4 apply the cited-page rule (their schemas carry `locator`), not the absence rule (none
-  carries the fields it reads); submit-only steps apply none, and `submit_model_payload` refuses
-  rules for them. A CP-0, CP-1A, CP-3 or CP-4 submit a rule fails is retained through the module's
+  and CP-4 apply the cited-page rule (their schemas carry `locator`). CP-1A and CP-4 also apply
+  the absence rule (user decision, 24 Oct 2026). It covers each value their sent schema's enums
+  carry from `tools.ABSENCE_MARKERS`: CP-1A `available: "No"` and `status: "Not disclosed"`, CP-4
+  `threshold_unit: "not stated"`. Each needs a recorded `search_pack` earlier in the step, as a
+  `financials` absence claim does. CP-3's `kind: "none"` market row is a legitimate "no market
+  evidence" row and needs none. Submit-only steps apply no rule, and `submit_model_payload`
+  refuses rules for them. A CP-0, CP-1A, CP-3 or CP-4 submit a rule fails is retained through the module's
   own validator with the rule issues appended, so it is rejected and the attempt finishes as the
   module's entry would finish it; a submit no rule fails takes the rule-free path unchanged.
 - **Budget lines.** The batch report's tool-loop line names each step's plan and tool set. While

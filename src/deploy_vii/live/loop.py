@@ -984,7 +984,7 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
             "final_payload_cited_not_read": sorted(
                 list(item) for item in cited_locators(final) - read
             )
-            if final
+            if final and tools is not None
             else None,
             "verdict": step.verdict,
             "verdict_reason": step.verdict_reason,

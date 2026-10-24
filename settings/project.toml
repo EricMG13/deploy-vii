@@ -73,7 +73,8 @@ recurring_caps_usd = { e1_per_case = 3, e2_per_milestone = 15, e3_per_week = 3 }
 cumulative_ceiling_usd = 200
 no_credit_fallback = "native-luna-else-labelled-claude-agent-proxy-cohort"
 # Task 8.0d (user decision, 24 Oct 2026): E1 runs the CP-1 stages as tool loops, the hybrid
-# harness's design ported into the live runner (`live.loop`; decision 0005 row of 24 Oct 2026).
+# harness's design ported into the live runner (`live.loop`). Task 8.9 (user decision, 24 Oct
+# 2026): every live step of every module runs as one (decision 0005 rows of 24 Oct 2026).
 tool_loop = true
 
 # Task 8.0d: each tool-loop step's effort, and the highest level its one escalation (after two

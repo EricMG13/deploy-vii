@@ -875,7 +875,13 @@ def test_each_new_step_runs_as_a_tool_loop_with_its_tool_set_and_settles(
     assert telemetry["step"]["rules"]["applied"] == list(applicable_rules(step_id))
     if tool_set(step_id) == SUBMIT_ONLY:
         assert telemetry["step"]["tool_calls"] == {"invalid": 1, f"submit_{step_id}": 1}
-        assert telemetry["step"]["pages_read"] is None
+        reading = ("pages_read", "located_pages", "searches_run", "spans_surfaced_by_search")
+        # Fix round 1 (review B5): every reading field is null, the cited-but-unread one too.
+        assert [telemetry["step"][f] for f in (*reading, "final_payload_cited_not_read")] == [
+            None
+        ] * 5
+    else:
+        assert isinstance(telemetry["step"]["final_payload_cited_not_read"], list)
 
 
 def request_of(rig: Rig, step_id: str, number: int = 1) -> dict[str, Any]:
