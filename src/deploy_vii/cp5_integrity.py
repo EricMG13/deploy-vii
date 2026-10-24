@@ -85,18 +85,22 @@ SUBMISSION_INPUT = "integrity-submission"
 # What a figure must share wherever it appears (ruling 5, fix round 1): its exact value (the
 # Decimal amount times its scale, so 1.1 at scale 1000 is 1100 at scale 1), unit, currency and
 # period; under one fact id also its table, row and field. A fact whose scale disagrees with
-# its unit (`UNIT_SCALE`) is its own finding; `currency` and unscaled units leave scale free.
+# its unit (`UNIT_SCALE`, fix round 2: the ratio units model_interface writes at scale 1 are
+# pinned too) is its own finding; `currency` (written at 1e6 by the statement registers) and
+# any other unit, such as a KPI template unit, leave scale free.
 VALUE_FIELDS = ("value", "unit", "currency", "period")
 PLACEMENT_FIELDS = ("table_id", "row_id", "field")
 UNIT_SCALE: Mapping[str, Decimal] = {
     "UNITS": Decimal(1),
     "THOUSANDS": Decimal(1000),
     "MILLIONS": Decimal(1000000),
+    **dict.fromkeys(("PERCENT", "MULTIPLE", "decimal_fraction"), Decimal(1)),
 }
-# Tables holding verbatim copies of another module's facts at coordinates Python assigns by
-# rule (CP-1A's `cp1_references`, business_context.py): their placement is not compared, their
-# value is.
-REFERENCE_TABLES = frozenset({CP1_REFERENCES})
+# (producer module, table) of verbatim copies of another module's facts at coordinates Python
+# assigns by rule: CP-1A's `cp1_references` (business_context.py). Their placement is not
+# compared, their value is. Keyed by producer as well (fix round 2): `table_id` is a free
+# identifier, so another module naming a table `cp1_references` is placement-checked.
+REFERENCE_COPIES = frozenset({("CP-1A", CP1_REFERENCES)})
 
 # --- the model-facing contract ---------------------------------------------------------------
 # Plain `str` fields, as in `BusinessContextSubmission`: the validator holds references and
@@ -380,7 +384,8 @@ def identity_groups(heads: Sequence[Module]) -> tuple[IdentityGroup, ...]:
     all facts, and by `(table_id, row_id, field, period)` over figures. Both checks run on
     every pair (ruling 5), so a disagreement may be found under both keys. Members are
     compared on `VALUE_FIELDS`; under a fact id also on `PLACEMENT_FIELDS`, except a member
-    in a `REFERENCE_TABLES` copy. An unsettled fact under a figure's id is a value mismatch
+    that is a `REFERENCE_COPIES` copy (its producer and table both match). An unsettled fact
+    under a figure's id is a value mismatch
     (no value against a value); text-only facts never form a group."""
     pooled: dict[tuple[Literal["fact_id", "coordinate"], str], list[tuple[str, Fact]]] = {}
     for head in heads:
@@ -401,7 +406,9 @@ def identity_groups(heads: Sequence[Module]) -> tuple[IdentityGroup, ...]:
         facts = [fact for _, fact in members]
         differing = tuple(name for name in VALUE_FIELDS if len(_values(facts, name)) > 1)
         if basis == "fact_id":
-            placed = [fact for fact in facts if fact.table_id not in REFERENCE_TABLES]
+            placed = [
+                fact for owner, fact in members if (owner, fact.table_id) not in REFERENCE_COPIES
+            ]
             differing += tuple(name for name in PLACEMENT_FIELDS if len(_values(placed, name)) > 1)
         groups.append(
             IdentityGroup(

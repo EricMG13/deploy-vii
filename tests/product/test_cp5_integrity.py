@@ -1051,8 +1051,10 @@ def placed(
     )
 
 
-def pair_findings(first: Fact, second: Fact) -> list[tuple[str, str, str]]:
-    heads_ = (module(PACK, "CP-1", facts=(first,)), module(PACK, "CP-MODEL", facts=(second,)))
+def pair_findings(
+    first: Fact, second: Fact, holder: str = "CP-MODEL"
+) -> list[tuple[str, str, str]]:
+    heads_ = (module(PACK, "CP-1", facts=(first,)), module(PACK, holder, facts=(second,)))
     return [(f.kind, f.subject, f.detail) for f in python_checks(scope_of(PACK, heads_)).findings]
 
 
@@ -1085,11 +1087,30 @@ def test_equal_amounts_in_two_currencies_are_a_mismatch() -> None:
 
 def test_only_the_cp1a_reference_copy_keeps_python_assigned_coordinates() -> None:
     copy = placed(table=CP1_REFERENCES, row="ref01")
-    assert pair_findings(placed(), copy) == []
-    assert pair_findings(placed(), copy.model_copy(update={"amount": Decimal("1200")}))
+    assert pair_findings(placed(), copy, "CP-1A") == []
+    assert pair_findings(placed(), copy.model_copy(update={"amount": Decimal("1200")}), "CP-1A")
     moved = pair_findings(placed(), placed(table="T4.10"))
     assert [(kind, subject) for kind, subject, _ in moved] == [("figure_identity", "fact_id f.x")]
     assert "table_id" in moved[0][2]
+
+
+def test_another_module_naming_its_table_cp1_references_is_placement_checked() -> None:
+    """Fix round 2: `table_id` is a free identifier, so the copy exemption belongs to CP-1A's
+    composed copies only, never to a table name another module (or a model) can write."""
+    spoof = placed(table=CP1_REFERENCES, row="ref09")
+    found = pair_findings(placed(), spoof, "CP-MODEL")
+    assert [(kind, subject) for kind, subject, _ in found] == [("figure_identity", "fact_id f.x")]
+    assert found[0][2].startswith("differs in table_id, row_id between CP-1, CP-MODEL;")
+
+
+def test_a_ratio_unit_is_pinned_to_scale_one() -> None:
+    found = pair_findings(placed(unit="PERCENT", amount="5"), placed(unit="PERCENT", amount="5"))
+    assert found == []
+    found = pair_findings(
+        placed(unit="PERCENT", amount="5", scale="1000"),
+        placed(unit="PERCENT", amount="0.005", scale="1000000"),
+    )
+    assert sorted(kind for kind, _, _ in found) == ["scale_unit", "scale_unit"]
 
 
 def test_the_context_block_takes_a_fact_projection() -> None:

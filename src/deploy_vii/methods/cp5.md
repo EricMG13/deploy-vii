@@ -15,8 +15,10 @@ Python has already checked, and lists in CONTEXT:
 - claim figure resolution: every figure in a claim is a reference to its own module's facts;
 - cross-module figure identity: a fact id, or a table, row, field and period, carries the same
   exact value (amount times scale), unit, currency and period in every module that holds it,
-  and one fact id keeps its table, row and field (CP-1A's reference copies excepted); a scale
-  that disagrees with its unit is a finding of its own. A fact whose status is not known enters
+  and one fact id keeps its table, row and field (only CP-1A's own reference copies are
+  excepted); a scale that disagrees with its unit is a finding of its own (amount, percent,
+  multiple and decimal-fraction units fix their scale; `currency` and any other unit, such as a
+  KPI template unit, leave it free). A fact whose status is not known enters
   its fact id's group and counts as a mismatch against a known figure (conservative); text-only
   facts are never compared;
 - stale inputs, blocked upstream modules and inherited limitations;
