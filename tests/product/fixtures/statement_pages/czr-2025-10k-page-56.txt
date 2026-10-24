@@ -1,0 +1,51 @@
+                                                                         CAESARS ENTERTAINMENT, INC.
+                                                                       CONSOLIDATED BALANCE SHEETS
+
+                                                                                                                                                                    December 31,
+(Dollars in millions, except par value)                                                                                                                     2025                       2024
+                                                                   ASSETS
+CURRENT ASSETS:
+   Cash and cash equivalents                                                                                                                      $                   887    $                   866
+   Restricted cash                                                                                                                                                     85                         95
+   Accounts receivable, net                                                                                                                                           476                        470
+   Inventories                                                                                                                                                         43                         45
+   Prepayments and other current assets                                                                                                                               312                        271
+      Total current assets                                                                                                                                          1,803                      1,747
+Investments in and advances to unconsolidated affiliates                                                                                                              133                        131
+Property and equipment, net                                                                                                                                       14,358                     14,812
+Goodwill                                                                                                                                                          10,441                     10,601
+Intangible assets other than goodwill                                                                                                                               3,985                      4,133
+Deferred tax asset                                                                                                                                                     67                         62
+Other long-term assets, net                                                                                                                                           852                      1,104
+      Total assets                                                                                                                                $               31,639     $               32,590
+                                         LIABILITIES AND STOCKHOLDERS’ EQUITY
+CURRENT LIABILITIES:
+   Accounts payable                                                                                                                               $                   297    $                   296
+   Accrued interest                                                                                                                                                   224                        242
+   Accrued other liabilities                                                                                                                                        1,618                      1,625
+   Current portion of long-term debt                                                                                                                                  114                        109
+      Total current liabilities                                                                                                                                     2,253                      2,272
+Long-term financing obligations                                                                                                                                   13,096                     12,899
+Long-term debt                                                                                                                                                    11,670                     12,033
+Deferred tax liability                                                                                                                                                 58                        130
+Other long-term liabilities                                                                                                                                           876                        880
+      Total liabilities                                                                                                                                           27,953                     28,214
+Commitments and contingencies (Note 8          )
+STOCKHOLDERS' EQUITY:
+   Preferred stock, $0.00001 par value, 150,000,000 shares authorized, no shares issued and outstanding                                                                —                          —
+   Common stock, $0.00001 par value, 500,000,000 shares authorized, 202,629,159 and 211,325,086 issued and outstanding                                                 —                          —
+   Additional paid-in capital                                                                                                                                       6,709                      6,862
+   Accumulated deficit                                                                                                                                            (3,303)                     (2,801)
+   Treasury stock, at cost                                                                                                                                             —                          —
+   Accumulated other comprehensive income                                                                                                                              98                         96
+      Caesars stockholders' equity                                                                                                                                  3,504                      4,157
+      Noncontrolling interests                                                                                                                                        182                        219
+        Total stockholders’ equity                                                                                                                                  3,686                      4,376
+        Total liabilities and stockholders’ equity                                                                                                $               31,639     $               32,590
+
+
+                                           The accompanying notes are an integral part of these consolidated financial statements.
+
+
+Table of Contents
+                                                                                                 56
