@@ -69,6 +69,29 @@ class ReportingScope(Contract):
     limitations: tuple[Text, ...] = ()
 
 
+def scope_matches_period(
+    scope: ReportingScope, period_type: str, start_date: date | None, end_date: date | None
+) -> bool:
+    """Task 8.0b: whether a period's type and dates select `scope`, the one rule
+    `context_binding` binds by and the financials prefill (`live.submission._period_scopes`)
+    fills from. A historical-duration or period-end scope with the period's end date; unless
+    the period is `PERIOD_END`, a historical-duration scope with its start date too. Dates
+    only: the entity and the four strings are each caller's own."""
+    return (
+        scope.end_date is not None
+        and scope.end_date == end_date
+        and scope.period_kind in _STATED_KINDS
+        and (
+            period_type == "PERIOD_END"
+            or (
+                scope.period_kind == "historical_duration"
+                and scope.start_date is not None
+                and scope.start_date == start_date
+            )
+        )
+    )
+
+
 class SourceContext(Contract):
     source_id: Identifier
     classification: Literal["financial", "nonfinancial", "unassessed"]
