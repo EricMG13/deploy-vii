@@ -32,34 +32,19 @@ from typing import Any
 from deploy_vii.cp1_workflow import FinancialStage
 from deploy_vii.downstream_readiness import DownstreamInputs
 from deploy_vii.narrative import EvidenceRecord
+from deploy_vii.registry import FULL as FULL
+from deploy_vii.registry import NARRATIVE_EVIDENCE as NARRATIVE_EVIDENCE
+from deploy_vii.registry import OMITTED as OMITTED
+from deploy_vii.registry import READINESS_INPUTS as READINESS_INPUTS
+from deploy_vii.registry import pack_source_steps, projections
 
-FULL = "full"
-OMITTED = "omitted"
-NARRATIVE_EVIDENCE = "narrative-evidence"
-READINESS_INPUTS = "readiness-inputs"
+# (consumer step, producer step) -> projection, from the registry's step chains (task 8.0a):
+# every later-earlier pair of each chain (CP-0 and CP-1A have one step each, so no earlier step
+# of their attempt is ever retained when they are dispatched).
+PROJECTIONS: Mapping[tuple[str, str], str] = projections()
 
-# (consumer step, producer step) -> projection; complete for CP-1 (CP-0 and CP-1A have one step
-# each, so no earlier step of their attempt is ever retained when they are dispatched).
-PROJECTIONS: Mapping[tuple[str, str], str] = {
-    ("financials", "source_context"): FULL,
-    # The financial stage's ledger holds the same source-context report (`ledger.context`).
-    ("narrative", "source_context"): OMITTED,
-    ("narrative", "financials"): NARRATIVE_EVIDENCE,
-    # The readiness validator reads the narrative step's output only; it holds the same catalogue.
-    ("readiness", "source_context"): OMITTED,
-    ("readiness", "financials"): OMITTED,
-    ("readiness", "narrative"): READINESS_INPUTS,
-    # Task 7.4: Python's QA scope (`prompts.quality_scope`) is the quality model's context.
-    ("quality", "source_context"): OMITTED,
-    ("quality", "financials"): OMITTED,
-    ("quality", "narrative"): OMITTED,
-    ("quality", "readiness"): OMITTED,
-}
-
-# Steps whose validators match citations against the pack's span text.
-PACK_SOURCE_STEPS = frozenset(
-    {"source_readiness", "source_context", "financials", "business_context"}
-)
+# Steps whose validators match citations against the pack's span text (the registry's).
+PACK_SOURCE_STEPS = pack_source_steps()
 
 TEXT_LIMIT = 120  # a description or explanation
 LABEL_LIMIT = 60  # a statement line's label

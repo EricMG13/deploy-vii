@@ -42,7 +42,15 @@ from deploy_vii.contracts import (
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import prose_issues
 from deploy_vii.readiness import citation_issues
-from deploy_vii.registry import canonical, dependencies, edge_rule, idle_statuses, modules, plan
+from deploy_vii.registry import (
+    canonical,
+    dependencies,
+    edge_rule,
+    idle_statuses,
+    modules,
+    plan,
+    within_attempt_repair,
+)
 
 Validator = Callable[[Module], tuple[str, ...]]
 SCHEMA = "execution/5"
@@ -116,11 +124,9 @@ class Attempt(Contract):
 
 # Decision 0008 MC-7 item 2 (task 7.0g): the steps that may be repaired once within their
 # attempt. CP-1's four model steps; not its `quality` promotion step (it settles the module), and
-# not CP-0's single review: those keep the attempt-level repair only. Equal to
-# `cp1_workflow.CP1_STEPS` (tested), named here because the workflow imports this module.
-WITHIN_ATTEMPT_REPAIR: Mapping[str, frozenset[str]] = {
-    "CP-1": frozenset({"source_context", "financials", "narrative", "readiness"})
-}
+# not CP-0's single review: those keep the attempt-level repair only. Derived from the
+# registry's step chains (task 8.0a), which `cp1_workflow.CP1_STEPS` also reads.
+WITHIN_ATTEMPT_REPAIR: Mapping[str, frozenset[str]] = within_attempt_repair()
 
 
 class Command(Contract):

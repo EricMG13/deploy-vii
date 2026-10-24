@@ -58,13 +58,14 @@ from deploy_vii.quality import (
     validate_quality_review,
 )
 from deploy_vii.readiness import shape_issues
-from deploy_vii.registry import plan
+from deploy_vii.registry import plan, step_chain
 from deploy_vii.source_context import SourceContextReview, source_context, validate_source_context
 from deploy_vii.statement_view import write_statement_preview
 
-CP1_STEPS = ("source_context", "financials", "narrative", "readiness")
-# Promotion retains the QA review as one more step of the same attempt and repair budget.
-CP1_PROMOTION = (*CP1_STEPS, "quality")
+# The registry's CP-1 chain (task 8.0a): the four stages, then the QA review whose acceptance is
+# the promotion, retained as one more step of the same attempt and repair budget.
+CP1_PROMOTION = step_chain("CP-1").steps
+CP1_STEPS = CP1_PROMOTION[:-1]
 
 
 class FinancialSubmission(Contract):

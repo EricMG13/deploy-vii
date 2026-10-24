@@ -37,6 +37,17 @@ from a pinned pool:
 
 ## Modules
 
+Every per-step table below is derived from one record per live module, a `StepChain` in
+`deploy_vii.registry.STEP_CHAINS` (task 8.0a; the lowest layer, so the journal's
+`WITHIN_ATTEMPT_REPAIR` reads it too): the module's ordered steps (the last one settles the
+module), its regression cell, the steps repaired within the attempt, the prefilled kinds per
+step (each such step binds every earlier step), the projection each later step receives of each
+earlier one, and the steps sent pack SOURCE blocks. `submission.STEPS` adds only each step's
+model-facing schema (a registry step without one, or a schema for no registry step, fails at
+import). A module's route (`module_route`: its required producers' chains, then its own, in
+`plan` order) gives the CLI's `module` cells and `regression` cases. Adding a live module is
+one more record plus its schemas, composer and prompt contract.
+
 | Module | Role |
 | --- | --- |
 | `settings.py` | Reads `[model_tests]` from `settings/project.toml` with `tomllib` (candidates, caps, artifact root, `credential_file`, `credential_token_index`: an integer >= 1, default 1 when absent; 0, negatives, booleans, floats and strings are refused; `prompt_bytes_per_token_lower_bound`: required, a positive finite number, no default). |

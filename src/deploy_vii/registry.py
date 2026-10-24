@@ -265,7 +265,8 @@ STEP_CHAINS = checked_chains(
             },
             projections={
                 ("financials", "source_context"): FULL,
-                # The financial stage's ledger holds the same source-context report.
+                # The financial stage's ledger holds the same source-context report
+                # (`ledger.context`).
                 ("narrative", "source_context"): OMITTED,
                 ("narrative", "financials"): NARRATIVE_EVIDENCE,
                 # The readiness validator reads the narrative step's output only; it holds the

@@ -24,7 +24,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any
 
-from deploy_vii.cp1_workflow import is_qa_blocked
+from deploy_vii.cp1_workflow import CP1_PROMOTION, is_qa_blocked
 from deploy_vii.execution import Attempt, Execution, NotAuthorized
 from deploy_vii.live.catalog import (
     USER_SELECTED,
@@ -96,26 +96,25 @@ from deploy_vii.live.schema import (
     strict_schema,
 )
 from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsError, load_settings
-from deploy_vii.registry import canonical, modules
+from deploy_vii.registry import canonical, module_route, modules, regression_cases, step_chain
 
 REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
 TRUNCATED = "truncated"  # a response classification: the completion was cut at the budget
-CP0_STEPS = ("source_readiness",)
+CP0_STEPS = step_chain("CP-0").steps
 # Task 7.4: the four stages, then the QA review whose acceptance is the CP-1 promotion. A
 # rejected review finishes the attempt (it settles the module), so `_run_cell` begins the
 # module repair, which restarts at source_context.
-CP1_CHAIN = ("source_context", "financials", "narrative", "readiness", "quality")
-FULL_CHAIN = CP0_STEPS + CP1_CHAIN
+CP1_CHAIN = CP1_PROMOTION
+# A module's route (task 8.0a, `registry.module_route`): its required producers' chains, then
+# its own; CP-1's is CP-0's review, then CP-1's chain.
+FULL_CHAIN = module_route("CP-1")
 # Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
 # step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.
-CP1A_CHAIN = (*CP0_STEPS, "business_context")
+CP1A_CHAIN = module_route("CP-1A")
 # Task 7.0h: the matched comparison's cases, in shuffle order (cp1a draws after the other two,
-# so the cp0 and cp1 orders are those of the two-case plan).
-REGRESSION_CASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("cp0", CP0_STEPS),
-    ("cp1", FULL_CHAIN),
-    ("cp1a", CP1A_CHAIN),
-)
+# so the cp0 and cp1 orders are those of the two-case plan): each registry module's cell and
+# route, in registry order, so a new module's case draws after these.
+REGRESSION_CASES: tuple[tuple[str, tuple[str, ...]], ...] = regression_cases()
 PROBE_STEPS = ("source_readiness", "source_context", "financials")
 SEED_SEARCH_LIMIT = 100_000
 BATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -422,11 +421,10 @@ def seeds_for(pool: PinnedPool, slugs: Sequence[str], start: int) -> list[int]:
 
 def _module_cells(module_arg: str, seed: int) -> list[Cell]:
     module = canonical(module_arg)
-    steps = {"CP-0": CP0_STEPS, "CP-1": FULL_CHAIN, "CP-1A": CP1A_CHAIN}.get(module)
-    if steps is None:
-        supported = ", ".join(sorted({definition.module_id for definition in STEPS.values()}))
-        raise CliError(f"{module} has no live step contract; supported: {supported}")
-    return [Cell("module-00", module.lower(), steps, seed)]
+    supported = sorted({definition.module_id for definition in STEPS.values()})
+    if module not in supported:
+        raise CliError(f"{module} has no live step contract; supported: {', '.join(supported)}")
+    return [Cell("module-00", module.lower(), module_route(module), seed)]
 
 
 def _regression_cells(pool: PinnedPool, slugs: list[str], seed: int) -> list[Cell]:

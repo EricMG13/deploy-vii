@@ -30,10 +30,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
 from deploy_vii.business_context import cp1_context_facts
 from deploy_vii.cp1_quality import cp1_quality_inputs
-from deploy_vii.cp1_workflow import CP1_PROMOTION, cp1_registers
+from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
 from deploy_vii.live.catalog import PinnedCandidate, PinnedPool
 from deploy_vii.live.client import (
@@ -67,6 +66,7 @@ from deploy_vii.live.schema import (
     unverified_keywords,
 )
 from deploy_vii.live.submission import STEPS, StepDef, Submitted, submit_model_payload
+from deploy_vii.registry import settling_steps, step_chain
 
 COHORT = "openrouter-pool"
 DEFAULT_MAX_RETRIES = 2
@@ -78,6 +78,8 @@ IN_FLIGHT_MAX_WAIT_S = 300
 # Ends the ledger settle reason of an in-flight 402 (`in_flight_refused`).
 IN_FLIGHT_SETTLE_MARK = "; in-flight 402: not a model try"
 SUBMITTED = frozenset({"ok", "truncated"})
+# Each module's last step, whose acceptance is the module's (`journal_outcome`, task 8.0a).
+SETTLING_STEPS = settling_steps()
 POOLABLE_STATUSES = frozenset({"accepted", "rejected"})
 
 
@@ -305,19 +307,18 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
         raise ValueError("ticket is finished or already retains a module response")
     if any(item.status == "pending" for item in attempt.steps):
         raise ValueError("a step response is pending; resume it before dispatching another")
-    if module_id == "CP-0":
-        if attempt.steps:
-            raise ValueError("CP-0 already retains its review step; resume it through the journal")
-        return "source_readiness"
-    if module_id == "CP-1A":
-        if attempt.steps:
-            raise ValueError("CP-1A already retains its one step; resume it through the journal")
-        return BUSINESS_CONTEXT
-    # Task 7.4: the four stages, then the `quality` review whose acceptance is the promotion.
+    # Task 8.0a: the module's registry chain (CP-1: the four stages, then the `quality` review
+    # whose acceptance is the promotion). On a pending ticket the journal keeps valid steps
+    # only (an invalid one finishes the attempt in the same write), so `done` is its position.
+    steps = step_chain(module_id).steps
     done = sum(1 for item in attempt.steps if item.status == "valid")
-    if done >= len(CP1_PROMOTION):
-        raise ValueError("every CP-1 step is already retained")
-    return CP1_PROMOTION[done]
+    if done < len(steps):
+        return steps[done]
+    if len(steps) == 1:
+        raise ValueError(
+            f"{module_id} already retains its review step; resume it through the journal"
+        )
+    raise ValueError(f"every {module_id} step is already retained")
 
 
 def _upstream(store: Execution, attempt: Attempt, step_id: str) -> tuple[UpstreamInput, ...]:
@@ -536,7 +537,7 @@ def journal_outcome(
     # A step that settles its module (CP-0's review, CP-1A's one step, CP-1's `quality`
     # promotion) is accepted only when the settled module is: a valid step whose candidate
     # fails the journal's check is rejected.
-    if step_id in {"source_readiness", BUSINESS_CONTEXT, QUALITY}:
+    if step_id in SETTLING_STEPS:
         accepted = journal.result_sha256 is not None and store.result(
             journal.result_sha256
         ).status in {"accepted", "restricted"}

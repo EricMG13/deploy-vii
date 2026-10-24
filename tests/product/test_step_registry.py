@@ -14,7 +14,7 @@ from deploy_vii.business_context import BusinessContextSubmission
 from deploy_vii.cp1_workflow import CP1_PROMOTION, CP1_STEPS, FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamReview
 from deploy_vii.execution import WITHIN_ATTEMPT_REPAIR, Attempt, StepSubmission
-from deploy_vii.live import cli, context, runner
+from deploy_vii.live import cli, context, runner, submission
 from deploy_vii.live.reconcile import _run_identity
 from deploy_vii.live.submission import BOUND_STEPS, PREFILLED, STEPS, ReadinessSubmission
 from deploy_vii.narrative import NarrativeReview
@@ -146,7 +146,9 @@ def test_the_next_step_walks_each_base_chain(module_id: str, chain: tuple[str, .
     [
         ("CP-0", BASE_CP0_STEPS, "CP-0 already retains its review step; resume it through"),
         ("CP-1", BASE_CP1_PROMOTION, "every CP-1 step is already retained"),
-        ("CP-1A", ("business_context",), "CP-1A already retains its one step; resume it"),
+        # Task 8.0a: one wording for every one-step module (base: "CP-1A already retains its one
+        # step; ..."); the refusal is raised before anything is reserved, sent or written.
+        ("CP-1A", ("business_context",), "CP-1A already retains its review step; resume it"),
     ],
 )
 def test_a_complete_chain_is_refused_with_the_base_wording(
@@ -183,6 +185,35 @@ def test_the_registry_derives_every_base_table() -> None:
     assert registry.step_chain("CP-1").settling == "quality"
     assert {m: registry.module_route(m) for m in BASE_MODULE_ROUTES} == BASE_MODULE_ROUTES
     assert registry.regression_cases() == BASE_REGRESSION_CASES
+
+
+def test_each_consumer_table_is_the_registry_derivation() -> None:
+    assert list(STEPS) == list(registry.step_modules())
+    assert {s: d.module_id for s, d in STEPS.items()} == registry.step_modules()
+    assert PREFILLED == registry.prefilled_kinds() and BOUND_STEPS == registry.bound_steps()
+    assert WITHIN_ATTEMPT_REPAIR == registry.within_attempt_repair()
+    assert context.PROJECTIONS == registry.projections()
+    assert context.PACK_SOURCE_STEPS == registry.pack_source_steps()
+    assert runner.SETTLING_STEPS == registry.settling_steps()
+    assert CP1_PROMOTION == registry.step_chain("CP-1").steps and cli.CP1_CHAIN == CP1_PROMOTION
+    assert CP1_STEPS == CP1_PROMOTION[:-1]
+    assert cli.FULL_CHAIN == registry.module_route("CP-1")
+    assert cli.CP1A_CHAIN == registry.module_route("CP-1A")
+    assert cli.REGRESSION_CASES == registry.regression_cases()
+    assert (context.FULL, context.OMITTED) == (registry.FULL, registry.OMITTED)
+    assert (context.NARRATIVE_EVIDENCE, context.READINESS_INPUTS) == (
+        registry.NARRATIVE_EVIDENCE,
+        registry.READINESS_INPUTS,
+    )
+
+
+def test_a_schema_table_that_misses_or_adds_a_step_is_refused() -> None:
+    schemas = {step_id: schema for step_id, _, schema in BASE_STEPS}
+    assert submission.step_definitions(schemas) == dict(STEPS)
+    with pytest.raises(ValueError, match="no model-facing schema for quality"):
+        submission.step_definitions({k: v for k, v in schemas.items() if k != "quality"})
+    with pytest.raises(ValueError, match="a schema for extra, which is no live step"):
+        submission.step_definitions({**schemas, "extra": QualityReview})
 
 
 SYNTHETIC = registry.StepChain(

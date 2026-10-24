@@ -95,7 +95,7 @@ from deploy_vii.live.ledger import (
 )
 from deploy_vii.live.retention import dump, write_once
 from deploy_vii.live.runner import COHORT, SCHEMA_BISECT_CASE, SCHEMA_CHECK_CASE
-from deploy_vii.live.submission import STEPS
+from deploy_vii.registry import step_modules
 
 USAGE_TOLERANCE_USD = Decimal("0.000001")
 # Cost bases that are a measured figure (metrics.json `ledger.cost_basis`); an estimate is not.
@@ -992,8 +992,9 @@ def interrupted_attempts(artifact_root: Path, batch_id: str, state: LedgerState)
 
 def _run_identity(attempt_id: str) -> dict[str, str]:
     """`ticket_id` and `step_id` of a dispatch attempt id (`<ticket>-<step>-<n>`, a step repair
-    `<ticket>-<step>-repair-<n>`; `runner._plan`), else nothing."""
-    for step_id in STEPS:
+    `<ticket>-<step>-repair-<n>`; `runner._plan`), else nothing. Steps are tried in registry
+    order (task 8.0a), the order `submission.STEPS` keeps."""
+    for step_id in step_modules():
         match = re.fullmatch(rf"(.+)-{re.escape(step_id)}(?:-repair)?-[0-9]+", attempt_id)
         if match is not None:
             return {"ticket_id": match.group(1), "step_id": step_id}

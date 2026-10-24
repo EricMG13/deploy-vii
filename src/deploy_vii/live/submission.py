@@ -113,6 +113,7 @@ from deploy_vii.readiness import (
     shape_issues,
     validate_review,
 )
+from deploy_vii.registry import bound_steps, prefilled_kinds, step_modules
 from deploy_vii.source_context import ReportingScope, SourceContextReview
 from deploy_vii.statement_validation import effective_accounts
 
@@ -190,48 +191,39 @@ class StepDef:
     schema: type[BaseModel]  # the model-facing shape: prompt schema, response_format, parse
 
 
-STEPS: Mapping[str, StepDef] = {
-    "source_readiness": StepDef("CP-0", ReadinessSubmission),
-    "source_context": StepDef("CP-1", SourceContextReview),
-    "financials": StepDef("CP-1", FinancialSubmission),
-    "narrative": StepDef("CP-1", NarrativeReview),
-    "readiness": StepDef("CP-1", DownstreamReview),
-    # Task 7.4: the analyst's QA review over the retained registers; its accepted submission
-    # is the CP-1 promotion (`cp1_workflow.promote_cp1`).
-    "quality": StepDef("CP-1", QualityReview),
-    # Task 7.2: the stored shape is the submission itself; Python composes the registers as the
-    # step output (`business_context.submit_cp1a_step`), so no composer is needed here.
-    "business_context": StepDef("CP-1A", BusinessContextSubmission),
-}
+def step_definitions(schemas: Mapping[str, type[BaseModel]]) -> dict[str, StepDef]:
+    """Every registry step (`registry.step_modules`, its order and module) with its schema from
+    `schemas`; a registry step without a schema, or a schema for no registry step, raises
+    ValueError (task 8.0a)."""
+    modules = step_modules()
+    if extra := sorted(set(schemas) - set(modules)):
+        raise ValueError(f"a schema for {', '.join(extra)}, which is no live step")
+    if missing := [step_id for step_id in modules if step_id not in schemas]:
+        raise ValueError(f"no model-facing schema for {', '.join(missing)}")
+    return {step_id: StepDef(module_id, schemas[step_id]) for step_id, module_id in modules.items()}
+
+
+STEPS: Mapping[str, StepDef] = step_definitions(
+    {
+        "source_readiness": ReadinessSubmission,
+        "source_context": SourceContextReview,
+        "financials": FinancialSubmission,
+        "narrative": NarrativeReview,
+        "readiness": DownstreamReview,
+        # Task 7.4: the analyst's QA review over the retained registers; its accepted submission
+        # is the CP-1 promotion (`cp1_workflow.promote_cp1`).
+        "quality": QualityReview,
+        # Task 7.2: the stored shape is the submission itself; Python composes the registers as
+        # the step output (`business_context.submit_cp1a_step`), so no composer is needed here.
+        "business_context": BusinessContextSubmission,
+    }
+)
 # Task 7.0i: the model supplies no hash. Each hash binding of a CP-1 step contract is marked
 # `PREFILLED_MARKER` with its kind (so the sent schema leaves it out), and Python fills it before
-# the journal validates. Per step: the kinds it carries, and the retained steps they come from.
-PREFILLED: Mapping[str, frozenset[str]] = {
-    "source_context": frozenset({"pack", "source"}),
-    "financials": frozenset(
-        {
-            "context-step",
-            "pack",
-            "source",
-            "source-context-review",
-            "facility",
-            "annual-observation",
-            "quarter-observations",
-            "financial-review",
-            "scope-dimension",
-        }
-    ),
-    "narrative": frozenset({"step-inputs"}),
-    "readiness": frozenset({"step-inputs"}),
-    "quality": frozenset({"quality-inputs"}),
-}
-BOUND_STEPS: Mapping[str, tuple[str, ...]] = {
-    "source_context": (),
-    "financials": ("source_context",),
-    "narrative": ("source_context", "financials"),
-    "readiness": ("source_context", "financials", "narrative"),
-    "quality": CP1_STEPS,
-}
+# the journal validates. Per step: the kinds it carries, and the retained steps they come from
+# (every earlier step of its chain). Both are the registry's (task 8.0a).
+PREFILLED: Mapping[str, frozenset[str]] = prefilled_kinds()
+BOUND_STEPS: Mapping[str, tuple[str, ...]] = bound_steps()
 # Fill order: a phase reads only values that are sent or that earlier phases wrote (a facility
 # row and an observation hash cover their citations; the financial review hash covers them all).
 # The dimension strings (task 7.13) read only sent fields, and the observation hashes parse the
