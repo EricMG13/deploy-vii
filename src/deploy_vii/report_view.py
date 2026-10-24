@@ -1544,9 +1544,10 @@ def _block(
 
 def _call(modules: Mapping[str, ModuleView]) -> tuple[tuple[CallItem, ...], CallWithheld | None]:
     """The call band (task 8.7): CP-6 makes the call. A settled (accepted or restricted) CP-6
-    head shows its ``T6A.4`` action bias as the "Action bias" fact and its confidence as the
-    "Confidence" scale, metered by ``cp6_committee.call_scale`` (user decision, 24 Oct 2026);
-    both texts are the head's facts, never recomputed. CP-6 outside the Pathway withholds the
+    head shows its final-bias action bias (``cp6_committee.ACTION_BIAS_FACT``) as the "Action
+    bias" fact and its confidence (``cp6_committee.CONFIDENCE_FACT``) as the "Confidence"
+    scale, metered by ``cp6_committee.call_scale`` (user decision, 24 Oct 2026); both texts are
+    the head's facts, never recomputed. CP-6 outside the Pathway withholds the
     call as not in this Pathway; CP-6 blocked, or unable to run because a required producer is
     blocked, withholds it as blocked; otherwise no judgement is recorded and the band says so. A
     settled head without its action bias and confidence fails closed (ValueError)."""

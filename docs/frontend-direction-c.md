@@ -170,8 +170,9 @@ Out of scope here, by design:
   supplies S.1 to S.4 series.
 
 The populated call band arrives with CP-6 (M8, task 8.7): `report_view._call` reads the
-settled CP-6 head and shows two items, the "Action bias" fact (the `T6A.4` action bias:
-Overweight, Neutral, Underweight or Insufficient Information) and the "Confidence" scale, whose
+settled CP-6 head and shows two items, the "Action bias" fact (the `T6-FINAL.final_bias`
+action bias: Overweight, Neutral, Underweight or Insufficient Information) and the
+"Confidence" scale, whose
 meter Python maps (`cp6_committee.call_scale`: Insufficient Information 1, Low 2, Medium 3,
 High 5; user decision, 24 Oct 2026, held by a differential test). Both texts are the head's
 facts, never recomputed. The three states: populated from an accepted or restricted CP-6 head;

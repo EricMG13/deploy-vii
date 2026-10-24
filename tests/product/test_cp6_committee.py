@@ -10,6 +10,7 @@ call-band mapping, reference existence, staleness and the prohibited-phrase boun
 Hypothesis properties, four of them differentials against naive references.
 """
 
+import hashlib
 import json
 import random
 import re
@@ -27,8 +28,9 @@ from hypothesis import strategies as st
 from deploy_vii.bindings import BindingMap, validate_bindings
 from deploy_vii.bindings.cp2 import CP2 as CP2_MAP
 from deploy_vii.bindings.cp6 import CP6
+from deploy_vii.bindings.shipped import SHIPPED_MAPS
 from deploy_vii.business_context import CP1_REFERENCES, PROHIBITED, Confidence, Gap, spelled
-from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, View
+from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, Status, View
 from deploy_vii.cp2_synthesis import STRENGTHS, THESIS, WEAKNESSES
 from deploy_vii.cp3_relative_value import cp3_module, relative_value, submit_cp3_step
 from deploy_vii.cp5_integrity import (
@@ -48,6 +50,7 @@ from deploy_vii.cp6_committee import (
     CONFIDENCE_FACT,
     CONFIDENCES,
     CP6_ACTIONS,
+    FINAL_BIAS_TABLE,
     MODULE_ID,
     REQUIRED_TABLES,
     STEP_ID,
@@ -56,6 +59,7 @@ from deploy_vii.cp6_committee import (
     TRADE_TERMS,
     WEAKNESS_CHALLENGES,
     Basis,
+    CallValues,
     CommitteeReport,
     CommitteeSubmission,
     Recommendation,
@@ -80,7 +84,7 @@ from deploy_vii.live.schema import relax, schema_relaxations, strict_copy, stric
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
 from deploy_vii.registry import STEP_CHAINS, StepChain, pack_source_steps
-from deploy_vii.report_view import CallItem, build, pathways
+from deploy_vii.report_view import CallItem, build, call_state, pathways
 from tests.product.cp3_market import FACILITIES, TLB_SPREAD, market_pack
 from tests.product.credit_snapshot import CREDIT_SNAPSHOT_MAPS, credit_snapshot_view
 from tests.product.oracle import expected_text, gap_ids, parity_record
@@ -370,8 +374,11 @@ def test_a_valid_submission_composes_the_tables() -> None:
     assert validate_committee(pack, committee(), up) == ()
     report = committee_challenge(pack, committee(), up)
     tables = {t.table_id: t for t in report.tables}
-    assert REQUIRED_TABLES == ("T6A.4", "T6E.4", "T6E.6", "T6E.7", "T6E.11")
+    assert REQUIRED_TABLES == ("T6A.4", "T6A.6", "T6A.7", "T6A.11")
+    composed = [t.table_id for t in report.tables if t.table_id.startswith("T6")]
+    assert composed == ["T6-FINAL", *REQUIRED_TABLES]
     assert tables.keys() == {
+        "T6-FINAL",
         *REQUIRED_TABLES,
         COMMITTEE_CHALLENGE,
         THESIS_CHALLENGE,
@@ -379,36 +386,47 @@ def test_a_valid_submission_composes_the_tables() -> None:
         WEAKNESS_CHALLENGES,
         CP1_REFERENCES,
     }
+    assert [tables[t].title for t in ("T6-FINAL", *REQUIRED_TABLES)] == [
+        "Final bias",
+        "Bear cross-examination",
+        "Chair evidence weighting: recovery view",
+        "Debate resolution matrix: committee risks",
+        "Gaps ledger",
+    ]
     cells = cells_of(report)
     liquidity = spelled(cp1_fact(pack))
-    assert cells["T6A.4.recommendation.action_bias"].text == "Neutral"
-    assert cells["T6A.4.recommendation.confidence"].text == "Low"
-    assert cells["T6A.4.recommendation.rationale"].text == (
+    assert (ACTION_BIAS_FACT, CONFIDENCE_FACT) == (
+        "T6-FINAL.final_bias.action_bias",
+        "T6-FINAL.final_bias.confidence",
+    )
+    assert cells["T6-FINAL.final_bias.action_bias"].text == "Neutral"
+    assert cells["T6-FINAL.final_bias.confidence"].text == "Low"
+    assert cells["T6-FINAL.final_bias.rationale"].text == (
         f"Liquidity of {liquidity} offsets thin disclosure, so the bias is neutral."
     )
-    assert cells["T6A.4.recommendation.basis"].text == (
+    assert cells["T6-FINAL.final_bias.basis"].text == (
         "CP-2 T2.1.assessment (Credit assessment); CP-2 T2.7.thesis (Thesis); "
         "CP-3 T3.4.preference (Preference); CP-1 Liquidity · FY2025"
     )
-    assert [r.label for r in tables["T6E.4"].rows] == [
+    assert [r.label for r in tables["T6A.4"].rows] == [
         "Thesis",
         "Liquidity",
         "Disclosure",
         "Key finding 2",
     ]
-    assert cells["T6E.4.c01.thesis_ref"].text == "CP-2 T2.7.thesis (Thesis)"
-    assert cells["T6E.4.c04.basis"].text == (
+    assert cells["T6A.4.c01.thesis_ref"].text == "CP-2 T2.7.thesis (Thesis)"
+    assert cells["T6A.4.c04.basis"].text == (
         "CP-3 T3.1.i01 (Term Loan B-2); CP-3 T3.1.i02 (Senior notes due 2030)"
     )
-    assert cells["T6E.6.v01.confidence"].text == "Insufficient Information"
-    assert cells["T6E.11.g01.gap_id"].text == "CP-6-GAP-001"
+    assert cells["T6A.6.v01.confidence"].text == "Insufficient Information"
+    assert cells["T6A.11.g01.gap_id"].text == "CP-6-GAP-001"
     assert all(f.amount is None for f in report.facts if f.table_id != CP1_REFERENCES)
     assert [c.claim_id for c in report.claims] == [
-        "T6A.4.recommendation",
-        "T6E.4.c01",
-        "T6E.4.c02",
-        "T6E.4.c03",
-        "T6E.4.c04",
+        "T6-FINAL.final_bias",
+        "T6A.4.c01",
+        "T6A.4.c02",
+        "T6A.4.c03",
+        "T6A.4.c04",
     ]
     assert all(c.citations == () for c in report.claims)  # CP-6 quotes no pack source
     assert report.schema_version == "committee-challenge/1"
@@ -469,8 +487,8 @@ def test_empty_registers_are_explicit_rows_and_required_ones_limit() -> None:
     cells = cells_of(report)
     for title in ("committee challenges", "recovery view", "committee risks"):
         assert f"No {title} rows in the CP-6 submission" in report.limitations
-    assert cells["T6E.4.none.counter_case"].status == "missing"
-    assert cells["T6E.11.none.gap"].status == "not_applicable"
+    assert cells["T6A.4.none.counter_case"].status == "missing"
+    assert cells["T6A.11.none.gap"].status == "not_applicable"
     tables = {t.table_id for t in report.tables}
     # A CP-2 row without a challenge stays empty: no challenge-column table is invented.
     assert not tables & {THESIS_CHALLENGE, STRENGTH_CHALLENGES, WEAKNESS_CHALLENGES}
@@ -511,7 +529,7 @@ def test_a_finding_id_and_its_register_row_are_both_cp5_refs() -> None:
         ),
         up,
     )
-    cell = cells_of(report)["T6A.4.recommendation.basis"].text
+    cell = cells_of(report)["T6-FINAL.final_bias.basis"].text
     assert cell.count(finding.finding_id) == 1  # one ref, however it is named
     assert f"CP-5 {finding.ref} ({finding.finding_id})" in cell
 
@@ -1196,7 +1214,7 @@ def test_composed_figures_are_the_upstream_facts_and_nothing_else_resolves(
         (GOOD[2], spread["synthetic-revolver-fy2025-spread_bps"]),
     ):
         expected = expected.replace(token, spelled(fact))
-    assert cells_of(report)["T6A.4.recommendation.rationale"].text == expected
+    assert cells_of(report)["T6-FINAL.final_bias.rationale"].text == expected
     assert TLB_SPREAD == GOOD[0]
 
 
@@ -1332,15 +1350,13 @@ def test_the_verdict_and_composition_do_not_depend_on_row_order(
     two = committee_challenge(pack, shuffled, up)
     assert set(one.limitations) == set(two.limitations)
     cells = (cells_of(one), cells_of(two))
-    assert (
-        cells[0]["T6A.4.recommendation.basis"].text == cells[1]["T6A.4.recommendation.basis"].text
-    )
+    assert cells[0]["T6-FINAL.final_bias.basis"].text == cells[1]["T6-FINAL.final_bias.basis"].text
 
     def challenged(cells: dict[str, Fact]) -> set[tuple[str | None, str | None]]:
         return {
             (f.text, cells[f.fact_id.replace("thesis_ref", "counter_case")].text)
             for f in cells.values()
-            if f.table_id == "T6E.4" and f.field == "thesis_ref"
+            if f.table_id == "T6A.4" and f.field == "thesis_ref"
         }
 
     assert challenged(cells[0]) == challenged(cells[1])
@@ -1634,12 +1650,12 @@ def test_the_binding_map_places_the_tables_on_the_rails() -> None:
         THESIS_CHALLENGE: ("strengths-weaknesses", "thesis"),
         STRENGTH_CHALLENGES: ("strengths-weaknesses", "strengths"),
         WEAKNESS_CHALLENGES: ("strengths-weaknesses", "weaknesses"),
+        "T6-FINAL": ("evidence", None),
         "T6A.4": ("evidence", None),
-        "T6E.4": ("evidence", None),
-        "T6E.6": ("evidence", None),
-        "T6E.7": ("evidence", None),
+        "T6A.6": ("evidence", None),
+        "T6A.7": ("evidence", None),
         CP1_REFERENCES: ("evidence", None),
-        "T6E.11": ("limitations", None),
+        "T6A.11": ("limitations", None),
     }
     assert all(e.cell_slot.startswith("cp6-") for e in CP6.entries)
     assert CP6.module_id == MODULE_ID
@@ -1648,11 +1664,28 @@ def test_the_binding_map_places_the_tables_on_the_rails() -> None:
 # --- method text and the r14 coverage map -------------------------------------------------------
 
 
+def r14_cp6() -> dict[str, Any]:
+    coverage = json.loads(Path("docs/methodology/r14-coverage.json").read_text(encoding="utf-8"))
+    found: dict[str, Any] = next(m for m in coverage["modules"] if m["module_id"] == MODULE_ID)
+    return found
+
+
+def portfolio_debate_ids() -> set[str]:
+    """r14's required CP-6 ids that CP-6 does not compose: the CP-6A Portfolio Debate tables."""
+    return set(r14_cp6()["artifact_contract"]["required_table_ids"]) - set(REQUIRED_TABLES)
+
+
 def test_the_method_text_names_the_tables_and_the_rules_and_states_no_figure() -> None:
     brief = files("deploy_vii").joinpath("methods", "cp6.md").read_text(encoding="utf-8")
     assert len(brief.splitlines()) < 110
-    for table_id in REQUIRED_TABLES:
-        assert f"`{table_id}`" in brief
+    final_bias = {FINAL_BIAS_TABLE, ACTION_BIAS_FACT, CONFIDENCE_FACT}
+    reserved = portfolio_debate_ids()
+    assert reserved == {"T6E.4", "T6E.6", "T6E.7", "T6E.11"}
+    for table_id in (*REQUIRED_TABLES, *sorted(final_bias), *sorted(reserved)):
+        assert f"`{table_id}`" in brief, table_id
+    # Provenance: the verified mapping names the pinned r14 source hash.
+    source = r14_cp6()["source_sha256"]
+    assert f"`{source}`" in brief
     for anchor in (
         "decision 0005",
         "SKILL.md",
@@ -1667,15 +1700,315 @@ def test_the_method_text_names_the_tables_and_the_rules_and_states_no_figure() -
         "blocked",
         "not in this run",
         "recovery_view",
-        "assumption",
+        "verified",
+        "Portfolio Debate",
+        "nine dimensions",
+        "Final Bias step",
+        "Deploy VII's own id for r14's",
     ):
         assert anchor in brief, anchor
+    assert "assumption" not in brief  # the r14 mapping is verified, no longer assumed
     keys = {"cp2_refs", "cp3_refs", "cp5_refs", "cp1_facts", "0004", "0005", "0007", "M10"}
     keys |= {"cp2_rows", "cp3_rows", "cp5_rows", "cp5_cp4_rows", "cp5_flagged_claims"}
+    keys |= {*final_bias, *reserved, source, "sha256", "T6A", "T6E"}
     assert {f.strip("`") for f in bare_figures(brief)} <= {*REQUIRED_TABLES, *keys}
 
 
 def test_the_required_tables_are_r14_cp6_ids() -> None:
-    coverage = json.loads(Path("docs/methodology/r14-coverage.json").read_text(encoding="utf-8"))
-    entry_ = next(m for m in coverage["modules"] if m["module_id"] == MODULE_ID)
+    entry_ = r14_cp6()
     assert set(REQUIRED_TABLES) <= set(entry_["artifact_contract"]["required_table_ids"])
+    # Task CP6-R: CP-6 composes r14's CP-6 (`T6A.*`) tables only; its own final bias is outside
+    # r14's ids.
+    assert all(t.startswith("T6A.") for t in REQUIRED_TABLES)
+    assert FINAL_BIAS_TABLE not in entry_["artifact_contract"]["required_table_ids"]
+
+
+# --- task CP6-R: the r14 id remap keeps every composed row and the call band --------------------
+# The differential oracle: every composed row's content (claims, texts, refs, limitations,
+# statuses, order) and the call band's rendered state, keyed by content, not by id. Ids are what
+# the remap moves (register table ids, their row ids, fact and claim ids) and titles follow r14's
+# names, so neither is content here; the Front Page tables keep their `cp6.*` ids and their row
+# ids (each the CP-2 row a challenge sits beside), so those stay in. The hash below was computed
+# on the base (d9071aa) before the remap and is the oracle after it.
+
+REMAP_ORACLE_SHA256 = "5991b26c135b302ce247ca827f51e77cb993bf34e8a896d94bfd36df5ee6a795"
+FRONT_TABLES = frozenset(
+    {
+        COMMITTEE_CHALLENGE,
+        THESIS_CHALLENGE,
+        STRENGTH_CHALLENGES,
+        WEAKNESS_CHALLENGES,
+        CP1_REFERENCES,
+    }
+)
+_IDS = {"fact_id", "table_id", "row_id"}
+INSUFFICIENT_INFO = "Insufficient Information"
+
+
+def _cell(fact: Fact) -> dict[str, Any]:
+    exclude = None if fact.table_id in FRONT_TABLES else _IDS
+    return fact.model_dump(mode="json", exclude=exclude)
+
+
+def composed_content(module: Module) -> dict[str, Any]:
+    """`module`'s composed content in composition order, register ids and titles left out."""
+    facts = {f.fact_id: f for f in module.facts}
+    tables = []
+    for table in module.tables:
+        front = table.table_id in FRONT_TABLES
+        tables.append(
+            {
+                "front": table.model_dump(mode="json", include={"table_id", "title"})
+                if front
+                else None,
+                "columns": [c.model_dump(mode="json") for c in table.columns],
+                "row_header": table.row_header,
+                "rows": [
+                    {
+                        "row_id": row.row_id if front else None,
+                        "label": row.label,
+                        "cells": [_cell(facts[i]) for i in row.fact_ids],
+                    }
+                    for row in table.rows
+                ],
+            }
+        )
+    return {
+        "inputs": [i.model_dump(mode="json") for i in module.inputs],
+        "tables": tables,
+        "facts_in_order": [_cell(f) for f in module.facts],
+        "claims": [c.model_dump(mode="json", exclude={"claim_id"}) for c in module.claims],
+        "limitations": list(module.limitations),
+    }
+
+
+def front_page(module: Module, status: Status) -> dict[str, Any]:
+    """The call band and the CP-6 Front Page blocks over the SYNTHETIC Credit Snapshot view with
+    `module` as its CP-6 head in `status`."""
+    view = credit_snapshot_view()
+    by_id = {m.module_id: m for m in view.modules}
+    cp6 = shown(module, by_id[MODULE_ID]).model_dump()
+    replaced = {
+        "CP-2": shown(heads()["CP-2"], by_id["CP-2"]),
+        MODULE_ID: ModuleView.model_validate({**cp6, "status": status}),
+    }
+    modules = tuple(replaced.get(m.module_id, m) for m in view.modules)
+    pathway = next(p for p in pathways() if p.id == "credit_snapshot")
+    report = build(view.model_copy(update={"modules": modules}), pathway, maps_with_cp6())
+    blocks = ("committee-challenge", "strengths-weaknesses")
+    return {
+        "call": [item.model_dump(mode="json") for item in report.call],
+        "call_withheld": report.call_withheld,
+        "call_state": json.loads(json.dumps(call_state(report))),
+        "blocks": [b.model_dump(mode="json") for b in report.blocks if b.block_id in blocks],
+    }
+
+
+def remap_cases() -> dict[str, tuple[Upstream, CommitteeSubmission]]:
+    """The accepted payloads of this module the differential covers."""
+    up = upstream_of()
+    finding = cp5_review(up.cp5).findings[0]
+    carrying = upstream_of(cp5=evaluated_cp4_cp5())
+    cp4_finding = next(
+        f for f in cp5_review(carrying.cp5).findings if f.where == f"CP-4 claim {CP4_CLAIM}"
+    )
+    insufficient = recommendation(
+        action_bias=INSUFFICIENT_INFO,
+        confidence=INSUFFICIENT_INFO,
+        limitation="CP-3 records no market evidence",
+    )
+    high = recommendation(action_bias="Overweight", confidence="High", limitation=None)
+    cites_finding = recommendation(
+        basis=basis(cp2=(THESIS_ROW,), cp5=(finding.finding_id, finding.ref))
+    )
+    return {
+        "default": (up, committee()),
+        "empty": (up, committee(thesis_challenges=(), recovery_view=(), risks=(), gaps=())),
+        "finding-basis": (up, committee(recommendation=cites_finding)),
+        "clean-high": (upstream_of(cp5=clean_cp5()), committee(recommendation=high)),
+        "recovery-on-cp4": (
+            carrying,
+            committee(recovery_view=(recovery_on(cp4_finding.finding_id), recovery())),
+        ),
+        "insufficient": (upstream_of(cp3=blind_cp3()), committee(recommendation=insufficient)),
+    }
+
+
+def remap_snapshot() -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for name, (up, submission) in remap_cases().items():
+        assert issues_of(submission, up) == (), name
+        module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+        snapshot[name] = {
+            "content": composed_content(module),
+            "front_page": {s: front_page(module, s) for s in ("restricted", "accepted")},
+        }
+    return snapshot
+
+
+def test_the_r14_id_remap_keeps_every_composed_row_and_the_call_band() -> None:
+    snapshot = remap_snapshot()
+    for name, case in snapshot.items():
+        for status, page in case["front_page"].items():
+            assert page["call_state"] == ["populated", None], (name, status)
+            assert [i["label"] for i in page["call"]] == ["Action bias", "Confidence"], name
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    assert digest == REMAP_ORACLE_SHA256, canonical
+
+
+# The pre-remap reader (`cp6_committee.settled_call` at d9071aa), kept verbatim with its ids as
+# the independent reference.
+OLD_ACTION_BIAS_FACT = "T6A.4.recommendation.action_bias"
+OLD_CONFIDENCE_FACT = "T6A.4.recommendation.confidence"
+
+
+def old_settled_call(module: Module) -> CallValues:
+    if module.module_id != MODULE_ID:
+        raise ValueError(f"{module.module_id} is not a CP-6 head")
+    facts = {fact.fact_id: fact for fact in module.facts}
+    bias, confidence = facts.get(OLD_ACTION_BIAS_FACT), facts.get(OLD_CONFIDENCE_FACT)
+    if (
+        bias is None
+        or confidence is None
+        or bias.text not in ACTION_BIASES
+        or confidence.text not in CONFIDENCES
+    ):
+        raise ValueError("The CP-6 head carries no settled action bias and confidence")
+    return CallValues(bias.text, confidence.text)
+
+
+def under_old_ids(module: Module) -> Module:
+    """`module` with the call band's two facts under their pre-remap ids (the identity before
+    the remap)."""
+    old = {ACTION_BIAS_FACT: OLD_ACTION_BIAS_FACT, CONFIDENCE_FACT: OLD_CONFIDENCE_FACT}
+    facts = tuple(
+        f.model_copy(update={"fact_id": old.get(f.fact_id, f.fact_id)}) for f in module.facts
+    )
+    return module.model_copy(update={"facts": facts})
+
+
+def recommendation_cells(module: Module) -> dict[str, str | None]:
+    """The recommendation row's cells read by content (its row label and column fields), never
+    by id: the row labelled Recommendation in the one table with an action bias column."""
+    facts = {f.fact_id: f for f in module.facts}
+    (table,) = [t for t in module.tables if "action_bias" in {c.field for c in t.columns}]
+    (row,) = [r for r in table.rows if r.label == "Recommendation"]
+    return {c.field: facts[i].text for c, i in zip(table.columns, row.fact_ids, strict=True)}
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    st.sampled_from(ACTION_BIASES),
+    st.sampled_from(CONFIDENCES),
+    st.sampled_from(("clean", "restricted")),
+    st.lists(st.integers(0, 3), max_size=4, unique=True),
+    st.lists(st.sampled_from((*WORDS, *GOOD)), min_size=1, max_size=6),
+)
+def test_settled_call_is_identical_under_the_old_and_new_fact_ids(
+    bias: str, confidence: str, cp5: str, picked: list[int], words: list[str]
+) -> None:
+    up = upstream_of(cp5=clean_cp5()) if cp5 == "clean" else upstream_of()
+    rec = recommendation(
+        action_bias=bias,
+        confidence=confidence,
+        rationale=" ".join(words),
+        limitation="Stated limitation",
+        basis=basis(cp2=(THESIS_ROW,), cp3=(PREFERENCE,)),
+    )
+    submission = committee(
+        recommendation=rec, thesis_challenges=tuple(challenges()[i] for i in picked)
+    )
+    refused = (bias == INSUFFICIENT_INFO) != (confidence == INSUFFICIENT_INFO) or (
+        cp5 == "restricted" and confidence == "High"
+    )
+    assert bool(issues_of(submission, up)) == refused
+    if refused:
+        return
+    module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+    call = settled_call(module)
+    assert (call.action_bias, call.confidence) == (bias, confidence)
+    assert old_settled_call(under_old_ids(module)) == call
+    cells = recommendation_cells(module)
+    assert (cells["action_bias"], cells["confidence"]) == (bias, confidence)
+    band = front_page(module, "restricted")["call"]
+    assert [(i["value_text"], i["meter"]) for i in band] == [(bias, None), (confidence, call.scale)]
+
+
+def test_cp6_neither_writes_nor_binds_a_portfolio_debate_table() -> None:
+    """Task CP6-R: the `T6E.*` ids are CP-6A Portfolio Debate's (M10). The shipped CP-6 map
+    names none, and no composed CP-6 table, fact or claim carries one."""
+    (shipped,) = [m for m in SHIPPED_MAPS if m.module_id == MODULE_ID]
+    assert shipped == CP6
+    coords = [
+        part
+        for e in shipped.entries
+        for part in (e.fact_coord.table_id, e.fact_coord.row_id, e.fact_coord.fact_id)
+        if part is not None
+    ]
+    reserved = portfolio_debate_ids()
+    assert not any(part.startswith("T6E.") or part in reserved for part in coords), coords
+    bound = {e.fact_coord.table_id for e in shipped.entries}
+    for name, (up, submission) in remap_cases().items():
+        module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+        ids = [
+            *(t.table_id for t in module.tables),
+            *(i for f in module.facts for i in (f.fact_id, f.table_id)),
+            *(c.claim_id for c in module.claims),
+        ]
+        assert not any(i.startswith("T6E.") for i in ids), name
+        assert {t.table_id for t in module.tables} <= bound, name
+
+
+def test_no_cp6_table_id_is_another_modules_table_id() -> None:
+    """Fix round 1: CP-6's own table ids (`T6-FINAL`, the r14 `T6A.*`, its Front Page tables)
+    are table ids no other shipped binding map and no other r14 module uses. `cp1_references`
+    is the shared carrier of verbatim CP-1 facts (`business_context.CP1_REFERENCES`, also CP-2's
+    and CP-3's) and is the one exemption."""
+    own = {e.fact_coord.table_id for e in CP6.entries} - {CP1_REFERENCES}
+    assert FINAL_BIAS_TABLE in own and set(REQUIRED_TABLES) <= own
+    others = {
+        e.fact_coord.table_id
+        for m in SHIPPED_MAPS
+        if m.module_id != MODULE_ID
+        for e in m.entries
+        if e.fact_coord.table_id is not None
+    }
+    assert "T6" in others  # r14 CP-0's T6, the id the final bias must not reuse
+    assert not own & others, own & others
+    coverage = json.loads(Path("docs/methodology/r14-coverage.json").read_text(encoding="utf-8"))
+    r14_others = {
+        table_id
+        for m in coverage["modules"]
+        if m["module_id"] != MODULE_ID
+        for key in ("required_table_ids", "conditional_table_ids")
+        for table_id in m["artifact_contract"].get(key, ())
+    }
+    assert not own & r14_others, own & r14_others
+    for name, (up, submission) in remap_cases().items():
+        module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+        assert {t.table_id for t in module.tables} - {CP1_REFERENCES} <= own, name
+
+
+def test_the_call_band_reads_the_final_bias_constants_and_no_literal_id() -> None:
+    """The call band's only source is `ACTION_BIAS_FACT` and `CONFIDENCE_FACT`: report_view
+    names no CP-6 table or fact id of its own."""
+    source = files("deploy_vii").joinpath("report_view.py").read_text(encoding="utf-8")
+    assert re.search(r"T6(?:[AE]|-FINAL)?\.", source) is None
+    assert "cp6_committee.ACTION_BIAS_FACT" in source
+    assert "cp6_committee.CONFIDENCE_FACT" in source
+
+
+def test_the_coverage_map_records_the_verified_mapping() -> None:
+    text = r14_cp6()["implementation"]
+    assert "assumption" not in text
+    for anchor in (
+        "task CP6-R",
+        "verified against the pinned r14 source",
+        "T6A.4, T6A.6, T6A.7 and T6A.11",
+        "nine-dimension",
+        "T6-FINAL.final_bias",
+        "T6E.4, T6E.6, T6E.7 and T6E.11",
+        "Portfolio Debate",
+    ):
+        assert anchor in text, anchor

@@ -31,11 +31,15 @@ in Python only, to:
   recovery conclusion; peer ranking, buy, sell and switch phrases and trade terms (a price or a
   size) stay prohibited.
 
-`committee_challenge` then composes, in Python, minimal tables under r14 CP-6 ids (`methods/cp6.md`
-records the decision 0005 adaptation), the FP 01 `committee-challenge` table, the CP-6 side of
+`committee_challenge` then composes, in Python, the final bias under Deploy VII's own
+`T6-FINAL` id (r14's Step 8 has no table) and minimal tables under the r14 CP-6 ids they
+denote, `T6A.4`, `T6A.6`, `T6A.7` and `T6A.11` (`methods/cp6.md` records the verified
+mapping and the decision 0005 adaptation; the `T6E.*` ids are CP-6A Portfolio Debate
+tables, which CP-6 never writes), the FP 01 `committee-challenge` table, the CP-6 side of
 `strengths-weaknesses` keyed by CP-2 row id, the referenced CP-1 facts, claims and own
-limitations. The call band reads the settled `T6A.4` action bias and confidence
-(`settled_call`); final integrity at report assembly is out of scope (ruling 4).
+limitations. The call band reads the settled final-bias action bias and confidence
+(`settled_call`, `ACTION_BIAS_FACT`, `CONFIDENCE_FACT`); final integrity at report assembly is
+out of scope (ruling 4).
 `submit_cp6_step` settles CP-6 as `submit_cp3_step` does and needs no registry entry.
 """
 
@@ -146,8 +150,13 @@ ActionBias = Literal["Overweight", "Neutral", "Underweight", "Insufficient Infor
 ACTION_BIASES: tuple[ActionBias, ...] = get_args(ActionBias)
 # Confidence from least to most; the call band's meter runs from 1 to 5 (`CallItem`).
 CONFIDENCES: tuple[Confidence, ...] = ("Insufficient Information", "Low", "Medium", "High")
-ACTION_BIAS_FACT = "T6A.4.recommendation.action_bias"
-CONFIDENCE_FACT = "T6A.4.recommendation.confidence"
+# The final bias (r14 CP-6 Step 8, which has no table): Deploy VII's own `T6-FINAL` id, outside
+# r14's T6A and T6E ids and distinct from every other module's table ids (r14 CP-0 has a `T6`),
+# one `final_bias` row. The call band reads these two facts and nothing else.
+FINAL_BIAS_TABLE = "T6-FINAL"
+FINAL_BIAS_ROW = "final_bias"
+ACTION_BIAS_FACT = f"{FINAL_BIAS_TABLE}.{FINAL_BIAS_ROW}.action_bias"
+CONFIDENCE_FACT = f"{FINAL_BIAS_TABLE}.{FINAL_BIAS_ROW}.confidence"
 
 
 def call_scale(confidence: Confidence) -> int:
@@ -174,7 +183,7 @@ class CallValues:
 
 
 def settled_call(module: Module) -> CallValues:
-    """The action bias and confidence of a CP-6 head (its `T6A.4` cells); raises ValueError
+    """The action bias and confidence of a CP-6 head (its final-bias cells); raises ValueError
     when the head is not CP-6's or carries no settled pair."""
     if module.module_id != MODULE_ID:
         raise ValueError(f"{module.module_id} is not a CP-6 head")
@@ -866,26 +875,28 @@ def validate_committee(
 # --- composition -----------------------------------------------------------------------------
 
 NO_BASIS = "No CP-2, CP-3 or CP-5 row or CP-1 figure cited"
-# Ruling 5: minimal tables under r14 CP-6 ids; the id-to-content mapping and every column are
-# composed from the contract rows, not from r14 column definitions (`methods/cp6.md`).
+FINAL_BIAS = Register(
+    FINAL_BIAS_TABLE,
+    "Final bias",
+    (
+        ("action_bias", "Action bias"),
+        ("rationale", "Rationale"),
+        ("conditions", "Conditions"),
+        ("confidence", "Confidence"),
+        ("basis", "Basis"),
+        ("limitation", "Limitation"),
+    ),
+)
+# Ruling 5 and task CP6-R: minimal tables under the r14 CP-6 ids they denote (verified against
+# the pinned r14 source, `methods/cp6.md`), titled by r14's table names; every column is composed
+# from the contract rows, not from r14 column definitions (decision 0005).
+CROSS_EXAMINATION, EVIDENCE_WEIGHTING, RESOLUTION, GAPS = "T6A.4", "T6A.6", "T6A.7", "T6A.11"
 REGISTERS: Mapping[str, Register] = {
     item.table_id: item
     for item in (
         Register(
-            "T6A.4",
-            "Action bias",
-            (
-                ("action_bias", "Action bias"),
-                ("rationale", "Rationale"),
-                ("conditions", "Conditions"),
-                ("confidence", "Confidence"),
-                ("basis", "Basis"),
-                ("limitation", "Limitation"),
-            ),
-        ),
-        Register(
-            "T6E.4",
-            "Committee challenges",
+            CROSS_EXAMINATION,
+            "Bear cross-examination",
             (
                 ("thesis_ref", "CP-2 row"),
                 ("counter_case", "Counter-case"),
@@ -896,8 +907,8 @@ REGISTERS: Mapping[str, Register] = {
             ),
         ),
         Register(
-            "T6E.6",
-            "Recovery view",
+            EVIDENCE_WEIGHTING,
+            "Chair evidence weighting: recovery view",
             (
                 ("subject", "Subject"),
                 ("view", "View"),
@@ -907,8 +918,8 @@ REGISTERS: Mapping[str, Register] = {
             ),
         ),
         Register(
-            "T6E.7",
-            "Committee risks",
+            RESOLUTION,
+            "Debate resolution matrix: committee risks",
             (
                 ("risk", "Risk"),
                 ("mechanic", "Risk mechanic"),
@@ -918,7 +929,7 @@ REGISTERS: Mapping[str, Register] = {
             ),
         ),
         Register(
-            "T6E.11",
+            GAPS,
             "Gaps ledger",
             (
                 ("gap_id", "Gap ID"),
@@ -931,7 +942,19 @@ REGISTERS: Mapping[str, Register] = {
         ),
     )
 }
+# The r14 CP-6 ids CP-6 composes; the final bias is CP-6's own table, outside r14's ids.
 REQUIRED_TABLES = tuple(REGISTERS)
+# What each table holds, in the words an empty table's limitation uses: unchanged by the r14 id
+# remap, which renamed the titles and not the analysis.
+HOLDS: Mapping[str, str] = MappingProxyType(
+    {
+        FINAL_BIAS_TABLE: "action bias",
+        CROSS_EXAMINATION: "committee challenges",
+        EVIDENCE_WEIGHTING: "recovery view",
+        RESOLUTION: "committee risks",
+        GAPS: "gaps ledger",
+    }
+)
 # The FP 01 `committee-challenge` table: one model text per line, the action bias first (the
 # collapsed block's summary), then each challenge, its CP-2 row's name leading the text.
 COMMITTEE_CHALLENGE = "cp6.committee_challenge"
@@ -1020,18 +1043,16 @@ class _Composer:
         )
         return fact_id
 
-    def _empty(self, title: str, required: bool) -> Cell:
+    def _empty(self, holds: str, required: bool) -> Cell:
         if required:
-            reason = f"No {title.lower()} rows in the CP-6 submission"
+            reason = f"No {holds} rows in the CP-6 submission"
             self.limitations.append(reason)
             return Cell(None, reason=reason, status="missing")
-        return Cell(
-            None, reason=f"None in the CP-6 submission ({title.lower()})", status="not_applicable"
-        )
+        return Cell(None, reason=f"None in the CP-6 submission ({holds})", status="not_applicable")
 
     def table(self, register: Register, rows: Sequence[_Row], *, required: bool) -> None:
         if not rows:
-            cell = self._empty(register.title, required)
+            cell = self._empty(HOLDS[register.table_id], required)
             rows = (_Row("none", "None", tuple(cell for _ in register.columns)),)
         self.tables.append(
             ReportTable(
@@ -1086,14 +1107,14 @@ def _name(row: CatalogueRow) -> str:
 
 
 def _recommendation(submission: CommitteeSubmission, out: _Composer) -> Cell:
-    """T6A.4 and the FP 01 action-bias line."""
+    """The final bias (`T6-FINAL`) and the FP 01 action-bias line."""
     row = submission.recommendation
     rationale, conditions = out.text(row.rationale), out.text(row.conditions)
     out.table(
-        REGISTERS["T6A.4"],
+        FINAL_BIAS,
         [
             _Row(
-                "recommendation",
+                FINAL_BIAS_ROW,
                 "Recommendation",
                 (
                     Cell(row.action_bias),
@@ -1127,7 +1148,7 @@ def _ordered(submission: CommitteeSubmission, upstream: Upstream) -> list[Thesis
 def _challenges(
     challenges: Sequence[ThesisChallenge], out: _Composer
 ) -> list[tuple[str, str, Cell]]:
-    """T6E.4 and the challenge columns beside CP-2's strengths and weaknesses, keyed by the
+    """T6A.4 and the challenge columns beside CP-2's strengths and weaknesses, keyed by the
     CP-2 row id; returns the FP 01 challenge lines."""
     rows: list[_Row] = []
     lines: list[tuple[str, str, Cell]] = []
@@ -1158,7 +1179,7 @@ def _challenges(
         if side is not None:
             cp2_row = ref.removeprefix("T2.7.")
             columns[side].append((cp2_row, f"Challenge · {name}", Cell(counter, judged=True)))
-    out.table(REGISTERS["T6E.4"], rows, required=True)
+    out.table(REGISTERS[CROSS_EXAMINATION], rows, required=True)
     for table_id in (THESIS_CHALLENGE, STRENGTH_CHALLENGES, WEAKNESS_CHALLENGES):
         out.front(table_id, columns[table_id])
     return lines
@@ -1184,12 +1205,12 @@ def _recovery(submission: CommitteeSubmission, out: _Composer) -> None:
                 ),
             )
         )
-    out.table(REGISTERS["T6E.6"], rows, required=True)
+    out.table(REGISTERS[EVIDENCE_WEIGHTING], rows, required=True)
 
 
 def _risks_and_gaps(submission: CommitteeSubmission, out: _Composer) -> None:
     out.table(
-        REGISTERS["T6E.7"],
+        REGISTERS[RESOLUTION],
         [
             _Row(
                 f"r{index:02d}",
@@ -1207,7 +1228,7 @@ def _risks_and_gaps(submission: CommitteeSubmission, out: _Composer) -> None:
         required=True,
     )
     out.table(
-        REGISTERS["T6E.11"],
+        REGISTERS[GAPS],
         [
             _Row(
                 f"g{index:02d}",
@@ -1281,18 +1302,18 @@ def committee_challenge(
     # facts (`execution.candidate_issues`). CP-6 quotes no pack source.
     claims = (
         Claim(
-            claim_id="T6A.4.recommendation",
+            claim_id=f"{FINAL_BIAS_TABLE}.{FINAL_BIAS_ROW}",
             text=row.rationale,
             citations=(),
             limitation=row.limitation,
         ),
         *(
-            Claim(claim_id=f"T6E.4.c{index:02d}", text=c.counter_case, citations=())
+            Claim(claim_id=f"{CROSS_EXAMINATION}.c{index:02d}", text=c.counter_case, citations=())
             for index, c in enumerate(challenges, 1)
         ),
         *(
             Claim(
-                claim_id=f"T6E.6.v{index:02d}",
+                claim_id=f"{EVIDENCE_WEIGHTING}.v{index:02d}",
                 text=view.view,
                 citations=(),
                 limitation=view.limitation,
