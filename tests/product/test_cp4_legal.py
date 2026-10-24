@@ -475,6 +475,12 @@ def test_python_parses_the_threshold_from_the_quote() -> None:
     assert value is None and issue and "no multiple" in issue
     value, issue = parse_threshold("5.00 to 0", "multiple")
     assert value is None and issue and "zero" in issue
+    # Confidence review: a clock time is not a ratio, and Python never asks the model to divide:
+    # a ratio to anything but one is not read (unit other, not calculable).
+    assert parse_threshold("4.50:1.00, tested at 12:00", "multiple") == (Decimal("4.50"), None)
+    assert parse_threshold("4.50 : 1", "multiple") == (Decimal("4.50"), None)
+    value, issue = parse_threshold("3.00 to 2.00", "multiple")
+    assert value is None and issue and "other than one" in issue
 
 
 def test_a_threshold_value_that_differs_from_its_quote_is_rejected() -> None:
@@ -735,12 +741,26 @@ def test_prohibited_and_python_owned_conclusions_are_rejected(text: str, kind: s
     assert any(f"({kind})" in issue for issue in found), found
 
 
-def test_a_mechanic_naming_the_test_is_not_a_compliance_claim() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The issuer must comply with the leverage test each quarter",
+        # Confidence review: an obligation to stay compliant is a provision, not a status.
+        "The issuer must remain in compliance with Section 4.09",
+        # Confidence review: a contractual repayment term is a mechanic, not a recovery view.
+        "The notes must be repaid in full upon a change of control",
+    ],
+)
+def test_a_provision_naming_the_test_is_not_a_conclusion(text: str) -> None:
     base = submission_fixture()
-    flag = base.red_flags[0].model_copy(
-        update={"mechanic": "The issuer must comply with the leverage test each quarter"}
-    )
+    flag = base.red_flags[0].model_copy(update={"mechanic": text})
     assert issues_of(changed(base, red_flags=(flag,))) == ()
+
+
+def test_a_recovery_outcome_is_still_rejected() -> None:
+    base = submission_fixture()
+    flag = base.red_flags[0].model_copy(update={"implication": "The notes would recover par"})
+    assert any("(recovery conclusion)" in i for i in issues_of(changed(base, red_flags=(flag,))))
 
 
 def test_a_metric_must_be_offered_and_match_the_threshold_unit() -> None:

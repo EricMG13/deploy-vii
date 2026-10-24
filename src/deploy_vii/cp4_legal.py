@@ -33,6 +33,7 @@ from pydantic import BaseModel, ValidationError
 
 from deploy_vii import prose
 from deploy_vii.business_context import (
+    _PROHIBITED,
     NO_EVIDENCE,
     NONE_STATED,
     Cell,
@@ -43,7 +44,6 @@ from deploy_vii.business_context import (
     _Bound,
     _register,
     _trace,
-    prohibited_issues,
     referencable,
     spelled,
 )
@@ -273,7 +273,10 @@ _NUMBER = r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)"
 _BEFORE = r"(?<![0-9A-Za-z])(?<![0-9][.,])"
 _AFTER = r"(?![0-9A-Za-z])"
 _END = r"(?![0-9]|[.,][0-9])"
-_RATIO = re.compile(rf"{_BEFORE}{_NUMBER}\s*(?:to|:)\s*{_NUMBER}{_END}", re.IGNORECASE)
+# "N to D" with any denominator; "N:1" only to one (confidence review: "12:00" is a clock time).
+_RATIO = re.compile(
+    rf"{_BEFORE}{_NUMBER}\s*(?:to\s*{_NUMBER}|:\s*(1(?:\.0+)?)){_END}", re.IGNORECASE
+)
 _TIMES = re.compile(rf"{_BEFORE}{_NUMBER}\s*(?:x|\u00d7|times){_AFTER}", re.IGNORECASE)
 _PERCENT = re.compile(rf"{_BEFORE}{_NUMBER}\s*(?:%|percent|per cent){_AFTER}", re.IGNORECASE)
 
@@ -283,19 +286,22 @@ def _decimal(text: str) -> Decimal:
 
 
 def parse_threshold(text: str, unit: str) -> tuple[Decimal | None, str | None]:
-    """The one threshold a quoted text states, as written (the ratio N to D is N / D; a
-    percentage is its number, 12.5 for 12.5%), or None with the reason it cannot be read. Only
-    the multiple and percent forms are read; any other unit has nothing to parse."""
+    """The one threshold a quoted text states, as written (a ratio N to one is N, a multiple
+    N x is N, a percentage is its number: 12.5 for 12.5%), or None with the reason it cannot be
+    read. A ratio to anything but one is not read: Python would have to divide a number the
+    model never wrote. Only the multiple and percent forms are read."""
     plain = normalise(text)
     values: list[Decimal] = []
     issue: str | None = None
     if unit == "multiple":
         for match in _RATIO.finditer(plain):
-            numerator, denominator = _decimal(match[1]), _decimal(match[2])
+            numerator, denominator = _decimal(match[1]), _decimal(match[2] or match[3])
             if denominator == 0:
                 issue = "the ratio has a zero denominator"
+            elif denominator != 1:
+                issue = "a ratio to other than one is not read; set threshold_unit to other"
             else:  # "5.00 to 1.00" keeps its written 5.00
-                values.append(numerator if denominator == 1 else numerator / denominator)
+                values.append(numerator)
         # A ratio's own numbers are read once: the "N times" form is searched outside them.
         values += [_decimal(m[1]) for m in _TIMES.finditer(_RATIO.sub(" ", plain))]
     elif unit == "percent":
@@ -353,13 +359,20 @@ _UNIT_OF: Mapping[str, frozenset[str]] = {
 # the leverage test") or the analysis a gap affects ("covenant tests and headroom") is not a
 # status, and is allowed; an amount or a status of headroom ("ample headroom", "headroom is",
 # "a cushion of") and a compliance status ("is in compliance", "has breached") are refused.
-_STATUS = r"(?:is|was|are|were|remains?|remained|stays?|stayed|being|been)"
+# Finite verbs only (confidence review): "must remain in compliance" and "subject to the issuer
+# being in compliance" are obligations and conditions a clause sets, not a status.
+_STATUS = r"(?:is|was|are|were|remains|remained|stays|stayed|been)"
 _ROOM = r"(?:headroom|cushion)"
 _SIZE = (
     r"(?:ample|sufficient|insufficient|limited|tight|comfortable|significant|substantial|"
     r"adequate|enough|considerable|meaningful|modest|thin|narrow|wide|large|small|healthy|"
     r"good|minimal|little|no|some|plenty of|more|less)"
 )
+# CP-1A's prohibited conclusions (`business_context.PROHIBITED`, `NEAR_INSTRUMENT`), less the
+# phrases that are contract mechanics in a legal reading (confidence review): "the notes must be
+# repaid in full upon a change of control" is a repayment term, not a recovery outcome.
+_LEGAL_MECHANICS = frozenset({"repaid in full"})
+_PROHIBITED_HERE = tuple(item for item in _PROHIBITED if item[1] not in _LEGAL_MECHANICS)
 _PYTHON_OWNED = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -550,6 +563,17 @@ def _shape_issues(submission: CovenantInterpretationSubmission) -> list[str]:
     ]
 
 
+def prohibited_issues_cp4(path: str, text: str) -> tuple[str, ...]:
+    """A text that states a prohibited conclusion (instrument recommendation, recovery outcome,
+    peer ranking), worded as `business_context.prohibited_issues`; CP-4 rows quote no
+    labelled management language, so no quoting exemption applies."""
+    return tuple(
+        f'{path}: prohibited conclusion ({kind}): "{phrase}"'
+        for kind, phrase, pattern in _PROHIBITED_HERE
+        if pattern.search(text)
+    )
+
+
 def python_owned_issues(path: str, text: str) -> tuple[str, ...]:
     """A text that states compliance or headroom, which only Python's cells state."""
     return tuple(
@@ -592,7 +616,7 @@ def validate_covenant_interpretation(
                 issues.append(f"{where}: empty text")
                 continue
             issues.extend(f"{where}: {issue}" for issue in prose.issues(text, bound, names=names))
-            issues.extend(prohibited_issues(where, text))
+            issues.extend(prohibited_issues_cp4(where, text))
             issues.extend(python_owned_issues(where, text))
             texts.append((text, scope))
     issues.extend(_shape_issues(submission))
@@ -1098,7 +1122,9 @@ def _check_tables(tests: Sequence[_Test], upstream: Upstream, out: _Composer) ->
             )
             for i, name in upstream.facilities.items()
         ),
-        empty=f"{CP1_BLOCKED}: no facility register is bound" if upstream.blocked else None,
+        empty=f"{CP1_BLOCKED}: no facility register is bound"
+        if upstream.blocked
+        else "The bound CP-1 T4.18 lists no facility",
     )
     out.table(
         REGISTERS["T4F.3"],
