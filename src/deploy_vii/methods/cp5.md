@@ -15,8 +15,11 @@ Python has already checked, and lists in CONTEXT:
 - claim figure resolution: every figure in a claim is a reference to its own module's facts;
 - cross-module figure identity: a fact id, or a table, row, field and period, carries the same
   exact value (amount times scale), unit, currency and period in every module that holds it,
-  and one fact id keeps its table, row and field (only CP-1A's own reference copies are
-  excepted); a scale that disagrees with its unit is a finding of its own (amount, percent,
+  and one fact id keeps its table, row and field. Any module's CP-1 references table holds
+  Python's verbatim copies of CP-1 facts: a copy's placement is not compared under its fact
+  id, its exact value, unit, currency and period are, with the source and every other copy;
+  and a copy is never compared by coordinate (`T5.6`), since each module numbers its own.
+  A scale that disagrees with its unit is a finding of its own (amount, percent,
   multiple and decimal-fraction units fix their scale; `currency` and any other unit, such as a
   KPI template unit, leave it free). A fact whose status is not known enters
   its fact id's group and counts as a mismatch against a known figure (conservative); text-only

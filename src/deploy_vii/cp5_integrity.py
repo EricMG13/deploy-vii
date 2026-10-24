@@ -9,9 +9,10 @@ re-implemented here (plan M8, MC-6):
 - claim figure resolution: `prose.issues` of each claim against its own module's facts;
 - cross-module figure identity (new, ruling 5, fix round 1): facts sharing a `fact_id`, and
   figures sharing `(table_id, row_id, field, period)`, must agree in exact value (amount times
-  scale), unit, currency and period, and under one fact id in table, row and field (CP-1A's
-  reference copies excepted); a scale that disagrees with its unit is its own finding. A
-  disagreement is a finding; CP-5 writes no replacement value and repeats no amount;
+  scale), unit, currency and period, and under one fact id in table, row and field (any
+  module's `cp1_references` copies excepted, task 8.4b; they are never compared by coordinate);
+  a scale that disagrees with its unit is its own finding. A disagreement is a finding; CP-5
+  writes no replacement value and repeats no amount;
 - stale inputs: `execution.current_inputs` and each bound hash against its current head;
 - gap propagation: `execution.blocked_ancestors` and `execution.inherited_limitations`, and a
   claim that rests on an unsettled fact without stating a limitation.
@@ -96,11 +97,14 @@ UNIT_SCALE: Mapping[str, Decimal] = {
     "MILLIONS": Decimal(1000000),
     **dict.fromkeys(("PERCENT", "MULTIPLE", "decimal_fraction"), Decimal(1)),
 }
-# (producer module, table) of verbatim copies of another module's facts at coordinates Python
-# assigns by rule: CP-1A's `cp1_references` (business_context.py). Their placement is not
-# compared, their value is. Keyed by producer as well (fix round 2): `table_id` is a free
-# identifier, so another module naming a table `cp1_references` is placement-checked.
-REFERENCE_COPIES = frozenset({("CP-1A", CP1_REFERENCES)})
+# Tables of verbatim copies of CP-1 facts at coordinates Python assigns by rule: every
+# module's `cp1_references` (CP-1A, CP-2, CP-3 and CP-6 compose one; the table id is the
+# composer's, never a model's). Task 8.4b, coordinator ruling 1 (superseding fix round 2's
+# CP-1A-only key): a copy's placement is not compared under its fact id; its exact value
+# (amount times scale), unit, currency and period are, with the source and every other copy.
+# Ruling 2: a copy is never pooled by coordinate, since each producer numbers its copies
+# from `ref01` (T5.6).
+REFERENCE_TABLES = frozenset({CP1_REFERENCES})
 
 # --- the model-facing contract ---------------------------------------------------------------
 # Plain `str` fields, as in `BusinessContextSubmission`: the validator holds references and
@@ -381,19 +385,19 @@ def scale_disagrees(fact: Fact) -> bool:
 
 def identity_groups(heads: Sequence[Module]) -> tuple[IdentityGroup, ...]:
     """Every key two modules share, where at least one member is a figure: by `fact_id` over
-    all facts, and by `(table_id, row_id, field, period)` over figures. Both checks run on
-    every pair (ruling 5), so a disagreement may be found under both keys. Members are
-    compared on `VALUE_FIELDS`; under a fact id also on `PLACEMENT_FIELDS`, except a member
-    that is a `REFERENCE_COPIES` copy (its producer and table both match). An unsettled fact
-    under a figure's id is a value mismatch
-    (no value against a value); text-only facts never form a group."""
+    all facts, and by `(table_id, row_id, field, period)` over figures outside the
+    `REFERENCE_TABLES` copies. Both checks run on every pair (ruling 5), so a disagreement may
+    be found under both keys. Members are compared on `VALUE_FIELDS`; under a fact id also on
+    `PLACEMENT_FIELDS`, except a member in a `REFERENCE_TABLES` copy table, of any producer
+    (8.4b ruling 1). An unsettled fact under a figure's id is a value mismatch (no value
+    against a value); text-only facts never form a group."""
     pooled: dict[tuple[Literal["fact_id", "coordinate"], str], list[tuple[str, Fact]]] = {}
     for head in heads:
         for fact in head.facts:
             pooled.setdefault(("fact_id", f"fact_id {fact.fact_id}"), []).append(
                 (head.module_id, fact)
             )
-            if fact.amount is not None:
+            if fact.amount is not None and fact.table_id not in REFERENCE_TABLES:
                 where = f"{fact.table_id}/{fact.row_id}/{fact.field}/{fact.period}"
                 pooled.setdefault(("coordinate", f"coordinate {where}"), []).append(
                     (head.module_id, fact)
@@ -406,9 +410,7 @@ def identity_groups(heads: Sequence[Module]) -> tuple[IdentityGroup, ...]:
         facts = [fact for _, fact in members]
         differing = tuple(name for name in VALUE_FIELDS if len(_values(facts, name)) > 1)
         if basis == "fact_id":
-            placed = [
-                fact for owner, fact in members if (owner, fact.table_id) not in REFERENCE_COPIES
-            ]
+            placed = [fact for _, fact in members if fact.table_id not in REFERENCE_TABLES]
             differing += tuple(name for name in PLACEMENT_FIELDS if len(_values(placed, name)) > 1)
         groups.append(
             IdentityGroup(
@@ -970,7 +972,10 @@ def _claim_tables(c: _Composition) -> None:
 
 def _identity_tables(c: _Composition) -> None:
     same = {
-        "fact_id": "Identical value (amount times scale), unit, currency, period and placement",
+        "fact_id": (
+            "Identical value (amount times scale), unit, currency, period and placement "
+            "(a CP-1 reference copy's placement is assigned by its composer)"
+        ),
         "coordinate": "Identical value (amount times scale), unit, currency and period",
     }
 

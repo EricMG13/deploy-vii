@@ -3,7 +3,8 @@
 SYNTHETIC: every head here is test data over the CP-0 readiness fixture pack; nothing qualifies
 an issuer. Heads are generic `Module`s: the CP-1 figure fixture (`cp1_fact`), the composed CP-1A
 registers (`business_context` over its submission fixture) and a CP-MODEL head in its
-publication shape. CP-2, CP-3 and CP-4 heads do not exist yet.
+publication shape. Task 8.4b adds CP-2 and CP-3 heads composed by their Python composers over
+the CP-3 test's SYNTHETIC fixtures (`composed_heads`).
 """
 
 import json
@@ -13,7 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.bindings import validate_bindings
@@ -33,6 +34,7 @@ from deploy_vii.contracts import (
     TableColumn,
     TableRow,
 )
+from deploy_vii.cp3_relative_value import cp3_module, relative_value
 from deploy_vii.cp5_integrity import (
     CP5_STEPS,
     MODULE_ID,
@@ -65,9 +67,12 @@ from deploy_vii.readiness import citation_issues
 from deploy_vii.registry import STEP_CHAINS, StepChain, checked_chains, module_route
 from deploy_vii.render import render
 from deploy_vii.report_view import build, pathways
+from tests.product import test_cp3_relative_value as cp3_tests
 from tests.product import test_cp_model_workflow as cp_model_tests
+from tests.product.cp3_market import FACILITIES, market_pack
 from tests.product.oracle import expected_by_fact, rendered_table_display
 from tests.product.test_business_context import cp1_fact, pack_fixture, submission_fixture
+from tests.product.test_cp2_synthesis import leverage_fact
 from tests.product.test_execution import cp_model_store, settle_module, settled, step_text
 
 SCOPE = ("CP-0", "CP-1", "CP-MODEL", "CP-1A", "CP-5")
@@ -797,21 +802,24 @@ BROKEN = (
     good_citation(PACK, "words the filing never says"),
     GOOD.model_copy(update={"locator": "line:9"}),
 )
-MODULES = ("CP-1", "CP-1A", "CP-MODEL")
+# CP-1A, CP-2 and CP-3 also hold `cp1_references` copies (8.4b), each numbered from `ref01`.
+MODULES = ("CP-1", "CP-1A", "CP-2", "CP-3", "CP-MODEL")
+COPY_PRODUCERS = frozenset({"CP-1A", "CP-2", "CP-3"})
 FACT_IDS = ("f.a", "f.b", "f.c")
 
 
 @st.composite
-def figure(draw: st.DrawFn, fact_id: str) -> Fact:
+def figure(draw: st.DrawFn, fact_id: str, copy_row: str | None = None) -> Fact:
+    """A figure at `T`, or, with `copy_row`, a `cp1_references` copy at that row (8.4b)."""
     cited = draw(st.lists(st.sampled_from((GOOD, *BROKEN)), unique=True, max_size=2))
     if draw(st.integers(0, 5)) == 0:
         return Fact(fact_id=fact_id, label=fact_id, status="missing", limitation="Synthetic gap")
     return Fact(
         fact_id=fact_id,
         label=fact_id,
-        table_id="T",
-        row_id=draw(st.sampled_from(("r1", "r2"))),
-        field="v",
+        table_id="T" if copy_row is None else CP1_REFERENCES,
+        row_id=draw(st.sampled_from(("r1", "r2"))) if copy_row is None else copy_row,
+        field="v" if copy_row is None else "value",
         # 1000 at scale 1 is 1 at scale 1000: one value, two representations.
         amount=Decimal(draw(st.sampled_from(("1", "2", "2.0", "1000")))),
         unit=draw(st.sampled_from(("MILLIONS", "THOUSANDS", "currency"))),
@@ -825,7 +833,11 @@ def figure(draw: st.DrawFn, fact_id: str) -> Fact:
 @st.composite
 def head(draw: st.DrawFn, module_id: str) -> Module:
     ids = draw(st.lists(st.sampled_from(FACT_IDS), unique=True, max_size=3))
-    facts = tuple(draw(figure(fact_id)) for fact_id in ids)
+    # A copy producer numbers its copies from ref01, as every `cp1_references` composer does,
+    # so two producers' copies of different facts meet at one coordinate.
+    as_copy = [module_id in COPY_PRODUCERS and draw(st.booleans()) for _ in ids]
+    rows = [f"ref{sum(as_copy[: n + 1]):02d}" if c else None for n, c in enumerate(as_copy)]
+    facts = tuple(draw(figure(fact_id, row)) for fact_id, row in zip(ids, rows, strict=True))
     claims: list[Claim] = []
     for index in range(draw(st.integers(0, 2))):
         text = "Synthetic claim"
@@ -970,33 +982,60 @@ def test_a_blocked_ancestor_is_restricted_never_accepted(
 
 
 def naive_identity(modules: tuple[Module, ...]) -> set[str]:
-    """Reference: a key held by two modules whose figure tuples, pooled as one set, differ.
+    """Reference: a key held by two modules whose figures, pooled as one set, differ.
 
     A figure is its exact value (amount times scale), unit, currency and period; under a
-    fact id it is also its table, row and field. (The generator writes no reference-copy
-    table, so the copy exemption is exercised by a focused test, not here.)"""
-    pooled: dict[str, dict[str, set[tuple[object, ...]]]] = defaultdict(lambda: defaultdict(set))
+    fact id its table, row and field must also agree, except for a `cp1_references` copy,
+    whose placement Python assigns (8.4b ruling 1). A copy is never pooled by coordinate
+    (8.4b ruling 2)."""
+    values: dict[str, dict[str, set[tuple[object, ...]]]] = defaultdict(lambda: defaultdict(set))
+    places: dict[str, set[tuple[object, ...]]] = defaultdict(set)
     figured: dict[str, bool] = defaultdict(bool)
     for item in modules:
         for fact in item.facts:
             exact = None if fact.amount is None else fact.amount * fact.scale
             value = (exact, fact.unit, fact.currency, fact.period)
-            placed = (*value, fact.table_id, fact.row_id, fact.field)
-            pooled[f"fact_id {fact.fact_id}"][item.module_id].add(placed)
-            figured[f"fact_id {fact.fact_id}"] |= fact.amount is not None
-            if fact.amount is not None:
+            copy = fact.table_id == CP1_REFERENCES
+            key = f"fact_id {fact.fact_id}"
+            values[key][item.module_id].add(value)
+            if not copy:
+                places[key].add((fact.table_id, fact.row_id, fact.field))
+            figured[key] |= fact.amount is not None
+            if fact.amount is not None and not copy:
                 where = f"coordinate {fact.table_id}/{fact.row_id}/{fact.field}/{fact.period}"
-                pooled[where][item.module_id].add(value)
+                values[where][item.module_id].add(value)
                 figured[where] = True
     return {
         key
-        for key, by_module in pooled.items()
-        if len(by_module) > 1 and figured[key] and len(set().union(*by_module.values())) > 1
+        for key, by_module in values.items()
+        if len(by_module) > 1
+        and figured[key]
+        and (len(set().union(*by_module.values())) > 1 or len(places[key]) > 1)
     }
+
+
+def copied(holder: str, fact_id: str, row: str | None = None) -> Module:
+    """`holder` with one figure: the CP-1 placement at `T`, or a copy at `row` of
+    `cp1_references`."""
+    fact = Fact(
+        fact_id=fact_id,
+        label=fact_id,
+        table_id="T" if row is None else CP1_REFERENCES,
+        row_id="r1" if row is None else row,
+        field="v" if row is None else "value",
+        amount=Decimal("1100") if fact_id == "f.a" else Decimal("7"),
+        unit="currency",
+        currency="USD",
+        period="FY2025",
+    )
+    return module(PACK, holder, facts=(fact,))
 
 
 @settings(max_examples=150, deadline=None)
 @given(heads(min_size=2))
+# Two producers numbering different copies from ref01; one copy beside its source.
+@example((copied("CP-2", "f.a", "ref01"), copied("CP-3", "f.b", "ref01")))
+@example((copied("CP-1", "f.a"), copied("CP-2", "f.a", "ref01")))
 def test_figure_identity_matches_a_naive_set_comparison(heads_: tuple[Module, ...]) -> None:
     pair = heads_[:2]
     found = {f.subject for f in figure_identity(pair)}
@@ -1035,10 +1074,11 @@ def placed(
     scale: str = "1",
     currency: str = "USD",
     table: str = "T",
+    fact_id: str = "f.x",
 ) -> Fact:
     return Fact(
-        fact_id="f.x",
-        label="f.x",
+        fact_id=fact_id,
+        label=fact_id,
         table_id=table,
         row_id=row,
         field="v",
@@ -1085,22 +1125,98 @@ def test_equal_amounts_in_two_currencies_are_a_mismatch() -> None:
     assert all("currency" in detail for _, _, detail in found)
 
 
-def test_only_the_cp1a_reference_copy_keeps_python_assigned_coordinates() -> None:
+@pytest.mark.parametrize("holder", ["CP-1A", "CP-2", "CP-3", "CP-MODEL"])
+def test_any_producers_reference_copy_keeps_python_assigned_coordinates(holder: str) -> None:
+    """8.4b ruling 1 (superseding fix round 2's CP-1A-only key): a member of any producer's
+    `cp1_references` table is exempt from the placement comparison under its fact id. The
+    accepted cost: a Python composer that mis-places a copy inside `cp1_references` is not
+    flagged; its value still is."""
     copy = placed(table=CP1_REFERENCES, row="ref01")
-    assert pair_findings(placed(), copy, "CP-1A") == []
-    assert pair_findings(placed(), copy.model_copy(update={"amount": Decimal("1200")}), "CP-1A")
-    moved = pair_findings(placed(), placed(table="T4.10"))
+    assert pair_findings(placed(), copy, holder) == []
+    assert pair_findings(placed(), placed(table=CP1_REFERENCES, row="ref09"), holder) == []
+    moved = pair_findings(placed(), placed(table="T4.10"), holder)
     assert [(kind, subject) for kind, subject, _ in moved] == [("figure_identity", "fact_id f.x")]
-    assert "table_id" in moved[0][2]
+    assert moved[0][2].startswith(f"differs in table_id between CP-1, {holder};")
 
 
-def test_another_module_naming_its_table_cp1_references_is_placement_checked() -> None:
-    """Fix round 2: `table_id` is a free identifier, so the copy exemption belongs to CP-1A's
-    composed copies only, never to a table name another module (or a model) can write."""
-    spoof = placed(table=CP1_REFERENCES, row="ref09")
-    found = pair_findings(placed(), spoof, "CP-MODEL")
+COPY_CHANGES: dict[str, tuple[str, dict[str, object]]] = {
+    "amount": ("value", {"amount": Decimal("1200")}),
+    "scale": ("value", {"scale": Decimal(1000)}),
+    "unit": ("unit", {"unit": "PERCENT"}),
+    "currency": ("currency", {"currency": "EUR"}),
+    "period": ("period", {"period": "FY2024"}),
+}
+
+
+@pytest.mark.parametrize("holder", ["CP-2", "CP-3"])
+@pytest.mark.parametrize("change", sorted(COPY_CHANGES))
+def test_a_differing_copy_of_another_producer_is_still_a_finding(holder: str, change: str) -> None:
+    """A `cp1_references` copy is compared with its source on value (amount times scale),
+    unit, currency and period; by fact id only (T5.5), never by coordinate (8.4b ruling 2)."""
+    field, update = COPY_CHANGES[change]
+    copy = placed(table=CP1_REFERENCES, row="ref01").model_copy(update=update)
+    found = pair_findings(placed(), copy, holder)
     assert [(kind, subject) for kind, subject, _ in found] == [("figure_identity", "fact_id f.x")]
-    assert found[0][2].startswith("differs in table_id, row_id between CP-1, CP-MODEL;")
+    assert found[0][2].startswith(f"differs in {field} between CP-1, {holder};")
+
+
+def test_a_differing_copy_in_a_composed_head_is_still_a_finding() -> None:
+    """The real composed CP-2 and CP-3 copies, each altered: one finding per copied fact."""
+    pack, heads_ = composed_heads()
+
+    def altered(item: Module) -> Module:
+        facts = tuple(
+            f.model_copy(update={"amount": (f.amount or 0) + 1})
+            if f.table_id == CP1_REFERENCES
+            else f
+            for f in item.facts
+        )
+        return Module.model_validate_json(
+            item.model_copy(update={"facts": facts}).model_dump_json()
+        )
+
+    for holder, fact_id in (
+        ("CP-2", "T4.10.liquidity.FY2025"),
+        ("CP-3", "T4.18.tlb-fy2025.spread_bps"),
+    ):
+        changed = tuple(altered(h) if h.module_id == holder else h for h in heads_)
+        found = [
+            (f.subject, f.detail)
+            for f in python_checks(scope_of(pack, changed)).findings
+            if f.kind == "figure_identity"
+        ]
+        assert len(found) == 1, found
+        assert found[0][0] == f"fact_id {fact_id}"
+        assert found[0][1].startswith("differs in value between ") and holder in found[0][1]
+
+
+@pytest.mark.parametrize("holder", ["CP-2", "CP-3"])
+def test_a_cp1_fact_in_another_table_of_cp2_or_cp3_is_placement_checked(holder: str) -> None:
+    """Only `cp1_references` is exempt: a CP-1 fact id elsewhere in CP-2 or CP-3 keeps its
+    CP-1 table, row and field."""
+    for where in ({"table": "T2.7"}, {"table": "T3.1", "row": "i01"}):
+        found = pair_findings(placed(), placed(**where), holder)
+        assert [(kind, subject) for kind, subject, _ in found] == [
+            ("figure_identity", "fact_id f.x")
+        ]
+        assert "table_id" in found[0][2] and holder in found[0][2]
+    # The real composed head, its copy moved out of `cp1_references` into another table.
+    pack, heads_ = composed_heads()
+    target = next(h for h in heads_ if h.module_id == holder)
+    copy = next(f for f in target.facts if f.table_id == CP1_REFERENCES)
+    moved_fact = copy.model_copy(update={"table_id": "T9.9", "row_id": "x01"})
+    # Not revalidated: the planted placement need not fit the head's table layout, and CP-5
+    # reads facts, not tables.
+    moved = target.model_copy(
+        update={"facts": tuple(moved_fact if f is copy else f for f in target.facts)}
+    )
+    changed = tuple(moved if h is target else h for h in heads_)
+    real = [
+        f for f in python_checks(scope_of(pack, changed)).findings if f.kind == "figure_identity"
+    ]
+    assert [f.subject for f in real] == [f"fact_id {copy.fact_id}"]
+    assert real[0].detail.startswith("differs in table_id, row_id, field between CP-1, ")
+    assert holder in real[0].modules
 
 
 def test_a_ratio_unit_is_pinned_to_scale_one() -> None:
@@ -1111,6 +1227,54 @@ def test_a_ratio_unit_is_pinned_to_scale_one() -> None:
         placed(unit="PERCENT", amount="0.005", scale="1000000"),
     )
     assert sorted(kind for kind, _, _ in found) == ["scale_unit", "scale_unit"]
+
+
+# --- 8.4b: every producer's `cp1_references` copies -----------------------------------------
+
+
+def composed_heads() -> tuple[PreparedPack, tuple[Module, ...]]:
+    """Real CP-2 and CP-3 heads composed by Python, as `test_cp3_relative_value` builds them,
+    beside CP-1 (its MILLIONS figure at the scale the unit implies), the CP-1A composed over that
+    CP-1 and CP-MODEL. CP-1A, CP-2 and CP-3 each number their `cp1_references` copies from
+    `ref01`, so the three copy tables share a coordinate while holding different CP-1 facts."""
+    pack = market_pack()
+    scaled = cp1_head(pack).facts
+    cp1 = cp3_tests.cp1_head(pack, (*scaled, leverage_fact(), *FACILITIES))
+    up = cp3_tests.upstream_of(pack, cp1=cp1, cp1a=cp1a_head(pack_fixture(), cp1))
+    report = relative_value(pack, cp3_tests.valuation(), up)
+    cp3 = cp3_module(report, up.bound, 0)
+    cp3 = cp3.model_copy(update={"status": "restricted" if cp3.limitations else "accepted"})
+    heads_ = (cp1, up.optional["CP-1A"], up.cp2, cp3, cp_model_head(pack))
+    return pack, tuple(Module.model_validate_json(h.model_dump_json()) for h in heads_)
+
+
+def copy_members(heads_: tuple[Module, ...]) -> set[tuple[str, str]]:
+    return {
+        (h.module_id, f.fact_id) for h in heads_ for f in h.facts if f.table_id == CP1_REFERENCES
+    }
+
+
+def test_composed_cp1_references_copies_raise_no_identity_finding() -> None:
+    """8.4b defect: CP-2's and CP-3's verbatim copies were mis-placed under their fact id, and
+    copy tables numbered from `ref01` collided at one coordinate (T5.6)."""
+    pack, heads_ = composed_heads()
+    copies = copy_members(heads_)
+    producers = {module_id for module_id, _ in copies}
+    assert producers == {"CP-1A", "CP-2", "CP-3"}  # three producers, each numbered from ref01
+    rows = {
+        (h.module_id, f.row_id) for h in heads_ for f in h.facts if f.table_id == CP1_REFERENCES
+    }
+    assert {(m, "ref01") for m in producers} <= rows
+    checks = python_checks(scope_of(pack, heads_))
+    # Every copy agrees with its CP-1 source, so any identity finding here is a false one.
+    identity = [f"{f.where}: {f.detail}" for f in checks.findings if f.kind == "figure_identity"]
+    assert identity == [], "False identity findings on cp1_references copies: " + " | ".join(
+        identity
+    )
+    # The copies are still compared with their source by fact id (T5.5), never by coordinate.
+    by_fact_id = {m for g in checks.groups if g.basis == "fact_id" for m in g.members}
+    assert copies <= by_fact_id
+    assert not any(CP1_REFERENCES in g.subject for g in checks.groups if g.basis == "coordinate")
 
 
 def test_the_context_block_takes_a_fact_projection() -> None:
