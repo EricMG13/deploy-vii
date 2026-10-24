@@ -374,7 +374,8 @@ live candidate.
 
 ## M7. CP-1 live acceptance and CP-1A
 
-Lane state (24 Oct 2026; each task's result is in `m7-live-acceptance-review.md`). Landed:
+Lane state (23 Oct 2026, with the 24 Oct 2026 resume below; each task's result is in
+`m7-live-acceptance-review.md`). Landed:
 7.0 hardened the mismatch text, prompts and reports before E1; 7.0b runs the product suite
 in parallel (decision 0011); 7.0c made the request deadline configurable; 7.0d put the Python
 vocabularies into the `financials` sent schema; 7.0e lets the `module` driver dispatch the
@@ -389,8 +390,16 @@ envelope; 7.8 reads a 402 for its reason before calling it exhaustion; 7.9 refin
 prompts from the first full proxy chain; 7.10 closes the review follow-ups; 7.11 closes what
 E1 batch e1-cp1-13 (the first GPT-6.1 Sol at high chain) found: three prompt facts, a
 quote-side hyphen wrap, reconciling an interrupted attempt and withholding a reply body whose
-account id survives redaction. Not landed: 7.1 (E1 for CP-0 and CP-1, its box below still
-open) and 7.3 (E2, pending credit).
+account id survives redaction; 7.12 (envelope memory sweep) adopted `_content_hash` over
+pydantic's JSON bytes: `write_envelope` growth 0.525 to 0.395 GB, pipeline peak 1.34 to 0.98 GB,
+byte-identical envelopes; 7.13 has Python prefill the book's and periods' four dimension strings
+from the bound scope, and lets an interrupted attempt settle from the next batch's before-check;
+7.14 requires `source_context` scopes to carry non-null, entity-consistent dimensions, and the
+reconciled report cross-checks spend against the key's usage; 7.15 closes the whole-lane
+review's pre-PR fixes. Not landed: 7.1 (E1 for CP-0 and CP-1, its box below still open) and 7.3
+(E2, its box below still open): both were paused by the user on 23 Oct 2026 (all live testing)
+and resumed on 24 Oct 2026 at Sol medium (decision 0005, 24 Oct 2026 amendment), the next batch
+pending the user's choice of runner.
 
 - [ ] **7.1 E1 for CP-0 and CP-1** on Caesars. This closes B's adopted condition: real
   readiness populates the header, Evidence and Limitations. It also closes C's CP-1
@@ -529,3 +538,11 @@ Watcher session): E1 for the CP-1 case is US$10 per batch, with a batch cap of U
 with the CP-0 case; other modules stay at US$3 per case; the US$200 cumulative ceiling is
 unchanged; the orchestrator pauses and asks the user before any figure above these. E1 batches
 1 to 5 (`e1-cp1-1` to `e1-cp1-5`) ran under it.
+
+User-owned choice, 24 October 2026 ([decision
+0005](../../../decisions/0005-methodology-changes-and-regular-testing.md), amendment of that
+date): live testing resumes on GPT-6.1 Sol at effort `medium` (`--models
+openai/gpt-6.1-sol@medium`; `settings/project.toml` `default_effort` and `complex_effort` are
+`medium`), superseding the 22–23 October "stay with high". The user paused all live testing on
+23 October 2026; the next batch waits for the user's choice between the hybrid harness and the
+product runner.

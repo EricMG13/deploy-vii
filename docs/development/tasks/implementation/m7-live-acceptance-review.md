@@ -416,7 +416,7 @@ Closed, one line per item (analytical meaning unchanged, decision 0005; no valid
 11. `frontend-direction-c.md`: prose cells of the Front Page company panel render in monospace, recorded for the design pass.
 12. `live-runner.md`: `steps run` counts an in-flight-refused attempt, which is no model try.
 13. This section.
-14. Withdrawn (24 Oct 2026): the user kept Sol's pooled effort at `high`; nothing changed.
+14. Withdrawn (23 Oct 2026): the user kept Sol's pooled effort at `high`; nothing changed.
 15. A pre-existing `prose` defect, found by the property test `test_any_digit_outside_labels_and_references_is_rejected` (Hypothesis counterexample `1900%`): a year-shaped number followed by `%` passed as a year label. A bare year is now a detached token, so `1900%`, `2025%` and `1950%` are bare figures, as `1900x` and `1900bn` already were; `FY2025`, `2025` and the other labels are unchanged. Present since M6 (2e5a050).
 
 Deferred: the `FinancialSubmission` split (decision 0008); turning `WITHIN_ATTEMPT_REPAIR` into a `repairable` argument; reducing the 7.4 QA scope, which inlines `record_json` (270 KB on the real pack, inside budget, not reduced).

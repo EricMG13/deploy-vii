@@ -51,7 +51,7 @@ gain.
 | 7.13 dimension prefill | Python fills each financial book's and each of its periods' `currency`, `unit`, `accounting_basis` and `entity_perimeter` with the strings of the retained `source_context` scope the model's own choices select: the book's `binding.books[].entity_id` and each period's `period_type`, `start_date` and `end_date`, by `context_binding`'s date and kind rule over the financial sources' scopes (`live/submission.prefill`, binding kind `scope-dimension`, as every hash binding since task 7.0i). The sent schema leaves the strings out; the prefill record lists every path Python wrote. A book takes the one tuple its periods' scopes share; where they share none the book is left unfilled and the attempt is rejected with one issue naming the periods and the fields (fail closed: no majority, no first-wins); a period with no matching scope is rejected with `context_binding`'s existing wording; a scope's null dimension is never written. `context_binding` and `book_issues` keep their exact-match rules. A period with no matching scope and no citations of its own is rejected by the shape check (`Field required`) rather than the binding wording; a null scope dimension is also rejected at the shape check (`Field required`), and its cause is upstream in `source_context` (task 7.14 tightens that step). **Adopted, user-approved 23 Oct 2026** (the user chose it in advance, after batch e1-cp1-13). E1 batches e1-cp1-13 and e1-cp1-14 (GPT-6.1 Sol at high): every input set's first `financials` try was rejected on dimension-string drift ("Mixed units, currency, accounting basis or perimeter" or "No matching entity/date/basis source scope"); all four of batch 13's rejections carried such drift (one masked by a quote issue), about US$0.95 a try | execution (which party writes eight identity strings; analytical meaning unchanged: the model still chooses the entity and the periods) | reliability; about one `financials` try per attempt | M7 task 7.13 |
 | 7.14 scope dimension consistency | `validate_source_context` rejects, at the step the model can repair, what the 7.13 prefill cannot bind: every `historical_duration` and `period_end` scope of a financial source states `currency`, `unit`, `entity_perimeter` and `accounting_basis` ("Financial scope lacks <field>: <scope_id>"), and all such scopes of one entity across the financial sources state the same four strings, compared exactly with no normalisation ("Financial scopes of one entity disagree on <field>: ..."). Forecast and unspecified scopes are untouched; `source_context` rule d states both rules. Fail closed: it only rejects more, and a passing context gives every period of a book that matches a scope one complete tuple, the same for the book. Differences in currency, unit, perimeter or basis between one entity's historical scopes, which `source_context` used to keep as gaps ("Different source <field> values require normalization review"), are now rejections at that step (fail closed; the brief asked for the entity-wide rule); that gap now arises only from forecast or unspecified scopes, or from scopes of a non-financial source. **Adopted, user-approved 23 Oct 2026** ("apply what the batch highlights"). E1 batches e1-cp1-13 and e1-cp1-14 (GPT-6.1 Sol at high): in three of the four input sets the accepted `source_context` (about US$0.44) wrote `currency: null` on every scope and worded the FY2025 `entity_perimeter` "… and consolidated subsidiaries, with intercompany accounts and transactions eliminated" against the comparative years' "… subsidiaries as reported for the comparative year" or "… as presented comparatively in the FY2025 annual report"; only the fourth (USD, one perimeter wording) let the prefill bind | execution (validator tightening; analytical meaning unchanged: a perimeter is the consolidation perimeter, which one filing's comparative years share) | reliability; the defect is repaired at `source_context`, not rejected one step later where no repair reaches it | M7 task 7.14 |
 
-**Candidates, recorded and not adopted (M7 task 7.10, 24 Oct 2026).** Found on the real
+**Candidates, recorded and not adopted (M7 task 7.10, 23 Oct 2026).** Found on the real
 Caesars pack (proxy journal e1-cp1-7). The owner decides; nothing changes in code, and each
 needs its own decision (and a `docs/methodology-adaptation.md` row) before adoption.
 
@@ -116,7 +116,7 @@ CI is available.
 
 **Amendment, 22 Oct 2026 (user decision).** The external-test pool is the user-named set,
 currently GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at high effort for every step (also for
-cases predefined as difficult). It is set in `settings/project.toml` (`[[model_tests.candidates]]`,
+cases predefined as difficult; the effort is superseded by the 24 Oct 2026 amendment below). It is set in `settings/project.toml` (`[[model_tests.candidates]]`,
 `default_effort`, `complex_effort`). §Selection's random draw applies only when the pool holds
 more than one model. With one model, every seed selects it, and the draw is recorded as trivial
 (`trivial-single-model-pool`), with the pool, eligibility, exclusions and seed recorded as before.
@@ -127,6 +127,14 @@ pools are superseded: Luna / GLM 5.3 Flash / latest DeepSeek (this decision's §
 coordinator-selected Grok / Sol / Gemini probe pool (22 October 2026). Their stored outputs,
 reports and replay entries are retained. The relaxation of the sent schema (decision 0008) must
 be accepted by OpenAI; other providers' rows are information only.
+
+**Amendment, 24 Oct 2026 (user decision).** Live testing resumes on `openai/gpt-6.1-sol` at
+effort `medium`, for every step (also for cases predefined as difficult). This supersedes the
+22–23 Oct 2026 "stay with high" (the amendment above and the 23 Oct withdrawal of task 7.10
+item 14). The pool `--models` argument is `openai/gpt-6.1-sol@medium`; `settings/project.toml`
+sets `default_effort` and `complex_effort` to `medium` (task 7.15). The user's words: "send the
+handoff to main to resume working and live testing on Sol medium." Live testing had been paused
+by the user on 23 Oct 2026; the next batch waits for the user's choice of runner.
 
 Not verified:
 - provider and model availability, effort support and pricing at batch time;

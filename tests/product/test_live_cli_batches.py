@@ -5,6 +5,7 @@ import hashlib
 import json
 import socket
 import stat
+import tomllib
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -774,11 +775,18 @@ def test_catalog_rule_report_says_so(rig: Rig) -> None:
     assert "- Pool: catalog rule" in rig.report()
 
 
-def test_the_one_model_catalog_rule_pool_runs_sol_at_high_with_a_trivial_draw(rig: Rig) -> None:
-    """Decision 0005 amendment: the project's pool (settings/project.toml) is Sol alone."""
+def test_the_one_model_catalog_rule_pool_runs_sol_at_medium_with_a_trivial_draw(
+    rig: Rig,
+) -> None:
+    """Decision 0005 amendment: the project's pool (settings/project.toml) is Sol alone, at the
+    project's default effort, `medium` since the 24 Oct 2026 amendment (task 7.15 item 8)."""
     project = (Path("settings") / "project.toml").read_text(encoding="utf-8")
     block = project[project.index("[[model_tests.candidates]]") : project.index("[frontend]")]
-    template = SETTINGS.format(key=rig.key)
+    effort = tomllib.loads(project)["model_tests"]["default_effort"]
+    template = SETTINGS.format(key=rig.key).replace(
+        'default_effort = "high"', f'default_effort = "{effort}"'
+    )
+    assert f'default_effort = "{effort}"' in template
     start, end = template.index("[[model_tests.candidates]]"), template.index("[ci]")
     rig.settings.write_text(template[:start] + block + template[end:], encoding="utf-8")
     catalog = rig.root / "sol.json"
@@ -788,12 +796,12 @@ def test_the_one_model_catalog_rule_pool_runs_sol_at_high_with_a_trivial_draw(ri
     argv = [*rig.argv("module", "--module", "CP-0"), "--catalog", str(catalog)]
     assert rig.run(argv, responder) == 0
     assert {b["model"] for b in chat_bodies(responder)} == {SOL}
-    assert {json.dumps(b["reasoning"]) for b in chat_bodies(responder)} == {'{"effort": "high"}'}
+    assert {json.dumps(b["reasoning"]) for b in chat_bodies(responder)} == {'{"effort": "medium"}'}
     text = rig.report()
     assert "- Pool: catalog rule" in text
     pool_section = text.split("## Pool", 1)[1].split("## Steps", 1)[0]
     (row,) = step_lines(pool_section, "openai/")
-    assert row[0] == SOL and row[1] == "yes" and row[3:5] == ["high (default)", "high"]
+    assert row[0] == SOL and row[1] == "yes" and row[3:5] == ["medium (default)", "medium"]
     assert len([line for line in pool_section.splitlines() if line.startswith("| ")]) == 3
     manifests = list((rig.root / "artifacts" / "model-tests" / "b1").rglob("manifest.json"))
     draws = {json.loads(m.read_text())["draw"]["algorithm"] for m in manifests}

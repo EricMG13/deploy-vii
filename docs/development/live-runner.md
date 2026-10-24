@@ -1,8 +1,10 @@
 # Live model runner (M2, Task A: runner core)
 
-Status: implemented and tested offline on 21 October 2026. No model has been called; every
-HTTP exchange in the tests goes through an injected fake transport. Analytical qualification,
-account entitlement and provider behaviour are unrun. Contract: [testing and
+Status: implemented and tested offline on 21 October 2026; every HTTP exchange in the tests
+goes through an injected fake transport. Live calls run only through this runner under DC-7 and
+DC-8; their batches are recorded under `artifacts/model-tests` and summarised in the [M7 live
+acceptance review](tasks/implementation/m7-live-acceptance-review.md), where CP-1's analytical
+qualification (E1, task 7.1) is still open. Contract: [testing and
 telemetry](../testing-and-telemetry.md); decisions [0005](../decisions/0005-methodology-changes-and-regular-testing.md)
 and [0006](../decisions/0006-delegated-choices-and-orchestration.md) (DC-6 to DC-8). API facts used:
 [coordinator inputs](live-runner-inputs-2026-10-21.md). Task 2.7b applied
@@ -389,8 +391,9 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   per case in an order shuffled by the seed; it refuses a pool with an ineligible arm.
 - The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
   with `default_effort`/`complex_effort`. Since the decision 0005 amendment (user decision,
-  22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone at `high`, so every cell's draw is
-  trivial and `regression` runs one arm per case. The earlier Luna / GLM 5.3 Flash / DeepSeek
+  22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at `medium` since the 24 Oct 2026
+  amendment (at `high` before), so every cell's draw is trivial and `regression` runs one arm per
+  case. The earlier Luna / GLM 5.3 Flash / DeepSeek
   pool is superseded, and its stored outputs and replay entries are retained.
 - `--models ID[@EFFORT],ID[@EFFORT],...` (task 2.8; `probe`, `module`, `regression`, `canary`)
   replaces the settings pool with the user's models, in the given order, and labels the pool
