@@ -86,3 +86,8 @@ is separate from analytical/live qualification. If a validator rejects a review,
 repair only the named issues against the same frozen evidence. Permit at most
 one targeted repair; retain both attempts and unresolved restrictions. Cross-attempt
 enforcement belongs to the execution runtime, separately from this method prompt.
+
+`analysis[].text` is run text: digits only in period labels (`FY2025`, `Q3 2025`,
+`LTM`), filing and section labels (`Items 7, 7A`, `page:12`, `pages 16-18`), SEC file
+numbers (`001-36629`) and coverage counts (`195 of 195 pages`); every other figure
+belongs in a citation's quote, not in the text (the validator rejects a bare figure).

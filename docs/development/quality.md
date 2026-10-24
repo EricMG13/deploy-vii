@@ -149,10 +149,15 @@ Shape validation of a report against its own embedded inputs is not authenticati
 
 ## Remaining
 
-The analytical review that supplies lineage and materiality judgments (a live model or analyst
-QA review), CP-1A and live or native-host qualification remain pending. The envelope and the
-promotion that consumes a `QualityReview` landed in task 6.4
-([canonical envelope](canonical-tables.md), [execution](execution.md)). The Python arithmetic is
-a key-area calculation; its rewrite tournament kept the incumbent (see the review).
+The envelope and the promotion that consumes a `QualityReview` landed in task 6.4
+([canonical envelope](canonical-tables.md), [execution](execution.md)). The analytical review
+that supplies the lineage and materiality judgments now has a live route (task 7.4): the CP-1
+`quality` step, in which a model (or a proxy agent) returns the `QualityReview` over the QA scope
+Python projects from the recomputed registers, Python fills its `inputs_sha256` and the review
+enters the journal only through `promote_cp1` ([live runner](live-runner.md)). The model never
+supplies a score, band or status; the validator still rejects a lineage above its ceiling. An
+analyst review through `execution cp1-promote` remains available. Pending: a live or proxy QA
+review on the real pack, and the analytical, CP-1A and native-host qualification. The Python
+arithmetic is a key-area calculation; its rewrite tournament kept the incumbent (see the review).
 
 Review: [confidence review](tasks/implementation/quality-review.md).

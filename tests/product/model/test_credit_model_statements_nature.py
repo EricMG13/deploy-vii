@@ -7,7 +7,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.model.registers import Cp1Registers
@@ -88,6 +88,8 @@ def test_a_cogs_row_with_a_figure_keeps_the_gross_profit_path() -> None:
     assert cells["ebit"].value == 698
 
 
+# Task 7.0f: took 250 ms against the 200 ms default deadline under the parallel suite (load ~10).
+@settings(deadline=None)
 @given(
     cogs=st.integers(min_value=-10_000, max_value=0),
     opex=st.integers(min_value=-10_000, max_value=0),

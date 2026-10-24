@@ -47,6 +47,21 @@ gain.
 | MC-8 | Modules with disjoint, settled inputs dispatch concurrently (for example CP-1 ∥ CP-1A, CP-2 ∥ CP-4), adopted only after a measured latency gain | execution ordering | performance | M9 |
 | MC-9 | Accepted artifacts are reused when scope extends; only invalidated consumers rerun | execution | performance; cost | M9 |
 | MC-10 | Each module prompt carries only its declared inputs; prompt and token budgets come from measured external data, not inherited caps | packaging | performance | M2.6 onward |
+| 7.11 quote-side hyphen wrap | The quote matcher (`quotes.quoted`) also joins a hyphenated line wrap on the quote side (`-`, newline and the spaces after it become `-`), as it has on the span side since task 2.10. Adopted: it widens matching only (every quote accepted before still is, a hyphen is never dropped or added, a quote with no visible text matches nothing); the owner may revert. E1 batch e1-cp1-13: GPT-6.1 Sol wrote `first-` then a newline and `priority` where the span prints `first-priority` | execution (layout artefact; analytical meaning unchanged) | reliability | M7 task 7.11 |
+| 7.13 dimension prefill | Python fills each financial book's and each of its periods' `currency`, `unit`, `accounting_basis` and `entity_perimeter` with the strings of the retained `source_context` scope the model's own choices select: the book's `binding.books[].entity_id` and each period's `period_type`, `start_date` and `end_date`, by `context_binding`'s date and kind rule over the financial sources' scopes (`live/submission.prefill`, binding kind `scope-dimension`, as every hash binding since task 7.0i). The sent schema leaves the strings out; the prefill record lists every path Python wrote. A book takes the one tuple its periods' scopes share; where they share none the book is left unfilled and the attempt is rejected with one issue naming the periods and the fields (fail closed: no majority, no first-wins); a period with no matching scope is rejected with `context_binding`'s existing wording; a scope's null dimension is never written. `context_binding` and `book_issues` keep their exact-match rules. A period with no matching scope and no citations of its own is rejected by the shape check (`Field required`) rather than the binding wording; a null scope dimension is also rejected at the shape check (`Field required`), and its cause is upstream in `source_context` (task 7.14 tightens that step). **Adopted, user-approved 23 Oct 2026** (the user chose it in advance, after batch e1-cp1-13). E1 batches e1-cp1-13 and e1-cp1-14 (GPT-6.1 Sol at high): every input set's first `financials` try was rejected on dimension-string drift ("Mixed units, currency, accounting basis or perimeter" or "No matching entity/date/basis source scope"); all four of batch 13's rejections carried such drift (one masked by a quote issue), about US$0.95 a try | execution (which party writes eight identity strings; analytical meaning unchanged: the model still chooses the entity and the periods) | reliability; about one `financials` try per attempt | M7 task 7.13 |
+| 7.14 scope dimension consistency | `validate_source_context` rejects, at the step the model can repair, what the 7.13 prefill cannot bind: every `historical_duration` and `period_end` scope of a financial source states `currency`, `unit`, `entity_perimeter` and `accounting_basis` ("Financial scope lacks <field>: <scope_id>"), and all such scopes of one entity across the financial sources state the same four strings, compared exactly with no normalisation ("Financial scopes of one entity disagree on <field>: ..."). Forecast and unspecified scopes are untouched; `source_context` rule d states both rules. Fail closed: it only rejects more, and a passing context gives every period of a book that matches a scope one complete tuple, the same for the book. Differences in currency, unit, perimeter or basis between one entity's historical scopes, which `source_context` used to keep as gaps ("Different source <field> values require normalization review"), are now rejections at that step (fail closed; the brief asked for the entity-wide rule); that gap now arises only from forecast or unspecified scopes, or from scopes of a non-financial source. **Adopted, user-approved 23 Oct 2026** ("apply what the batch highlights"). E1 batches e1-cp1-13 and e1-cp1-14 (GPT-6.1 Sol at high): in three of the four input sets the accepted `source_context` (about US$0.44) wrote `currency: null` on every scope and worded the FY2025 `entity_perimeter` "… and consolidated subsidiaries, with intercompany accounts and transactions eliminated" against the comparative years' "… subsidiaries as reported for the comparative year" or "… as presented comparatively in the FY2025 annual report"; only the fourth (USD, one perimeter wording) let the prefill bind | execution (validator tightening; analytical meaning unchanged: a perimeter is the consolidation perimeter, which one filing's comparative years share) | reliability; the defect is repaired at `source_context`, not rejected one step later where no repair reaches it | M7 task 7.14 |
+| 7.19 quote-page prompt fact | Prompt fact: quoted words must be on the cited page (a heading on the preceding page is not); user-approved 24 Oct 2026; no locator correction (provenance). `financials` rule j (`QUOTE_PAGE_RULE`); prompt text only, no schema or validator change. Sol medium, 24 Oct 2026: four of four first `financials` submits were rejected on a quote of a statement heading cited under the table's page | execution (prompt wording; analytical meaning unchanged; Python still never changes what the model cited) | reliability; about one `financials` try per run, unmeasured | M7 task 7.19 |
+
+**Candidates, recorded and not adopted (M7 task 7.10, 23 Oct 2026).** Found on the real
+Caesars pack (proxy journal e1-cp1-7). The owner decides; nothing changes in code, and each
+needs its own decision (and a `docs/methodology-adaptation.md` row) before adoption.
+
+| ID | Observation | Options | Class | Status |
+| --- | --- | --- | --- | --- |
+| Candidate 7.10a: readiness gap scoping | An unscoped gap marks every consumer `not_ready`. Scoping all 1,251 gaps for 6 consumers is about 7,500 hex ids (about 560 KB), more than any 128k-token completion holds, so a model cannot reach `ready` on this pack through this route | gap scopes by gap class, resolved by Python; or Python pre-scoping with model confirmation (a contract change) | execution (contract change) | candidate, not adopted |
+| Candidate 7.10b: BLOCK-gap extraction | A `degraded` extraction yields 160 BLOCK gaps, which block the narrative and therefore QA whatever the analyst judges; CP-1 cannot be promoted on such a pack | improve the extraction; or change the BLOCK-gap methodology | analytical semantics (gap methodology) | candidate, not adopted |
+| Candidate 7.11: dimension prefill (M7 task 7.11, 23 Oct 2026) | E1 batch e1-cp1-13: three of the four `financials` rejections carried dimension-string issues; six "Mixed units, currency, accounting basis or perimeter" and three "No matching entity/date/basis source scope" issues came from the model rewriting a book's or period's `currency`, `unit`, `accounting_basis` or `entity_perimeter` instead of copying the bound scope's string. Task 7.11 states the copy rule in the prompt (financials rule i) | Python prefills the book's and every period's four dimension strings from the bound source scope (`live/submission.prefill`, as every hash binding is prefilled since task 7.0i), removing this failure class; or keep the prompt rule only | execution (contract change: the model no longer supplies the four strings) | superseded: adopted as row 7.13 above (user-approved 23 Oct 2026) |
+| Candidate 7.13: locator correction (M7 task 7.13, 23 Oct 2026) | E1 batch e1-cp1-14 (code 92b249b, before the 7.11 preamble page sentence): both input sets' step repairs failed on one quote only, a statement heading cited `page:95` that sits near the end of the `page:94` span (the `locator=page:95` marker follows it). The same heading was cited one page off on four consecutive tries across batches e1-cp1-13 and e1-cp1-14, both before and after the issue text named the page | Python moves a citation to the adjacent span where its quote is unique; or keep the 7.11 preamble sentence (the page is the marker that opens the span) only, which no batch has yet exercised | execution (provenance: a correction would change what the model claimed) | candidate, not adopted; the owner decides |
 
 ## B. Regular internal and external testing
 
@@ -85,6 +100,8 @@ CI is available.
   recurring caps apply ([decision 0006](0006-delegated-choices-and-orchestration.md) DC-6,
   21 October 2026), under a cumulative ceiling of US$200 including the first batch:
   - E1: US$3 per module case;
+    (the CP-1 case is amended: US$10 per batch, US$12 with the CP-0 case; see the 22 Oct 2026
+    amendment under DC-6 in decision 0006)
   - E2: US$15 per milestone;
   - E3: US$3 per week.
 
@@ -100,7 +117,7 @@ CI is available.
 
 **Amendment, 22 Oct 2026 (user decision).** The external-test pool is the user-named set,
 currently GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at high effort for every step (also for
-cases predefined as difficult). It is set in `settings/project.toml` (`[[model_tests.candidates]]`,
+cases predefined as difficult; the effort is superseded by the 24 Oct 2026 amendment below). It is set in `settings/project.toml` (`[[model_tests.candidates]]`,
 `default_effort`, `complex_effort`). §Selection's random draw applies only when the pool holds
 more than one model. With one model, every seed selects it, and the draw is recorded as trivial
 (`trivial-single-model-pool`), with the pool, eligibility, exclusions and seed recorded as before.
@@ -111,6 +128,16 @@ pools are superseded: Luna / GLM 5.3 Flash / latest DeepSeek (this decision's §
 coordinator-selected Grok / Sol / Gemini probe pool (22 October 2026). Their stored outputs,
 reports and replay entries are retained. The relaxation of the sent schema (decision 0008) must
 be accepted by OpenAI; other providers' rows are information only.
+
+**Amendment, 24 Oct 2026 (user decision).** Live testing resumes on `openai/gpt-6.1-sol` at
+effort `medium`, for every step (also for cases predefined as difficult). This supersedes the
+22–23 Oct 2026 "stay with high" (the amendment above and the 23 Oct withdrawal of task 7.10
+item 14). The pool `--models` argument is `openai/gpt-6.1-sol@medium`; `settings/project.toml`
+sets `default_effort` and `complex_effort` to `medium` (task 7.15). The user's words: "send the
+handoff to main to resume working and live testing on Sol medium." Live testing had been paused
+by the user on 23 Oct 2026; the next batch waits for the user's choice of runner.
+
+Evidence (24 Oct 2026): 3/3 CP-1 passes at Sol medium through the hybrid harness, US$1.35–2.29 per run, `financials` FY2025-only (99–102 lines); see m7-live-acceptance-review.md §7.17.
 
 Not verified:
 - provider and model availability, effort support and pricing at batch time;

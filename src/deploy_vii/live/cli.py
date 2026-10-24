@@ -10,18 +10,22 @@ a summary table only: no response bodies, prompts, source text or validator word
 import argparse
 import hashlib
 import json
+import math
 import random
 import re
 import secrets
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import partial
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
-from deploy_vii.execution import Execution, NotAuthorized
+from deploy_vii.cp1_workflow import is_qa_blocked
+from deploy_vii.execution import Attempt, Execution, NotAuthorized
 from deploy_vii.live.catalog import (
     USER_SELECTED,
     Catalog,
@@ -30,23 +34,38 @@ from deploy_vii.live.catalog import (
     PinnedCandidate,
     PinnedPool,
     parse_selection,
-    utc_stamp,
 )
-from deploy_vii.live.client import ChatClient, Request, Response, TransportError, urllib_transport
+from deploy_vii.live.client import (
+    DEFAULT_TIMEOUT_SECONDS,
+    ChatClient,
+    Request,
+    Response,
+    TransportError,
+    urllib_transport,
+)
 from deploy_vii.live.cohort import ProxyResult, credit_state
+from deploy_vii.live.context import step_sources
 from deploy_vii.live.corpus import CORPUS_ROOT, REPOSITORY_ROOT, CorpusError, write_entry
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import NoEligibleModel, draw
-from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, LedgerError
+from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, LedgerError, utc_stamp
 from deploy_vii.live.prompts import schema_text
 from deploy_vii.live.reconcile import (
+    USAGE_SCHEMA,
     Outcome,
     RetainedAttempt,
+    SpendCrossCheck,
     batch_attempts,
     candidates,
+    interrupted_attempts,
+    lookup_order,
+    next_batch_window,
+    open_ledger,
     read_usage,
     reconcile_attempt,
+    reconcile_interrupted,
+    spend_cross_check,
     usage_path,
 )
 from deploy_vii.live.retention import AttemptWriter
@@ -55,10 +74,12 @@ from deploy_vii.live.runner import (
     DEFAULT_MAX_TOKENS,
     SCHEMA_CHECK_MAX_TOKENS,
     STEPS,
+    DispatchResult,
     SchemaCheck,
     StepSpec,
     check_schema,
     dispatch,
+    expected_step,
     schema_rejections,
 )
 from deploy_vii.live.schema import (
@@ -78,9 +99,23 @@ from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsErr
 from deploy_vii.registry import canonical, modules
 
 REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
+TRUNCATED = "truncated"  # a response classification: the completion was cut at the budget
 CP0_STEPS = ("source_readiness",)
-CP1_CHAIN = ("source_context", "financials", "narrative", "readiness")
+# Task 7.4: the four stages, then the QA review whose acceptance is the CP-1 promotion. A
+# rejected review finishes the attempt (it settles the module), so `_run_cell` begins the
+# module repair, which restarts at source_context.
+CP1_CHAIN = ("source_context", "financials", "narrative", "readiness", "quality")
 FULL_CHAIN = CP0_STEPS + CP1_CHAIN
+# Task 7.2: CP-1A needs CP-0 only (methodology.json), so its module route is CP-0, then its one
+# step; CP-1 is not run, so its CONTEXT offers no CP-1 fact and no figure may be referenced.
+CP1A_CHAIN = (*CP0_STEPS, "business_context")
+# Task 7.0h: the matched comparison's cases, in shuffle order (cp1a draws after the other two,
+# so the cp0 and cp1 orders are those of the two-case plan).
+REGRESSION_CASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cp0", CP0_STEPS),
+    ("cp1", FULL_CHAIN),
+    ("cp1a", CP1A_CHAIN),
+)
 PROBE_STEPS = ("source_readiness", "source_context", "financials")
 SEED_SEARCH_LIMIT = 100_000
 BATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -93,6 +128,9 @@ HELD_FOOTNOTE = (
 )
 # A step CP-0 did not authorize (its T8 command is not `Run <id>`): nothing sent, nothing spent.
 NOT_AUTHORIZED = "not-authorized"
+# The runner's status for an attempt that returned no model payload (timeout, an HTTP error or
+# an error inside a 200, a deadline hold): never a validator verdict, so no issue count.
+NO_RESPONSE = "no-response"
 NOT_AUTHORIZED_SCHEMA = "live-step-not-authorized/1"
 SCHEMA_CHECK_CAP = Decimal("0.05")  # a call costs about US$0.0005 (task 2.11)
 
@@ -124,6 +162,9 @@ class Row:
     cost: str
     issue_count: int
     cohort: str = COHORT
+    prompt_bound: int | None = None  # prompt tokens upper bound of the attempt (Pool table)
+    repair: int = 0  # the journal's attempt number: 0 a first attempt, 1 the MC-7 repair
+    step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
 
     def cells(self) -> tuple[object, ...]:
         return (
@@ -136,8 +177,16 @@ class Row:
             self.status,
             self.classification,
             self.cost,
-            self.issue_count,
+            "-" if self.status == NO_RESPONSE else self.issue_count,
         )
+
+    def step_cells(self) -> tuple[object, ...]:
+        """A batch-report Steps row: `cells()` and the Repair column: `-` a first try of the
+        first attempt, `step` the step's repair within its attempt, `1` the MC-7 repair attempt
+        and `1+step` a step's repair within that repair attempt."""
+        within = "step" if self.step_try == 2 else ""
+        attempt = str(self.repair) if self.repair else ""
+        return (*self.cells(), "+".join(filter(None, (attempt, within))) or "-")
 
 
 @dataclass
@@ -172,6 +221,7 @@ class CohortSummary:
     attempts: int
     accepted: int
     rejected: int
+    no_response: int
     pooled: bool
     qualification: bool | None
 
@@ -189,6 +239,7 @@ def summarize_cohorts(rows: Sequence[Row]) -> list[CohortSummary]:
                 len(group),
                 sum(row.status == "accepted" for row in group),
                 sum(row.status == "rejected" for row in group),
+                sum(row.status == NO_RESPONSE for row in group),
                 pooled,
                 None if pooled else False,
             )
@@ -219,6 +270,16 @@ def _max_tokens(text: str) -> int:
         raise argparse.ArgumentTypeError(f"{text!r} is not a token count") from None
     if value <= 0:
         raise argparse.ArgumentTypeError("--max-tokens must be a positive token count")
+    return value
+
+
+def _timeout_s(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("--timeout must be a positive, finite number of seconds")
     return value
 
 
@@ -284,6 +345,13 @@ def configure(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MAX_TOKENS,
         help=f"completion budget per call, every model (default {DEFAULT_MAX_TOKENS}); "
         "a model whose context or completion limit cannot hold it is ineligible",
+    )
+    common.add_argument(
+        "--timeout",
+        type=_timeout_s,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help="request deadline per call in seconds, every model (default 600): each socket "
+        "operation and the whole call",
     )
     common.add_argument("--catalog", type=Path, help="saved models JSON; else fetched")
     common.add_argument("--report-directory", type=Path, default=REPORT_DIRECTORY)
@@ -354,7 +422,7 @@ def seeds_for(pool: PinnedPool, slugs: Sequence[str], start: int) -> list[int]:
 
 def _module_cells(module_arg: str, seed: int) -> list[Cell]:
     module = canonical(module_arg)
-    steps = {"CP-0": CP0_STEPS, "CP-1": FULL_CHAIN}.get(module)
+    steps = {"CP-0": CP0_STEPS, "CP-1": FULL_CHAIN, "CP-1A": CP1A_CHAIN}.get(module)
     if steps is None:
         supported = ", ".join(sorted({definition.module_id for definition in STEPS.values()}))
         raise CliError(f"{module} has no live step contract; supported: {supported}")
@@ -367,8 +435,7 @@ def _regression_cells(pool: PinnedPool, slugs: list[str], seed: int) -> list[Cel
         raise CliError(f"a matched comparison needs every candidate eligible; excluded: {excluded}")
     shuffler = random.Random(seed)
     plan: list[tuple[str, tuple[str, ...], str]] = []
-    cases: tuple[tuple[str, tuple[str, ...]], ...] = (("cp0", CP0_STEPS), ("cp1", FULL_CHAIN))
-    for case, steps in cases:
+    for case, steps in REGRESSION_CASES:
         order = list(slugs)
         shuffler.shuffle(order)
         plan += [(case, steps, slug) for slug in order]
@@ -415,29 +482,51 @@ def _run_cell(
     bytes_per_token: Decimal,
     effort: str,
     max_tokens: int,
+    timeout_s: float,
     evidence: Path,
     batch: Batch,
     rejections: Mapping[tuple[str, str, str], str],
+    repair: bool,
+    sleep: Callable[[float], None],
 ) -> None:
+    """Run one cell's steps in order, module by module. With `repair` (the `module` driver) a
+    validator rejection that leaves the attempt pending is followed by that step's one repair
+    within the attempt (task 7.0g); a rejection that finishes the attempt is followed by the
+    module's one MC-7 repair attempt, which restarts the module from its first step. The cell
+    ends at the first step that is not accepted."""
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
-    ticket, current, cp0_attempt = "", "", None
-    for step_id in cell.steps:
-        module = STEPS[step_id].module_id
-        if module != current:
-            try:
-                ticket = store.begin(module).ticket_id
-            except NotAuthorized as refusal:
-                # CP-0 judged this consumer CONDITIONAL or BLOCKED: a valid accepted outcome,
-                # recorded as this step's result. Nothing is sent; the cell ends, the batch goes on.
-                record = _record_not_authorized(cell, step_id, refusal, pool, cp0_attempt, evidence)
-                batch.rows.append(not_authorized_row(record))
-                return
-            current = module
+
+    def row(step_id: str, attempt: Attempt, item: DispatchResult) -> None:
+        batch.rows.append(
+            Row(
+                cell.cell_id,
+                cell.case_id,
+                step_id,
+                item.draw.slug,
+                cell.seed,
+                item.attempt_id,
+                item.status,
+                item.classification or "none",
+                usd_cell(item.cost_usd, bool(item.settlement and item.settlement.unreconciled)),
+                len(item.issues),
+                prompt_bound=item.prompt_tokens_upper_bound,
+                repair=attempt.number,
+                step_try=item.step_try,
+            )
+        )
+
+    def send(step_id: str, attempt: Attempt) -> DispatchResult:
         result = dispatch(
-            StepSpec(step_id, cell.case_id, sources, max_tokens=max_tokens),
+            StepSpec(
+                step_id,
+                cell.case_id,
+                step_sources(step_id, sources),  # task 7.5: only where spans are checked
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+            ),
             store=store,
-            ticket_id=ticket,
+            ticket_id=attempt.ticket_id,
             ledger=ledger,
             pool=pool,
             seed=cell.seed,
@@ -448,27 +537,80 @@ def _run_cell(
             bytes_per_token=bytes_per_token,
             effort=effort,
             schema_rejections=rejections,
+            sleep=sleep,
+            # An in-flight 402 the runner waits out and re-sends (task 7.8) gets its own row
+            # before the re-send, so the row stands even when the re-send raises.
+            on_in_flight=partial(row, step_id, attempt),
         )
-        batch.rows.append(
-            Row(
-                cell.cell_id,
-                cell.case_id,
-                step_id,
-                result.draw.slug,
-                cell.seed,
-                result.attempt_id,
-                result.status,
-                result.classification or "none",
-                usd_cell(
-                    result.cost_usd, bool(result.settlement and result.settlement.unreconciled)
-                ),
-                len(result.issues),
-            )
-        )
-        if module == "CP-0":
-            cp0_attempt = result.attempt_id  # the attempt whose review holds the T8 commands
-        if result.status != "accepted":
+        row(step_id, attempt, result)
+        return result
+
+    cp0_attempt = None
+
+    def play(steps: Sequence[str], attempt: Attempt) -> tuple[str, DispatchResult]:
+        """Send the steps in order; the last result, with its step, is the first non-accepted
+        one, or the final."""
+        nonlocal cp0_attempt
+        for step_id in steps:
+            result = send(step_id, attempt)
+            if attempt.module_id == "CP-0":
+                cp0_attempt = result.attempt_id  # the attempt whose review holds the T8 commands
+            # A rejection the journal kept pending is the step's one repair within the attempt:
+            # re-send the same step once. Its second rejection finishes the attempt (journal).
+            # A truncated try is no verdict the model can act on (the budget is the operator's
+            # knob, `--max-tokens`): a re-send at the same budget is a near-certain loss, so the
+            # step's repair stays unused (task 7.0h).
+            if (
+                repair
+                and result.status == "rejected"
+                and result.attempt_pending
+                and result.classification != TRUNCATED
+            ):
+                result = send(step_id, attempt)
+            if result.status != "accepted":
+                break
+        return step_id, result
+
+    for module, run in groupby(cell.steps, key=lambda step_id: STEPS[step_id].module_id):
+        group = tuple(run)
+        try:
+            attempt = store.begin(module)
+        except NotAuthorized as refusal:
+            # CP-0 judged this consumer CONDITIONAL or BLOCKED: a valid accepted outcome,
+            # recorded as this step's result. Nothing is sent; the cell ends, the batch goes on.
+            record = _record_not_authorized(cell, group[0], refusal, pool, cp0_attempt, evidence)
+            batch.rows.append(not_authorized_row(record))
             return
+        steps = group
+        while True:
+            step_id, result = play(steps, attempt)
+            if result.status == "accepted":
+                break  # every step of the module is accepted: on to the next module
+            # Only a validator verdict (rejected) on a first attempt earns the module's one MC-7
+            # repair. A no-response or fallback leaves the ticket pending, and a repair already
+            # used is spent: either ends the cell. A truncated rejection is a budget verdict, not a
+            # validator one, and consumes no module repair either (task 7.0h); nor does a CP-1 QA
+            # Blocked verdict, an analytical outcome that stands (task 7.4 fix round 1). `begin`
+            # refuses a consumed repair loudly.
+            if (
+                not repair
+                or result.status != "rejected"
+                or result.classification == TRUNCATED
+                or qa_blocked_only(step_id, result.issues)
+                or attempt.number != 0
+            ):
+                return
+            attempt = store.begin(module)
+            steps = group[group.index(expected_step(attempt, module)) :]
+
+
+def qa_blocked_only(step_id: str, issues: Sequence[str]) -> bool:
+    """True when a `quality` rejection's issues are only the CP-1 QA Blocked verdict
+    (`cp1_workflow.is_qa_blocked`, fix round 1, coordinator ruling): the review is valid and its
+    own judgments block QA, an analytical outcome that stands and is not repaired, so the cell
+    ends at it as at a truncation. Only `quality` emits the verdict (task 7.10 item 2): the same
+    text on any other step is an ordinary rejection."""
+    return step_id == "quality" and bool(issues) and all(map(is_qa_blocked, issues))
 
 
 def _record_not_authorized(
@@ -560,12 +702,16 @@ def _row(values: Sequence[object]) -> str:
 
 
 def _pool_cells(
-    candidate: PinnedCandidate, default_effort: str, reserved: Mapping[str, Decimal]
+    candidate: PinnedCandidate,
+    default_effort: str,
+    reserved: Mapping[str, Decimal],
+    bounds: Mapping[str, int],
 ) -> tuple[str, ...]:
     held = reserved.get(candidate.slug)
     amount = "-" if held is None else format(held, "f")
+    bound = str(bounds[candidate.slug]) if candidate.slug in bounds else "-"
     if not candidate.eligible:
-        return (candidate.slug, "no", candidate.exclusion_reason or "", "-", "-", amount)
+        return (candidate.slug, "no", candidate.exclusion_reason or "", "-", "-", bound, amount)
     decision = candidate.effort_for(default_effort)
     own = candidate.requested_effort
     sent = (
@@ -579,7 +725,22 @@ def _pool_cells(
         "",
         own if own else f"{default_effort} (default)",
         sent,
+        bound,
         amount,
+    )
+
+
+def _repairs_dispatched(rows: Sequence[Row]) -> str:
+    """Repairs that sent at least one step, both kinds: MC-7 repair attempts (per cell and
+    module) and steps repaired within their attempt (task 7.0g; per cell, attempt and step). A
+    repair stopped by the cap before its first dispatch has no row, and an `ineligible` row was
+    sealed unsent; neither is counted."""
+    sent = [row for row in rows if row.status != "ineligible"]
+    modules = {(row.cell_id, STEPS[row.step_id].module_id) for row in sent if row.repair}
+    steps = {(row.cell_id, row.repair, row.step_id) for row in sent if row.step_try == 2}
+    return (
+        f"{len(modules) + len(steps)} (module repair attempts {len(modules)}, "
+        f"within-attempt step repairs {len(steps)})"
     )
 
 
@@ -593,6 +754,7 @@ def render_report(
     batch: Batch,
     default_effort: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
     """Summary tables only; counts come from the registry and the retained results."""
     state = ledger.state()
@@ -602,6 +764,11 @@ def render_report(
         model = models.get(record.attempt_id)
         if model is not None:
             reserved[model] = max(reserved.get(model, Decimal(0)), record.reserved_usd)
+    # The prompt bound behind each reservation, also for an attempt sealed ineligible.
+    bounds: dict[str, int] = {}
+    for row in batch.rows:
+        if row.prompt_bound is not None:
+            bounds[row.model] = max(bounds.get(row.model, 0), row.prompt_bound)
     pool_line = (
         f"user-selected ({POOL_RULING})" if pool.pool_label == USER_SELECTED else "catalog rule"
     )
@@ -614,6 +781,7 @@ def render_report(
         "Reason",
         "Requested effort",
         "Effort sent",
+        "Prompt token bound (largest)",
         "Reserved USD per attempt (largest)",
     )
     lines = [
@@ -628,21 +796,24 @@ def render_report(
         f"{pool.looked_up_at}",
         f"- Registry modules with a live step contract: {len(live)} of {len(modules())}",
         f"- Max tokens: {max_tokens} per call (every model)",
+        f"- Timeout: {timeout_s} s per call (every model)",
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
+        f"- Repairs dispatched: {_repairs_dispatched(batch.rows)}",
+        f"- Truncated: {sum(row.classification == TRUNCATED for row in batch.rows)}",
         f"- Stopped: {batch.stopped or 'no'}",
         "",
         "## Pool",
         "",
         _row(pool_header),
         _row(("---",) * len(pool_header)),
-        *(_row(_pool_cells(c, default_effort, reserved)) for c in pool.candidates),
+        *(_row(_pool_cells(c, default_effort, reserved, bounds)) for c in pool.candidates),
         "",
         "## Steps",
         "",
-        _row((*steps_header, "Issues")),
-        _row(("---",) * (len(steps_header) + 1)),
-        *(_row(r.cells()) for r in batch.rows if r.cohort == COHORT),
+        _row((*steps_header, "Issues", "Repair")),
+        _row(("---",) * (len(steps_header) + 2)),
+        *(_row(r.step_cells()) for r in batch.rows if r.cohort == COHORT),
         "",
     ]
     # Results are grouped by cohort and never merged: proxy cohorts (DC-8) get their own table
@@ -652,13 +823,21 @@ def render_report(
             lines += [
                 f"## Steps ({summary.cohort})",
                 "",
-                _row((*steps_header, "Issues")),
-                _row(("---",) * (len(steps_header) + 1)),
-                *(_row(r.cells()) for r in batch.rows if r.cohort == summary.cohort),
+                _row((*steps_header, "Issues", "Repair")),
+                _row(("---",) * (len(steps_header) + 2)),
+                *(_row(r.step_cells()) for r in batch.rows if r.cohort == summary.cohort),
                 "",
             ]
     lines += _held_footnote(batch.rows)
-    cohort_header = ("Cohort", "Attempts", "Accepted", "Rejected", "Pooled", "Qualification")
+    cohort_header = (
+        "Cohort",
+        "Attempts",
+        "Accepted",
+        "Rejected",
+        "No response",
+        "Pooled",
+        "Qualification",
+    )
     lines += [
         "## Cohorts",
         "",
@@ -671,6 +850,7 @@ def render_report(
                     s.attempts,
                     s.accepted,
                     s.rejected,
+                    s.no_response,
                     "yes" if s.pooled else "no",
                     "not decided here" if s.qualification is None else str(s.qualification).lower(),
                 )
@@ -680,16 +860,6 @@ def render_report(
         "",
     ]
     return "\n".join(lines)
-
-
-def open_ledger(path: Path) -> Ledger:
-    """An existing ledger file opened with the cap its first line records."""
-    first = path.read_bytes().split(b"\n", 1)[0]
-    try:
-        cap = Decimal(str(json.loads(first)["cap_usd"]))
-    except (ValueError, KeyError, TypeError, InvalidOperation):
-        raise LedgerError(f"{path.name} has no readable opening line") from None
-    return Ledger(path, cap)
 
 
 def committed_elsewhere(directory: Path) -> Decimal:
@@ -704,6 +874,15 @@ def committed_elsewhere(directory: Path) -> Decimal:
     return total
 
 
+def aborted(failure: BaseException) -> str:
+    """The report's `Stopped:` value for an exception; a credit stop also says why (task 7.8:
+    the 402's reason and, for a balance refusal, the requested and affordable max_tokens)."""
+    stop = f"aborted: {type(failure).__name__}"
+    if isinstance(failure, CreditExhausted):
+        return f"{stop} ({failure.state.summary()})"
+    return stop
+
+
 def _finish_report(path: Path, content: str, inflight: BaseException | None) -> None:
     """Write the report; a failure here never replaces the exception `inflight`, if any."""
     try:
@@ -713,9 +892,6 @@ def _finish_report(path: Path, content: str, inflight: BaseException | None) -> 
         if inflight is None:
             raise
         inflight.add_note(f"live report not written: {type(problem).__name__}: {problem}")
-
-
-USAGE_SCHEMA = "account-usage-check/1"
 
 
 def record_usage(root: Path, batch_id: str, phase: str, client: ChatClient, command: str) -> None:
@@ -787,8 +963,14 @@ def _open_batch(args: argparse.Namespace, settings: LiveSettings, batch_id: str)
     return report
 
 
-def run_live(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
-    """Run one live subcommand and return its exit status."""
+def run_live(
+    args: argparse.Namespace,
+    *,
+    transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Run one live subcommand and return its exit status. `sleep` is the wait before the
+    runner re-sends an in-flight 402 (task 7.8)."""
     transport = transport or urllib_transport
     settings: LiveSettings = load_settings(args.settings)
     batch_id = args.batch_id or utc_stamp().replace(":", "").replace("-", "")
@@ -827,14 +1009,17 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 bytes_per_token=settings.prompt_bytes_per_token_lower_bound,
                 effort=default_effort,
                 max_tokens=args.max_tokens,
+                timeout_s=args.timeout,
                 evidence=root / batch_id,
                 batch=batch,
                 rejections=rejections,
+                repair=args.live_command == "module",
+                sleep=sleep,
             )
     except CapExceeded as stop:
         batch.stopped = f"cap: {stop}"
     except BaseException as failure:
-        batch.stopped = f"aborted: {type(failure).__name__}"
+        batch.stopped = aborted(failure)
         raise
     finally:
         _record_usage_after(root, batch_id, usage_client, args.live_command, sys.exception())
@@ -850,6 +1035,7 @@ def run_live(args: argparse.Namespace, *, transport: Transport | None = None) ->
                 batch,
                 default_effort,
                 args.max_tokens,
+                args.timeout,
             ),
             sys.exception(),
         )
@@ -887,6 +1073,8 @@ def _reconciled_row(
     seed = draw_record.get("seed") if isinstance(draw_record, dict) else None
     if cohort != COHORT:
         cost = "0 (proxy)"
+    elif record is not None and record.status == "reserved":  # task 7.11: an interrupted try
+        cost = f"reserved {format(record.reserved_usd, 'f')} (open)"
     elif record is None or record.charged_usd is None:
         cost = "not dispatched"
     else:
@@ -917,9 +1105,12 @@ def render_reconciliation(
     outcomes: Sequence[Outcome],
     checked_at: str,
     not_authorized: Sequence[Row] = (),
+    *,
+    spend: tuple[SpendCrossCheck | None, str],
 ) -> str:
     """The batch's steps with final charges (ledger after `adjust`) and the lookups made; the
-    steps CP-0 did not authorize (no attempt, nothing charged) follow the retained attempts."""
+    steps CP-0 did not authorize (no attempt, nothing charged) follow the retained attempts;
+    the spend cross-check closes it (task 7.14)."""
     state = ledger.state()
     records = {item.attempt_id: item for item in state.attempts}
     order = {name: index for index, name in enumerate(records)}
@@ -967,8 +1158,65 @@ def render_reconciliation(
             for o in outcomes
         ),
         "",
+        *_spend_section(spend),
     ]
     return "\n".join(lines)
+
+
+SPEND_NOT_CHECKED = "not checked: the reconcile stopped before the cross-check"
+
+
+def _checked_spend(client: ChatClient, root: Path) -> tuple[SpendCrossCheck | None, str]:
+    """The cross-check, or "not checked" with why when its key read fails. Documented
+    fail-open (fix round 1): the cross-check only reports, so a credential or connection
+    failure on its own read is printed and recorded in the section, and leaves the exit code
+    to the lookups and settlements (it is read after all of them, so it changes none)."""
+    try:
+        return spend_cross_check(client, utc_stamp, root)
+    except (TransportError, CredentialError) as problem:
+        why = f"not checked: {type(problem).__name__}: {problem}"
+        print(f"spend cross-check {why}")
+        return None, why
+
+
+def _spend_section(spend: tuple[SpendCrossCheck | None, str]) -> list[str]:
+    """Task 7.14: the key's usage now against the settled charges of the ledgers opened since
+    the origin, both inputs with their times and the ledger count, and the earlier ledgers it
+    leaves out; without a figure, why. Reported only."""
+    found, why = spend
+    lines = [
+        "## Spend cross-check",
+        "",
+        "Reported only: nothing is settled or adjusted from this figure.",
+        "",
+    ]
+    if found is None:
+        return [*lines, f"- No figure: {why}", ""]
+    count, left = len(found.ledgers), len(found.excluded)
+    not_covered = (
+        f"- Not covered: {left} ledger{'' if left == 1 else 's'} opened before the origin "
+        f"({', '.join(found.excluded)}), settled {format(found.excluded_usd, 'f')} USD; not in "
+        "the figure"
+        if left
+        else "- Not covered: no ledger opened before the origin"
+    )
+    return [
+        *lines,
+        f"- Origin: {found.origin_file}, usage {format(found.origin_usd, 'f')} USD at "
+        f"{found.origin_at} (the earliest recorded before-check)",
+        not_covered,
+        f"- Key usage now: {format(found.now_usd, 'f')} USD at {found.now_at} "
+        "(`GET /api/v1/key` at reconcile time)",
+        f"- Billed since the origin: {format(found.billed_usd, 'f')} USD",
+        f"- Settled in {count} ledger{'' if count == 1 else 's'} (.ledgers/*.jsonl): "
+        f"{format(found.settled_usd, 'f')} USD, of which {format(found.held_usd, 'f')} USD held "
+        f"at a reservation (cost unknown); {found.open_reservations} reservations open "
+        "(not counted)",
+        f"- Unattributed USD: {format(found.unattributed_usd, 'f')} (billed since the origin "
+        "less settled; positive: billed but in no ledger, late billing or spend outside the "
+        "runner; negative: settled but not billed, refunds or lag)",
+        "",
+    ]
 
 
 def _write_derived(path: Path, content: str) -> None:
@@ -999,11 +1247,31 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
     retained = list(batch_attempts(root, args.batch_id))
     refused = read_not_authorized(root, args.batch_id)  # a bad record fails before any call
     usage = read_usage(root, args.batch_id)
+    spend: tuple[SpendCrossCheck | None, str] = (None, SPEND_NOT_CHECKED)
     try:
-        for attempt in candidates(root, args.batch_id):
+        for attempt in lookup_order(candidates(root, args.batch_id)):
             outcomes.append(
                 reconcile_attempt(attempt, ledger, client, utc_stamp, batch=retained, usage=usage)
             )
+        # Task 7.11: after every lookup, like a deadline hold (nothing to look up either).
+        interrupted = interrupted_attempts(root, args.batch_id, ledger.state())
+        # Task 7.13: a batch killed before its after-check may close at the next before-check.
+        killed = interrupted and not usage_path(root, args.batch_id, "after").is_file()
+        next_batch = next_batch_window(root, args.batch_id) if killed else None
+        for directory in interrupted:
+            outcomes.append(
+                reconcile_interrupted(
+                    directory,
+                    ledger,
+                    client,
+                    utc_stamp,
+                    batch=retained,
+                    usage=usage,
+                    next_batch=next_batch,
+                )
+            )
+        # Task 7.14: after every adjust of this run, so the settled sum includes them.
+        spend = _checked_spend(client, root)
     finally:
         cells, notes = _cell_names(args.directory / "live" / args.batch_id)
         content = render_reconciliation(
@@ -1015,6 +1283,7 @@ def run_reconcile(args: argparse.Namespace, *, transport: Transport | None = Non
             outcomes,
             checked_at,
             refused,
+            spend=spend,
         )
         try:
             _write_derived(report, content)
@@ -1322,7 +1591,7 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
         record_usage(root, batch_id, "before", usage_client, args.live_command)
         stopped = checks()
     except BaseException as failure:
-        stopped = f"aborted: {type(failure).__name__}"
+        stopped = aborted(failure)
         raise
     finally:
         _record_usage_after(root, batch_id, usage_client, args.live_command, sys.exception())
@@ -1339,7 +1608,12 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
     return EXIT_CAP if stopped else 0
 
 
-def execute(args: argparse.Namespace, *, transport: Transport | None = None) -> int:
+def execute(
+    args: argparse.Namespace,
+    *,
+    transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
     if args.live_command == "corpus":
         try:
             target = write_entry(
@@ -1361,7 +1635,7 @@ def execute(args: argparse.Namespace, *, transport: Transport | None = None) -> 
             return run_schema_check(args, transport=transport)
         if args.live_command == "reconcile":
             return run_reconcile(args, transport=transport)
-        return run_live(args, transport=transport)
+        return run_live(args, transport=transport, sleep=sleep)
     except CreditExhausted as error:
         print(f"live {args.live_command} stopped: {error}")
         print("ticket pending; coordinator decision (DC-8)")

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -13,10 +14,22 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from deploy_vii.execution import Execution
+from deploy_vii.business_context import REQUIRED_REGISTERS
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_workflow import (
+    PROMOTED,
+    FinancialStage,
+    cp1_registers,
+    promote_cp1,
+    submit_cp1_step,
+    write_cp1_envelope,
+)
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
+from deploy_vii.execution import Execution, NotAuthorized
 from deploy_vii.live import prompts, runner, submission
 from deploy_vii.live.catalog import Catalog, ModelSelection, PinnedPool, parse_selection
 from deploy_vii.live.client import ChatClient, Response, TransportError, urllib_transport
+from deploy_vii.live.context import step_sources
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import draw
@@ -35,7 +48,14 @@ from deploy_vii.live.runner import (
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
-from deploy_vii.readiness import ReadinessReview, extraction_coverage, live_consumers
+from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source
+from deploy_vii.quality import QualityInputs
+from deploy_vii.readiness import (
+    ReadinessReview,
+    build_readiness,
+    extraction_coverage,
+    live_consumers,
+)
 from tests.product.live_support import (
     FAKE_KEY,
     SECOND_FAKE_KEY,
@@ -47,13 +67,16 @@ from tests.product.live_support import (
     make_rtf_key,
     ok,
 )
-from tests.product.test_execution import fixture_store
+from tests.product.test_business_context import cp1_fact, submission_fixture
+from tests.product.test_execution import accept_cp0, candidate_for, fixture_store, step_text
 from tests.product.test_live_client import (
     UPSTREAM_502,
     TricklingReply,
     choice_error_body,
     install,
 )
+from tests.product.test_live_credit import ACCOUNT, CREDIT_402, IN_FLIGHT_402, refusal
+from tests.product.test_narrative import draft
 from tests.product.test_readiness import as_submission, readiness_fixture
 from tests.product.test_workflow import cp1_case
 
@@ -73,6 +96,11 @@ SEVEN = {
     "checks",
     "render",
 }
+
+
+def no_wait(seconds: float) -> None:
+    """The default `sleep` of these tests: a dispatch that waits unasked is a failure."""
+    raise AssertionError(f"unexpected wait of {seconds} s")
 
 
 @dataclass
@@ -100,6 +128,7 @@ class Rig:
         step: StepSpec = CP0,
         max_retries: int = 2,
         key_index: int = 1,
+        sleep: Callable[[float], None] | None = None,
     ) -> DispatchResult:
         return dispatch(
             step,
@@ -116,6 +145,7 @@ class Rig:
             effort=effort,
             clock=lambda: NOW,
             max_retries=max_retries,
+            sleep=sleep or no_wait,
         )
 
     def files(self, *, include_journal: bool = True) -> list[Path]:
@@ -305,7 +335,7 @@ def test_unavailable_sources_and_repairs_and_upstream_are_data_blocks() -> None:
         }
     )
     gone = pack.model_copy(update={"sources": (missing,)})
-    up = prompts.UpstreamInput("step:source_context", "a" * 64, "b" * 64, '{"x":1}')
+    up = prompts.UpstreamInput("step:source_context", "a" * 64, '{"x":1}', "full")
     user = prompts.build(
         "financials",
         gone,
@@ -316,7 +346,8 @@ def test_unavailable_sources_and_repairs_and_upstream_are_data_blocks() -> None:
     )[1].content
     assert "UNAVAILABLE (missing): file not supplied" in user
     assert "<<<SOURCE id=filing sha256=none>>>" in user and "0" * 64 not in user
-    assert f"<<<SOURCE id=step:source_context sha256={'a' * 64}>>>\nstep_output_sha256=" in user
+    header = f"<<<SOURCE id=step:source_context sha256={'a' * 64} projection=full>>>"
+    assert f'{header}\n{{"x":1}}\n<<<END>>>' in user
     assert "<<<REPAIR id=prior-validation-issues" in user and "- second issue" in user
     spreadsheet = pack.sources[0].model_copy(
         update={
@@ -380,6 +411,8 @@ def test_dispatch_accepts_a_valid_review_and_retains_every_artifact(tmp_path: Pa
         "repair_of_ticket_id": None,
         "repair_of_attempt_id": None,
         "retry_of_attempt_id": None,
+        "step_repair_of_attempt_id": None,  # task 7.0g
+        "in_flight_retry_of_attempt_id": None,  # task 7.8
     }
     request = load(directory / "request.json")
     assert request["body"]["model"] == LUNA and "tools" not in request["body"]
@@ -661,6 +694,7 @@ def test_fallback_then_retry_reuses_pending_ticket(tmp_path: Path) -> None:
     retries = load(attempt_dir(first) / "manifest.json")["retries"]
     assert retries == {
         "attempt_number": 1,
+        "step_try": 1,  # task 7.0g
         "max_retries": 2,
         "exhausted": False,
         "ticket_interrupted": False,
@@ -750,6 +784,49 @@ def test_repair_attempt_links_to_its_predecessor_and_prompts_the_issues(tmp_path
     assert load(attempt_dir(second) / "metrics.json")["repair_count"] == 1
 
 
+def test_a_classified_quote_issue_reaches_the_repair_block_whole(tmp_path: Path) -> None:
+    """Task 7.0, end to end: a quote stitched across interleaved text (the Sol p104 shape) is
+    rejected with the classified clause, and the repair prompt carries that issue in full."""
+    sentence = (
+        "Net revenues increased primarily due to the full-year contribution of the regional "
+        "properties acquired in the prior year and higher hold on table games across the "
+        "Las Vegas segment"
+    )
+    cut = sentence.index(" in the prior")  # a column break after "acquired"
+    first_run, second_run = sentence[:cut], sentence[cut + 1 :]
+    cells = "Casino 5,321 5,102 4,870 Food and beverage 1,934 1,876 1,702 Hotel 2,207 2,118"
+    row = f"{first_run} {cells} {second_run}"
+    fixture, _ = readiness_fixture()
+    source = prepare_source(
+        SourceRequest(source_id="filing", path="filing.txt", media_type="text/plain"),
+        f"Synthetic issuer FY2025 cash USD million 0\n{row}\n".encode(),
+    )
+    store = Execution.create(
+        tmp_path / "execution", PreparedPack(run=fixture.run, sources=(source,))
+    )
+    rig = make_rig(tmp_path / "rig")
+    rig.store, rig.ticket_id = store, store.begin("CP-0").ticket_id
+    stitched = json.loads(rig.submission)
+    stitched["analysis"][0]["citations"].append(
+        {"source_id": "filing", "locator": "line:2", "quote": sentence}
+    )
+    rig.submission = json.dumps(stitched)
+    first = rig.run(ChatClient(FakeTransport(reply(rig))))
+    assert first.status == "rejected"
+    clause = f"two runs separated by interleaved text (columns or table cells) at offset {cut}"
+    (classified,) = [issue for issue in first.issues if clause in issue]
+    assert classified.endswith("quote one contiguous run or choose another locator")
+    assert len(classified) > 300  # beyond the journal's bound before task 7.0
+    rig.submission = as_submission(rig.review).model_dump_json()
+    repair = rig.store.begin("CP-0")
+    rig.ticket_id = repair.ticket_id
+    transport = FakeTransport(reply(rig))
+    rig.run(ChatClient(transport))
+    user = json.loads(transport.requests[0].body or b"{}")["messages"][1]["content"]
+    block = user.split("<<<REPAIR id=prior-validation-issues", 1)[1].split("<<<END>>>", 1)[0]
+    assert f"- {classified}\n" in block
+
+
 def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
     tmp_path: Path,
 ) -> None:
@@ -761,6 +838,10 @@ def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
     financials = StepSpec("financials", "case-cp1", sources)
     failed = rig.run(ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials)
     assert failed.status == "rejected" and failed.issues[0].startswith("(root): Invalid JSON")
+    # Task 7.0g: the step's one repair within the attempt is rejected too, which finishes it.
+    assert failed.attempt_pending
+    failed = rig.run(ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials)
+    assert failed.status == "rejected" and not failed.attempt_pending
     repair = rig.store.begin("CP-1")
     assert repair.number == 1 and repair.repair_issues == failed.issues
     rig.ticket_id = repair.ticket_id
@@ -786,6 +867,129 @@ def test_a_cp1_repair_carries_only_the_failing_steps_issues_on_that_step(
 
     assert scope(redo)["scope"] == "none" and scope(redo)["failing_step"] == "financials"
     assert scope(again)["scope"] == "failing-step" and scope(again)["issue_count"] == 1
+
+
+def cp1_spec(rig: Rig, step_id: str) -> StepSpec:
+    sources = tuple(s.source_id for s in rig.store.pack().sources)
+    return StepSpec(step_id, "case-cp1", step_sources(step_id, sources))
+
+
+def user_prompt(transport: FakeTransport) -> str:
+    content: str = json.loads(transport.requests[0].body or b"{}")["messages"][1]["content"]
+    return content
+
+
+def repair_block(issues: tuple[str, ...]) -> str:
+    return "\n".join(f"- {issue}" for issue in issues)
+
+
+def events_of(result: DispatchResult, name: str) -> list[dict[str, Any]]:
+    lines = (result.directory / "events.jsonl").read_text().splitlines()
+    return [e for e in map(json.loads, lines) if e["event"] == name]
+
+
+def test_a_rejected_cp1_step_is_re_sent_within_its_attempt_with_its_own_issues(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0g: after a rejection the attempt stays pending, the same step is expected again
+    and its REPAIR block carries that step's own issues; the next step carries none."""
+    rig, extraction = cp1_rig(tmp_path)
+    financials = cp1_spec(rig, "financials")
+    failed = rig.run(ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials)
+    assert failed.status == "rejected" and failed.attempt_pending and failed.step_try == 1
+    assert failed.issues[0].startswith("(root): Invalid JSON")
+    ticket = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert [s.step_id for s in ticket.step_repairs] == ["financials"]
+    assert runner.expected_step(ticket, "CP-1") == "financials"
+    transport = FakeTransport(ok(extraction.model_dump_json(), model=LUNA))
+    fixed = rig.run(ChatClient(transport), step=financials)
+    assert fixed.status == "accepted" and fixed.attempt_pending and fixed.step_try == 2
+    user = user_prompt(transport)
+    assert user.count("<<<REPAIR id=prior-validation-issues") == 1
+    assert repair_block(failed.issues) in user
+    manifest = load(fixed.directory / "manifest.json")
+    assert manifest["links"]["step_repair_of_attempt_id"] == failed.attempt_id
+    assert manifest["links"]["repair_of_ticket_id"] is None
+    assert manifest["links"]["retry_of_attempt_id"] is None  # a repair try is not a retry
+    assert manifest["retries"]["step_try"] == 2 and manifest["retries"]["attempt_number"] == 1
+    assert load(fixed.directory / "metrics.json")["repair_count"] == 0  # the attempt number
+    first = load(failed.directory / "manifest.json")
+    assert first["retries"]["step_try"] == 1 and first["links"]["step_repair_of_attempt_id"] is None
+    (scope,) = events_of(fixed, "repair_prompt")
+    assert scope == {
+        **scope,
+        "scope": "failing-step",
+        "failing_step": "financials",
+        "issue_count": len(failed.issues),
+    }
+    assert not events_of(failed, "repair_prompt")
+    # The next step's request carries no REPAIR block. (Task 7.5: its bounded prompt now fits
+    # the drawn model, so the request is sent; before, the raw upstream made it ineligible.)
+    reply = FakeTransport(ok("not json", model=LUNA))
+    following = rig.run(ChatClient(reply), step=cp1_spec(rig, "narrative"))
+    assert following.status == "rejected"
+    request = load(following.directory / "request.json")
+    assert "<<<REPAIR" not in request["body"]["messages"][1]["content"]
+
+
+def test_a_steps_own_issues_take_precedence_over_the_previous_attempts(tmp_path: Path) -> None:
+    """On the repair attempt the failing step's first try carries the previous attempt's
+    issues; its within-attempt repair carries only its own first try's issues, never both."""
+    rig, extraction = cp1_rig(tmp_path)
+    context_payload = rig.store.payload(rig.store.read().attempts[-1].steps[0].payload_sha256)
+    financials = cp1_spec(rig, "financials")
+    for content in ("not json", "[]"):  # attempt 0: rejected, and its step repair rejected
+        rig.run(ChatClient(FakeTransport(ok(content, model=LUNA))), step=financials)
+    previous = rig.store.read().attempts[-1]
+    assert previous.status == "finished" and len(previous.step_repairs) == 1
+    rig.ticket_id = rig.store.begin("CP-1").ticket_id
+    redo = rig.run(
+        ChatClient(FakeTransport(ok(context_payload, model=LUNA))),
+        step=cp1_spec(rig, "source_context"),
+    )
+    assert redo.status == "accepted", redo.issues
+    first = FakeTransport(ok("{}", model=LUNA))
+    one = rig.run(ChatClient(first), step=financials)
+    assert one.status == "rejected" and one.attempt_pending and one.step_try == 1
+    second = FakeTransport(ok(extraction.model_dump_json(), model=LUNA))
+    two = rig.run(ChatClient(second), step=financials)
+    assert two.status == "accepted" and two.step_try == 2
+    inherited, own = repair_block(previous.issues), repair_block(one.issues)
+    assert inherited != own
+    assert inherited in user_prompt(first) and own not in user_prompt(first)
+    assert own in user_prompt(second) and inherited not in user_prompt(second)
+    assert user_prompt(second).count("<<<REPAIR") == 1
+    manifest = load(two.directory / "manifest.json")
+    assert manifest["links"]["step_repair_of_attempt_id"] == one.attempt_id
+    assert manifest["links"]["repair_of_ticket_id"] == previous.ticket_id
+    assert load(two.directory / "metrics.json")["repair_count"] == 1
+
+
+def test_a_step_repair_try_has_its_own_retry_budget(tmp_path: Path) -> None:
+    """Retries (no model output) and the step's repair try are counted apart: a no-response on
+    the repair try is that try's first attempt, and its retry links to it."""
+    rig, extraction = cp1_rig(tmp_path)
+    financials = cp1_spec(rig, "financials")
+    failed = rig.run(
+        ChatClient(FakeTransport(ok("not json", model=LUNA))), step=financials, max_retries=1
+    )
+    lost = rig.run(ChatClient(FakeTransport(TimeoutError("slow"))), step=financials, max_retries=1)
+    assert lost.status == "no-response" and lost.step_try == 2 and not lost.ticket_interrupted
+    lost_manifest = load(lost.directory / "manifest.json")
+    assert lost_manifest["retries"]["attempt_number"] == 1
+    assert lost_manifest["links"]["retry_of_attempt_id"] is None
+    assert lost_manifest["links"]["step_repair_of_attempt_id"] == failed.attempt_id
+    again = rig.run(
+        ChatClient(FakeTransport(ok(extraction.model_dump_json(), model=LUNA))),
+        step=financials,
+        max_retries=1,
+    )
+    assert again.status == "accepted" and again.step_try == 2
+    manifest = load(again.directory / "manifest.json")
+    assert manifest["retries"]["attempt_number"] == 2
+    assert manifest["links"]["retry_of_attempt_id"] == lost.attempt_id
+    assert manifest["links"]["step_repair_of_attempt_id"] == failed.attempt_id
+    assert len({failed.attempt_id, lost.attempt_id, again.attempt_id}) == 3
 
 
 def test_a_repair_after_an_interruption_keeps_the_module_issues(tmp_path: Path) -> None:
@@ -875,8 +1079,12 @@ def test_cp1_step_dispatch_carries_the_retained_step_as_upstream_data(tmp_path: 
     ]
     held = store.read().attempts[-1].steps[0]
     user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
-    assert f"<<<SOURCE id=step:source_context sha256={held.content_hash()}>>>" in user
+    # R5 (task 7.5): the source-context report is sent whole; the header names the projection.
+    header = f"<<<SOURCE id=step:source_context sha256={held.content_hash()} projection=full>>>"
+    assert f"{header}\n{{" in user and user.count("<<<SOURCE id=step:") == 1
     assert extraction.context_step_sha256 == held.content_hash()
+    # Only the `quality` manifest names QA inputs (task 7.4 fix round 1).
+    assert "quality_inputs_sha256" not in load(attempt_dir(result) / "manifest.json")["hashes"]
     # The step order is enforced before any money is spent.
     idle = FakeTransport()
     before = rig.ledger.state().lines
@@ -884,6 +1092,83 @@ def test_cp1_step_dispatch_carries_the_retained_step_as_upstream_data(tmp_path: 
         with pytest.raises(ValueError, match="not the next step"):
             rig.run(ChatClient(idle), step=StepSpec(wrong, "case-cp1", ()))
     assert idle.requests == [] and rig.ledger.state().lines == before
+
+
+def test_the_readiness_dispatch_shows_no_binding_hash_and_python_fills_it(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0i fix 1: `readiness` binds `inputs_sha256` to the narrative step's retained
+    `DownstreamInputs`. The `step_output_sha256=` line that alone showed it is gone; Python
+    fills the binding, so the prompt shows only each block's header hash."""
+    store, ticket, extraction = cp1_case(tmp_path)
+    finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    stage = FinancialStage.model_validate_json(step_text(store, finances.steps[-1]))
+    narrative = submit_cp1_step(
+        store, ticket.ticket_id, "narrative", draft(stage.narrative_inputs).model_dump_json()
+    )
+    assert [s.status for s in narrative.steps] == ["valid", "valid", "valid"]
+    held = narrative.steps[-1]
+    required = DownstreamInputs.model_validate_json(step_text(store, held)).content_hash()
+    upstream = runner._upstream(store, narrative, "readiness")
+    system, user = (
+        message.content
+        for message in prompts.build(
+            "readiness", store.pack(), (), DownstreamReview, upstream=upstream
+        )
+    )
+    # Task 7.5: the narrative step's inputs projected for readiness, the only block sent.
+    header = f"<<<SOURCE id=step:narrative sha256={held.content_hash()} projection=readiness-inputs"
+    assert f"{header}>>>\nprojection=readiness-inputs: " in user
+    assert user.count("<<<SOURCE id=") == 1 and "record_json" not in user
+    assert "step_output_sha256" not in user and required not in user
+    assert "inputs_sha256" not in system
+    for producer in ("source_context", "financials"):  # R3: not sent to readiness
+        assert f"<<<SOURCE id=step:{producer} " not in user
+    submitted = submission.submit_model_payload(store, ticket.ticket_id, "readiness", "{}")
+    assert submitted.prefilled == ("inputs_sha256",)
+    assert json.loads(submitted.payload) == {"inputs_sha256": required}
+    assert submitted.journal.steps[-1].step_id == "readiness"
+    assert submitted.journal.steps[-1].status == "valid", submitted.journal.steps[-1].issues
+
+
+def test_the_narrative_dispatch_sends_the_evidence_projection_and_no_pack_source(
+    tmp_path: Path,
+) -> None:
+    """Task 7.5 (R1, R2, R6): the narrative prompt carries the financial stage projected to its
+    evidence table under the retained step's content hash, no raw output, no `record_json`, no
+    source-context block and no pack SOURCE block; the review the model returns is accepted."""
+    store, ticket, extraction = cp1_case(tmp_path)
+    finances = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    raw = step_text(store, finances.steps[-1])
+    stage = FinancialStage.model_validate_json(raw)
+    rig = Rig(
+        store=store,
+        ticket_id=ticket.ticket_id,
+        ledger=Ledger(tmp_path / "ledger" / "l.jsonl", Decimal("5"), clock=lambda: NOW),
+        pool=fixture_pool("batch-n"),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(_keys(tmp_path)),
+        review=readiness_fixture()[1],
+        root=tmp_path,
+    )
+    review = json.loads(draft(stage.narrative_inputs).model_dump_json())
+    del review["inputs_sha256"]  # Python fills the binding
+    transport = FakeTransport(ok(json.dumps(review), model=LUNA))
+    result = rig.run(ChatClient(transport), step=cp1_spec(rig, "narrative"))
+    assert result.status == "accepted", result.issues
+    user = user_prompt(transport)
+    held = finances.steps[-1]
+    header = (
+        f"<<<SOURCE id=step:financials sha256={held.content_hash()} projection=narrative-evidence"
+    )
+    assert user.count(f"{header}>>>\nprojection=narrative-evidence: ") == 1
+    assert user.count("<<<SOURCE id=") == 1  # no pack source, no source-context block
+    assert "record_json" not in user and '"quote"' not in user
+    assert len(user) < len(raw) // 10
+    assert all(r.evidence_id in user for r in stage.narrative_inputs.catalogue)
+    request = load(attempt_dir(result) / "request.json")
+    assert load(result.directory / "manifest.json")["hashes"]["declared_inputs"] == []
+    assert request["body"]["messages"][1]["content"] == user
 
 
 def _keys(tmp_path: Path) -> Path:
@@ -1286,12 +1571,16 @@ def test_manifest_records_the_relaxations_and_hashes_the_schema_actually_sent(
         "const-to-enum",
         "drop-length",
         "nullable-array-anyof",
+        "decimal-number-only",  # task 7.0d: amounts sent as JSON numbers only
+        "prefixed-enum",  # task 7.0d fix 1: statement item ids
+        "drop-prefilled",  # task 7.0i: context_step_sha256 is filled by Python
     ]
     unverified = manifest["schema_keywords_unverified"]
     assert unverified and not {"const", "minLength", "maxLength"} & set(unverified)
     sent = json.loads(transport.requests[0].body or b"{}")["response_format"]["json_schema"]
     text = json.dumps(sent["schema"], sort_keys=True, separators=(",", ":"))
     assert '"const"' not in text and "Length" not in text
+    assert "x-deploy-vii-" not in text  # no marker reaches the wire
     assert manifest["hashes"]["schema_sha256"] == hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -1387,6 +1676,64 @@ def test_a_payload_without_nulls_reaches_the_journal_byte_for_byte(tmp_path: Pat
     assert result.status == "accepted"
     assert rig.store.payload(rig.store.read().attempts[-1].steps[-1].payload_sha256) == raw
     assert "payload_nulls_resolved" not in (result.directory / "events.jsonl").read_text()
+    assert "payload_prefilled" not in (result.directory / "events.jsonl").read_text()
+
+
+def test_the_prefilled_context_binding_is_recorded_beside_the_raw_output(tmp_path: Path) -> None:
+    """Task 7.0i: the model is not asked for `context_step_sha256`; Python fills it before the
+    journal validates, and the attempt's events say so (output.md keeps the raw content)."""
+    rig, extraction = cp1_rig(tmp_path)
+    document = json.loads(extraction.model_dump_json())
+    del document["context_step_sha256"]
+    raw = json.dumps(document)
+    step = StepSpec("financials", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    transport = FakeTransport(ok(raw, model=LUNA))
+    result = rig.run(ChatClient(transport), step=step)
+    assert result.status == "accepted", result.issues
+    assert (result.directory / "output.md").read_text(encoding="utf-8") == raw
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    attempt = rig.store.read().attempts[-1]
+    kept = rig.store.payload(attempt.steps[-1].payload_sha256)
+    assert filled["paths"] == ["context_step_sha256"]
+    assert (filled["count"], filled["by_kind"]) == (1, {"context-step": 1})
+    assert filled["retained_payload_sha256"] == attempt.steps[-1].payload_sha256
+    assert json.loads(kept)["context_step_sha256"] == attempt.steps[0].content_hash()
+    # The model was never asked: neither the schema nor the step text names the field.
+    system = json.loads((transport.requests[0].body or b"{}").decode())["messages"][0]["content"]
+    assert "context_step_sha256" not in system
+
+
+def test_the_dimension_strings_python_wrote_are_recorded_beside_the_raw_output(
+    tmp_path: Path,
+) -> None:
+    """Task 7.13 provenance: the model sends no book or period dimension string; the attempt's
+    `payload_prefilled` event names every path Python wrote (kind `scope-dimension`), output.md
+    keeps what the model sent, and the journal keeps the filled payload."""
+    rig, extraction = cp1_rig(tmp_path)
+    document = json.loads(extraction.model_dump_json())
+    dimensions = ("currency", "unit", "accounting_basis", "entity_perimeter")
+    (book,) = document["financial"]["books"]
+    for item in (book, *book["periods"]):
+        for name in dimensions:
+            del item[name]
+    raw = json.dumps(document)
+    step = StepSpec("financials", "case-cp1", tuple(s.source_id for s in rig.store.pack().sources))
+    result = rig.run(ChatClient(FakeTransport(ok(raw, model=LUNA))), step=step)
+    assert result.status == "accepted", result.issues
+    assert (result.directory / "output.md").read_text(encoding="utf-8") == raw
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    periods = len(book["periods"])
+    assert filled["by_kind"] == {"scope-dimension": 4 * (1 + periods)}
+    assert "financial.books.0.entity_perimeter" in filled["paths"]
+    assert f"financial.books.0.periods.{periods - 1}.currency" in filled["paths"]
+    kept = json.loads(rig.store.payload(rig.store.read().attempts[-1].steps[-1].payload_sha256))
+    assert kept == json.loads(extraction.model_dump_json())  # the scope's strings, as built
 
 
 def test_a_pre_0008_review_shaped_payload_is_rejected_and_retained_as_received(
@@ -1685,6 +2032,37 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
             },
             False,
         ),
+        # Task 7.15 item 4 and fix round 1: a withheld detail (the account id survives) keeps
+        # the verdict it had before 7.15, by OpenAI's code or by the schema words the detail
+        # named before it was withheld (`ChatResult.detail_names_schema`).
+        (
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {
+                    "raw": "user_id=u-1: Invalid schema for response_format 'x'",
+                    "provider_name": "OpenAI",
+                    "provider_error_code": "invalid_json_schema",
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {"raw": "user_id=u-1: Invalid schema for response_format 'x'"},
+            },
+            True,
+        ),
+        (  # the account id withheld, but no schema words: no verdict on the schema, as before
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {"raw": "user_id=u-1: max_tokens is below the minimum of 32"},
+            },
+            False,
+        ),
     ],
     ids=[
         "openai-code",
@@ -1694,6 +2072,9 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
         "reasoning",
         "names-json-schema-only",
         "google",
+        "withheld-openai-code",
+        "withheld-no-code",
+        "withheld-no-schema-words",
     ],
 )
 def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
@@ -1709,6 +2090,11 @@ def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
     metadata = error.get("metadata")
     code = metadata.get("provider_error_code") if isinstance(metadata, dict) else None
     assert manifest["provider_error_code"] == code
+    assert "u-1" not in json.dumps(manifest) and "u-1" not in (check.detail or "")
+    raw = metadata.get("raw") if isinstance(metadata, dict) else None
+    if isinstance(raw, str) and "user_id" in raw:
+        note = "<provider detail withheld: account id>"
+        assert manifest["error_detail"] == note and check.detail == note
 
 
 def run_check(
@@ -1789,6 +2175,311 @@ def test_a_check_402_is_sealed_then_stops_with_credit_exhausted(tmp_path: Path) 
     assert record.status == "settled" and record.charged_usd == Decimal(0)  # known-zero 402
 
 
+class Waits:
+    """Records each requested wait (the injected `sleep`)."""
+
+    def __init__(self) -> None:
+        self.seconds: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.seconds.append(seconds)
+
+
+def in_flight(retry_after: object = "120") -> Response:
+    metadata: dict[str, object] = {"reason": "in_flight_budget_exhausted"}
+    if retry_after is not None:
+        metadata["headers"] = {"Retry-After": retry_after}
+    return Response(402, refusal("Retry after in-flight requests settle", metadata))
+
+
+def test_an_in_flight_402_waits_retry_after_and_retries_once_as_a_new_reservation(
+    tmp_path: Path,
+) -> None:
+    """Task 7.8 (batch e1-cp1-8): the transient refusal is sealed, settled at zero, waited out
+    and re-sent once on the same drawn model as a separately reserved attempt."""
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))
+    result = rig.run(ChatClient(transport), sleep=waits)
+    assert result.status == "accepted" and waits.seconds == [120]
+    first = result.retried
+    assert first is not None and first.retried is None
+    assert (first.status, first.classification) == ("no-response", "insufficient_credit")
+    assert first.cost_usd == Decimal(0) and first.draw == result.draw
+    assert transport.requests[0].body == transport.requests[1].body  # the same request
+    sealed = load(attempt_dir(first) / "manifest.json")
+    assert sealed["status"] == "no-response" and sealed["credit"]["transient"] is True
+    assert sealed["credit"]["exhausted"] is None and sealed["credit"]["retry_after_s"] == 120
+    assert ACCOUNT not in json.dumps(sealed)
+    events = (attempt_dir(first) / "events.jsonl").read_text(encoding="utf-8")
+    assert "credit_in_flight_refusal" in events and "credit_exhausted" not in events
+    retried = load(attempt_dir(result) / "manifest.json")
+    assert retried["links"]["in_flight_retry_of_attempt_id"] == first.attempt_id
+    assert retried["links"]["retry_of_attempt_id"] == first.attempt_id
+    # Fix round 1 (F2): the refused attempt was no model try, so the re-send is still try 1.
+    assert retried["retries"]["attempt_number"] == 1 and retried["credit"] is None
+    (record,) = [r for r in rig.ledger.state().attempts if r.attempt_id == first.attempt_id]
+    assert runner.in_flight_refused(record)  # the settle reason carries the mark
+    wait = [
+        json.loads(line)
+        for line in (attempt_dir(result) / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if '"in_flight_retry"' in line
+    ]
+    assert wait[0]["retry_of"] == first.attempt_id and wait[0]["waited_s"] == 120
+    records = {record.attempt_id: record for record in rig.ledger.state().attempts}
+    assert records[first.attempt_id].charged_usd == Decimal(0)  # the known-zero 402
+    assert records[result.attempt_id].charged_usd == Decimal("0.00033")
+    assert [a.status for a in rig.store.read().attempts] == ["finished"]
+
+
+@pytest.mark.parametrize(("retry_after", "waited"), [("900", 300), (None, 120), ("0", 0)])
+def test_the_in_flight_wait_is_capped_and_defaults_when_absent(
+    tmp_path: Path, retry_after: str | None, waited: int
+) -> None:
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    rig.run(ChatClient(FakeTransport(in_flight(retry_after), reply(rig))), sleep=waits)
+    assert waits.seconds == [waited]
+
+
+def test_a_second_in_flight_402_is_exhaustion_and_both_attempts_are_sealed(
+    tmp_path: Path,
+) -> None:
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402))
+    with pytest.raises(CreditExhausted) as raised:
+        rig.run(ChatClient(transport), sleep=waits)
+    assert waits.seconds == [120] and len(transport.requests) == 2
+    manifests = sorted(
+        (load(path) for path in (rig.root / "artifacts").rglob("manifest.json")),
+        key=lambda manifest: manifest["attempt_id"],
+    )
+    first, second = (manifest["attempt_id"] for manifest in manifests)
+    assert [manifest["status"] for manifest in manifests] == ["no-response", "no-response"]
+    assert manifests[0]["credit"]["exhausted"] is None
+    assert manifests[1]["credit"]["exhausted"] is True
+    assert manifests[1]["links"]["in_flight_retry_of_attempt_id"] == first
+    message = str(raised.value)
+    assert first in message and second in message and "in_flight_budget_exhausted" in message
+    assert raised.value.state.exhausted is True
+    assert all(record.charged_usd == Decimal(0) for record in rig.ledger.state().attempts)
+    assert [a.status for a in rig.store.read().attempts] == ["pending"]  # repair kept
+
+
+def test_a_credit_402_does_not_wait_and_reports_the_affordable_budget(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    transport = FakeTransport(Response(402, CREDIT_402))
+    with pytest.raises(CreditExhausted) as raised:
+        rig.run(ChatClient(transport))  # the default `sleep` fails on any wait
+    assert len(transport.requests) == 1
+    assert "requested max_tokens 128000, affordable 91075" in str(raised.value)
+    (path,) = (rig.root / "artifacts").rglob("manifest.json")
+    credit = load(path)["credit"]
+    assert credit["exhausted"] is True and credit["reason"] == "openrouter_credits"
+    assert credit["affordable_max_tokens"] == 91075 and ACCOUNT not in json.dumps(load(path))
+
+
+def test_an_in_flight_402_on_the_last_allowed_try_still_gets_its_one_re_send(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 (F2): the refusal is not a try, so even max_retries=0 re-sends once."""
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))
+    result = rig.run(ChatClient(transport), max_retries=0, sleep=waits)
+    assert result.status == "accepted" and waits.seconds == [120]
+    retries = load(attempt_dir(result) / "manifest.json")["retries"]
+    assert retries["attempt_number"] == 1 and retries["exhausted"] is True  # the real value
+    # Task 7.10 item 7: the refused attempt is followed by its re-send, so it exhausts nothing.
+    assert result.retried is not None
+    refused = load(attempt_dir(result.retried) / "manifest.json")["retries"]
+    assert refused["attempt_number"] == 1 and refused["exhausted"] is False
+    assert refused["ticket_interrupted"] is False
+
+
+def test_an_in_flight_refusal_uses_up_no_model_try(tmp_path: Path) -> None:
+    """Fix round 1 (F2, DC-8: credit is not a model failure): a refusal on try 1, then
+    timeouts on the re-send and the next tries, interrupts the ticket after the same three model
+    tries as a run without the refusal."""
+    rig = make_rig(tmp_path)
+    waits = Waits()
+    first = rig.run(
+        ChatClient(FakeTransport(Response(402, IN_FLIGHT_402), TimeoutError("slow"))),
+        sleep=waits,
+    )
+    assert first.status == "no-response" and first.classification == "timeout"
+    assert first.retried is not None and not first.ticket_interrupted
+    numbers = [
+        load(attempt_dir(item) / "manifest.json")["retries"]["attempt_number"]
+        for item in (first.retried, first)
+    ]
+    assert numbers == [1, 1]  # the refused attempt and its re-send are the same model try
+    second = rig.run(ChatClient(FakeTransport(TimeoutError("slow"))))
+    assert not second.ticket_interrupted
+    third = rig.run(ChatClient(FakeTransport(TimeoutError("slow"))))
+    assert third.ticket_interrupted
+    ticket = rig.store.read().attempts[0]
+    assert ticket.interruption is not None
+    assert "Retries exhausted after 3 attempts" in ticket.interruption
+    with pytest.raises(ValueError, match="finished"):
+        rig.run(ChatClient(FakeTransport()))
+
+
+REDACTED_ACCOUNT = '"user_id": "<redacted>"'
+
+
+def stored_body(directory: Path) -> tuple[dict[str, Any], str]:
+    response = load(directory / "response.json")
+    text = response["body_text"]
+    assert isinstance(text, str)
+    assert response["body_sha256"] == hashlib.sha256(text.encode()).hexdigest()  # stored text
+    assert response["body_bytes"] == len(text.encode())
+    assert response["body_redactions"] == ["user_id"]
+    assert load(directory / "manifest.json")["body_redactions"] == ["user_id"]
+    assert ACCOUNT not in (directory / "response.json").read_text(encoding="utf-8")
+    return response, text
+
+
+def test_a_stored_402_body_keeps_everything_but_the_account_id(tmp_path: Path) -> None:
+    """Task 7.10 item 8: the in-flight 402 of batch e1-cp1-8 is stored with its `user_id` value
+    replaced (key kept) and nothing else changed; the hash is the stored text's."""
+    rig = make_rig(tmp_path)
+    result = rig.run(
+        ChatClient(FakeTransport(Response(402, IN_FLIGHT_402), reply(rig))), sleep=Waits()
+    )
+    assert result.retried is not None
+    _, text = stored_body(attempt_dir(result.retried))
+    raw = IN_FLIGHT_402.decode()
+    assert text == raw.replace(f'"user_id": "{ACCOUNT}"', REDACTED_ACCOUNT)
+    assert json.loads(text) == {**json.loads(raw), "user_id": "<redacted>"}
+    # The refusal was still read from the body as received (task 7.8).
+    assert load(attempt_dir(result.retried) / "manifest.json")["credit"]["retry_after_s"] == 120
+
+
+def test_a_stored_200_body_is_redacted_the_same_way(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    body = reply(rig).body.decode()
+    assert body.endswith("}")
+    raw = body[:-1] + f', "user_id": "{ACCOUNT}"}}'
+    result = rig.run(ChatClient(FakeTransport(Response(200, raw.encode()))))
+    assert result.status == "accepted"
+    _, text = stored_body(attempt_dir(result))
+    assert text == raw.replace(f'"user_id": "{ACCOUNT}"', REDACTED_ACCOUNT)
+
+
+def test_a_body_without_an_account_id_is_stored_byte_for_byte(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    sent = reply(rig)
+    result = rig.run(ChatClient(FakeTransport(sent)))
+    response = load(attempt_dir(result) / "response.json")
+    assert response["body_text"] == sent.body.decode()
+    assert response["body_sha256"] == hashlib.sha256(sent.body).hexdigest()
+    assert "body_redactions" not in response
+    assert "body_redactions" not in load(attempt_dir(result) / "manifest.json")
+
+
+@pytest.mark.parametrize(
+    ("raw", "stored"),
+    [
+        (b'{"user_id":"u-1","a":1}', b'{"user_id":"<redacted>","a":1}'),
+        (b'{"x": {"user_id" :\n 42}, "user_id": null}', None),
+        (b'{"n": "a \\"user_id\\": \\"keep\\""}', b'{"n": "a \\"user_id\\": \\"keep\\""}'),
+        (b'{"\\"user_id": "keep"}', b'{"\\"user_id": "keep"}'),
+        (b'{"user_id": "a\\"b\\\\"}', b'{"user_id": "<redacted>"}'),
+        (b'\xff{"user_id": "u-1"}', b'\xff{"user_id": "<redacted>"}'),
+    ],
+)
+def test_the_account_id_redaction_replaces_only_user_id_values(
+    raw: bytes, stored: bytes | None
+) -> None:
+    from deploy_vii.live.retention import redact_account_id
+
+    if stored is None:
+        stored = b'{"x": {"user_id" :\n "<redacted>"}, "user_id": "<redacted>"}'
+    redacted, applied = redact_account_id(raw)
+    assert redacted == stored
+    assert applied == (("user_id",) if stored != raw else ())
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"user\\u005fid": "u-1", "a": 1}',
+        # The escaped key first: `json.loads` keeps only the last duplicate (rewrite tournament).
+        b'{"user\\u005fid": "u-1", "user_id": "u-2"}',
+        # Too deep to parse, so the redaction cannot be verified (rewrite tournament).
+        b"[" * 100_000 + b'{"user\\u005fid": "u-1"}' + b"]" * 100_000,
+        # Task 7.11 item 6: OpenRouter carries the upstream body as a JSON string in
+        # `error.metadata.raw`; its escaped `\"user_id\"` is no key, so no in-place match.
+        b'{"error": {"code": 402, "message": "Provider returned error", "metadata": {"raw": '
+        b'"{\\"error\\": {\\"user_id\\": \\"u-1\\", \\"type\\": \\"billing\\"}}", '
+        b'"provider_name": "Upstream"}}, "user_id": "u-2"}',
+        # Not JSON: a form-encoded echo holds the account id with no key to match.
+        b"error=insufficient_credit&user_id=u-1",
+        # Documented fail-closed: a model answer that itself mentions the key (output.md keeps it).
+        b'{"choices": [{"message": {"content": "{\\"note\\": \\"user_id u-1\\"}"}}]}',
+    ],
+    ids=["escaped-key", "escaped-duplicate", "too-deep", "metadata-raw", "not-json", "answer"],
+)
+def test_an_account_id_the_redaction_cannot_reach_withholds_the_body(raw: bytes) -> None:
+    """A key spelled with a JSON escape is the same `user_id` but no in-place match, and so is a
+    `user_id` inside a JSON string or a non-JSON body: the body is withheld rather than stored
+    with the account id (fail closed), and nothing was redacted in what is stored."""
+    from deploy_vii.live.client import ChatResult, parse_usage
+    from deploy_vii.live.retention import response_envelope
+
+    refused = ChatResult(
+        "http_error", 402, raw, False, None, None, None, None, None, False, None,
+        parse_usage(None), 0.1, None,
+    )  # fmt: skip
+    envelope = response_envelope(refused)
+    assert envelope["body_text"] is None and "body_base64" not in envelope
+    assert "body_sha256" not in envelope and envelope["body_redactions"] == []
+    assert "u-1" not in json.dumps(envelope) and "user_id" in envelope["body_withheld"]
+
+
+def test_a_withheld_body_names_no_redaction_in_response_or_manifest(tmp_path: Path) -> None:
+    """Task 7.11 item 6, end to end: the in-flight 402 with the upstream body in
+    `error.metadata.raw` is withheld; neither file says `user_id` was redacted."""
+    raw = json.loads(IN_FLIGHT_402)
+    raw["error"]["metadata"]["raw"] = json.dumps({"error": {"user_id": ACCOUNT}})
+    body = json.dumps(raw).encode()
+    assert b'\\"user_id\\"' in body and ACCOUNT.encode() in body
+    rig = make_rig(tmp_path)
+    result = rig.run(ChatClient(FakeTransport(Response(402, body), reply(rig))), sleep=Waits())
+    assert result.retried is not None
+    directory = attempt_dir(result.retried)
+    response = load(directory / "response.json")
+    assert response["body_text"] is None and response["body_redactions"] == []
+    assert "body_redactions" not in load(directory / "manifest.json")
+    assert ACCOUNT not in (directory / "response.json").read_text(encoding="utf-8")
+    # The refusal was still read from the body as received (DC-7, task 7.8).
+    assert load(directory / "manifest.json")["credit"]["retry_after_s"] == 120
+
+
+def test_a_body_whose_only_account_id_is_a_top_level_key_is_still_stored() -> None:
+    from deploy_vii.live.client import ChatResult, parse_usage
+    from deploy_vii.live.retention import response_envelope
+
+    raw = b'{"id": "gen-1", "choices": [], "user_id": "u-1"}'
+    accepted = ChatResult(
+        "ok", 200, raw, False, None, None, None, None, None, False, None,
+        parse_usage(None), 0.1, None,
+    )  # fmt: skip
+    envelope = response_envelope(accepted)
+    assert envelope["body_text"] == '{"id": "gen-1", "choices": [], "user_id": "<redacted>"}'
+    assert envelope["body_redactions"] == ["user_id"] and "body_withheld" not in envelope
+
+
+def test_a_check_in_flight_402_stops_with_its_reason_and_no_wait(tmp_path: Path) -> None:
+    """`live schema-check` does not retry: the refusal stops the check, named as in flight."""
+    with pytest.raises(CreditExhausted) as raised:
+        run_check(tmp_path, FakeTransport(Response(402, IN_FLIGHT_402)))
+    assert "in_flight_budget_exhausted" in str(raised.value)
+    assert raised.value.state.exhausted is True
+
+
 def test_a_check_with_a_multi_token_key_file_records_the_counts_only(tmp_path: Path) -> None:
     key = f"old {FAKE_KEY}\nnew {SECOND_FAKE_KEY}"
     transport = FakeTransport(ok('{"a', model=LUNA, finish_reason="length"))
@@ -1806,3 +2497,280 @@ def test_an_unreadable_schema_check_record_fails_closed(tmp_path: Path, content:
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError, match="schema-check record"):
         schema_rejections(tmp_path)
+
+
+# --- 7.2: CP-1A business_context, one step after CP-0 ---------------------------------------
+
+CP1A_STEP = StepSpec("business_context", "case-cp1a", ("filing",), max_tokens=4000)
+
+
+def cp1a_rig(tmp_path: Path, submission: str | None = None, *, cp1: bool = False) -> Rig:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)  # CP-0's T8 command for CP-1A is `Run CP-1A`
+    if cp1:  # settle CP-1 with one cited figure, so CP-1A's CONTEXT may offer it
+        ticket = store.begin("CP-1")
+        figure = candidate_for(store, "CP-1").model_copy(
+            update={"facts": (cp1_fact(store.pack()),)}
+        )
+        store.finish(ticket.ticket_id, figure.model_dump_json(), lambda _: ())
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    return Rig(
+        store=store,
+        ticket_id=store.begin("CP-1A").ticket_id,
+        ledger=Ledger(tmp_path / "ledger" / "l.jsonl", Decimal("5"), clock=lambda: NOW),
+        pool=fixture_pool("batch-a"),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(keys),
+        review=readiness_fixture()[1],
+        root=tmp_path,
+        submission=submission or submission_fixture().model_dump_json(),
+    )
+
+
+def test_a_business_context_dispatch_settles_cp1a_with_its_four_statuses(tmp_path: Path) -> None:
+    rig = cp1a_rig(tmp_path)
+    transport = FakeTransport(reply(rig))
+    result = rig.run(ChatClient(transport), step=CP1A_STEP)
+    assert result.status == "accepted", result.issues
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1A")
+    assert head.status == "restricted"  # own gaps restrict it (M4 rules)
+    assert head.qualification is not None
+    assert head.qualification.implementation == "implemented"
+    assert head.qualification.analytical_qualification == "unrun"
+    module = rig.store.head_module(head)
+    assert {t.table_id for t in module.tables} >= set(REQUIRED_REGISTERS)
+    body = json.loads((transport.requests[0].body or b"{}").decode())
+    assert body["response_format"]["json_schema"]["name"] == "business_context"
+    system, user = (message["content"] for message in body["messages"])
+    assert prompts.CP1A_METHOD.strip() in system and prompts.CP1A_CONSUMER_RULE in system
+    assert "no figure may be referenced" in user  # CP-1 is not accepted in this journal
+    request = load(attempt_dir(result) / "request.json")
+    bound = runner.prompt_token_bound(request["body"], BYTES_PER_TOKEN)
+    assert result.prompt_tokens_upper_bound == bound
+    assert bound < 20_000  # one invented line: the method, rules and schema dominate
+
+
+def test_a_rejected_business_context_finishes_the_attempt_and_the_repair_carries_it(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(submission_fixture().model_dump_json())
+    document["gaps"][0]["action"] = "Raise 11,456 of new equity"
+    rig = cp1a_rig(tmp_path, json.dumps(document))
+    first = rig.run(ChatClient(FakeTransport(reply(rig))), step=CP1A_STEP)
+    assert first.status == "rejected"
+    assert "gaps[0].action: Bare figure: 11,456" in first.issues
+    assert not [h for h in rig.store.read().heads if h.module_id == "CP-1A"]
+    repair = rig.store.begin("CP-1A")
+    assert repair.number == 1 and runner.expected_step(repair, "CP-1A") == "business_context"
+    rig.ticket_id = repair.ticket_id
+    rig.submission = submission_fixture().model_dump_json()
+    transport = FakeTransport(reply(rig))
+    second = rig.run(ChatClient(transport), step=CP1A_STEP)
+    assert second.status == "accepted", second.issues
+    user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
+    assert "- gaps[0].action: Bare figure: 11,456" in user
+
+
+def test_a_valid_step_whose_shape_the_journal_refuses_is_rejected_not_accepted(
+    tmp_path: Path,
+) -> None:
+    rig = cp1a_rig(tmp_path, '{"sources": []}')
+    result = rig.run(ChatClient(FakeTransport(reply(rig))), step=CP1A_STEP)
+    assert result.status == "rejected"
+    assert any(issue.startswith("company: Field required") for issue in result.issues)
+
+
+def test_cp1a_is_not_dispatched_when_cp0_does_not_authorise_it(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    _, review = readiness_fixture()
+    conditional = review.model_copy(
+        update={
+            "consumers": tuple(
+                c.model_copy(
+                    update={"readiness": "CONDITIONAL", "missing_source": "Ownership filings"}
+                )
+                if c.module_id == "CP-1A"
+                else c
+                for c in review.consumers
+            )
+        }
+    )
+    ticket = store.begin("CP-0")
+    candidate = build_readiness(store.pack(), conditional)
+    store.finish(ticket.ticket_id, candidate.model_dump_json(), lambda _: ())
+    with pytest.raises(NotAuthorized) as refused:
+        store.begin("CP-1A")
+    assert refused.value.module_id == "CP-1A" and refused.value.commands == ("DO NOT RUN",)
+
+
+def test_cp1a_context_offers_settled_cp1_figures_and_the_module_resolves_them(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(submission_fixture().model_dump_json())
+    text = "Liquidity was {T4.10.liquidity.FY2025|US$ m} at FY2025."
+    document["credit_translations"][0]["evidence"] = text
+    rig = cp1a_rig(tmp_path, json.dumps(document), cp1=True)
+    transport = FakeTransport(reply(rig))
+    result = rig.run(ChatClient(transport), step=CP1A_STEP)
+    assert result.status == "accepted", result.issues
+    user = json.loads((transport.requests[0].body or b"{}").decode())["messages"][1]["content"]
+    assert '"ref": "T4.10.liquidity.FY2025"' in user and "no figure may be referenced" not in user
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1A")
+    assert [item.input_id for item in head.inputs][:3] == ["prepared-pack", "CP-0", "CP-1"]
+    module = rig.store.head_module(head)
+    copied = next(f for f in module.facts if f.fact_id == "T4.10.liquidity.FY2025")
+    assert copied.table_id == "cp1_references" and copied.amount == Decimal("1100")
+
+
+def test_step_repair_of_returns_the_last_first_try_from_either_cohort() -> None:
+    """Task 7.0h: the happy path, plain and `proxy-` prefixed ids; repair ids never match."""
+    names = ["t1-financials-1", "t1-financials-repair-1", "t2-financials-1"]
+    assert runner.step_repair_of(names, "t1", "financials") == "t1-financials-1"
+    proxy = ["proxy-agent_a-t1-financials-2"]
+    assert runner.step_repair_of(proxy, "t1", "financials") == "proxy-agent_a-t1-financials-2"
+
+
+def test_step_repair_of_fails_closed_without_the_rejected_try() -> None:
+    names = ["t1-source_context-1", "t1-financials-repair-1", "t2-financials-1"]
+    with pytest.raises(ValueError, match="no prior try of t1/financials in the ledger"):
+        runner.step_repair_of(names, "t1", "financials")
+
+
+# --- task 7.4: the live `quality` step promotes CP-1 -------------------------------------------
+
+
+def quality_rig(tmp_path: Path) -> tuple[Rig, QualityInputs]:
+    """A rig on a CP-1 ticket whose four stages are retained valid, and its QA inputs."""
+    from tests.product.test_cp1_workflow import staged
+
+    store, attempt = staged(tmp_path / "case")
+    rig = Rig(
+        store=store,
+        ticket_id=attempt.ticket_id,
+        ledger=Ledger(tmp_path / "ledger" / "l.jsonl", Decimal("5"), clock=lambda: NOW),
+        pool=fixture_pool("batch-q"),
+        writer=AttemptWriter(tmp_path / "artifacts"),
+        key_path=make_rtf_key(_keys(tmp_path)),
+        review=readiness_fixture()[1],
+        root=tmp_path,
+    )
+    return rig, cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+
+
+def model_review(inputs: QualityInputs, **update: object) -> dict[str, Any]:
+    """What a model returns for `quality`: the at-ceiling review without its inputs binding."""
+    from tests.product.test_cp1_workflow import at_ceiling
+
+    document: dict[str, Any] = json.loads(at_ceiling(inputs, **update).model_dump_json())
+    del document["inputs_sha256"]
+    return document
+
+
+def quality_step(rig: Rig) -> StepSpec:
+    return StepSpec("quality", "case-cp1", ())  # R6 (task 7.5): the QA review checks no span
+
+
+def test_the_fifth_cp1_step_is_quality_and_its_dispatch_promotes_cp1(tmp_path: Path) -> None:
+    rig, inputs = quality_rig(tmp_path)
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert runner.expected_step(attempt, "CP-1") == "quality"
+    transport = FakeTransport(ok(json.dumps(model_review(inputs)), model=LUNA))
+    result = rig.run(ChatClient(transport), step=quality_step(rig))
+    assert result.status == "accepted", result.issues
+    assert result.journal is not None and result.journal.status == "finished"
+    assert not result.attempt_pending
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    exported = write_cp1_envelope(rig.store, tmp_path / "envelope")
+    assert exported.name == "envelope.md" and (tmp_path / "envelope" / "complete.json").is_file()
+    lines = (result.directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    events = [json.loads(line) for line in lines]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    assert filled["paths"] == ["inputs_sha256"] and filled["by_kind"] == {"quality-inputs": 1}
+    body = json.loads((transport.requests[0].body or b"{}").decode())
+    assert body["response_format"]["json_schema"]["name"] == "quality"
+    system, user = (message["content"] for message in body["messages"])
+    assert prompts.QUALITY_LINEAGE_RULE in system and "inputs_sha256" not in system
+    assert user.count(f"<<<CONTEXT id={prompts.QUALITY_BLOCK_ID} sha256=") == 1
+    assert "<<<SOURCE id=" not in user  # the QA scope stands in for stage outputs and pack
+    assert inputs.content_hash() not in user  # nothing is left to copy
+    request = load(attempt_dir(result) / "request.json")
+    assert result.prompt_tokens_upper_bound == runner.prompt_token_bound(
+        request["body"], BYTES_PER_TOKEN
+    )
+    # Fix round 1: the manifest links the scope the model saw to the binding the review holds.
+    manifest = load(attempt_dir(result) / "manifest.json")
+    retained = rig.store.payload(result.journal.steps[-1].payload_sha256)
+    assert manifest["hashes"]["quality_inputs_sha256"] == inputs.content_hash()
+    assert json.loads(retained)["inputs_sha256"] == inputs.content_hash()
+    with pytest.raises(ValueError, match="finished"):
+        rig.run(ChatClient(FakeTransport()), step=quality_step(rig))
+
+
+def test_a_rejected_quality_dispatch_finishes_the_attempt_for_the_module_repair(
+    tmp_path: Path,
+) -> None:
+    """R2: `quality` settles the module, so a rejected review is not repaired within the
+    attempt (it is not in `WITHIN_ATTEMPT_REPAIR`); the module repair re-runs from the start."""
+    rig, inputs = quality_rig(tmp_path)
+    ceilings = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+    document = model_review(inputs)
+    upgraded = next(
+        e for e in document["claims"][0]["evidence"] if ceilings[e["evidence_id"]] == "Calculated"
+    )
+    upgraded["lineage_class"] = "Directly Sourced"
+    transport = FakeTransport(ok(json.dumps(document), model=LUNA))
+    result = rig.run(ChatClient(transport), step=quality_step(rig))
+    upgrade = (
+        f"QA lineage upgrade rejected: {upgraded['evidence_id']} Directly Sourced above ceiling "
+        "Calculated"
+    )
+    assert result.status == "rejected" and upgrade in result.issues
+    assert not result.attempt_pending and result.step_try == 1
+    assert not [h for h in rig.store.read().heads if h.module_id == "CP-1"]
+    repair = rig.store.begin("CP-1")
+    assert repair.number == 1 and runner.expected_step(repair, "CP-1") == "source_context"
+
+
+def test_quality_is_not_dispatched_before_the_readiness_stage(tmp_path: Path) -> None:
+    rig, _ = cp1_rig(tmp_path)  # only source_context is retained
+    idle = FakeTransport()
+    before = rig.ledger.state().lines
+    with pytest.raises(ValueError, match="not the next step"):
+        rig.run(ChatClient(idle), step=quality_step(rig))
+    assert idle.requests == [] and rig.ledger.state().lines == before
+
+
+def test_a_crash_before_the_promotion_settles_is_never_re_sent_and_resumes_in_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The valid `quality` step is retained before `promote_cp1` settles: a crash between them
+    leaves five valid steps on a pending ticket. The runner refuses a second dispatch before
+    anything is spent (the review is not re-bought), and `promote_cp1` resumes from the
+    retained, pre-filled payload."""
+    rig, inputs = quality_rig(tmp_path)
+
+    def crash(*_: object, **__: object) -> object:
+        raise RuntimeError("Simulated host crash before settlement")
+
+    monkeypatch.setattr(rig.store, "finish", crash)
+    transport = FakeTransport(ok(json.dumps(model_review(inputs)), model=LUNA))
+    with pytest.raises(RuntimeError, match="Simulated"):
+        rig.run(ChatClient(transport), step=quality_step(rig))
+    monkeypatch.undo()
+    pending = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert pending.status == "pending" and [s.status for s in pending.steps] == ["valid"] * 5
+    with pytest.raises(ValueError, match="every CP-1 step is already retained"):
+        runner.expected_step(pending, "CP-1")
+    before = rig.ledger.state().lines
+    idle = FakeTransport()
+    with pytest.raises(ValueError, match="every CP-1 step is already retained"):
+        rig.run(ChatClient(idle), step=quality_step(rig))
+    assert idle.requests == [] and rig.ledger.state().lines == before
+    retained = rig.store.payload(pending.steps[-1].payload_sha256)
+    assert json.loads(retained)["inputs_sha256"] == inputs.content_hash()  # pre-filled
+    finished = promote_cp1(rig.store, rig.ticket_id, retained)
+    assert finished.status == "finished" and not finished.issues
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1")
+    assert head.qualification == PROMOTED

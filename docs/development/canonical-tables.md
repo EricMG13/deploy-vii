@@ -114,7 +114,7 @@ this order (pinned Deploy VI `bd71346`,
 | 14 | Evidence Trace | Findings, `analysis-coverage`, `funding-assessment`, `required-stories`, `evidence-trace`, Evidence list |
 | 15 | QA Status | Confidence, QA findings, QA limitations |
 | 16 | Limitation Flags | Own, inherited and gap-register limitations |
-| 17 | Module Handoff | Identity, T4.14–T4.19, `operating-kpis`, `pro-forma`, Provenance |
+| 17 | Module Handoff | Identity, T4.14–T4.19, `segment-allocation` (`Not produced` for a book without segments), `operating-kpis`, `pro-forma`, Provenance |
 
 r14 lists no Analysis H2 among the 17, so the findings open Evidence Trace beside the
 records they stand on. Every section is present. A table the module lacks is an H3 with
@@ -161,3 +161,14 @@ Export after promotion: `deploy-vii execution --directory DIR envelope --module 
 `complete.json` (`cp1-envelope/1`: module, snapshot, ticket, pack, registers and QA
 hashes, head status and its four statuses, file hashes) into a new directory, after the
 written pair verifies. See [execution](execution.md) for promotion.
+
+## Model destination manifest (task 7.1a)
+
+CP-MODEL's module carries three text registers, all bound to the Evidence destination
+(`bindings/cp_model.py`) because they are provenance of the published Model, not Front Page
+figures: `model-destination` (the manifest: path and SHA-256 of `calculation.json`; for
+`model.html` and `receipt.json` the cell reads "Recorded in receipt.json", since a page cannot
+hold its own hash and the receipt names the head), `model-calculation` (the `ModelReport`
+schema and SHA-256) and `model-provenance` (the CP-1 head, the envelope Markdown and sidecar
+hashes and the pack hash). The Model panel reads them for its calculation JSON link and its
+provenance line. See [execution](execution.md).

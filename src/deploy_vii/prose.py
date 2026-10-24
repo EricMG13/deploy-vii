@@ -34,6 +34,9 @@ _RESERVED = re.compile(r"[{}\[\]]")
 _B = r"(?<![0-9A-Za-z])"
 _E = r"(?![0-9A-Za-z])"
 _YEAR = r"(?:19|20)[0-9]{2}"
+# A bare year is a detached token: a percent sign after it makes a figure (1900%), as a unit
+# letter already did (1900x, 1900bn) (task 7.10 item 15).
+_YEAR_E = r"(?![0-9A-Za-z%])"
 _MONTH = (
     r"(?:January|February|March|April|May|June|July|August|September|October|November|"
     r"December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?"
@@ -60,7 +63,7 @@ LABELS: Mapping[str, re.Pattern[str]] = MappingProxyType(
                     rf"{_B}{_DAY} {_MONTH} {_YEAR}{_E}",
                     rf"{_B}{_MONTH} {_DAY}, {_YEAR}{_E}",
                     rf"{_B}{_YEAR}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01]){_E}",
-                    rf"{_B}{_YEAR}{_E}",
+                    rf"{_B}{_YEAR}{_YEAR_E}",
                 )
             )
         ),

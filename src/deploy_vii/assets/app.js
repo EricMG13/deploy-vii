@@ -591,11 +591,20 @@
     return content;
   };
   // The Model destination (decision 0006 DC-5): the CP-MODEL artifact above the CP-1 register detail.
-  // CP-MODEL emits no calculation JSON yet (M8), so a module that has not run says so and offers none.
+  // A published Model (task 7.1a) shows its calculation JSON link and publication provenance, read from the
+  // module's own registers; a module that has not run says so and offers none.
   const renderModelArtifact = () => {
     const model = report.modules.find(item => item.module_id === "CP-MODEL");
     const body = node("div");
     if (model) body.append(chip(model.status_glyph, model.status_word));
+    const fact = (table, row, field) => { const found = model && model.facts.find(item => item.table_id === table && item.row_id === row && item.field === field); return found ? found.text : null; };
+    const path = fact("model-destination", "calculation-json", "path"), cp1 = fact("model-provenance", "cp1-head", "sha256"), pack = fact("model-provenance", "pack", "sha256");
+    if (model && model.artifact_sha256 && path && /^[A-Za-z0-9._-]+$/.test(path) && cp1 && pack) {
+      const json = node("p", "Calculation JSON: ", "text-content"), link = node("a", path); link.href = path; json.append(link);
+      const page = node("p", "Its status and limitations are on the ", "text-content"), anchor = node("a", "CP-MODEL page"); anchor.href = "#CP-MODEL"; page.append(anchor, ".");
+      body.append(json, node("p", `Published as head ${model.artifact_sha256.slice(0, 12)} from CP-1 head ${cp1.slice(0, 12)} · pack ${pack.slice(0, 12)}`, "muted"), node("p", "This destination shows CP-1 and CP-MODEL only; other modules appear on the Front Page.", "muted"), page);
+      return panel("Model", body);
+    }
     let words;
     if (!model || model.status_glyph === "unrun") words = "Model not run: CP-MODEL has not published the Model destination, so no calculation JSON has been emitted.";
     else if (model.status_glyph === "na") words = `Model is not part of the ${front.pathway.title} Pathway, so it is not run.`;

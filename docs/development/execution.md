@@ -57,6 +57,14 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
   restricted inputs' own and inherited lists), but only a blocked ancestor
   downgrades the status; other inherited text never does. A candidate must bind each
   input's hash and status exactly. CP-1 QA derives `module_status` from own findings.
+  What counts as an own finding is the module's rule. For CP-1A (task 7.2, fix round 1), own
+  limitations are only the model's `gaps` rows and an empty required register (company,
+  source classification, credit translation, consumers). Validator defects reject before
+  anything settles. An empty register for a fact class the filing may legitimately lack
+  (acquisitions, behaviour flags, events, conflicts and so on) is one `not_applicable` row, not
+  a limitation. An Insufficient Information row keeps its limitation in its own register. A
+  CP-1A that fills only its required registers therefore settles `accepted`
+  ([business context](business-context.md)).
 - `view()` returns a cumulative accepted View. Stale and blocked heads expose
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
@@ -172,10 +180,12 @@ references that Python resolves and spells. The model never writes a number.
   head against its blob, and a head blob must always be an `accepted`, `restricted` or
   `blocked` module, stale or not. The trust boundary is the snapshot and pointer pair,
   as before: a local hash chain detects changed bytes, not a rewritten snapshot.
-- Inline text that remains in a snapshot is bounded by one cap: at most 20 lines of at
-  most 300 characters, then a line counting the rest (`bounded_issues`; a longer line
-  ends in `…`). It applies to `Attempt.issues` and the `repair_issues` copy of them, to
-  `StepSubmission.issues`, and (300 characters, marker included) to `Attempt.interruption`.
+- Inline text that remains in a snapshot is bounded: at most 20 lines of at most 600
+  characters, then a line counting the rest (`bounded_issues`; a longer line ends in `…`).
+  It applies to `Attempt.issues` and the `repair_issues` copy of them and to
+  `StepSubmission.issues`; `Attempt.interruption` keeps 300 characters, marker included.
+  The line cap was 300 until task 7.0, which raised it so a quote mismatch (a 200-character
+  quoted fragment and the clause saying why it failed) reaches the REPAIR prompt whole.
   Schema errors of a malformed response are `loc: message` lines with no input value or
   URL, and pass through the same cap; citation and validator findings may quote caller
   text (a locator, a field name) and are cut by it. The cap hides lines beyond the
@@ -219,8 +229,22 @@ implementation arguments, never model-controlled choices. It retains raw UTF-8
 response text before invoking validation. Every step binds the current pack and
 upstream heads, plus every prior completed submission hash (including its retained
 output). Runtime exceptions leave the same response pending. A changed response
-requires explicit interruption, consuming the attempt. Invalid submissions consume
-the module's existing one-repair allowance; stages do not get separate budgets.
+requires explicit interruption, consuming the attempt. Each of CP-1's four model
+steps (`WITHIN_ATTEMPT_REPAIR`: `source_context`, `financials`, `narrative`,
+`readiness`) may be repaired once within its attempt (task 7.0g, decision 0008 MC-7
+item 2): its first invalid submission moves to `Attempt.step_repairs` (the retained
+invalid try, payload hash and issues, in order) and the attempt stays pending, with
+no settlement and no head; the next submission of the same step is its repair, and
+no later step may be submitted before it. `steps` keeps meaning the retained steps in
+module order, so positional readers and the module's content hash never see the
+repaired try, and an empty `step_repairs` is omitted from the JSON (stored
+`execution/5` snapshots keep their bytes; no schema change). A second invalid
+submission of the step, an invalid submission of any other step (CP-0, the `quality`
+promotion step) or an interruption finishes the attempt and consumes the module's
+one-repair allowance as before. Bound: two tries per step per attempt, two attempts
+per input set; a third try of a step is refused before any write, and the contract
+refuses a `step_repairs` entry that is not an invalid try with issues, or a second
+entry for one step.
 A blocked stage may retain a diagnostic report. On failure, the module payload
 is a Python-built empty candidate; the actual raw response remains in its step.
 Finishing a module while a stage response awaits validation is disallowed;
@@ -289,14 +313,106 @@ condition, so it consumes the attempt and its repair before CP-1 settles `blocke
 `blocked` settlement of a valid but QA-Blocked candidate would change the M4 settlement rule
 and is not implemented.
 
+### CP-1A promotion (task 7.2)
+
+CP-1A has one step, `business_context` (`business_context.CP1A_STEPS`), passed to
+`submit_step` by `submit_cp1a_step` like CP-0's `source_readiness`; `execution/5` and `module/5`
+are unchanged. Being one step, it is not in `WITHIN_ATTEMPT_REPAIR` (task 7.0g): a rejected
+`business_context` finishes the attempt, and the module-wide repair (`begin`) follows. Promotion is the accepted step, then the Python candidate
+(`cp1a_module(business_context(...))`) settled by `finish` when it equals the candidate trusted
+validation rebuilds: the step validator (`validate_business_context`: citations, run text,
+semantic rules, prohibited conclusions, consumers) has no issue, every claim's run text resolves
+(`candidate_issues`) and the composed registers pass the four `cp1a.*` rules. Settlement follows
+the M4 rules, so the fixture's own gaps make it `restricted`; the head records `implemented` and
+three `unrun` statuses (`business_context.PROMOTED`), as 6.4 does for CP-1. CP-1A's registry
+edge is CP-0 alone. A settled CP-1 is bound as a context input when present
+(`execution.CONTEXT_PRODUCERS`): `current_inputs` adds the CP-1 head (accepted or restricted;
+never required, a blocked or stale CP-1 is left out) after the required upstreams, so the CP-1
+figures CP-1A text references are lineage, CP-1A goes stale when CP-1 is rerun, and a CP-1
+settled after CP-1A changes the input set, which allows a CP-1A rerun with figures. Like any
+bound input, CP-1's limitations then show as CP-1A's inherited limitations (shown, not
+penalised). The
+referenced CP-1 facts are copied into CP-1A's `cp1_references` table. `deliver_cp1a` publishes
+a standalone delivery like `deliver_cp0` (receipt `cp1a-delivery/1`; a submission with any
+validator issue publishes `rejected` with those issues). It takes no CP-1 facts: only the
+journal binds CP-1, so a standalone delivery cannot record a figure without its lineage.
+CP-1A settled before CP-1 binds nothing of CP-1 and stays current when CP-1 settles later;
+`begin("CP-1A")` then opens a new input set with CP-1 as context. A CP-1 finish stales a
+CP-1A that bound it (`invalidate`). Through the public journal that state needs an upstream
+change, because a settled CP-1 is not rerun on unchanged inputs.
+
 CP-MODEL's artifact (decision 0006 DC-5) is the HTML Model destination plus the calculation
 JSON of the accepted CP-1 financial model; the r14 XLSX workbook export is deferred and
 recorded so in `docs/methodology/r14-coverage.json`. CP-MODEL requires accepted CP-1 (a
 blocked CP-1 blocks it) and, when selected, is an analyst input to CP-5 (restricted if
 blocked). The presets whose composition holds a Model-owned block (Credit Snapshot,
 Earnings Update, Relative Value, Portfolio Decision) request it right after CP-1
-(decision 0009, task 6.5). Nothing runs it yet, so it stays `unrun` and the Model
-destination says "Model not run"; its calculation JSON is M8.
+(decision 0009, task 6.5). Until it is published it stays `unrun` and the Model
+destination says "Model not run"; `publish_cp_model` below gives it a head.
+
+### CP-MODEL publication (task 7.1a)
+
+`publish_cp_model(store, output=DIR)` (CLI `cp-model-publish --output DIR`) is Python only:
+no model call, no prompt, no review. It is refused (`CpModelRefused`; the CLI prints the
+reason on stderr and exits 2) before any file is written and before any attempt begins unless:
+
+1. the run requests CP-MODEL (decision 0009 presets: Credit Snapshot, Earnings Update,
+   Relative Value, Portfolio Decision);
+2. CP-1's head is `accepted` or `restricted` and records `Head.qualification` (so it was
+   promoted by 6.4, not settled by the engine alone) and its promotion attempt retains the
+   `quality` handoff and a `financials` stage that calculated a Model (`FinancialStage.model`);
+3. `DIR` does not exist; and no attempt is pending (`begin` refuses otherwise).
+
+Then it begins `CP-MODEL` and builds the candidate `Module` from the journal alone: three
+text registers (the Model destination manifest, the calculation JSON identity, and the
+provenance binding CP-1's head, the envelope Markdown and sidecar hashes and the pack hash)
+and one claim without a figure. It settles that candidate in memory with the journal's own
+`settle` to learn the head it will become, renders `model.html` for that head (the CP-1
+page through the accepted route, `read_cp1_envelope`, with the Model panel populated),
+writes `model.html`, `calculation.json` (CP-1's `ModelReport`, `financial-model/3`, in its
+canonical JSON) and `receipt.json` (last), and only then calls `finish`. The validator
+re-derives the candidate from the journal and refuses any difference, so two runs from the
+same inputs give the same `model.html`, `calculation.json`, module and head hash, byte for
+byte (tested); `receipt.json` differs between two runs by `ticket_id` only (tested). The page is
+a function of the CP-1 envelope and the CP-MODEL module alone (an idle base view), so it
+re-derives after later modules settle. By design (ruling R3) it shows CP-1 and CP-MODEL only,
+says so on the page ("This destination shows CP-1 and CP-MODEL only; other modules appear on
+the Front Page.") and leaves other modules to the Front Page route (`render`). A page cannot
+hold its own hash and the receipt names the head, so the manifest lists those two files with
+"Recorded in receipt.json" instead of a hash; the receipt holds the hashes of `model.html`
+and `calculation.json`.
+
+Failure. Any failure before `finish` (a file that cannot be written, a render error, a
+candidate the journal would not settle) interrupts the attempt and is raised as
+`CpModelRefused`, so the CLI exits 2 with the reason. That leaves no head from the attempt,
+but it consumes the attempt: the one repair may publish into a new directory, and a second
+consecutive failure leaves a `blocked` CP-MODEL head (decision 0007: the input set's repair
+is consumed; the journal's rule, not changed here), which degrades CP-5 to `restricted`; a
+third call is refused (`begin`). If `finish` itself raises (for example "Ticket inputs have
+changed" after the files are written), the interrupt cannot succeed either, because
+`interrupt` re-checks the inputs through `finish`: the ticket stays pending, the files stay on
+disk, `CpModelRefused` names both facts, and every later publication is refused while the
+ticket is pending. No CLI recovers a pending ticket whose inputs changed; concurrent writers
+are unsupported. The receipt names the head the journal is to hold, so a directory whose head
+is not in the journal is not a publication.
+
+`verify_cp_model_publication(store, output)` (CLI `cp-model-verify --output DIR`, exit 2 with
+the issues) re-derives from the journal alone: the CP-MODEL head must equal the candidate
+rebuilt from the promoted CP-1, and `model.html`, `calculation.json` and `receipt.json` must
+equal the bytes re-derived for that head. A tampered file, a missing file, a missing or stale
+head or a CP-1 that no longer holds each yield an issue.
+
+M4 inheritance: settlement follows the journal's rules unchanged. CP-1's limitations are
+inherited and shown; a `restricted` CP-1 head also gives CP-MODEL the own limitation
+"Published from a restricted CP-1 head; the Model carries its limitations", so CP-MODEL
+settles `restricted`; a synthetic run restricts it as for any module. A blocked CP-1 blocks
+CP-MODEL (the edge blocks). CP-MODEL is exempt from CP-0's consumer review.
+
+The head records `Qualification(implementation="implemented")` and the other three statuses
+`unrun`. The contract has no `not_applicable` literal for `analytical_qualification`, so
+`unrun` is used: no analyst has qualified the Model's figures, and the contract is not
+extended here. After publication CP-5 can begin under the presets that request CP-MODEL
+(`test_cp5_is_held_until_cp_model_is_published_then_begins`).
 
 ### Rendering the accepted envelope (task 6.5)
 

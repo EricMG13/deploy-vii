@@ -63,6 +63,11 @@ removed CP-3, CP-5 and CP-6 from the report. Any inherited limitation also force
   core scope and keep `block` until their milestones.
 - Twelve optional edges have no missing-input text in r14 and take the default
   `restricted` as a proposal (see the M4.1 research report in the brief's evidence).
+- Decision candidate (M7 task 7.0, recorded, not changed): a data-driven QA `Blocked` (for
+  example a blocked narrative) is refused like any failed condition, so it consumes the
+  attempt and its repair before CP-1 settles `blocked` (`docs/development/execution.md`);
+  settling a valid but QA-Blocked candidate `blocked` directly would change the M4
+  settlement rule and needs its own decision.
 
 Not verified: r14 shared files (`CANON_SHARED.md`, canon SEC5, D1 status map) were not
 read; LITE_CREDIT_22 behaviour; runtime behaviour on a real pack.

@@ -2,45 +2,62 @@
 
 Order: the draw, effort and prompt are fixed before anything is spent; the cap is enforced by
 reserving first; the raw response is retained before the journal sees it; the payload reaches
-the journal only through submit_cp0_review / submit_cp1_step (the same validators as any other
-input; for source_readiness after Python composes the stored review from the model's
-submission, `live.submission`); the ledger is settled and the manifest sealed even if
-validation raises. A response
-from a model other than the drawn one (provider fallback) is retained and classified but never
-submitted, so a substitute can never be counted as the drawn model. The key is loaded here,
-used for the header and for scrubbing, and appears in no record.
+the journal only through `live.submission.submit_model_payload`: submit_cp0_review /
+submit_cp1_step (the same validators as any other input), or `store.submit_step` with the
+validator that rejects an uncomposable CP-0 submission or a CP-1 payload holding a reference
+Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4).
+For source_readiness Python composes the stored review from the model's submission; for every
+CP-1 step it pre-fills the hash bindings. The ledger is settled
+and the manifest sealed even if validation raises. A response from a model other than the
+drawn one (provider fallback) is retained and classified but never submitted, so a substitute
+can never be counted as the drawn model. The key is loaded here, used for the header and for
+scrubbing, and appears in no record.
 """
 
 import hashlib
 import json
 import math
 import re
+import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from fractions import Fraction
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-from deploy_vii.cp1_workflow import CP1_STEPS
+from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
+from deploy_vii.business_context import cp1_context_facts
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_workflow import CP1_PROMOTION, cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
-from deploy_vii.live.catalog import PinnedCandidate, PinnedPool, utc_stamp
+from deploy_vii.live.catalog import PinnedCandidate, PinnedPool
 from deploy_vii.live.client import (
     CHAT_URL,
     DEFAULT_TIMEOUT_SECONDS,
+    SCHEMA_WORDS,
     ChatClient,
     ChatRequest,
     ChatResult,
     TransportError,
 )
+from deploy_vii.live.context import OMITTED, projection_name, upstream_text
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
-from deploy_vii.live.ledger import CapExceeded, Ledger, Settlement
-from deploy_vii.live.prompts import UpstreamInput, build, response_format, schema_text
+from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, Settlement, utc_stamp
+from deploy_vii.live.prompts import (
+    QUALITY,
+    UpstreamInput,
+    build,
+    quality_scope,
+    response_format,
+    schema_text,
+)
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter, response_envelope
 from deploy_vii.live.schema import (
     RELAXATIONS_BASIS,
@@ -55,6 +72,11 @@ COHORT = "openrouter-pool"
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_TOKENS = 16000  # the completion budget; `live ... --max-tokens N` overrides it
 TOKEN_OVERHEAD = 64
+# Task 7.8: the wait before the one retry of an in-flight 402 (`in_flight_wait_s`).
+IN_FLIGHT_DEFAULT_WAIT_S = 120  # when the refusal states no Retry-After
+IN_FLIGHT_MAX_WAIT_S = 300
+# Ends the ledger settle reason of an in-flight 402 (`in_flight_refused`).
+IN_FLIGHT_SETTLE_MARK = "; in-flight 402: not a model try"
 SUBMITTED = frozenset({"ok", "truncated"})
 POOLABLE_STATUSES = frozenset({"accepted", "rejected"})
 
@@ -110,6 +132,15 @@ class DispatchResult:
     `Execution.interrupt`. That consumes the input set's one repair: the next `begin` is the
     repair attempt, or, if this was already the repair, the module is blocked for these inputs.
     The manifest `retries` block records this. `ticket_interrupted` mirrors it.
+
+    A CP-1 step the journal rejects for the first time in its attempt leaves the attempt
+    pending (`attempt_pending`, task 7.0g): the same step is expected again, and its next
+    dispatch is the step's one repair within the attempt (`step_try` 2), with its own attempt
+    ids (`<ticket>-<step>-repair-<n>`) and its own retry budget.
+
+    An in-flight 402 (task 7.8, `credit.from_dispatch_402`) is waited out and re-sent once by
+    `dispatch` itself: the result is the re-sent attempt's, and `retried` holds the refused
+    one (`no-response`, `insufficient_credit`, its credit state in `in_flight`).
     """
 
     attempt_id: str
@@ -123,6 +154,11 @@ class DispatchResult:
     cost_usd: Decimal | None
     issues: tuple[str, ...]
     ticket_interrupted: bool = False
+    prompt_tokens_upper_bound: int | None = None  # the reservation's prompt bound (MC-10)
+    attempt_pending: bool = False  # the journal ticket is still pending after this dispatch
+    step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
+    in_flight: CreditState | None = None  # an in-flight 402 that `dispatch` retries (7.8)
+    retried: "DispatchResult | None" = None  # the in-flight refused attempt this one re-sent
 
 
 @cache
@@ -178,10 +214,15 @@ class RepairPrompt:
 def repair_prompt(snapshot: ExecutionSnapshot, attempt: Attempt, step_id: str) -> RepairPrompt:
     """The failing step's validator issues, on that step's prompt only.
 
-    The previous attempt's last invalid step is the failing step: its own issues go into the
-    REPAIR block of the same step on the repair ticket, and the other steps get none. When no
-    step failed validation (an interruption, or a module-level refusal after valid steps) there
-    is no step to scope to, so the module issues are carried on every step as before."""
+    Within an attempt first (task 7.0g): a step whose first try this attempt rejected gets that
+    try's issues (`Attempt.step_repairs`), and nothing from the previous attempt. Otherwise, on
+    a repair ticket, the previous attempt's last invalid step is the failing step: its own
+    issues go into the REPAIR block of the same step, and the other steps get none. When no step
+    failed validation (an interruption, or a module-level refusal after valid steps) there is
+    no step to scope to, so the module issues are carried on every step as before."""
+    own = next((item for item in attempt.step_repairs if item.step_id == step_id), None)
+    if own is not None:
+        return RepairPrompt(own.issues, "failing-step", step_id)
     if attempt.repair_of is None:
         return RepairPrompt((), "none", None)
     previous = next(item for item in snapshot.attempts if item.ticket_id == attempt.repair_of)
@@ -215,11 +256,14 @@ class _Plan:
     attempt_number: int
     max_retries: int
     repair: RepairPrompt
+    step_try: int
     pool_label: str
     misfit: str | None
     events: list[dict[str, Any]] = field(default_factory=list)
     # Counts only, and only when the key file held several tokens (see credential.LoadedKey).
     key_note: dict[str, int] = field(default_factory=dict)
+    # The wait before this re-send of an in-flight 402 (task 7.8; links name the refused try).
+    in_flight_waited_s: int | None = None
 
     @property
     def exhausted(self) -> bool:
@@ -265,23 +309,66 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
         if attempt.steps:
             raise ValueError("CP-0 already retains its review step; resume it through the journal")
         return "source_readiness"
+    if module_id == "CP-1A":
+        if attempt.steps:
+            raise ValueError("CP-1A already retains its one step; resume it through the journal")
+        return BUSINESS_CONTEXT
+    # Task 7.4: the four stages, then the `quality` review whose acceptance is the promotion.
     done = sum(1 for item in attempt.steps if item.status == "valid")
-    if done >= len(CP1_STEPS):
+    if done >= len(CP1_PROMOTION):
         raise ValueError("every CP-1 step is already retained")
-    return CP1_STEPS[done]
+    return CP1_PROMOTION[done]
 
 
-def _upstream(store: Execution, attempt: Attempt) -> tuple[UpstreamInput, ...]:
-    return tuple(
-        UpstreamInput(
-            "step:" + item.step_id,
-            item.content_hash(),
-            item.output_sha256,
-            store.step_output(item.output_sha256),
+def _upstream(store: Execution, attempt: Attempt, step_id: str) -> tuple[UpstreamInput, ...]:
+    """The retained valid steps `step_id` is sent, each as its `live.context` projection under
+    its content hash (task 7.5); an omitted step sends nothing, an unlisted pair raises."""
+    blocks = []
+    for item in attempt.steps:
+        if item.status != "valid" or item.output_sha256 is None:
+            continue
+        projection = projection_name(step_id, item.step_id)
+        if projection == OMITTED:
+            continue
+        output = store.step_output(item.output_sha256)
+        text = upstream_text(step_id, item.step_id, output)
+        blocks.append(UpstreamInput("step:" + item.step_id, item.content_hash(), text, projection))
+    return tuple(blocks)
+
+
+def step_try(attempt: Attempt, step_id: str) -> int:
+    """2 when the journal kept this step's rejected first try for its repair within the attempt."""
+    return 2 if any(item.step_id == step_id for item in attempt.step_repairs) else 1
+
+
+def _tries(names: list[str], prefix: str) -> list[str]:
+    """The attempt ids `<prefix>-<n>` among `names`, in order (`<prefix>-repair-<n>` excluded)."""
+    pattern = re.compile(re.escape(prefix) + r"-[0-9]+")
+    return [name for name in names if pattern.fullmatch(name)]
+
+
+def step_repair_of(names: list[str], ticket_id: str, step_id: str) -> str:
+    """The last first try of this ticket step among the ledger ids `names`, from either cohort
+    (`<ticket>-<step>-<n>` or `proxy-<label>-<ticket>-<step>-<n>`): the try the journal rejected
+    and kept for the step's repair within the attempt (task 7.0g). A repair without that try would
+    carry false provenance, so its absence raises before anything is written (task 7.0h)."""
+    first = re.escape(f"{ticket_id}-{step_id}") + r"-[0-9]+"
+    pattern = re.compile(r"(?:proxy-[A-Za-z0-9_.-]+-)?" + first)
+    found = next((name for name in reversed(names) if pattern.fullmatch(name)), None)
+    if found is None:
+        raise ValueError(
+            f"no prior try of {ticket_id}/{step_id} in the ledger: "
+            "a step repair needs the rejected try"
         )
-        for item in attempt.steps
-        if item.status == "valid" and item.output_sha256 is not None
-    )
+    return found
+
+
+def in_flight_refused(record: AttemptRecord) -> bool:
+    """Whether the ledger settled this attempt as an in-flight 402 (task 7.8, fix round 1):
+    credit is not a model failure, so such an attempt uses up no `max_retries` try. The mark is
+    the end of the settle reason `_close` writes; the charge is known zero, so no `adjust`
+    (held charges only) can replace it."""
+    return record.status == "settled" and (record.basis or "").endswith(IN_FLIGHT_SETTLE_MARK)
 
 
 def next_attempt_id(
@@ -322,13 +409,22 @@ def _plan(
     candidate = pool.candidate(drawn.slug)
     decision = candidate.effort_for(effort)
     repair = repair_prompt(snapshot, attempt, step.step_id)
+    # Task 7.4: the QA review reads the QA scope of the recomputed registers (registers that do
+    # not stage raise here, before anything is spent), not the four retained stage outputs
+    # (task 7.5: `live.context` omits them for `quality`).
+    quality = step.step_id == QUALITY
+    registers = cp1_registers(store, ticket_id) if quality else None
+    inputs = cp1_quality_inputs(registers) if registers is not None else None
     messages = build(
         step.step_id,
         store.pack(snapshot),
         step.declared_sources,
         step.schema,
-        upstream=_upstream(store, attempt),
+        upstream=_upstream(store, attempt, step.step_id),
         repair_issues=repair.issues,
+        # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
+        cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
+        scope=quality_scope(registers, inputs) if registers is not None else None,
     )
     chat = ChatRequest(
         model=candidate.slug,
@@ -341,11 +437,17 @@ def _plan(
     )
     body = chat.body()
     tokens = prompt_token_bound(body, bytes_per_token)
-    prefix = f"{ticket_id}-{step.step_id}"
+    first_try = f"{ticket_id}-{step.step_id}"
+    current = step_try(attempt, step.step_id)
+    # The step's repair within the attempt has its own ids, so its retries are its own.
+    prefix = first_try if current == 1 else f"{first_try}-repair"
     base = AttemptLocator(pool.batch_id, step.case_id, candidate.slug, prefix)
     attempt_id, retry_of = next_attempt_id(ledger, writer, base, prefix)
-    known = [item.attempt_id for item in ledger.state().attempts]
-    tries = sum(1 for name in known if name.startswith(prefix + "-"))  # refusals are not tries
+    records = ledger.state().attempts
+    known = [item.attempt_id for item in records]
+    # Neither cap refusals (never reserved) nor in-flight 402s (task 7.8) are model tries.
+    in_flight = {item.attempt_id for item in records if in_flight_refused(item)}
+    tries = sum(name not in in_flight for name in _tries(known, prefix))
     if tries >= max_retries + 1:
         raise ValueError(
             f"{tries} attempts already used on this ticket step (max_retries={max_retries}); "
@@ -376,6 +478,12 @@ def _plan(
                 None,
             ),
             "retry_of_attempt_id": retry_of,
+            # The dispatched try the journal rejected; its issues are this try's REPAIR block.
+            "step_repair_of_attempt_id": (
+                step_repair_of(known, ticket_id, step.step_id) if current == 2 else None
+            ),
+            # The in-flight 402 this try re-sends (task 7.8); set by `dispatch`.
+            "in_flight_retry_of_attempt_id": None,
         },
         clock=clock,
         started_at=clock(),
@@ -383,6 +491,7 @@ def _plan(
         attempt_number=tries + 1,
         max_retries=max_retries,
         repair=repair,
+        step_try=current,
         pool_label=pool.pool_label,
         misfit=candidate.misfit(tokens, step.max_tokens),
         hashes={
@@ -392,6 +501,8 @@ def _plan(
             "schema_sha256": hashlib.sha256(schema_text(step.schema).encode()).hexdigest(),
             "request_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
             "declared_inputs": list(step.declared_sources),
+            # Task 7.4 fix round 1: the QA inputs the scope shows and the review must bind.
+            **({} if inputs is None else {"quality_inputs_sha256": inputs.content_hash()}),
         },
     )
 
@@ -422,13 +533,28 @@ def _record_response(plan: _Plan, writer: AttemptWriter, run: _Run) -> None:
 def journal_outcome(
     store: Execution, step_id: str, journal: Attempt
 ) -> tuple[str, tuple[str, ...]]:
-    if step_id == "source_readiness":
+    # A step that settles its module (CP-0's review, CP-1A's one step, CP-1's `quality`
+    # promotion) is accepted only when the settled module is: a valid step whose candidate
+    # fails the journal's check is rejected.
+    if step_id in {"source_readiness", BUSINESS_CONTEXT, QUALITY}:
         accepted = journal.result_sha256 is not None and store.result(
             journal.result_sha256
         ).status in {"accepted", "restricted"}
         return ("accepted" if accepted else "rejected"), journal.issues
-    submitted = next(item for item in reversed(journal.steps) if item.step_id == step_id)
+    # A first rejection repaired within the attempt is kept apart from `steps` (task 7.0g).
+    submitted = next(
+        (item for item in reversed(journal.steps) if item.step_id == step_id),
+        next((item for item in journal.step_repairs if item.step_id == step_id), None),
+    )
+    if submitted is None:
+        raise ValueError(f"the journal retains no {step_id} submission on this ticket")
     return ("accepted" if submitted.status == "valid" else "rejected"), submitted.issues
+
+
+def _pending(store: Execution, ticket_id: str) -> bool:
+    """Whether the journal ticket is still pending, read from the journal after the dispatch."""
+    attempt = next(item for item in store.read().attempts if item.ticket_id == ticket_id)
+    return attempt.status == "pending"
 
 
 def _interrupt_if_exhausted(plan: _Plan, store: Execution, run: _Run, why: str) -> None:
@@ -454,13 +580,36 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
             else "ticket interrupted during the repair: no repair remains and the module is "
             "blocked for these inputs"
         )
+    # An in-flight 402 `dispatch` re-sends (task 7.8) is no model try: on the last allowed try
+    # the re-send follows, so the refused attempt exhausts nothing (task 7.10 item 7).
+    resent = run.credit is not None and run.credit.transient and run.credit.exhausted is None
     return {
         "attempt_number": plan.attempt_number,
+        "step_try": plan.step_try,
         "max_retries": plan.max_retries,
-        "exhausted": plan.exhausted,
+        "exhausted": plan.exhausted and not resent,
         "ticket_interrupted": run.ticket_interrupted,
         "journal_consequence": consequence,
     }
+
+
+def _refusal(plan: _Plan, result: ChatResult) -> CreditState:
+    """The 402 as its body reads (task 7.8). An in-flight refusal is re-sent once (also on the
+    last try: it used up none), so on the re-send itself it is exhaustion (DC-8)."""
+    state = from_dispatch_402(plan.clock(), result.http_status, result.raw, result.retry_after)
+    retried = plan.links["in_flight_retry_of_attempt_id"]
+    if not state.transient or retried is None:
+        return state
+    why = f"in flight again after one retry of {retried} ({plan.in_flight_waited_s} s wait)"
+    detail = f"{state.detail} on {plan.attempt_id}, {why}: treated as exhaustion"
+    return replace(state, exhausted=True, detail=detail)
+
+
+def in_flight_wait_s(state: CreditState) -> int:
+    """Seconds to wait before re-sending an in-flight 402: its Retry-After, at most 300; 120
+    when the refusal states none (task 7.8)."""
+    stated = state.retry_after_s
+    return min(IN_FLIGHT_DEFAULT_WAIT_S if stated is None else stated, IN_FLIGHT_MAX_WAIT_S)
 
 
 def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
@@ -476,15 +625,18 @@ def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
         plan.event("journal_skipped", reason="no model payload to submit")
         if result.classification == "insufficient_credit":
             # Credit is not a model failure: the ticket stays open for the coordinator's
-            # explicit choice (native Luna or a proxy) and the input set's repair is kept.
-            run.credit = from_dispatch_402(plan.clock(), result.http_status)
-            plan.event("credit_exhausted", **run.credit.to_record())
+            # explicit choice (native Luna or a proxy) and the input set's repair is kept. An
+            # in-flight refusal is not a model failure either: `dispatch` re-sends it once.
+            run.credit = _refusal(plan, result)
+            name = "credit_exhausted" if run.credit.exhausted else "credit_in_flight_refusal"
+            plan.event(name, **run.credit.to_record())
             return
         _interrupt_if_exhausted(plan, store, run, result.classification)
         return
 
-    # output.md keeps the raw content; the journal sees nulls for omitted defaults resolved
-    # and, for source_readiness, the review Python composed from the submission.
+    # output.md keeps the raw content; the journal sees nulls for omitted defaults resolved,
+    # for source_readiness the review Python composed from the submission and for every CP-1
+    # step the hash bindings Python pre-filled (task 7.0i).
     def resolved(paths: tuple[str, ...]) -> None:
         if paths:
             plan.event("payload_nulls_resolved", paths=list(paths))
@@ -504,7 +656,17 @@ def _submit(plan: _Plan, store: Execution, run: _Run) -> None:
 
 def composed_event(event: Callable[..., None], submitted: Submitted) -> None:
     """Record what Python composed from a submission: the retained review's hash, the items it
-    added as explicit gaps and the issues that kept the payload from composing."""
+    added as explicit gaps and the issues that kept the payload from composing; for pre-filled
+    bindings (task 7.0i), the paths Python set, their count and count per kind, and the retained
+    payload's hash."""
+    if submitted.prefilled:
+        event(
+            "payload_prefilled",
+            paths=list(submitted.prefilled),
+            count=len(submitted.prefilled),
+            by_kind=dict(Counter(submitted.prefilled_kinds)),
+            retained_payload_sha256=hashlib.sha256(submitted.payload.encode()).hexdigest(),
+        )
     composition = submitted.composition
     if composition is None:
         return
@@ -714,9 +876,10 @@ def _close(plan: _Plan, ledger: Ledger, writer: AttemptWriter, run: _Run, key: s
         _record_response(plan, writer, run)
     cost = _cost(plan.candidate, run.result)
     try:
-        run.settlement = ledger.settle(
-            plan.attempt_id, cost.amount, f"{cost.reason}; status={run.status}"
-        )
+        reason = f"{cost.reason}; status={run.status}"
+        if run.credit is not None and run.credit.transient:
+            reason += IN_FLIGHT_SETTLE_MARK  # `_plan` counts no try for it
+        run.settlement = ledger.settle(plan.attempt_id, cost.amount, reason)
         plan.event("ledger_settled", charged=run.settlement.charged, basis=cost.basis)
     finally:
         run.directory = _seal(plan, writer, run, cost)
@@ -749,6 +912,8 @@ def dispatch(
     max_retries: int = DEFAULT_MAX_RETRIES,
     credit: CreditState | None = None,
     schema_rejections: Mapping[tuple[str, str, str], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    on_in_flight: Callable[[DispatchResult], None] | None = None,
 ) -> DispatchResult:
     """Run one attempt of `step` on the model drawn from `pool` with `seed`.
 
@@ -758,6 +923,13 @@ def dispatch(
     before anything is reserved or sent (task 2.11).
     Credit exhaustion (a 402, or a `credit` state already known to be exhausted) raises
     CreditExhausted; the runner never switches model or cohort on its own (DC-8).
+    An in-flight 402 (task 7.8) is the one exception: once that attempt is sealed and settled
+    (at zero), `sleep(in_flight_wait_s(...))` and the step is re-sent once on the same drawn
+    model, reserved anew under the same cap. The refused attempt uses up no `max_retries` try
+    (`in_flight_refused`), so the re-send is the same model try, also on the last one. Its
+    manifest names the refused try (`links.in_flight_retry_of_attempt_id`). A second in-flight
+    402 is exhaustion. `on_in_flight` receives the sealed refused attempt before the wait, so a
+    caller can report it whatever the re-send then does (raises included).
     `key_index` is `[model_tests].credential_token_index`; a refused key (401) is never retried
     with another token from the file. `bytes_per_token` is
     `[model_tests].prompt_bytes_per_token_lower_bound` (the reservation's prompt bound). Both are
@@ -765,6 +937,55 @@ def dispatch(
     """
     if credit is not None and credit.exhausted is True:
         raise CreditExhausted(credit, ticket_id)
+    send = partial(
+        _dispatch_once,
+        step,
+        store=store,
+        ticket_id=ticket_id,
+        ledger=ledger,
+        pool=pool,
+        seed=seed,
+        client=client,
+        writer=writer,
+        key_path=key_path,
+        key_index=key_index,
+        bytes_per_token=bytes_per_token,
+        effort=effort,
+        clock=clock,
+        max_retries=max_retries,
+        schema_rejections=schema_rejections,
+    )
+    first = send(None)
+    if first.in_flight is None:
+        return first
+    if on_in_flight is not None:
+        on_in_flight(first)
+    waited = in_flight_wait_s(first.in_flight)
+    sleep(waited)
+    # The re-send raises CreditExhausted on any further in-flight 402 (`_refusal`).
+    return replace(send((first.attempt_id, waited)), retried=first)
+
+
+def _dispatch_once(
+    step: StepSpec,
+    in_flight_of: tuple[str, int] | None,
+    *,
+    store: Execution,
+    ticket_id: str,
+    ledger: Ledger,
+    pool: PinnedPool,
+    seed: int,
+    client: ChatClient,
+    writer: AttemptWriter,
+    key_path: Path,
+    key_index: int,
+    bytes_per_token: Decimal,
+    effort: str,
+    clock: Callable[[], str],
+    max_retries: int,
+    schema_rejections: Mapping[tuple[str, str, str], str] | None,
+) -> DispatchResult:
+    """One attempt of `dispatch`; `in_flight_of` is (the refused try, the wait) on a re-send."""
     plan = _plan(
         step,
         store,
@@ -791,7 +1012,12 @@ def dispatch(
         plan.locator, _request_record(plan)
     )  # the exact request is retained before sending
     plan.event("drawn", draw=plan.drawn.to_record(), effort=plan.effort)
-    if plan.attempt.repair_of is not None:
+    if in_flight_of is not None:
+        retry_of, waited = in_flight_of
+        plan.links["in_flight_retry_of_attempt_id"] = retry_of
+        plan.in_flight_waited_s = waited
+        plan.event("in_flight_retry", retry_of=retry_of, waited_s=waited)
+    if plan.attempt.repair_of is not None or plan.step_try == 2:
         plan.event("repair_prompt", **plan.repair.to_record())
     if plan.misfit is not None:
         reason = f"ineligible: {plan.misfit}"
@@ -806,6 +1032,9 @@ def dispatch(
             settlement=None,
             cost_usd=Decimal(0),
             issues=(),
+            prompt_tokens_upper_bound=plan.prompt_tokens,
+            attempt_pending=True,  # nothing was sent, so the journal was not touched
+            step_try=plan.step_try,
         )
     try:
         ledger.reserve(plan.attempt_id, plan.reserve_usd)
@@ -833,7 +1062,8 @@ def dispatch(
     finally:
         _close(plan, ledger, writer, run, key)
     assert run.directory is not None
-    if run.credit is not None:
+    # Only a retryable in-flight refusal (exhausted unknown) returns; every other 402 raises.
+    if run.credit is not None and run.credit.exhausted is not None:
         raise CreditExhausted(run.credit, ticket_id)
     return DispatchResult(
         attempt_id=plan.attempt_id,
@@ -847,6 +1077,10 @@ def dispatch(
         cost_usd=run.settlement.charged if run.settlement else None,
         issues=run.issues,
         ticket_interrupted=run.ticket_interrupted,
+        prompt_tokens_upper_bound=plan.prompt_tokens,
+        attempt_pending=_pending(store, ticket_id),
+        step_try=plan.step_try,
+        in_flight=run.credit,
     )
 
 
@@ -865,23 +1099,19 @@ SCHEMA_BISECT_RECORD = "schema-bisect-attempt/1"
 SCHEMA_CHECK_MAX_TOKENS = 16  # the brief's floor; a provider minimum above it answers a 400
 SCHEMA_CHECK_TIMEOUT_SECONDS = 120.0
 SCHEMA_CHECK_PROMPT = "Reply with one JSON object that conforms to the response format."
-# A 400 is a verdict on the schema only when it says so (review fix, task 2.11): schema-check
-# sends what a real run does not (16 tokens, no reasoning, a one-line prompt), so a 400 about
-# those would otherwise block the paid path with nothing able to lift it. Without OpenAI's code,
-# only "invalid schema" (or "invalid_json_schema") or `response_format` names the schema; a bare
-# "json_schema" can be the request feature ("max_tokens too small for json_schema output").
-_SCHEMA_WORDS = re.compile(r"invalid[ _](json[ _])?schema|response_format", re.IGNORECASE)
 
 
 def schema_shaped(result: ChatResult) -> bool:
     """True for an HTTP 400 whose provider code is `invalid_json_schema` or whose detail says
-    "invalid schema" or names `response_format`. Google's "Request contains an invalid argument"
-    does not."""
+    "invalid schema" or names `response_format` (`client.SCHEMA_WORDS`). Google's "Request
+    contains an invalid argument" does not. A detail withheld for its account id keeps the
+    verdict it had: the client read the words before withholding it (`detail_names_schema`,
+    task 7.15 fix round 1)."""
     if result.classification != "http_error" or result.http_status != 400:
         return False
     if result.provider_error_code == "invalid_json_schema":
         return True
-    return bool(_SCHEMA_WORDS.search(result.error_detail or ""))
+    return result.detail_names_schema or bool(SCHEMA_WORDS.search(result.error_detail or ""))
 
 
 @dataclass(frozen=True)
@@ -1114,7 +1344,8 @@ def check_schema(
     no real run reads. A reservation the cap refuses is sealed and returned as outcome
     `refused` (nothing sent; the caller stops); a connection failure propagates after the
     reservation is settled as held; a 402 raises CreditExhausted after the attempt is sealed
-    (DC-8)."""
+    (DC-8), with the reason its body states. A check is not retried, so an in-flight 402 stops
+    it too (task 7.8; only `dispatch` waits and re-sends)."""
     name, schema = variant if variant is not None else (None, None)
     chat = schema_check_request(candidate, step_id, schema)
     tokens = prompt_token_bound(chat.body(), bytes_per_token)
@@ -1199,7 +1430,11 @@ def check_schema(
         finally:
             _seal_check(check, writer, cost)
     if answer.classification == "insufficient_credit":
-        raise CreditExhausted(from_dispatch_402(clock(), answer.http_status))
+        state = from_dispatch_402(clock(), answer.http_status, answer.raw, answer.retry_after)
+        if state.exhausted is not True:
+            detail = f"{state.detail} in flight; schema-check does not retry: treated as exhaustion"
+            state = replace(state, exhausted=True, detail=detail)
+        raise CreditExhausted(state)
     return _result(check)
 
 

@@ -11,6 +11,7 @@ from deploy_vii.contracts import View
 from deploy_vii.cp1_workflow import FinancialStage, cp1_register_preview, submit_cp1_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
+from tests.product.evidence import evidence_path
 from tests.product.oracle import expected_by_fact, front_blocks, parity_record
 from tests.product.test_execution import step_text
 from tests.product.test_narrative import draft
@@ -125,9 +126,7 @@ def test_register_fields_and_provenance_offline(tmp_path: Path, width: int, heig
     path = cp1_register_preview(store, done.ticket_id, tmp_path / "report")
     view = View.model_validate_json((path.parent / "view.json").read_bytes())
     module = next(m for m in view.modules if m.module_id == "CP-1")
-    evidence = (
-        Path("artifacts/rendering/canonical-registers") / tmp_path.parent.name / tmp_path.name
-    )
+    evidence = evidence_path("canonical-registers", tmp_path)
     evidence.mkdir(parents=True)
     for name in ("view.json", "tables.md", "complete.json", "candidate.html"):
         (evidence / name).write_bytes((path.parent / name).read_bytes())

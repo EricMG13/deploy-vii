@@ -1,8 +1,9 @@
 """SYNTHETIC Credit Snapshot fixture: invented figures, labelled, never an issuer's facts.
 
 ``credit_snapshot_view`` is a candidate View whose modules carry typed registers in the shapes
-the shipped binding maps name (CP-1 T4.4, T4.10, T4.17, T4.18) plus synthetic maps for the
-producers that have no shipped map yet (CP-1A, CP-2, CP-3, CP-6). ``credit_snapshot_fixture``
+the shipped binding maps name (CP-1 T4.4, T4.10, T4.17, T4.18; CP-1A composed by Python from
+the synthetic business-context submission) plus synthetic maps for the producers that have no
+shipped map yet (CP-2, CP-3, CP-6). ``credit_snapshot_fixture``
 runs ``report_view.build`` over them and adds what no producer supplies yet, each marked here:
 the S.1 to S.5 and debt-stack charts (their marks are read from the registers' own facts, so
 every mark resolves to a passport) and the "condition" state of the last block.
@@ -13,6 +14,8 @@ from typing import Literal
 
 from deploy_vii.bindings import Binding, BindingMap
 from deploy_vii.bindings.cp1 import CP1
+from deploy_vii.bindings.cp1a import CP1A
+from deploy_vii.business_context import business_context
 from deploy_vii.contracts import (
     Citation,
     Fact,
@@ -37,6 +40,7 @@ from deploy_vii.report_view import (
     gap_refs,
     pathways,
 )
+from tests.product.test_business_context import pack_fixture, submission_fixture
 from tests.product.test_charts import twin_for
 from tests.product.test_render import synthetic_view
 
@@ -451,12 +455,7 @@ def _synthetic_map(module: str, *entries: tuple[str, str, str], **sections: Sect
 
 CREDIT_SNAPSHOT_MAPS: tuple[BindingMap, ...] = (
     CP1,
-    _synthetic_map(
-        "CP-1A",
-        ("operating-model", "company-operating-model", "operating-model"),
-        ("profile", "company-profile", "profile"),
-        ("transaction", "transaction-summary", "transaction"),
-    ),
+    CP1A,
     _synthetic_map(
         "CP-2",
         ("findings", "key-findings", "findings"),
@@ -481,22 +480,7 @@ def credit_snapshot_view() -> View:
     base = synthetic_view()
     cp1_tables, cp1_facts = _cp1()
 
-    def keyvalue(
-        table: str, rows: tuple[tuple[str, str], ...]
-    ) -> tuple[ReportTable, tuple[Fact, ...]]:
-        return layout(
-            table,
-            table,
-            ("value=Value",),
-            tuple((key, key, (fact(table, key, "value", text=text),)) for key, text in rows),
-        )
-
-    operating = keyvalue(
-        "operating-model",
-        (("Business", "Synthetic gaming operator"), ("Segments", "Regional, Digital")),
-    )
-    profile = keyvalue("profile", (("Ratings", "Synthetic B1 / BB-"),))
-    transaction = keyvalue("transaction", (("Terms", "Synthetic all-cash offer"),))
+    cp1a = business_context(pack_fixture(), submission_fixture())  # the shipped register shapes
     findings = (
         *_prose(
             "findings",
@@ -509,11 +493,7 @@ def credit_snapshot_view() -> View:
     )
     mid = {
         "CP-1": _module(_by(base, "CP-1"), cp1_tables, cp1_facts),
-        "CP-1A": _module(
-            _by(base, "CP-1A"),
-            (operating[0], profile[0], transaction[0]),
-            operating[1] + profile[1] + transaction[1],
-        ),
+        "CP-1A": _module(_by(base, "CP-1A"), cp1a.tables, cp1a.facts),
         "CP-2": _module(
             _by(base, "CP-2"),
             facts=(

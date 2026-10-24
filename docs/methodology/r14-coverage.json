@@ -118,7 +118,7 @@
           "transaction_summary"
         ]
       },
-      "implementation": "unrun",
+      "implementation": "partial (contract, validator, bindings; T2D.8/T2D.9 derived in Python; live E1 pending)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"
@@ -783,7 +783,7 @@
           }
         }
       },
-      "implementation": "partial (artifact defined; destination renders its not-run state in task 6.5; the published Model and calculation JSON in M8)",
+      "implementation": "implemented (task 7.1a: the promoted CP-1 is published as the Model destination and its calculation JSON; the XLSX workbook is deferred, decision 0006 DC-5)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"

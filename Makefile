@@ -36,7 +36,7 @@ test:
 	uv run --locked pytest tests/product -m 'not live and not private'
 
 coverage:
-	uv run --locked pytest tests/product -m 'not live and not private' --cov=deploy_vii --cov-branch --cov-report=term-missing
+	uv run --locked pytest tests/product -m 'not live and not private' -n auto --dist loadfile --cov=deploy_vii --cov-branch --cov-report=term-missing
 
 audit:
 	mkdir -p artifacts/dependency-audit
@@ -60,6 +60,8 @@ diff:
 # CAP is a required USD amount bound to the batch ledger; DIRECTORY is the execution journal.
 DIRECTORY ?= artifacts/execution
 LIVE = uv run --locked python -m deploy_vii live
+# live-module pass-through (task 7.0): each option is sent only when its variable is set.
+LIVE_MODULE_OPTIONS = $(if $(MODELS), --models "$(MODELS)")$(if $(MAX_TOKENS), --max-tokens "$(MAX_TOKENS)")$(if $(TIMEOUT), --timeout "$(TIMEOUT)")$(if $(BATCH_ID), --batch-id "$(BATCH_ID)")$(if $(SEED), --seed "$(SEED)")
 
 replay:
 	uv run --locked pytest tests/product/test_replay.py -q -rs
@@ -70,7 +72,7 @@ live-probe:
 
 live-module:
 	test -n "$(MODULE)" -a -n "$(CAP)" || { echo "MODULE=<id> and CAP=<usd> are required"; exit 2; }
-	$(LIVE) module --directory "$(DIRECTORY)" --module "$(MODULE)" --cap "$(CAP)"
+	$(LIVE) module --directory "$(DIRECTORY)" --module "$(MODULE)" --cap "$(CAP)"$(LIVE_MODULE_OPTIONS)
 
 live-regression:
 	test -n "$(CAP)" || { echo "CAP=<usd> is required"; exit 2; }

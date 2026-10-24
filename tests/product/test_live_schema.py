@@ -1,18 +1,24 @@
 """Strict response schemas: every property required, defaults nullable, nulls resolved back."""
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from hypothesis import given
+from hypothesis import strategies as st
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
+from deploy_vii.contracts import Identifier
+from deploy_vii.financial_contracts import Alternative, Observation
 from deploy_vii.live import schema as strict
 from deploy_vii.live.prompts import response_format, schema_text
 from deploy_vii.live.runner import STEPS
 from deploy_vii.readiness import ReadinessReview
+from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS
 from tests.product import replay_support
 from tests.product.test_readiness import readiness_fixture
 
@@ -129,9 +135,11 @@ def test_prompt_schema_text_is_the_strict_response_schema(step_id: str) -> None:
         fmt["json_schema"]["schema"], sort_keys=True, separators=(",", ":")
     )
     untransformed = json.dumps(model.model_json_schema(), sort_keys=True, separators=(",", ":"))
-    # The 0008 submission has no defaults, so it is already strict as Pydantic writes it; the
-    # stored contracts the CP-1 steps still send are not.
-    assert (schema_text(model) == untransformed) is (step_id == "source_readiness")
+    # The 0008 submissions (CP-0's and, task 7.2, CP-1A's) have no defaults, so they are already
+    # strict as Pydantic writes them; the stored contracts the CP-1 steps still send are not.
+    assert (schema_text(model) == untransformed) is (
+        step_id in {"source_readiness", "business_context"}
+    )
 
 
 def test_unverified_keywords_are_listed_not_stripped() -> None:
@@ -165,14 +173,18 @@ def test_source_context_sent_schema_keeps_every_other_constraint() -> None:
     assert {"const", "minLength", "maxLength"} <= sent_keys(strict_copy)  # what 5ae16ef9 sent
     kept = {"pattern", "format", "maxItems", "anyOf", "$ref", "enum", "additionalProperties"}
     assert kept <= sent_keys(sent)
-    assert sent_keys(sent) == sent_keys(strict_copy) - {"const", "minLength", "maxLength"}
+    # Task 7.0i: the marked hash bindings (and so their marker and hash pattern) are left out.
+    dropped = {"const", "minLength", "maxLength", strict.PREFILLED_MARKER}
+    assert sent_keys(sent) == sent_keys(strict_copy) - dropped
     patterns = sorted({n["pattern"] for n in nodes(sent) if "pattern" in n})
-    assert patterns == sorted({n["pattern"] for n in nodes(strict_copy) if "pattern" in n})
+    hashes = {"^[0-9a-f]{64}$"}
+    assert patterns == sorted({n["pattern"] for n in nodes(strict_copy) if "pattern" in n} - hashes)
     assert strict.schema_relaxations(SCHEMAS["source_context"]) == [
         "nullable-enum",
         "const-to-enum",
         "drop-length",
         "nullable-array-anyof",
+        "drop-prefilled",
     ]
 
 
@@ -214,12 +226,16 @@ def test_relaxations_name_the_nullable_array_and_one_of_rewrites() -> None:
         "drop-length",
         "nullable-array-anyof",
         "oneof-anyof",
+        "decimal-number-only",
+        "prefixed-enum",
+        "drop-prefilled",
     )
     assert strict.schema_relaxations(SCHEMAS["narrative"]) == [
         "const-to-enum",
         "drop-length",
         "nullable-array-anyof",
         "oneof-anyof",
+        "drop-prefilled",  # task 7.0i: inputs_sha256 is filled by Python
     ]
     assert "nullable-array-anyof" in strict.schema_relaxations(SCHEMAS["readiness"])
     assert "nullable-array-anyof" in strict.schema_relaxations(SCHEMAS["financials"])
@@ -673,3 +689,276 @@ def test_numbers_keep_their_exact_text_when_a_payload_is_rewritten() -> None:
         "value": Decimal("1234567890.123456789012"),
         "notes": [],
     }
+
+
+# --- task 7.0d: Decimal amounts are sent as JSON numbers only (E1 batch e1-cp1-3) -------------
+
+
+def number_or_string(node: dict[str, Any]) -> bool:
+    kinds = [b.get("type") for b in node.get("anyOf", ()) if isinstance(b, dict)]
+    return "number" in kinds and "string" in kinds
+
+
+def test_observation_and_alternative_amounts_are_sent_without_a_string_branch() -> None:
+    bounds = {"exclusiveMaximum": 1e18, "exclusiveMinimum": -1e18, "type": "number"}
+    assert strict.strict_schema(Observation)["properties"]["amount"] == {
+        "anyOf": [bounds, {"type": "null"}],
+        "title": "Amount",
+    }
+    alternative = strict.strict_schema(Alternative)["properties"]["amount"]
+    assert alternative == {**bounds, "title": "Amount"}
+    sent = strict.strict_schema(SCHEMAS["financials"])
+    assert not [n for n in nodes(sent) if number_or_string(n)]
+    # The stored contract's own schema still has the string branch (normalise reads it).
+    assert [n for n in nodes(SCHEMAS["financials"].model_json_schema()) if number_or_string(n)]
+    # The marker is consumed on the way out: no step's sent schema carries it.
+    for model in SCHEMAS.values():
+        assert strict.DECIMAL_MARKER not in sent_keys(strict.strict_schema(model))
+
+
+Lookalike = Annotated[float, Field(gt=-1e18, lt=1e18)]
+
+
+class NumberOrText(BaseModel):
+    plain: float | str
+    bounded: Lookalike | str
+    optional: Lookalike | str | None
+
+
+def test_a_genuine_number_or_string_union_is_not_rewritten() -> None:
+    """The rule fires on the `Number` marker only, never on a shape that merely looks alike (a
+    float with the Decimal bounds beside a string is a real union)."""
+    copied = strict.strict_copy(NumberOrText)
+    sent = strict.strict_schema(NumberOrText)
+    for name in ("plain", "bounded", "optional"):
+        assert number_or_string(sent["properties"][name]), name
+        assert sent["properties"][name] == copied["properties"][name], name
+    assert "decimal-number-only" not in strict.relaxations(copied)
+
+
+def test_relaxations_name_decimal_number_only_where_it_applied() -> None:
+    assert "decimal-number-only" in strict.RELAXATIONS
+    assert "decimal-number-only" in strict.schema_relaxations(SCHEMAS["financials"])
+    for step in sorted(set(SCHEMAS) - {"financials"}):
+        assert "decimal-number-only" not in strict.schema_relaxations(SCHEMAS[step]), step
+    assert "decimal-number-only" in strict.RELAXATIONS_BASIS
+    # Reported on the strict copy only: the sent copy no longer carries the marker.
+    assert "decimal-number-only" not in strict.relaxations(strict.strict_schema(Observation))
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"anyOf": [{"type": "number"}, {"type": "integer"}]},
+        {"anyOf": [{"type": "number"}, {"type": "string", "format": "date"}]},
+        {"anyOf": [{"type": "number", "enum": [1]}, {"type": "string"}]},
+        {"anyOf": [{"type": "number"}, {"type": "string"}, {"type": "string"}]},
+        {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        {"type": "number"},
+    ],
+    ids=["no-string", "string-format", "number-enum", "two-strings", "no-number", "no-any-of"],
+)
+def test_a_marked_node_of_another_shape_fails_closed(node: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="cannot be relaxed"):
+        strict.relax({"properties": {"x": {**node, strict.DECIMAL_MARKER: True}}})
+
+
+def test_a_defaulted_marked_number_keeps_its_null_branch() -> None:
+    """`_nullable` appends null inside a marked node; only the string branch is dropped."""
+    marked = {
+        "anyOf": [{"type": "number", "minimum": 0}, {"type": "string"}, {"type": "null"}],
+        "title": "N",
+        strict.DECIMAL_MARKER: True,
+    }
+    assert strict.relax({"properties": {"n": marked}}) == {
+        "properties": {
+            "n": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}], "title": "N"}
+        }
+    }
+
+
+def test_a_stored_string_amount_still_validates_and_a_printed_one_is_still_refused() -> None:
+    """The sent copy only: the stored contract and its parse are unchanged (I2)."""
+    citation = {"source_id": "filing", "source_sha256": "0" * 64, "locator": "page:1", "quote": "q"}
+    stored = {"amount": "3624", "citations": [citation], "explanation": "A"}
+    assert Alternative.model_validate_json(json.dumps(stored)).amount == Decimal("3624")
+    number = json.dumps({**stored, "amount": 0}).replace('"amount": 0', '"amount": 3624.10')
+    assert Alternative.model_validate_json(number).amount == Decimal("3624.10")
+    for printed in ("3,624", "(211)"):
+        with pytest.raises(ValidationError, match="Input should be a valid decimal"):
+            Alternative.model_validate_json(json.dumps({**stored, "amount": printed}))
+
+
+# --- task 7.0d fix 1: statement item ids as a closed list or an `other:` id ("prefixed-enum") --
+
+IDENTIFIER = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"  # deploy_vii.contracts.Identifier, read there
+OTHER = r"^other:[A-Za-z0-9_.:-]*$"
+
+
+def items(*kinds: str) -> list[str]:
+    return sorted(
+        {item for kind in kinds for item in (*REQUIRED_ITEMS[kind], *OPTIONAL_ITEMS[kind])}
+    )
+
+
+def prefixed(enum: list[str], title: str) -> dict[str, Any]:
+    return {
+        "anyOf": [{"type": "string", "enum": enum}, {"type": "string", "pattern": OTHER}],
+        "title": title,
+    }
+
+
+def test_statement_and_balance_item_ids_are_sent_as_a_list_or_an_other_id() -> None:
+    sent = strict.strict_schema(SCHEMAS["financials"])["$defs"]
+    assert sent["StatementLine"]["properties"]["item_id"] == prefixed(
+        items("IS", "CFS", "BS"), "Item Id"
+    )
+    assert sent["BalanceMovementBridge"]["properties"]["balance_item_id"] == prefixed(
+        items("BS"), "Balance Item Id"
+    )
+    assert (len(items("IS", "CFS", "BS")), len(items("BS"))) == (78, 32)
+    # Deferred (6 ids plus `facility:<facility_id>`, a derived prefix): still a free Identifier.
+    assert "anyOf" not in sent["ProFormaObservation"]["properties"]["metric_id"]
+    assert strict.PREFIXED_ENUM_MARKER not in json.dumps(
+        strict.strict_schema(SCHEMAS["financials"])
+    )
+    assert strict.PREFIXED_ENUM_MARKER in json.dumps(SCHEMAS["financials"].model_json_schema())
+
+
+def test_every_listed_item_is_an_identifier_and_none_is_an_other_id() -> None:
+    for item in items("IS", "CFS", "BS"):
+        assert re.fullmatch(IDENTIFIER, item) and not re.fullmatch(OTHER, item), item
+    assert TypeAdapter(Identifier).json_schema()["pattern"] == IDENTIFIER  # the pattern read above
+
+
+@given(
+    st.one_of(
+        st.text(alphabet="other:Az9_.-/ é\n", max_size=12),
+        st.text(alphabet="Az9_.:-/ é\n", max_size=8).map(lambda tail: "other:" + tail),
+    )
+)
+def test_the_other_pattern_accepts_exactly_what_identifier_and_the_prefix_rule_accept(
+    text: str,
+) -> None:
+    """`statement_validation` and `balance_movement` accept a non-listed id when it is an
+    Identifier and `startswith("other:")`; the sent pattern is that intersection (lengths aside:
+    `maxLength` is dropped from every sent Identifier)."""
+    expected = bool(re.fullmatch(IDENTIFIER, text)) and text.startswith("other:")
+    assert bool(re.fullmatch(OTHER, text)) is expected
+
+
+def test_prefixed_enum_is_named_where_it_applied_and_marked_nodes_of_another_shape_fail() -> None:
+    assert strict.RELAXATIONS[-2] == "prefixed-enum"  # task 7.0i appended drop-prefilled
+    assert "prefixed-enum" in strict.schema_relaxations(SCHEMAS["financials"])
+    for step in sorted(set(SCHEMAS) - {"financials"}):
+        assert "prefixed-enum" not in strict.schema_relaxations(SCHEMAS[step]), step
+    assert "prefixed-enum" in strict.RELAXATIONS_BASIS
+    marker = {strict.PREFIXED_ENUM_MARKER: {"enum": ["a"], "pattern": "^other:"}}
+    for node in (
+        {"type": ["string", "null"], **marker},  # nullable: not expressible as this anyOf
+        {"type": "string", "enum": ["b"], **marker},
+        {"anyOf": [{"type": "string"}], **marker},
+        {"type": "string", strict.PREFIXED_ENUM_MARKER: {"enum": [], "pattern": "^x"}},
+        {"type": "string", strict.PREFIXED_ENUM_MARKER: {"enum": ["a"]}},
+        {"type": "string", strict.PREFIXED_ENUM_MARKER: ["a"]},
+    ):
+        with pytest.raises(ValueError, match="cannot be relaxed"):
+            strict.relax({"properties": {"x": node}})
+
+
+# --- task 7.0i: the model supplies no hash; every binding Python fills is left out --------
+
+HASH_PATTERN = "^[0-9a-f]{64}$"
+# Task 7.4: `quality` is the fifth CP-1 step; its QA inputs binding is pre-filled too.
+CP1_STEPS = ("source_context", "financials", "narrative", "readiness", "quality")
+
+
+def hash_typed(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node that is, or is an array of, a 64-hex hash (`contracts.Hash`)."""
+    return [
+        node
+        for node in nodes(schema)
+        if node.get("pattern") == HASH_PATTERN
+        or (isinstance(node.get("items"), dict) and node["items"].get("pattern") == HASH_PATTERN)
+    ]
+
+
+@pytest.mark.parametrize("step", CP1_STEPS)
+def test_the_cp1_sent_schemas_carry_no_hash_typed_property(step: str) -> None:
+    """E1 batch 5 copied the wrong 64-hex value three times: no CP-1 step asks for a hash now."""
+    model = SCHEMAS[step]
+    sent = strict.strict_schema(model)
+    assert hash_typed(model.model_json_schema())  # the stored contract still binds hashes
+    assert hash_typed(sent) == []
+    assert strict.PREFILLED_MARKER not in json.dumps(sent)  # the marker is consumed
+    for node in nodes(sent):
+        if "properties" in node:
+            assert node["required"] == list(node["properties"])  # still strict-valid
+    assert "drop-prefilled" in strict.schema_relaxations(model)
+
+
+def test_the_stored_contracts_still_require_every_binding() -> None:
+    stored = SCHEMAS["financials"].model_json_schema()
+    assert "context_step_sha256" in stored["required"]
+    binding = stored["properties"]["context_step_sha256"]
+    assert binding[strict.PREFILLED_MARKER] == "context-step"
+    assert binding["pattern"] == HASH_PATTERN
+    citation = stored["$defs"]["Citation"]
+    assert "source_sha256" in citation["required"]
+    assert citation["properties"]["source_sha256"][strict.PREFILLED_MARKER] == "source"
+
+
+def test_drop_prefilled_is_named_where_it_applied() -> None:
+    assert strict.RELAXATIONS[-2:] == ("prefixed-enum", "drop-prefilled")
+    assert "drop-prefilled" in strict.RELAXATIONS_BASIS
+    assert strict.PREFILLED_MARKER in strict.RELAXATIONS_BASIS
+    for step in sorted(set(SCHEMAS) - set(CP1_STEPS)):
+        assert "drop-prefilled" not in strict.schema_relaxations(SCHEMAS[step]), step
+        # The rule rewrites marked nodes only, so with no marker these sent schemas are unchanged.
+        assert strict.PREFILLED_MARKER not in json.dumps(SCHEMAS[step].model_json_schema()), step
+    # Reported on the strict copy only: the sent copy no longer carries the marker.
+    sent = strict.strict_schema(SCHEMAS["financials"])
+    assert "drop-prefilled" not in strict.relaxations(sent)
+
+
+def test_a_marked_property_is_dropped_with_its_required_entry_and_nothing_else() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "h": {"type": "string", "pattern": "^x$", strict.PREFILLED_MARKER: "kind"},
+            "b": {"type": "integer"},
+        },
+        "required": ["a", "h", "b"],
+        "additionalProperties": False,
+    }
+    expected = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+        "required": ["a", "b"],
+        "additionalProperties": False,
+    }
+    assert strict.relax(schema) == expected
+    assert strict.relax(expected) == expected  # idempotent
+    assert strict.relaxations(schema) == ["drop-prefilled"]
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string", strict.PREFILLED_MARKER: "kind"},
+        {"type": "array", "items": {"type": "string", strict.PREFILLED_MARKER: "kind"}},
+        {"anyOf": [{"type": "string", strict.PREFILLED_MARKER: "kind"}, {"type": "null"}]},
+        {"$defs": {"H": {"type": "string", strict.PREFILLED_MARKER: "kind"}}},
+        {"properties": {"h": {"type": "string", strict.PREFILLED_MARKER: True}}},
+        {"properties": {"h": {"type": "string", strict.PREFILLED_MARKER: ""}}},
+    ],
+    ids=["root", "array-item", "union-branch", "definition", "marker-true", "marker-empty"],
+)
+def test_a_marker_that_is_not_a_kind_on_an_object_property_fails_closed(
+    schema: dict[str, Any],
+) -> None:
+    """Only a property can be left out (its object drops it), and only under a kind name that
+    `live.submission` resolves; a marker anywhere else would reach the provider."""
+    with pytest.raises(ValueError, match="cannot be relaxed"):
+        strict.relax(schema)

@@ -21,11 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from deploy_vii.execution import Attempt, Execution
-from deploy_vii.live.catalog import utc_stamp
 from deploy_vii.live.client import ChatClient
+from deploy_vii.live.context import PACK_SOURCE_STEPS
 from deploy_vii.live.credential import redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_key_response
-from deploy_vii.live.ledger import Ledger, Settlement
+from deploy_vii.live.ledger import Ledger, Settlement, utc_stamp
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter
 from deploy_vii.live.runner import (
     StepSpec,
@@ -34,6 +34,8 @@ from deploy_vii.live.runner import (
     expected_step,
     journal_outcome,
     next_attempt_id,
+    step_repair_of,
+    step_try,
 )
 from deploy_vii.live.submission import submit_model_payload
 
@@ -135,11 +137,17 @@ def accept_proxy_payload(
 ) -> ProxyResult:
     """Feed a coordinator-supplied payload through the journal validators as cohort proxy:<label>.
 
-    Raises ValueError for a bad label, unknown ticket or a step that is not next on the ticket,
-    before anything is written. A payload the journal rejects is retained and settles `rejected`.
+    Raises ValueError for a bad label, pack sources declared for a step whose validator checks no
+    span (task 7.5, R6), unknown ticket or a step that is not next on the ticket, before anything
+    is written. A payload the journal rejects is retained and settles `rejected`.
     """
     if not AGENT_LABEL.fullmatch(agent_label):
         raise ValueError("agent label may hold letters, digits, '.', '_' and '-' (max 40)")
+    if step.declared_sources and step.step_id not in PACK_SOURCE_STEPS:  # task 7.5, R6
+        raise ValueError(
+            f"step {step.step_id} checks no span against the pack; it declares no pack sources "
+            "(declare them through live.context.step_sources)"
+        )
     snapshot = store.read()
     attempt = next((item for item in snapshot.attempts if item.ticket_id == ticket_id), None)
     if attempt is None:
@@ -148,9 +156,20 @@ def accept_proxy_payload(
         raise ValueError(f"{step.step_id} is not the next step for this ticket")
     luna = native_luna or native_luna_check(clock=clock)
     cohort = PROXY_PREFIX + agent_label
-    prefix = f"proxy-{agent_label}-{ticket_id}-{step.step_id}"
+    first_try = f"proxy-{agent_label}-{ticket_id}-{step.step_id}"
+    # A step the journal kept pending after its first rejection: this payload is its repair try
+    # (task 7.0g), with its own ids, so it is never labelled a retry of the rejected try.
+    current = step_try(attempt, step.step_id)
+    prefix = first_try if current == 1 else f"{first_try}-repair"
     base = AttemptLocator(batch_id, step.case_id, cohort, prefix)
     attempt_id, retry_of = next_attempt_id(ledger, writer, base, prefix)
+    known = [item.attempt_id for item in ledger.state().attempts]
+    links = {
+        "retry_of_attempt_id": retry_of,
+        "step_repair_of_attempt_id": (
+            step_repair_of(known, ticket_id, step.step_id) if current == 2 else None
+        ),
+    }
     locator = AttemptLocator(batch_id, step.case_id, cohort, attempt_id)
     started = clock()
     events: list[dict[str, Any]] = []
@@ -225,7 +244,8 @@ def accept_proxy_payload(
                     status,
                     issues,
                     error,
-                    retry_of,
+                    links,
+                    current,
                     started,
                     clock(),
                     payload,
@@ -272,7 +292,8 @@ def _manifest(
     status: str,
     issues: tuple[str, ...],
     error: str | None,
-    retry_of: str | None,
+    links: dict[str, str | None],
+    current: int,
     started: str,
     finished: str,
     payload: str,
@@ -314,7 +335,8 @@ def _manifest(
             "caller_supplied_payload": True,
             "native_luna": luna.to_record(),
         },
-        "links": {"retry_of_attempt_id": retry_of},
+        "links": links,
+        "retries": {"step_try": current},
         "validator": {"outcome": status, "issues": list(issues)},
         "credential": {"recorded": False, "response_scrubbed": False},
         "credit": credit.to_record() if credit else None,

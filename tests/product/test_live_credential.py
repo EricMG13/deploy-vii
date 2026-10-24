@@ -348,14 +348,14 @@ def test_scrub_key_never_alters_words_that_merely_contain_the_key_prefix() -> No
 def test_project_settings_declare_the_runner_contract() -> None:
     settings = load_settings(Path("settings/project.toml"))
     # Decision 0005 amendment (user decision, 22 Oct 2026): the pool is the user-named set,
-    # currently GPT-6.1 Sol alone, at high for every step.
+    # currently GPT-6.1 Sol alone; since the 24 Oct 2026 amendment at medium for every step.
     (sol,) = settings.candidates
     assert (sol.key, sol.model_id, sol.resolution) == (
         "sol",
         "openai/gpt-6.1-sol",
         "explicit-version",
     )
-    assert settings.default_effort == "high" and settings.complex_effort == "high"
+    assert settings.default_effort == "medium" and settings.complex_effort == "medium"
     raw = tomllib.loads(Path("settings/project.toml").read_text(encoding="utf-8"))
     assert raw["model_tests"]["selection"] == (
         "user-named-pool-uniform-random-only-when-more-than-one-model"

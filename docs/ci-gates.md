@@ -27,7 +27,7 @@ pyproject and gate scripts plus locally recorded `origin/main` at
 | jscpd 3% incl tests | Detect copy/paste | Repeated test cases may be clearer than abstractions; adds Node setup | Advisory for product code when it exists; no research-phase dependency. |
 | Gitleaks | Keep secrets out of history | Long custom range/floor logic has maintenance cost | Pinned full reachable-history scan initially; no provider secret in CI. |
 | PR line cap | Keep changes reviewable | Historical policies used 800 and separately authorized 4000 | Advisory full-diff reporting, no arbitrary blocking cap; justify scope in the PR. |
-| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/40/10-minute limits (Product checks 40 since the M2 PR: the suite outgrew 15); investigate timeouts. |
+| Whole workflow timeout | Bound runaway work | Working tree 20 minutes; recorded origin/main 240 minutes | Separate jobs with 10/75/10-minute limits (Product checks 75 since 24 Oct 2026: M6 took 36m49s on the hosted runner and M7 adds tests; 40 since the M2 PR); investigate timeouts. |
 
 The existing checks protect valuable invariants. The concern is overlapping
 execution and misleading proxies for quality, not the existence of validation.
@@ -68,6 +68,12 @@ no artifacts and no textutil: `git archive HEAD -o "$DIR/tree.tar"`, then
 memory-heavy bindings tests peak near 2.3 GiB, so a single pytest process was killed
 (exit 137) in a 3.8 GiB Docker VM; give the VM more memory or run one process per test
 file with `--cov-append`.
+
+**Parallel execution.** `make coverage` runs `pytest -n auto --dist loadfile` (decision
+[0011](decisions/0011-parallel-test-execution.md)): one worker per CPU, all tests of a file on
+one worker. The 90% floor applies to the single combined TOTAL report. Debug serially with
+`-n 0` (`PYTEST_XDIST_AUTO_NUM_WORKERS=1` still runs one worker subprocess); cap workers with `--maxprocesses N` where memory
+is short (the heaviest tests peak near 2.3 GiB per worker).
 
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and

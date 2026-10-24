@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from deploy_vii.cp1_workflow import PROMOTED, write_cp1_envelope
 from deploy_vii.live import cli
 from deploy_vii.live.client import ChatClient, Response, TransportError
 from deploy_vii.live.cohort import (
@@ -21,11 +22,12 @@ from deploy_vii.live.cohort import (
     native_luna_available,
     native_luna_check,
 )
+from deploy_vii.live.context import step_sources
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.ledger import CapExceeded
 from deploy_vii.live.retention import RetentionError
 from deploy_vii.live.runner import COHORT, DispatchResult, StepSpec, dispatch
-from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, FakeTransport, make_rtf_key
+from tests.product.live_support import FAKE_KEY, SECOND_FAKE_KEY, FakeTransport, make_rtf_key, ok
 from tests.product.test_live_runner import (
     BYTES_PER_TOKEN,
     CP0,
@@ -33,8 +35,11 @@ from tests.product.test_live_runner import (
     SEED_FOR,
     Rig,
     attempt_dir,
+    cp1_rig,
     load,
     make_rig,
+    model_review,
+    quality_rig,
     reply,
 )
 
@@ -395,9 +400,10 @@ def test_proxy_cohort_never_pools(tmp_path: Path) -> None:
     ]
     by_cohort = {row[0]: row for row in summary}
     assert set(by_cohort) == {COHORT, "proxy:claude-agent"}  # never merged
-    assert by_cohort["proxy:claude-agent"][1:] == ["1", "1", "0", "no", "false"]
-    assert by_cohort[COHORT][1] == "1" and by_cohort[COHORT][4] == "yes"
-    assert by_cohort[COHORT][5] != "true"
+    # Columns: attempts, accepted, rejected, no response (task 7.0), pooled, qualification.
+    assert by_cohort["proxy:claude-agent"][1:] == ["1", "1", "0", "0", "no", "false"]
+    assert by_cohort[COHORT][1] == "1" and by_cohort[COHORT][5] == "yes"
+    assert by_cohort[COHORT][6] != "true"
     # Proxy attempts are listed under their own cohort, never in the pool steps table.
     pool_section = text.split("## Steps", 1)[1].split("##", 1)[0]
     assert done.attempt_id not in pool_section and pooled.attempt_id in pool_section
@@ -461,3 +467,130 @@ def test_proxy_after_a_cap_overrun_is_refused_by_the_zero_reservation(tmp_path: 
     # Only an incomplete attempt remains (request.json, no manifest), and no ledger line.
     assert not list((rig.root / "artifacts").rglob("manifest.json"))
     assert [a.attempt_id for a in rig.ledger.state().attempts] == ["earlier"]
+
+
+def cp1_proxy(rig: Rig, step_id: str, payload: str, *, all_sources: bool = False) -> ProxyResult:
+    """A proxy CP-1 step declaring the pack sources `step_sources` gives it (task 7.5, R6), or,
+    with `all_sources`, every pack source whatever the step."""
+    sources = tuple(s.source_id for s in rig.store.pack().sources)
+    return accept_proxy_payload(
+        StepSpec(step_id, "case-cp1", sources if all_sources else step_sources(step_id, sources)),
+        payload,
+        "claude-agent",
+        store=rig.store,
+        ticket_id=rig.ticket_id,
+        ledger=rig.ledger,
+        writer=rig.writer,
+        batch_id=rig.pool.batch_id,
+        clock=lambda: NOW,
+    )
+
+
+def test_a_proxy_step_repair_is_linked_as_a_repair_not_a_retry(tmp_path: Path) -> None:
+    """Task 7.0g fix 1: a proxy payload submitted again after the journal kept the step's first
+    rejection pending is that step's repair try: its own `-repair-<n>` id, a null
+    `retry_of_attempt_id`, `step_try` 2 and a link to the rejected try."""
+    rig, extraction = cp1_rig(tmp_path)
+    failed = cp1_proxy(rig, "financials", "not json")
+    assert failed.status == "rejected" and failed.journal is not None
+    assert failed.journal.status == "pending" and len(failed.journal.step_repairs) == 1
+    first = load(failed.directory / "manifest.json")
+    assert first["retries"] == {"step_try": 1}
+    assert first["links"]["step_repair_of_attempt_id"] is None
+    fixed = cp1_proxy(rig, "financials", extraction.model_dump_json())
+    assert fixed.status == "accepted", fixed.issues
+    assert fixed.attempt_id.startswith(f"proxy-claude-agent-{rig.ticket_id}-financials-repair-")
+    manifest = load(fixed.directory / "manifest.json")
+    assert manifest["retries"] == {"step_try": 2}
+    assert manifest["links"] == {
+        "retry_of_attempt_id": None,
+        "step_repair_of_attempt_id": failed.attempt_id,
+    }
+
+
+def test_a_proxy_repair_of_a_pool_rejection_links_the_pool_try(tmp_path: Path) -> None:
+    rig, extraction = cp1_rig(tmp_path)
+    sources = tuple(s.source_id for s in rig.store.pack().sources)
+    pooled = rig.run(
+        ChatClient(FakeTransport(ok("not json", model=LUNA))),
+        step=StepSpec("financials", "case-cp1", sources),
+    )
+    assert pooled.status == "rejected" and pooled.attempt_pending
+    fixed = cp1_proxy(rig, "financials", extraction.model_dump_json())
+    assert fixed.status == "accepted", fixed.issues
+    manifest = load(fixed.directory / "manifest.json")
+    assert manifest["links"]["step_repair_of_attempt_id"] == pooled.attempt_id
+    assert manifest["links"]["retry_of_attempt_id"] is None
+
+
+def test_a_proxy_payload_records_the_bindings_python_filled(tmp_path: Path) -> None:
+    """Task 7.0i: the proxy cohort enters payloads the same way, so its events say what Python
+    pre-filled (paths, count and the count per kind)."""
+    rig, extraction = cp1_rig(tmp_path)
+    document = json.loads(extraction.model_dump_json())
+    del document["context_step_sha256"]
+    document["binding"]["source_context_review_sha256"] = "0" * 64
+    result = cp1_proxy(rig, "financials", json.dumps(document))
+    assert result.status == "accepted", result.issues
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    assert filled["paths"] == ["context_step_sha256", "binding.source_context_review_sha256"]
+    assert filled["count"] == 2
+    assert filled["by_kind"] == {"context-step": 1, "source-context-review": 1}
+    attempt = rig.store.read().attempts[-1]
+    assert filled["retained_payload_sha256"] == attempt.steps[-1].payload_sha256
+
+
+def test_a_proxy_quality_review_promotes_cp1_at_zero_cost(tmp_path: Path) -> None:
+    """R4 (task 7.4): the no-credit path reaches a promoted CP-1 head through the same route:
+    the review is pre-filled and entered through `promote_cp1`, cohort `proxy:<label>`."""
+    rig, inputs = quality_rig(tmp_path)
+    result = cp1_proxy(rig, "quality", json.dumps(model_review(inputs)))
+    assert result.status == "accepted", result.issues
+    assert result.cohort == "proxy:claude-agent" and result.journal is not None
+    assert result.journal.status == "finished" and not result.journal.issues
+    head = next(h for h in rig.store.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    write_cp1_envelope(rig.store, tmp_path / "envelope")
+    state = rig.ledger.state()
+    assert state.spent == Decimal(0) and state.reserved == Decimal(0)
+    manifest = load(result.directory / "manifest.json")
+    assert manifest["step_id"] == "quality" and manifest["poolable"] is False
+    events = [
+        json.loads(line) for line in (result.directory / "events.jsonl").read_text().splitlines()
+    ]
+    (filled,) = [e for e in events if e["event"] == "payload_prefilled"]
+    assert filled["by_kind"] == {"quality-inputs": 1}
+
+
+def test_a_rejected_proxy_quality_review_finishes_the_attempt(tmp_path: Path) -> None:
+    rig, inputs = quality_rig(tmp_path)
+    ceilings = {c.evidence_id: c.ceiling for c in inputs.ceilings}
+    document = model_review(inputs)
+    evidence = document["claims"][0]["evidence"]
+    lifted = next(e for e in evidence if ceilings[e["evidence_id"]] == "Calculated")
+    lifted["lineage_class"] = "Directly Sourced"
+    result = cp1_proxy(rig, "quality", json.dumps(document))
+    assert result.status == "rejected"
+    assert any(i.startswith("QA lineage upgrade rejected: ") for i in result.issues)
+    assert result.journal is not None and result.journal.status == "finished"
+    assert not [h for h in rig.store.read().heads if h.module_id == "CP-1"]
+
+
+def test_a_proxy_step_that_checks_no_span_is_refused_the_pack_sources(tmp_path: Path) -> None:
+    """Task 7.5 fix 1 (R6 on the proxy path): `quality` matches no quote against the pack, so a
+    proxy spec declaring pack sources is refused before anything is written; the manifest never
+    records pack sources for it. The `step_sources` spec is accepted (above, it promotes CP-1)."""
+    rig, inputs = quality_rig(tmp_path)
+    before = rig.ledger.state().lines
+    with pytest.raises(ValueError, match="step quality checks no span against the pack"):
+        cp1_proxy(rig, "quality", json.dumps(model_review(inputs)), all_sources=True)
+    assert rig.ledger.state().lines == before
+    assert not (rig.root / "artifacts").exists() or not list((rig.root / "artifacts").rglob("*"))
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket_id)
+    assert len(attempt.steps) == 4 and attempt.status == "pending"
+    result = cp1_proxy(rig, "quality", json.dumps(model_review(inputs)))
+    assert result.status == "accepted", result.issues
+    assert load(result.directory / "request.json")["declared_inputs"] == []

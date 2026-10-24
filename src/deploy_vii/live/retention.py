@@ -19,7 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from deploy_vii.live.client import ChatResult
+from deploy_vii.live.client import ACCOUNT_ID, REDACTED, ChatResult, account_id_left
 from deploy_vii.live.credential import scrub_key
 
 _SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$")
@@ -53,25 +53,55 @@ class AttemptLocator:
         return names
 
 
+# A JSON object key `"user_id"` and its scalar value. The key's opening quote follows no
+# backslash: in valid JSON a quote inside a string is always escaped, a token quote never is.
+_ACCOUNT_VALUE = re.compile(
+    rb'(?<!\\)("user_id"\s*:\s*)("(?:[^"\\]|\\.)*"|-?[0-9][0-9.eE+-]*|true|false|null)'
+)
+
+
+def redact_account_id(raw: bytes) -> tuple[bytes, tuple[str, ...]]:
+    """`raw` with every `user_id` value replaced by `"<redacted>"` in place (key, spacing and
+    every other byte kept), and `("user_id",)` when anything was replaced (task 7.10 item 8)."""
+    stored, count = _ACCOUNT_VALUE.subn(
+        lambda match: match.group(1) + b'"' + REDACTED.encode() + b'"', raw
+    )
+    return stored, (ACCOUNT_ID,) if count else ()
+
+
 def response_envelope(result: ChatResult | None, reason: str | None = None) -> dict[str, Any]:
-    """Keep the returned bytes exactly (text when UTF-8, else base64) plus their hash."""
+    """Keep the returned bytes (text when UTF-8, else base64) plus the stored bytes' hash.
+
+    The only change is the account id: every `user_id` value is stored as `"<redacted>"`
+    (`body_redactions` names it, and `AttemptWriter.seal` copies it into the manifest). A body
+    whose account id cannot be redacted in place is withheld whole (`body_withheld`), never
+    stored with it; nothing is stored, so its `body_redactions` is empty (task 7.11)."""
     if result is None or result.raw is None:
         return {
             "http_status": None if result is None else result.http_status,
             "body_text": None,
             "reason": reason or (result.error_detail if result else "no response received"),
         }
+    stored, redactions = redact_account_id(result.raw)
     envelope: dict[str, Any] = {
         "http_status": result.http_status,
-        "body_bytes": len(result.raw),
-        "body_sha256": hashlib.sha256(result.raw).hexdigest(),
         "scrubbed_of_credential_shapes": result.redacted,
     }
+    if account_id_left(stored):
+        return {
+            **envelope,
+            "body_text": None,
+            "body_withheld": "a user_id could not be redacted in place",
+            "body_redactions": [],
+        }
+    envelope.update(body_bytes=len(stored), body_sha256=hashlib.sha256(stored).hexdigest())
+    if redactions:
+        envelope["body_redactions"] = list(redactions)
     try:
-        envelope["body_text"] = result.raw.decode("utf-8")
+        envelope["body_text"] = stored.decode("utf-8")
     except UnicodeDecodeError:
         envelope["body_text"] = None
-        envelope["body_base64"] = base64.b64encode(result.raw).decode("ascii")
+        envelope["body_base64"] = base64.b64encode(stored).decode("ascii")
     return envelope
 
 
@@ -87,10 +117,29 @@ def dump(document: object) -> str:
     )
 
 
+def write_once(path: Path, text: str) -> bool:
+    """Write a new evidence file (temp file, fsync, link: an existing file is never replaced).
+
+    Only key-shaped tokens are replaced (never header-like prose); True if any were."""
+    scrubbed = scrub_key(text, "")
+    data = scrubbed.encode("utf-8")
+    descriptor, temporary = tempfile.mkstemp(prefix=".part-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)  # fails if the file exists: evidence is never replaced
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return scrubbed != text
+
+
 class AttemptWriter:
     def __init__(self, root: Path) -> None:
         self.root = root
         self._altered: dict[Path, list[str]] = {}
+        self._redacted: dict[Path, list[str]] = {}  # `body_redactions` of each staged response
 
     def path_for(self, locator: AttemptLocator) -> Path:
         return self.root.joinpath(*locator.parts())
@@ -103,19 +152,7 @@ class AttemptWriter:
 
     @staticmethod
     def _write_new(path: Path, text: str) -> bool:
-        """Only key-shaped tokens are replaced (never header-like prose); True if any were."""
-        scrubbed = scrub_key(text, "")
-        data = scrubbed.encode("utf-8")
-        descriptor, temporary = tempfile.mkstemp(prefix=".part-", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.link(temporary, path)  # fails if the file exists: evidence is never replaced
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-        return scrubbed != text
+        return write_once(path, text)
 
     def begin(self, locator: AttemptLocator, request: Mapping[str, Any]) -> Path:
         """Create the attempt directory and retain the exact request before it is sent."""
@@ -136,6 +173,8 @@ class AttemptWriter:
         directory = self.path_for(locator)
         self._put(directory / "response.json", dump(response))
         self._put(directory / "output.md", output or "")
+        if redactions := response.get("body_redactions"):
+            self._redacted[directory] = list(redactions)
 
     def stage(
         self,
@@ -181,7 +220,11 @@ class AttemptWriter:
         # Files whose key-shaped tokens were replaced (by the writer, or by the caller before the
         # writer saw them) are named in the manifest. manifest.json itself is not listed.
         scrubbed = sorted({*self._altered.pop(directory, []), *scrubbed_upstream})
-        self._put(directory / "manifest.json", dump({**manifest, "scrubbed_files": scrubbed}))
+        sealed = {**manifest, "scrubbed_files": scrubbed}
+        # The stored response body's redactions (`response_envelope`), named when applied.
+        if redactions := self._redacted.pop(directory, None):
+            sealed["body_redactions"] = redactions
+        self._put(directory / "manifest.json", dump(sealed))
         return directory
 
     def write(

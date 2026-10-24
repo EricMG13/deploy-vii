@@ -91,6 +91,21 @@ REJECTED = (
 )
 
 
+@pytest.mark.parametrize(
+    ("text", "figure"),
+    [("; 1900%;", "1900%"), ("; 2025%;", "2025%"), ("growth of 1950% over", "1950%")],
+)
+def test_a_year_shaped_number_with_a_percent_sign_is_a_bare_figure(text: str, figure: str) -> None:
+    """Task 7.10 item 15 (a Hypothesis counterexample, `1900%`): a year label is a detached
+    token, so a percent suffix makes it a figure, as `1900x` and `1900bn` already were."""
+    assert check(text, refs=REFS, gaps=GAPS) == (f"Bare figure: {figure}",)
+
+
+@pytest.mark.parametrize("text", ["FY2025", "2025", "In 2025, revenue fell.", "1900 per cent"])
+def test_a_detached_year_stays_a_label(text: str) -> None:
+    assert check(text, refs=REFS, gaps=GAPS) == ()
+
+
 @pytest.mark.parametrize("text", ACCEPTED)
 def test_prose_runs_allow_labels(text: str) -> None:
     assert check(text, refs=REFS, gaps=GAPS) == ()

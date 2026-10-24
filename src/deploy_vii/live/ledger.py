@@ -17,7 +17,14 @@ CLI's cumulative-ceiling check all read the adjusted figure. An `adjust` names i
 `generation-endpoint` (the generation record's `total_cost`) or `generation-404+usage-delta`
 (decision 0008: the generation endpoint answered 404 and the batch's account-usage delta equals
 the other attempts' measured costs, so the held attempt cost nothing). The second is always
-zero and carries both facts in `evidence`.
+zero and carries both facts in `evidence`. Task 7.0 adds `account-usage-delta`: a held attempt
+with no generation id (a deadline expiry, nothing to look up) that is the batch's only held
+attempt, every other attempt's cost being measured, takes the account-usage delta less those
+costs. It names no generation (`generation_id` null), carries its facts in `evidence` and is at
+most the attempt's reservation (a larger residual is other spend, never attributed). Task 7.13
+adds `account-usage-delta/next-batch-before`: the same residual for an interrupted attempt of a
+batch that recorded no after-check, over the window that closes at the next batch's
+before-check with no other batch's reservation between the two checks; the same rules apply.
 
 The first line records the cap the file was opened with; it is written together with the first
 reservation, so a file that exists is always bound. Opening the same file with another
@@ -38,7 +45,13 @@ from typing import Any, Literal
 
 ADJUST_SOURCE = "generation-endpoint"
 ADJUST_404_SOURCE = "generation-404+usage-delta"
-ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE})
+ADJUST_USAGE_SOURCE = "account-usage-delta"
+ADJUST_NEXT_BEFORE_SOURCE = "account-usage-delta/next-batch-before"
+# The usage-delta sources: no generation, evidence required, at most the reservation.
+_USAGE_SOURCES = frozenset({ADJUST_USAGE_SOURCE, ADJUST_NEXT_BEFORE_SOURCE})
+ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE, *_USAGE_SOURCES})
+# Sources whose line must carry `evidence` (the facts behind the figure).
+_EVIDENCED = frozenset({ADJUST_404_SOURCE, *_USAGE_SOURCES})
 
 
 class LedgerError(Exception):
@@ -77,11 +90,11 @@ class Adjustment:
 
     previous_charged_usd: Decimal
     reconciled_usd: Decimal
-    generation_id: str
+    generation_id: str | None  # None only for a usage-delta adjustment (either source)
     checked_at: str
     seq: int
     source: str = ADJUST_SOURCE
-    evidence: dict[str, Any] | None = None  # the facts behind a generation-404+usage-delta
+    evidence: dict[str, Any] | None = None  # the facts behind a 404 or usage-delta figure
 
 
 @dataclass(frozen=True)
@@ -109,8 +122,13 @@ class LedgerState:
         return self.cap - self.reserved - self.spent
 
 
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+# The one UTC second stamp of ledger lines, usage checks, manifests and the catalog lookup
+# (task 7.15 item 6: the one `utc_stamp` of the live package; `reconcile._instant` parses it).
+STAMP = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def utc_stamp() -> str:
+    return datetime.now(UTC).strftime(STAMP)
 
 
 def _money(value: object, what: str) -> Decimal:
@@ -128,7 +146,9 @@ def _text(value: Decimal) -> str:
 
 
 class Ledger:
-    def __init__(self, path: Path, cap_usd: Decimal, *, clock: Callable[[], str] = _now) -> None:
+    def __init__(
+        self, path: Path, cap_usd: Decimal, *, clock: Callable[[], str] = utc_stamp
+    ) -> None:
         if not cap_usd.is_finite() or cap_usd <= 0:
             raise LedgerError("the cap must be a positive amount")
         self.path = path
@@ -233,19 +253,11 @@ class Ledger:
         if source not in ADJUST_SOURCES:
             raise LedgerError(f"ledger line {number} adjusts from an unknown source")
         generation, checked = entry.get("generation_id"), entry.get("checked_at")
-        if not isinstance(generation, str) or not generation.strip():
-            raise LedgerError(f"ledger line {number} adjusts without a generation id")
         if not isinstance(checked, str) or not checked.strip():
             raise LedgerError(f"ledger line {number} adjusts without a check time")
         reconciled = _money(entry.get("reconciled_usd"), f"line {number} reconciled cost")
         evidence = entry.get("evidence")
-        if source == ADJUST_404_SOURCE:
-            if reconciled != 0:
-                raise LedgerError(f"ledger line {number}: a {source} adjustment is always zero")
-            if not isinstance(evidence, dict) or not evidence:
-                raise LedgerError(f"ledger line {number}: a {source} adjustment needs evidence")
-        elif evidence is not None:
-            raise LedgerError(f"ledger line {number}: only {ADJUST_404_SOURCE} carries evidence")
+        Ledger._source_rules(number, str(source), generation, evidence, reconciled, held)
         return replace(
             held,
             actual_usd=reconciled,
@@ -255,6 +267,41 @@ class Ledger:
                 previous, reconciled, generation, checked, number, str(source), evidence
             ),
         )
+
+    @staticmethod
+    def _source_rules(
+        number: int,
+        source: str,
+        generation: object,
+        evidence: object,
+        reconciled: Decimal,
+        held: AttemptRecord,
+    ) -> None:
+        """What each `adjust` source requires: a generation id except for the usage delta
+        (which names none), evidence exactly for the 404 and usage-delta sources, zero for a
+        404, at most the reservation for the usage delta."""
+        if source in _USAGE_SOURCES:
+            if generation is not None:
+                raise LedgerError(
+                    f"ledger line {number}: a {source} adjustment names no generation"
+                )
+        elif not isinstance(generation, str) or not generation.strip():
+            raise LedgerError(f"ledger line {number} adjusts without a generation id")
+        if source in _EVIDENCED:
+            if not isinstance(evidence, dict) or not evidence:
+                raise LedgerError(f"ledger line {number}: a {source} adjustment needs evidence")
+        elif evidence is not None:
+            raise LedgerError(
+                f"ledger line {number}: only {ADJUST_404_SOURCE} or a usage-delta source "
+                "carries evidence"
+            )
+        if source == ADJUST_404_SOURCE and reconciled != 0:
+            raise LedgerError(f"ledger line {number}: a {source} adjustment is always zero")
+        if source in _USAGE_SOURCES and reconciled > held.reserved_usd:
+            raise LedgerError(
+                f"ledger line {number}: a {source} adjustment above its reservation is not "
+                "attributable to the attempt"
+            )
 
     # -- writing -----------------------------------------------------------------------------
 
@@ -359,7 +406,7 @@ class Ledger:
         attempt_id: str,
         reconciled_usd: Decimal,
         *,
-        generation_id: str,
+        generation_id: str | None,
         checked_at: str,
         source: str = ADJUST_SOURCE,
         evidence: dict[str, Any] | None = None,

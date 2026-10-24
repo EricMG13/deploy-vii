@@ -16,7 +16,10 @@ produced against, the recorded validator outcome and its provenance, plus option
   differs from `live` is refused unless the validator fix that changed it is named
   (`--outcome-changed-by <task-or-decision>`); the entry then also records `outcome_changed_by`,
   and `live` stays as recorded (tier I2 tracks validator-driven outcome changes, task 2.9);
-- `upstream`, the accepted payloads of the earlier CP-1 steps of the same ticket.
+- `upstream`, the accepted payloads of the earlier CP-1 steps of the same ticket (for the
+  `quality` step, task 7.10: all four stages; its replay re-enters the review through the
+  promotion, so an accepted entry is a promotion and a rejected one names the refusal, the QA
+  Blocked verdict included).
 
 An attempt on a pack that is neither registered nor found under `artifacts/public-case/` gets none
 of the pack keys, so it replays as `stale-inputs` with the reason. Only attempts whose payload
@@ -26,12 +29,13 @@ there as `skipped-pack-absent`.
 """
 
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from deploy_vii.cp1_workflow import CP1_STEPS
+from deploy_vii.cp1_workflow import CP1_PROMOTION
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, submit_model_payload
 from deploy_vii.preparation import PreparedPack, load_pack
@@ -39,13 +43,14 @@ from deploy_vii.preparation import PreparedPack, load_pack
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CORPUS_ROOT = REPOSITORY_ROOT / "tests" / "product" / "replay"
 CASE_PACKS = "artifacts/public-case"
-SUPPORTED_STEPS = ("source_readiness", *CP1_STEPS)
+SUPPORTED_STEPS = ("source_readiness", *CP1_PROMOTION)
 # Prepared-pack hashes of the synthetic builders in tests/product/replay_support.py (a test
 # asserts they still match, so drift is caught there, not here).
 SYNTHETIC_PACKS = {
     "synthetic-cp0": "fdd5a1eee9773517b2285cb211067edffa5636351f3d6825cc20cc3babd0a164",
     "synthetic-cp1": "4e9b00f5c670fedcd5c22bfc34190ff9df351bbdeab26c3c3eb93dae7bb311b0",
 }
+_LOG = logging.getLogger(__name__)
 _CASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 PACK_SOURCE = re.compile(r"artifacts/public-case/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 
@@ -89,14 +94,35 @@ def _live_verdict(directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def find_case_pack(pack_sha256: str, repository: Path = REPOSITORY_ROOT) -> str | None:
-    """The `artifacts/public-case/<dir>` whose completion marker records `pack_sha256`."""
+    """The first `artifacts/public-case/<dir>` (in name order) whose completion marker records
+    `pack_sha256` and whose pack loads under the current contract, or None.
+
+    A directory that cannot be read or loaded (an earlier `run/1` preparation) is skipped with
+    a logged warning naming it and the reason (task 7.0), never silently; load_case_pack still
+    verifies the returned pack's hash."""
     for marker in sorted((repository / CASE_PACKS).glob("*/complete.json")):
+        source = f"{CASE_PACKS}/{marker.parent.name}"
         try:
             recorded = json.loads(marker.read_text(encoding="utf-8")).get("pack_sha256")
-        except (OSError, ValueError, AttributeError):
-            continue  # an unreadable marker is not this pack; load_case_pack verifies a match
-        if recorded == pack_sha256:
-            return f"{CASE_PACKS}/{marker.parent.name}"
+        except (OSError, ValueError, AttributeError) as error:
+            _LOG.warning("%s skipped: its complete.json is unreadable (%s)", source, error)
+            continue
+        if recorded != pack_sha256:
+            continue
+        try:
+            load_pack(marker.parent)
+        except (OSError, ValueError) as error:
+            first = (str(error).splitlines() or [""])[0]
+            _LOG.warning(
+                "%s skipped: it records pack_sha256 %s but does not load under the current "
+                "pack contract (%s: %s)",
+                source,
+                pack_sha256,
+                type(error).__name__,
+                first,
+            )
+            continue
+        return source
     return None
 
 
@@ -213,13 +239,14 @@ def entry_from_attempt(
         if issues == [SUPERSEDED_SHAPE]:
             # The payload predates the model-facing submission shape; it stays as evidence.
             entry["superseded_by"] = "0008"
-    if step_id in CP1_STEPS and CP1_STEPS.index(step_id) > 0:
+    if step_id in CP1_PROMOTION and CP1_PROMOTION.index(step_id) > 0:
         entry["upstream"] = _upstream(directory, manifest, step_id)
     return entry
 
 
 def _upstream(directory: Path, manifest: dict[str, Any], step_id: str) -> dict[str, str]:
     """Accepted payloads of the earlier steps of this ticket, from its sibling attempt dirs."""
+    earlier = CP1_PROMOTION[: CP1_PROMOTION.index(step_id)]
     found: dict[str, str] = {}
     for sibling in sorted(directory.parent.iterdir()):
         if not (sibling / "manifest.json").is_file():
@@ -228,7 +255,7 @@ def _upstream(directory: Path, manifest: dict[str, Any], step_id: str) -> dict[s
         if (
             other.get("ticket_id") == manifest.get("ticket_id")
             and other.get("status") == "accepted"
-            and other.get("step_id") in CP1_STEPS[: CP1_STEPS.index(step_id)]
+            and other.get("step_id") in earlier
         ):
             step = other["step_id"]
             if step in found:
@@ -236,10 +263,10 @@ def _upstream(directory: Path, manifest: dict[str, Any], step_id: str) -> dict[s
             if "output.md" in other.get("scrubbed_files", []):
                 raise CorpusError(f"earlier step {step}: output.md was altered by scrubbing")
             found[step] = (sibling / "output.md").read_text(encoding="utf-8")
-    missing = [s for s in CP1_STEPS[: CP1_STEPS.index(step_id)] if s not in found]
+    missing = [s for s in earlier if s not in found]
     if missing:
         raise CorpusError("no accepted attempt retained for earlier step(s): " + ", ".join(missing))
-    return {s: found[s] for s in CP1_STEPS if s in found}
+    return {s: found[s] for s in earlier}
 
 
 def write_entry(
