@@ -28,6 +28,13 @@ added to the journal's own issues for the submit (`live.submission.submit_model_
   payload does not name the source the absent value belongs to.
 - `unread_citation_issues`: every `page:N` the payload cites was returned by `read_pages`
   earlier in the step. Other locators are not pages and are not checked by this rule.
+
+Task 8.9 (user decision 24 Oct 2026, every live step a tool loop): a step's tool set is the
+registry's (`registry.tool_sets`). A `pack` step is offered `search_pack`, `read_pages` (over
+its declared sources only: `PackTools(sources=...)`) and its submit; a `submit-only` step is
+offered its submit alone. Each step applies the rules its contract can fail
+(`applicable_rules`): CP-1's four stages both, as 8.0d set them; CP-0, CP-1A, CP-3 and CP-4 the
+cited-page rule only; submit-only steps none.
 """
 
 import json
@@ -46,6 +53,7 @@ from deploy_vii.live.prompts import block, span_line
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.submission import STEPS
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.registry import SUBMIT_ONLY, ToolSet, step_chain, tool_set
 from deploy_vii.source_context import ReportingScope, SourceContextReview, scope_matches_period
 
 MAX_PAGES_PER_READ = 5
@@ -86,8 +94,21 @@ def _function(name: str, description: str, parameters: dict[str, Any]) -> dict[s
     }
 
 
-def tool_specs(step_id: str) -> tuple[dict[str, Any], ...]:
-    """`search_pack`, `read_pages` and `submit_<step_id>`, as the harness offers them."""
+def submit_spec(step_id: str) -> dict[str, Any]:
+    return _function(
+        submit_name(step_id),
+        f"Submit the {step_id} JSON object. Answers `accepted` or the validator's issues.",
+        strict_schema(STEPS[step_id].schema),
+    )
+
+
+def tool_specs(step_id: str, kind: ToolSet | None = None) -> tuple[dict[str, Any], ...]:
+    """The tools a tool-loop step is offered, by its tool set (`kind`, default the registry's,
+    task 8.9): `pack` is `search_pack`, `read_pages` and `submit_<step_id>`, as the harness
+    offers them; `submit-only` is `submit_<step_id>` alone."""
+    kind = tool_set(step_id) if kind is None else kind
+    if kind == SUBMIT_ONLY:
+        return (submit_spec(step_id),)
     return (
         _function(
             SEARCH,
@@ -120,11 +141,7 @@ def tool_specs(step_id: str) -> tuple[dict[str, Any], ...]:
                 "additionalProperties": False,
             },
         ),
-        _function(
-            submit_name(step_id),
-            f"Submit the {step_id} JSON object. Answers `accepted` or the validator's issues.",
-            strict_schema(STEPS[step_id].schema),
-        ),
+        submit_spec(step_id),
     )
 
 
@@ -149,11 +166,24 @@ class PackTools:
 
     `read`: the (source, `page:N`) spans `read_pages` returned. `surfaced`: the spans a search
     showed a snippet of. `searched`: the scope of each search that returned a result (None:
-    every source)."""
+    every source the step reads).
 
-    def __init__(self, pack: PreparedPack) -> None:
-        self.ready = {s.source_id: s for s in pack.sources if s.status == "ready" and s.sha256}
-        self.ids = tuple(source.source_id for source in pack.sources)
+    `sources` (task 8.9): the step's declared sources, the only ones the tools read or search
+    (CP-4's legal and CP-3's market sources, `live.context.readable_sources`); None is every
+    pack source. A pack source outside them is refused by name; an unknown id raises."""
+
+    def __init__(self, pack: PreparedPack, sources: Sequence[str] | None = None) -> None:
+        every = tuple(source.source_id for source in pack.sources)
+        if sources is not None and (unknown := [s for s in sources if s not in every]):
+            raise ValueError(f"{', '.join(unknown)} is not a source of the pack")
+        allowed = set(every if sources is None else sources)
+        self.pack_ids = every
+        self.ids = tuple(source_id for source_id in every if source_id in allowed)
+        self.ready = {
+            s.source_id: s
+            for s in pack.sources
+            if s.source_id in allowed and s.status == "ready" and s.sha256
+        }
         self.pages = {
             source_id: {
                 int(m.group(1)): span
@@ -168,6 +198,10 @@ class PackTools:
         self.searched: list[str | None] = []
 
     def _source(self, source_id: object) -> str:
+        if isinstance(source_id, str) and source_id in self.pack_ids and source_id not in self.ids:
+            raise ToolError(
+                f"source {source_id} is not one of the sources this step reads: {list(self.ids)}"
+            )
         if not isinstance(source_id, str) or source_id not in self.ids:
             raise ToolError(f"unknown source_id {source_id!r}; sources: {list(self.ids)}")
         if source_id not in self.ready:
@@ -566,10 +600,43 @@ def unread_citation_issues(payload: str, seen: Seen) -> tuple[str, ...]:
     return tuple(f"{UNREAD_PAGE}: {source_id} {locator}" for source_id, locator in unread)
 
 
+def _cites_locators(step_id: str) -> bool:
+    """Whether the step's sent schema has a `locator` field (a citation can name a page)."""
+
+    def walk(node: object) -> bool:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict) and "locator" in properties:
+                return True
+            return any(walk(value) for value in node.values())
+        return isinstance(node, list) and any(walk(value) for value in node)
+
+    return walk(strict_schema(STEPS[step_id].schema))
+
+
+def applicable_rules(step_id: str) -> tuple[str, ...]:
+    """The rules a tool-loop step's submits can fail, in rule order (task 8.9).
+
+    - CP-1's tool steps: both, as task 8.0d set them (for `narrative` and `readiness`, which
+      cite evidence ids only and make no absence claim these rules read, both find nothing).
+    - Every other pack-tool step (CP-0, CP-1A, CP-3, CP-4): the cited-page rule when its sent
+      schema has a `locator` (each does); the absence rule is omitted, because none of their
+      contracts carries the fields `absence_issues` reads (`event_scan`, a `missing`
+      observation, a `not_disclosed` disclosure).
+    - A submit-only step: none (it reads nothing, so "read" and "searched" mean nothing)."""
+    if tool_set(step_id) == SUBMIT_ONLY:
+        return ()
+    if step_id in step_chain("CP-1").tool_steps:
+        return RULES
+    return (UNREAD,) if _cites_locators(step_id) else ()
+
+
 @dataclass(frozen=True)
 class ToolRules:
-    """The evidence rules of a tool-loop step. `floor`: the completeness floor's lines per
-    statement and source scope for `financials` (settings; None: no floor)."""
+    """The evidence rules of the tool-loop steps. `floor`: the completeness floor's lines per
+    statement and source scope for `financials` (settings; None: no floor). `checked`: the
+    rules turned on; each step applies those of them its contract can fail
+    (`applicable_rules`)."""
 
     floor: int | None = None
     checked: tuple[str, ...] = RULES
@@ -580,9 +647,13 @@ class ToolRules:
         if unknown := sorted(set(self.checked) - set(RULES)):
             raise ValueError(f"unknown tool-loop rules {unknown}")
 
+    def applied(self, step_id: str) -> tuple[str, ...]:
+        """The rules turned on that `step_id` applies, in rule order."""
+        return tuple(rule for rule in applicable_rules(step_id) if rule in self.checked)
+
     def active(self, step_id: str) -> bool:
         """Whether any rule can add an issue to `step_id`'s submits."""
-        return bool(self.checked) or (step_id == "financials" and self.floor is not None)
+        return bool(self.applied(step_id)) or (step_id == "financials" and self.floor is not None)
 
     def issues(
         self,
@@ -593,23 +664,31 @@ class ToolRules:
         context: SourceContextReview | None,
     ) -> tuple[str, ...]:
         """The rule issues of one submit, in rule order. The floor needs the retained
-        `source_context` review (`context`); a `financials` submit without one raises."""
+        `source_context` review (`context`); a `financials` submit without one raises, as does
+        a submit-only step's (no rule is defined for it)."""
+        if tool_set(step_id) == SUBMIT_ONLY:
+            raise ValueError(f"{step_id} is submit-only: it checks no tool-loop rule")
         found: list[str] = []
         if step_id == "financials" and self.floor is not None:
             if context is None:
                 raise ValueError("the completeness floor needs the retained source_context review")
             found += completeness_issues(payload, context, self.floor)
-        if ABSENCE in self.checked:
+        applied = self.applied(step_id)
+        if ABSENCE in applied:
             found += absence_issues(step_id, payload, seen)
-        if UNREAD in self.checked:
+        if UNREAD in applied:
             found += unread_citation_issues(payload, seen)
         return tuple(found)
 
-    def to_record(self) -> dict[str, Any]:
-        return {
+    def to_record(self, step_id: str | None = None) -> dict[str, Any]:
+        """The settings, and with `step_id` the rules that step applies."""
+        record: dict[str, Any] = {
             "completeness_floor_lines": self.floor,
             "completeness_floor_reason": None
             if self.floor is not None
             else "no [model_tests.completeness_floor] in settings",
             "checked": list(self.checked),
         }
+        if step_id is not None:
+            record["applied"] = list(self.applied(step_id))
+        return record

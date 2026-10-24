@@ -18,17 +18,21 @@ from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient, ChatRequest, Response
 from deploy_vii.live.ledger import OPENROUTER, Ledger, LedgerError, opening_provider
 from deploy_vii.live.prompts import NO_TOOLS_RULE, PromptError, build, span_line, tools_rule
+from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
 from deploy_vii.live.submission import STEPS, submit_model_payload
 from deploy_vii.live.tools import (
+    ABSENCE,
     INCOMPLETE,
     UNBACKED_ABSENCE,
+    UNREAD,
     UNREAD_PAGE,
     PackTools,
     Seen,
     ToolError,
     ToolRules,
     absence_issues,
+    applicable_rules,
     completeness_issues,
     expected_cells,
     fiscal_year,
@@ -47,6 +51,7 @@ from deploy_vii.registry import (
     tool_sets,
 )
 from deploy_vii.source_context import SourceContextReview
+from tests.product import test_cp4_legal as cp4_tests
 from tests.product.live_support import FAKE_KEY
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
 from tests.product.test_workflow import cp1_case
@@ -367,10 +372,83 @@ def test_the_rules_validate_their_settings_and_need_the_context_for_the_floor() 
     }
 
 
+# Task 8.9: the rules each tool-loop step checks. CP-1's four keep 8.0d's (both; vacuous for
+# narrative and readiness, which cite evidence ids only). The new pack steps cite `page:N`
+# locators, so the cited-page rule applies; none of them carries the fields the absence rule
+# reads, so it is omitted. Submit-only steps read nothing and check no rule.
+RULES_BY_STEP = {
+    **dict.fromkeys(CP1_STAGES, (ABSENCE, UNREAD)),
+    **dict.fromkeys(("source_readiness", "business_context", "relative_value"), (UNREAD,)),
+    "legal_covenants": (UNREAD,),
+    **dict.fromkeys(("quality", "credit_synthesis", "integrity_review"), ()),
+    "committee_challenge": (),
+}
+ABSENCE_FIELDS = ('"event_scan"', '"no_events_identified"', '"missing"', '"not_disclosed"')
+
+
+def test_each_tool_step_checks_only_the_rules_its_contract_can_fail() -> None:
+    assert {step: applicable_rules(step) for step in RULES_BY_STEP} == RULES_BY_STEP
+    assert set(RULES_BY_STEP) == tool_loop_steps()
+    for step in ("source_readiness", "business_context", "relative_value", "legal_covenants"):
+        sent = json.dumps(strict_schema(STEPS[step].schema))
+        assert '"locator"' in sent and not [f for f in ABSENCE_FIELDS if f in sent], step
+    rules = ToolRules()
+    for step, kind in tool_sets().items():
+        assert rules.active(step) == (kind == PACK_TOOLS), step
+    cited = json.dumps({"x": {"source_id": "S1", "locator": "page:4", "quote": "q"}})
+    for step in ("source_readiness", "business_context", "relative_value", "legal_covenants"):
+        found = rules.issues(step, cited, seen=Seen(), context=None)
+        assert found == (f"{UNREAD_PAGE}: S1 page:4",), step
+        read = Seen(read=frozenset({("S1", "page:4")}))
+        assert rules.issues(step, cited, seen=read, context=None) == ()
+    for step in ("quality", "credit_synthesis", "integrity_review", "committee_challenge"):
+        assert not ToolRules(floor=1).active(step)
+        with pytest.raises(ValueError, match=f"{step} is submit-only: it checks no tool-loop"):
+            rules.issues(step, cited, seen=Seen(), context=None)
+    assert rules.to_record("legal_covenants")["applied"] == [UNREAD]
+    assert rules.to_record("credit_synthesis")["applied"] == []
+
+
+def test_a_submit_only_step_is_offered_its_submit_tool_only() -> None:
+    def names(specs: tuple[dict[str, Any], ...]) -> list[str]:
+        return [spec["function"]["name"] for spec in specs]
+
+    assert names(tool_specs("credit_synthesis", SUBMIT_ONLY)) == ["submit_credit_synthesis"]
+    assert names(tool_specs("legal_covenants", PACK_TOOLS)) == [
+        "search_pack",
+        "read_pages",
+        "submit_legal_covenants",
+    ]
+    for step, kind in tool_sets().items():  # without a kind: the registry's
+        assert tool_specs(step) == tool_specs(step, kind)
+    (only,) = tool_specs("quality")
+    assert only["function"]["parameters"] == strict_schema(STEPS["quality"].schema)
+
+
+def test_the_pack_tools_read_only_the_steps_declared_sources(tmp_path: Path) -> None:
+    pack = cp4_tests.journal(tmp_path).pack()
+    assert [s.source_id for s in pack.sources] == ["filing", "indenture", "deck"]
+    tools = PackTools(pack, sources=("filing", "indenture"))
+    assert tools.ids == ("filing", "indenture")
+    for raw in (
+        {"source_id": "deck", "first_page": 1, "last_page": 1},
+        {"query": "the", "source_id": "deck"},
+    ):
+        with pytest.raises(ToolError, match="deck is not one of the sources this step reads"):
+            (tools.read_pages if "first_page" in raw else tools.search_pack)(raw)
+    text = tools.search_pack({"query": "the", "max_hits": 15})
+    assert "<<<SOURCE id=deck " not in text
+    assert tools.seen().searched == (None,)
+    everything = PackTools(pack)
+    assert everything.ids == ("filing", "indenture", "deck")
+    with pytest.raises(ValueError, match="nowhere is not a source of the pack"):
+        PackTools(pack, sources=("nowhere",))
+
+
 def test_a_rule_issue_rejects_a_payload_the_stage_accepts(tmp_path: Path, case: Case) -> None:
     shutil.copytree(case.store.directory, tmp_path / "journal")
     journal = Execution(tmp_path / "journal")
-    with pytest.raises(ValueError, match="CP-1 stages"):
+    with pytest.raises(ValueError, match="pack-tool steps, not to quality "):
         submit_model_payload(journal, case.ticket, "quality", "{}", rules=lambda _: ())
     found = submit_model_payload(
         journal, case.ticket, "financials", case.payload, rules=lambda _: ("Rule: broken",)

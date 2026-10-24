@@ -42,8 +42,10 @@ from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_cp5_integrity as cp5_tests
 from tests.product import test_cp6_committee as cp6_tests
 from tests.product.live_support import FakeTransport, fixture_pool, make_rtf_key
+from tests.product.test_business_context import submission_fixture as cp1a_submission
+from tests.product.test_execution import accept_cp0, fixture_store
 from tests.product.test_live_runner import NOW, Rig, reply
-from tests.product.test_readiness import readiness_fixture
+from tests.product.test_readiness import as_submission, readiness_fixture
 
 CP1_ROUTE = (
     "source_readiness",
@@ -256,14 +258,80 @@ def test_a_payload_the_module_rejects_finishes_the_attempt_rejected(
     assert not [h for h in store.read().heads if h.module_id == module_id]
 
 
-@pytest.mark.parametrize("step_id", sorted(SCHEMAS))
-def test_tool_loop_rules_are_refused_for_the_new_steps(step_id: str, tmp_path: Path) -> None:
+SUBMIT_ONLY_STEPS = ("credit_synthesis", "integrity_review", "committee_challenge")
+
+
+@pytest.mark.parametrize("step_id", SUBMIT_ONLY_STEPS)
+def test_tool_loop_rules_are_refused_for_the_submit_only_steps(
+    step_id: str, tmp_path: Path
+) -> None:
     store, payload = CASES[step_id](tmp_path)
     ticket = store.begin(SCHEMAS[step_id][0])
-    with pytest.raises(ValueError, match=f"not to {step_id}"):
+    with pytest.raises(ValueError, match=f"not to {step_id} "):
         submission.submit_model_payload(
             store, ticket.ticket_id, step_id, payload, rules=lambda _: ()
         )
+
+
+def cp0_case(tmp_path: Path) -> tuple[Execution, str]:
+    return fixture_store(tmp_path), as_submission(readiness_fixture()[1]).model_dump_json()
+
+
+def cp1a_case(tmp_path: Path) -> tuple[Execution, str]:
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    return store, cp1a_submission().model_dump_json()
+
+
+# Task 8.9: the pack-tool steps besides CP-1's, whose submits a tool-loop rule may reject.
+PACK_CASES: dict[str, tuple[str, Callable[[Path], tuple[Execution, str]]]] = {
+    "source_readiness": ("CP-0", cp0_case),
+    "business_context": ("CP-1A", cp1a_case),
+    "legal_covenants": ("CP-4", cp4_case),
+    "relative_value": ("CP-3", cp3_case),
+}
+
+
+Rules = Callable[[str], tuple[str, ...]] | None
+
+
+def enter(
+    tmp_path: Path, step_id: str, payload: str | None = None, rules: Rules = None
+) -> tuple[str, tuple[str, ...], Execution]:
+    module_id, case = PACK_CASES[step_id]
+    store, fixture = case(tmp_path)
+    ticket = store.begin(module_id).ticket_id
+    entered = submission.submit_model_payload(
+        store, ticket, step_id, fixture if payload is None else payload, rules=rules
+    )
+    return (*runner.journal_outcome(store, step_id, entered.journal), store)
+
+
+def module_results(store: Execution, module_id: str) -> list[str]:
+    return [
+        store.result(h.result_sha256).model_dump_json()
+        for h in store.read().heads
+        if h.module_id == module_id
+    ]
+
+
+@pytest.mark.parametrize("step_id", sorted(PACK_CASES))
+def test_a_rule_issue_rejects_a_pack_step_its_validator_accepts_and_nothing_else_changes(
+    step_id: str, tmp_path: Path
+) -> None:
+    module_id = PACK_CASES[step_id][0]
+    plain = enter(tmp_path / "plain", step_id)
+    clean = enter(tmp_path / "clean", step_id, rules=lambda _: ())
+    assert plain[:2] == clean[:2] and plain[0] == "accepted", plain[1]
+    assert module_results(clean[2], module_id) == module_results(plain[2], module_id) != []
+    ruled = enter(tmp_path / "ruled", step_id, rules=lambda _: ("Rule: broken",))
+    assert ruled[:2] == ("rejected", ("Rule: broken",))
+    assert not [h for h in ruled[2].read().heads if h.module_id == module_id]
+    # A payload the validator rejects keeps its own issues, followed by the rule's.
+    bare = enter(tmp_path / "bare", step_id, "{}")
+    both = enter(tmp_path / "both", step_id, "{}", rules=lambda _: ("Rule: broken",))
+    assert bare[0] == both[0] == "rejected"
+    assert both[1] == (*bare[1], "Rule: broken")
 
 
 # --- prompts --------------------------------------------------------------------------------

@@ -82,9 +82,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from deploy_vii import business_context, cp3_relative_value, cp4_legal
 from deploy_vii.business_context import BusinessContextSubmission, submit_cp1a_step
 from deploy_vii.contracts import Contract
-from deploy_vii.cp0_workflow import submit_cp0_review
+from deploy_vii.cp0_workflow import _validate_review, submit_cp0_review
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import (
     CP1_STEPS,
@@ -118,7 +119,13 @@ from deploy_vii.readiness import (
     shape_issues,
     validate_review,
 )
-from deploy_vii.registry import bound_steps, prefilled_kinds, step_modules
+from deploy_vii.registry import (
+    bound_steps,
+    pack_tool_steps,
+    prefilled_kinds,
+    step_chain,
+    step_modules,
+)
 from deploy_vii.source_context import (
     DIMENSIONS,
     ReportingScope,
@@ -247,6 +254,19 @@ MODULE_STEP_ENTRIES: Mapping[str, Callable[[Execution, str, str, str], Attempt]]
     "CP-5": submit_cp5_step,
     "CP-6": submit_cp6_step,
 }
+# Task 8.9: the one-step modules a pack-tool loop runs and the validator their own entry hands
+# `store.submit_step` (each module's `_validate_step`, the function its `MODULE_STEP_ENTRIES`
+# entry calls). A submit a tool-loop rule fails is retained through that validator with the
+# rule issues appended (`_with_rules`), as the entry would retain it had the validator found
+# them: the step is invalid and the attempt finishes rejected. Every other submit goes to the
+# entry unchanged.
+RULED_ENTRIES: Mapping[str, Callable[[Execution, PreparedPack, Attempt], StepValidation]] = {
+    "CP-1A": business_context._validate_step,
+    "CP-4": cp4_legal._validate_step,
+    "CP-3": cp3_relative_value._validate_step,
+}
+# The steps whose submits tool-loop rules may judge: the pack-tool steps (registry).
+RULED_STEPS = pack_tool_steps()
 # Task 7.0i: the model supplies no hash. Each hash binding of a CP-1 step contract is marked
 # `PREFILLED_MARKER` with its kind (so the sent schema leaves it out), and Python fills it before
 # the journal validates. Per step: the kinds it carries, and the retained steps they come from
@@ -922,17 +942,31 @@ def submit_model_payload(
     unless, with no unbound reference, those lines are the stage's only issues).
 
     `rules` (task 8.0d, a tool-loop step's evidence rules, `live.tools.ToolRules`) receives the
-    retained payload and returns issues the journal adds to the step's own (`_with_rules`). It
-    applies to the four CP-1 stages only; for any other step it is refused."""
+    retained payload and returns issues the journal adds to the step's own (`_with_rules`).
+    Task 8.9: it applies to the pack-tool steps (`registry.pack_tool_steps`: CP-1's four
+    stages, CP-0, CP-1A, CP-3 and CP-4); for a submit-only step it is refused. On CP-0, CP-1A,
+    CP-3 and CP-4 the rules read the payload the model sent (after null resolution); a payload
+    they find nothing in takes the path it takes without rules, byte for byte."""
     step = STEPS[step_id]
-    if rules is not None and (step.module_id != "CP-1" or step_id == "quality"):
-        raise ValueError(f"tool-loop rules apply to the CP-1 stages, not to {step_id}")
+    if rules is not None and step_id not in RULED_STEPS:
+        raise ValueError(f"tool-loop rules apply to the pack-tool steps, not to {step_id} ")
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
     entry = MODULE_STEP_ENTRIES.get(step.module_id)
     if entry is not None:
-        journal = entry(store, ticket_id, step_id, normalised)
+        if rules is not None and rules(normalised):
+            validator = partial(RULED_ENTRIES[step.module_id], store)
+            journal = store.submit_step(
+                ticket_id,
+                step.module_id,
+                step_chain(step.module_id).steps,
+                step_id,
+                normalised,
+                _with_rules(validator, rules, normalised),
+            )
+        else:
+            journal = entry(store, ticket_id, step_id, normalised)
         return Submitted(journal, normalised, resolved, (), (), None)
     if step_id == "quality":
         # Task 7.4: the review enters the journal only through the promotion, so an accepted
@@ -960,15 +994,26 @@ def submit_model_payload(
     composition = compose_payload(store.pack(), normalised)
     if composition.review is not None and not composition.issues:
         retained = composition.review.model_dump_json()
-        return Submitted(
-            submit_cp0_review(store, ticket_id, retained), retained, resolved, (), (), composition
+        if rules is None or not rules(normalised):
+            journal = submit_cp0_review(store, ticket_id, retained)
+            return Submitted(journal, retained, resolved, (), (), composition)
+        # Task 8.9: `submit_cp0_review`'s own validator, with the rule issues the model's
+        # payload fails appended (the composed review is what the journal retains).
+        journal = store.submit_step(
+            ticket_id,
+            "CP-0",
+            ("source_readiness",),
+            "source_readiness",
+            retained,
+            _with_rules(partial(_validate_review, store), rules, normalised),
         )
+        return Submitted(journal, retained, resolved, (), (), composition)
+    uncomposable: Callable[[PreparedPack, Attempt], StepValidation] = partial(
+        _validate_uncomposable, store
+    )
+    if rules is not None:
+        uncomposable = _with_rules(uncomposable, rules, normalised)
     journal = store.submit_step(
-        ticket_id,
-        "CP-0",
-        ("source_readiness",),
-        "source_readiness",
-        normalised,
-        lambda pack, current: _validate_uncomposable(store, pack, current),
+        ticket_id, "CP-0", ("source_readiness",), "source_readiness", normalised, uncomposable
     )
     return Submitted(journal, normalised, resolved, (), (), composition)
