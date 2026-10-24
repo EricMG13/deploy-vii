@@ -73,9 +73,10 @@ there as history. The brief remains the append-only progress log. Base: `main` a
 - Each milestone tracks four separate statuses: implementation, analytical
   qualification, rendering acceptance and native-host qualification. The coverage-map
   vocabulary is `unrun | partial | implemented`.
-- Reviews: confidence-review after every code change. Rewrite-tournament (no-argument
-  post-edit mode) only for artifact state, provenance, financial calculations and
-  execution ordering.
+- Reviews: confidence-review after every code change. Key-area code (artifact state,
+  provenance, financial calculations, execution ordering) lands with a committed
+  differential or property test; rewrite-tournament is retired (decision 0011). Review
+  notes stay short (CLAUDE.md review regime). M1–M6 "Tournament" lines are historical.
 - Escalate to `dv-escalate` after two concrete failed repairs. No recursive agent
   spawning.
 - Every task report ends with `Not verified:`. Update the owner's row in
@@ -394,12 +395,13 @@ cap; use the backup cohort if credit is exhausted.
 
 - [ ] **9.1 `dv-sensitive` (MC-9).** A journal transition extends the requested set to a
   superset. It recomputes dependencies and stales only the heads whose resolved inputs
-  change. Test `test_adding_cp1b_refreshes_only_affected_consumers`. Tournament
-  (execution ordering).
+  change. Test `test_adding_cp1b_refreshes_only_affected_consumers`. Property test of the
+  staling rule over generated dependency graphs (execution ordering).
 - [ ] **9.2 `dv-sensitive` (MC-8).** Allow concurrent pending attempts for modules with
   disjoint, settled inputs (for example CP-1 ∥ CP-1A, CP-2 ∥ CP-4). The journal stays
   single-writer per transition. Adopt this only after an E2 run shows the wall-clock
-  gain; otherwise record it as rejected. Tournament (execution ordering).
+  gain; otherwise record it as rejected. Property test that interleaved settles of disjoint
+  modules equal a serial order (execution ordering).
 
 **Acceptance:** E's completion condition becomes testable, and the MC-8 decision is backed
 by measurement.
@@ -436,6 +438,7 @@ report delivery. Keep external blockers visible.
 | 0007 | Degradation and status semantics, with per-edge rules | M4 |
 | 0008 | Model-facing contract shape and repair budget, from probe evidence | **Adopted** 21 October 2026 (M2.7) |
 | 0009 | Pathway presets and the `not_in_pathway` status | M3.5 |
+| 0011 | Retire rewrite-tournament; differential/property tests for key areas; short review notes | **Adopted** 24 October 2026 |
 
 ## Budget plan
 
@@ -471,8 +474,8 @@ testing and ask the user before exceeding it. The reservation ledger enforces ev
 2. The worker works test-first and runs I1 (plus I2 when a model-facing contract
    changes). Its report ends with `Not verified:`.
 3. The coordinator inspects the full diff, reruns the gates (and `make secrets` before
-   publication), then confidence-review, then the tournament if the change is in a key
-   area. It appends a dated result to `brief.md` and updates the coverage map and the
+   publication), then confidence-review, and checks that key-area changes carry their
+   differential or property test. It appends a dated result to `brief.md` and updates the coverage map and the
    methodology-adaptation rows.
 4. The coordinator hands the verified local commits to the PR session (decision 0006
    DC-2, DC-3). The PR session pushes, opens the PR, squash-merges once local gates exit

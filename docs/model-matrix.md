@@ -29,7 +29,7 @@ Native identifiers: `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`,
 implementation and Fable for diagnosis and escalation.
 Verify the actual interface and account entitlement. One implementation owner
 carries each task through its checks. The user's confidence-review and key-area
-rewrite-tournament requirements apply; this matrix adds no extra approval chain.
+differential/property-test requirements apply; this matrix adds no extra approval chain.
 
 ## Routing rules
 

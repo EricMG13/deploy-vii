@@ -36,10 +36,11 @@ dependencies, invalidation and at most one targeted repair.
   pin batch routes, high or justified supported xhigh. No credit replenishment.
 - On exhausted OpenRouter credit, check actual native Luna availability; otherwise
   requested GLM/DeepSeek only. Preserve separate host cohorts and unknown metrics.
-- Confidence review after code; per the user's latest correction, limit post-edit
-  rewrite tournaments to key areas (artifact state, provenance, financial
-  calculations, execution ordering). Routine UI, CLI and adapter work uses focused
-  tests and confidence review. Bounded maintenance after accepted layers.
+- Confidence review after code. Key-area code (artifact state, provenance, financial
+  calculations, execution ordering) lands with a committed differential or property
+  test; rewrite-tournament is retired (decision 0011, 24 October 2026). Routine UI, CLI
+  and adapter work uses focused tests and confidence review. Review notes stay short
+  (CLAUDE.md review regime). Bounded maintenance after accepted layers.
 - Track implementation, analytical qualification, rendering acceptance and native
   host qualification independently. No schema/browser pass implies financial fidelity.
 
@@ -268,7 +269,8 @@ normalizer received the Sol/high tournament. See facility-fx-review.md and
 Next: bind CP-1/Model outputs to the execution
 journal, canonical Markdown and Workbench. CP-1A remains an explicit requirement;
 current internal readiness decisions are not full CP-1 acceptance.
-Tournaments remain key-area only; confidence review applies to all code changes.
+Tournaments remained key-area only (retired 24 October 2026, decision 0011);
+confidence review applies to all code changes.
 
 Execution review: execution-review.md. Native/live qualification remains unrun.
 
