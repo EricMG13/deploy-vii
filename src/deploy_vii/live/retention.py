@@ -19,7 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from deploy_vii.live.client import ChatResult
+from deploy_vii.live.client import ACCOUNT_ID, REDACTED, ChatResult, account_id_left
 from deploy_vii.live.credential import scrub_key
 
 _SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$")
@@ -53,8 +53,6 @@ class AttemptLocator:
         return names
 
 
-ACCOUNT_ID = "user_id"  # OpenRouter's account id in a reply body (task 7.8: never recorded)
-REDACTED = "<redacted>"
 # A JSON object key `"user_id"` and its scalar value. The key's opening quote follows no
 # backslash: in valid JSON a quote inside a string is always escaped, a token quote never is.
 _ACCOUNT_VALUE = re.compile(
@@ -69,34 +67,6 @@ def redact_account_id(raw: bytes) -> tuple[bytes, tuple[str, ...]]:
         lambda match: match.group(1) + b'"' + REDACTED.encode() + b'"', raw
     )
     return stored, (ACCOUNT_ID,) if count else ()
-
-
-_REDACTED_PAIR = re.compile(rb'(?<!\\)"user_id"\s*:\s*"' + re.escape(REDACTED.encode()) + rb'"')
-
-
-def _account_id_left(stored: bytes) -> bool:
-    """Whether the stored body may still hold an account id, so it must be withheld.
-
-    Task 7.11 item 6: the byte sequence `user_id` anywhere outside a redacted pair (an escaped
-    `\\"user_id\\"` inside a JSON string, such as OpenRouter's `error.metadata.raw` copy of the
-    upstream body, or a body that is not JSON). Else, for a JSON body, a `user_id` value other
-    than the redaction: a key the in-place match cannot see (one spelled with a JSON escape),
-    duplicates included, since every object's pairs are read before a dict keeps the last."""
-    if ACCOUNT_ID.encode() in _REDACTED_PAIR.sub(b"\0", stored):
-        return True
-    values: list[object] = []
-
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        values.extend(value for key, value in items if key == ACCOUNT_ID)
-        return dict(items)
-
-    try:
-        json.loads(stored, object_pairs_hook=pairs)
-    except RecursionError:
-        return True  # too deep to read: the redaction cannot be verified, so withhold
-    except ValueError:
-        return False  # not JSON, and no `user_id` bytes left outside a redacted pair
-    return any(value != REDACTED for value in values)
 
 
 def response_envelope(result: ChatResult | None, reason: str | None = None) -> dict[str, Any]:
@@ -117,7 +87,7 @@ def response_envelope(result: ChatResult | None, reason: str | None = None) -> d
         "http_status": result.http_status,
         "scrubbed_of_credential_shapes": result.redacted,
     }
-    if _account_id_left(stored):
+    if account_id_left(stored):
         return {
             **envelope,
             "body_text": None,

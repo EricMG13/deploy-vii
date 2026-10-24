@@ -505,7 +505,12 @@ from OpenRouter's `error.metadata.raw` (prefixed with `provider_name` and `provi
 key scrubbed, capped at 500 characters with `[truncated from N chars]`), for example `HTTP 400:
 Provider returned error; OpenAI invalid_json_schema: Invalid schema for response_format
 'source_context'. Please ensure it is a valid JSON Schema.` No prompt, response body or content
-is shown.
+is shown. Task 7.15: an `error_detail` in which the account id survives (the stored body's check,
+`client.account_id_left`, applied to the whole detail and to the provider text before its cap)
+is replaced whole by `<provider detail withheld: account id>` in every path, so it reaches neither
+`checks/classification.json`, the manifest nor this column; the reply body is still read as
+received for a 402 (DC-7). Such a 400 counts as a schema rejection only through
+`provider_error_code` `invalid_json_schema`, since the withheld detail names no schema.
 
 Runner use. `probe`, `module`, `regression` and `canary` read every `schema-check-attempt/1`
 manifest under their artifact root before the first cell (an unreadable one fails the batch

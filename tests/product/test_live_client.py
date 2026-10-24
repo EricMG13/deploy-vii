@@ -437,6 +437,88 @@ def test_the_provider_detail_is_taken_only_from_a_raw_text_and_scrubbed(
     assert result.classification == "http_error" and result.error_detail == detail
 
 
+ACCOUNT = "u-account-77"
+WITHHELD = "<provider detail withheld: account id>"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Not JSON: the raw text is copied as it is, account id and all.
+        {"code": 400, "message": "m", "metadata": {"raw": f"refused: user_id={ACCOUNT}"}},
+        # The upstream body as a JSON string with no message: copied whole, so the escaped
+        # `\"user_id\"` of the reply body becomes a `"user_id"` pair in the detail.
+        {
+            "code": 400,
+            "message": "m",
+            "metadata": {"raw": json.dumps({"error": {"type": "billing", "user_id": ACCOUNT}})},
+        },
+        # The key spelled with a JSON escape: no `user_id` bytes, but the same key when read.
+        {"code": 400, "message": "m", "metadata": {"raw": '{"error": {"user\\u005fid": 77}}'}},
+        # The same escape in a raw longer than the cap: the cut text is no longer JSON, so the
+        # check reads the provider's text before it is cut.
+        {
+            "code": 400,
+            "message": "m",
+            "metadata": {"raw": '{"error": {"user\\u005fid": 77, "pad": "' + "x" * 600 + '"}}'},
+        },
+        # OpenRouter's own message and a provider label are the same detail.
+        {"code": 400, "message": f"user_id {ACCOUNT} refused"},
+        {"code": 400, "message": "m", "metadata": {"raw": "r", "provider_name": "user_id"}},
+    ],
+    ids=["not-json", "escaped-key", "json-escape", "truncated", "message", "label"],
+)
+def test_a_detail_in_which_the_account_id_survives_is_withheld_whole(
+    error: dict[str, object],
+) -> None:
+    """Task 7.15 item 4: `error_detail` is a sibling of the stored body (task 7.11 item 6) and
+    reaches `checks/classification.json`, the schema-check manifest and its report, so the
+    same byte check applies; a surviving `user_id` replaces the whole detail with a fixed
+    note. The body itself is untouched (DC-7 reads it as received)."""
+    body = json.dumps({"error": error}).encode()
+    result = classify(Response(400, body))
+    assert result.classification == "http_error" and result.http_status == 400
+    assert result.error_detail == WITHHELD
+    assert result.raw == body
+
+
+def test_a_detail_outside_the_reply_body_account_id_is_kept() -> None:
+    """Only what `error_detail` keeps is checked: an account id elsewhere in `metadata.raw`
+    (the message is taken from it) leaves the detail as it was."""
+    raw = json.dumps({"error": {"message": "Invalid schema", "user_id": ACCOUNT}})
+    body = json.dumps({"error": {"code": 400, "message": "m", "metadata": {"raw": raw}}})
+    result = classify(Response(400, body.encode()))
+    assert result.error_detail == "HTTP 400: m; Invalid schema"
+
+
+@pytest.mark.parametrize(
+    "status, document",
+    [
+        (402, {"error": {"code": 402, "message": f"no credit for user_id {ACCOUNT}"}}),
+        (200, {"error": {"code": 504, "message": f"timeout user_id={ACCOUNT}"}}),
+        (
+            200,
+            {
+                "id": "gen-1",
+                "choices": [
+                    {
+                        "finish_reason": "error",
+                        "message": {"content": None},
+                        "error": {"code": 502, "message": f"user_id={ACCOUNT}"},
+                    }
+                ],
+            },
+        ),
+    ],
+    ids=["credit", "body-error", "choice-error"],
+)
+def test_every_error_detail_path_withholds_a_surviving_account_id(
+    status: int, document: dict[str, object]
+) -> None:
+    result = classify(Response(status, json.dumps(document).encode()))
+    assert result.error_detail == WITHHELD
+
+
 @pytest.mark.parametrize(
     "error, classification, detail",
     [

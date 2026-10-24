@@ -1312,6 +1312,45 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     assert rig.store.read().content_hash() == journal
 
 
+DETAIL_ACCOUNT = "u-account-77"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        f"upstream refused: user_id={DETAIL_ACCOUNT}",  # not JSON: copied as it is
+        json.dumps({"error": {"type": "invalid_request_error", "user_id": DETAIL_ACCOUNT}}),
+    ],
+    ids=["not-json", "escaped-key"],
+)
+def test_schema_check_withholds_a_provider_detail_that_names_the_account_id(
+    rig: Rig, raw: str
+) -> None:
+    """Task 7.15 item 4, end to end: `error.metadata.raw` with a surviving `user_id` never
+    reaches `checks/classification.json`, the manifest or the report's `Provider detail`; the
+    fixed note stands in for the whole detail and the body is withheld (task 7.11 item 6)."""
+    error = {"code": 400, "message": "Provider returned error", "metadata": {"raw": raw}}
+    body = json.dumps({"error": error}).encode()
+    assert DETAIL_ACCOUNT.encode() in body and (b"user_id=" in body or b'\\"user_id\\"' in body)
+    responder = SchemaResponder({(LUNA, "source_context")}, refusal=body)
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context")
+    assert rig.run(argv, responder) == 0
+    note = "<provider detail withheld: account id>"
+    text = rig.report("s1")
+    row = check_rows(text)[(LUNA, "source_context")]
+    assert row[2:5] == ["http_error", "http_error", "400"] and row[11] == note
+    evidence = rig.root / "artifacts" / "model-tests" / "s1" / "schema-check"
+    (manifest,) = evidence.rglob("manifest.json")
+    directory = manifest.parent
+    classification = json.loads((directory / "checks" / "classification.json").read_text())
+    assert classification["error_detail"] == note
+    assert json.loads((directory / "manifest.json").read_text())["error_detail"] == note
+    assert json.loads((directory / "response.json").read_text())["body_text"] is None
+    for path in [*directory.rglob("*"), *rig.reports.rglob("*")]:
+        if path.is_file():
+            assert DETAIL_ACCOUNT not in path.read_text(encoding="utf-8", errors="replace"), path
+
+
 def test_schema_check_cap_refusal_sends_nothing_and_stops_the_batch(rig: Rig) -> None:
     responder = SchemaResponder(set())
     argv = check_argv(rig, "--models", LUNA, "--steps", "source_context", cap="0.0000001")

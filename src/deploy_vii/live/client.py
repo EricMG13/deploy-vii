@@ -28,6 +28,11 @@ KEY_TIMEOUT_SECONDS = 30.0
 DEFAULT_TIMEOUT_SECONDS = 600.0
 READ_CHUNK_BYTES = 64 * 1024
 PROVIDER_DETAIL_CHARS = 500  # the upstream message kept in `error_detail` (task 2.11)
+ACCOUNT_ID = "user_id"  # OpenRouter's account id in a reply body (task 7.8: never recorded)
+REDACTED = "<redacted>"
+# The whole `error_detail` when the account id survives in it (task 7.15 item 4).
+DETAIL_WITHHELD = "<provider detail withheld: account id>"
+_REDACTED_PAIR = re.compile(rb'(?<!\\)"user_id"\s*:\s*"' + re.escape(REDACTED.encode()) + rb'"')
 USAGE_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
@@ -298,6 +303,32 @@ class ChatClient:
         return _classify(request, response, key, self._clock() - started)
 
 
+def account_id_left(stored: bytes) -> bool:
+    """Whether the stored bytes may still hold an account id, so they must be withheld.
+
+    Task 7.11 item 6: the byte sequence `user_id` anywhere outside a redacted pair (an escaped
+    `\\"user_id\\"` inside a JSON string, such as OpenRouter's `error.metadata.raw` copy of the
+    upstream body, or a body that is not JSON). Else, for a JSON body, a `user_id` value other
+    than the redaction: a key the in-place match cannot see (one spelled with a JSON escape),
+    duplicates included, since every object's pairs are read before a dict keeps the last.
+    Task 7.15 item 4 applies the same check to `error_detail`."""
+    if ACCOUNT_ID.encode() in _REDACTED_PAIR.sub(b"\0", stored):
+        return True
+    values: list[object] = []
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        values.extend(value for key, value in items if key == ACCOUNT_ID)
+        return dict(items)
+
+    try:
+        json.loads(stored, object_pairs_hook=pairs)
+    except RecursionError:
+        return True  # too deep to read: the redaction cannot be verified, so withhold
+    except ValueError:
+        return False  # not JSON, and no `user_id` bytes left outside a redacted pair
+    return any(value != REDACTED for value in values)
+
+
 def _as_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -316,6 +347,21 @@ def _body_error_class(error: Mapping[str, Any]) -> Classification:
 
 
 def _classify(request: ChatRequest, response: Response, key: str, latency: float) -> ChatResult:
+    """`_classify_reply`, with an `error_detail` in which the account id survives replaced
+    whole by `DETAIL_WITHHELD` (task 7.15 item 4: the detail is written to
+    `checks/classification.json`, the schema-check manifest and its report). `raw` is kept
+    as received, so a 402 is still read from it (DC-7, `credit.from_dispatch_402`), and the
+    stored body has its own check (`retention.response_envelope`)."""
+    result = _classify_reply(request, response, key, latency)
+    detail = result.error_detail
+    if detail is not None and account_id_left(detail.encode()):
+        return replace(result, error_detail=DETAIL_WITHHELD)
+    return result
+
+
+def _classify_reply(
+    request: ChatRequest, response: Response, key: str, latency: float
+) -> ChatResult:
     """Scrub the body, then classify it; an error body never becomes an `ok` result.
 
     OpenRouter commits a 200 before inference and pads a non-streaming call with whitespace, so
@@ -357,10 +403,13 @@ def _classify(request: ChatRequest, response: Response, key: str, latency: float
     if not success:
         provider = _provider_detail(error, key)
         explained = "; ".join(part for part in (message, provider) if part) or None
-        return replace(
+        refused = replace(
             _failed(failure, explained),
             provider_error_code=_text(_as_dict(error.get("metadata")).get("provider_error_code")),
         )
+        if provider == DETAIL_WITHHELD:
+            return replace(refused, error_detail=DETAIL_WITHHELD)
+        return refused
     choices = document.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else None
     if not isinstance(choice, dict):
@@ -391,7 +440,9 @@ def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
     OpenRouter's `message` is generic ("Provider returned error"); the reason (probe-5b: "Invalid
     schema for response_format 'source_context' ...") is only inside `raw`. A raw JSON text gives
     its `error.message` (or `message`); any other raw text is kept as it is, up to
-    `PROVIDER_DETAIL_CHARS` characters (an HTML error page must not flood reports)."""
+    `PROVIDER_DETAIL_CHARS` characters (an HTML error page must not flood reports). A text in
+    which the account id survives (`account_id_left`) gives `DETAIL_WITHHELD`, and the caller
+    withholds the whole detail."""
     metadata = _as_dict(error.get("metadata"))
     raw = _text(metadata.get("raw"))
     if raw is None or not raw.strip():
@@ -403,6 +454,9 @@ def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
         document = {}
     inner = _as_dict(document.get("error")) or document
     text = _text(inner.get("message")) or text
+    if account_id_left(text.encode()):
+        # Read before the cap: cut JSON no longer shows an escaped key (task 7.15 item 4).
+        return DETAIL_WITHHELD
     if len(text) > PROVIDER_DETAIL_CHARS:
         text = f"{text[:PROVIDER_DETAIL_CHARS]} [truncated from {len(text)} chars]"
     label = " ".join(
