@@ -2032,6 +2032,28 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
             },
             False,
         ),
+        # Task 7.15 item 4: a withheld detail (the account id survives) names no schema, so
+        # only OpenAI's code still makes it a schema rejection.
+        (
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {
+                    "raw": "user_id=u-1: Invalid schema for response_format 'x'",
+                    "provider_name": "OpenAI",
+                    "provider_error_code": "invalid_json_schema",
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {"raw": "user_id=u-1: Invalid schema for response_format 'x'"},
+            },
+            False,
+        ),
     ],
     ids=[
         "openai-code",
@@ -2041,6 +2063,8 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
         "reasoning",
         "names-json-schema-only",
         "google",
+        "withheld-openai-code",
+        "withheld-no-code",
     ],
 )
 def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
@@ -2056,6 +2080,7 @@ def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
     metadata = error.get("metadata")
     code = metadata.get("provider_error_code") if isinstance(metadata, dict) else None
     assert manifest["provider_error_code"] == code
+    assert "u-1" not in json.dumps(manifest) and "u-1" not in (check.detail or "")
 
 
 def run_check(
