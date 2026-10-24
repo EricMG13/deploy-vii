@@ -738,7 +738,9 @@ def _recommendation_issues(
         support = [(CP2, r) for r in dict.fromkeys(row.basis.cp2_refs) if r in upstream.cp2_rows]
         support += [(CP3, r) for r in dict.fromkeys(row.basis.cp3_refs) if r in upstream.cp3_rows]
         unflagged = [key for key in support if key not in upstream.review.flagged]
-        if not unflagged and not _figures(row, bound):
+        # A figure supports the call only where the call is argued: its limitation is not.
+        argued = row.model_copy(update={"limitation": None})
+        if not unflagged and not _figures(argued, bound):
             if support:
                 named = ", ".join(f"{m} {r}" for m, r in support)
                 issues.append(f"recommendation.basis: rests only on CP-5-flagged claims ({named})")

@@ -608,6 +608,22 @@ def test_a_recommendation_resting_only_on_cp5_flagged_claims_is_rejected() -> No
     assert issues_of(committee(recommendation=honest), up) == ()
 
 
+def test_a_figure_in_the_limitation_is_no_support_for_the_recommendation() -> None:
+    """Confidence review: a CP-1 figure named only in the limitation once counted as the
+    unflagged support of a recommendation resting on flagged claims."""
+    up = upstream_of(cp5=flagging_cp5())
+    rec = recommendation(
+        rationale="Thin disclosure keeps the bias neutral.",
+        limitation=f"Liquidity of {LIQUIDITY} is one figure",
+        basis=basis(cp2=(ASSESSMENT,)),
+    )
+    assert (
+        "recommendation.basis: rests only on CP-5-flagged claims (CP-2 T2.1.assessment)"
+    ) in issues_of(committee(recommendation=rec), up)
+    in_conditions = rec.model_copy(update={"conditions": f"Liquidity above {LIQUIDITY}."})
+    assert issues_of(committee(recommendation=in_conditions), up) == ()
+
+
 def test_a_cp5_restricted_handoff_limits_and_caps_below_high() -> None:
     up = upstream_of(cp5=flagging_cp5())
     # The assessment marked unsupported, and key finding 1 partly supported over CP-5's
