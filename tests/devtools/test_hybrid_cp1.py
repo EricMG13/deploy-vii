@@ -1444,3 +1444,28 @@ def test_a_shared_ledger_cap_given_explicitly_must_match_and_then_runs(
     assert "openrouter cap 20 differs from" in capsys.readouterr().err
     same = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", shared, "--cap-openrouter", "15")
     assert cp1.main([*same, "--dry-run"], transport=unexpected_send) == 0
+
+
+# --- rewrite tournament (24 Oct 2026): ledgers the cumulative ceiling cannot count --------------
+
+
+def test_a_shared_ledger_outside_the_counted_ledgers_is_refused(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `cp0.prior_committed` sums only `<artifact-root>/.ledgers/*.jsonl`: spend on a ledger kept
+    # elsewhere would be missing from this batch's ceiling check and from every later one's.
+    fake_keys(monkeypatch)
+    inside = earlier_batch_ledger(tmp_path)
+    outside = tmp_path / "elsewhere" / inside.name
+    outside.parent.mkdir()
+    shutil.copyfile(inside, outside)
+    inside.unlink()
+    args = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", outside, "--dry-run")
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert f"is not in {inside.parent}" in capsys.readouterr().err
+    assert not (tmp_path / "root" / "hybrid-cp1-2").exists()
+    # The same ledger reached through another spelling of the counted directory still runs.
+    shutil.copyfile(outside, inside)
+    respelled = inside.parent / ".." / ".ledgers" / inside.name
+    args = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", respelled, "--dry-run")
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 0
