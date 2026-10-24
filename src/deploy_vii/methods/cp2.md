@@ -50,10 +50,14 @@ What to return:
 
 Gap propagation. CONTEXT lists each upstream module's status and the limitations the result
 inherits. When CP-1A is blocked, cite no CP-1A row (`cp1a_refs` stay empty), work from the CP-1
-figures and state the limits; the assessment's confidence is then below High. Each gap under
-`critical_cp1a_gaps` must be restated by a `gaps` row whose `cp1a_refs` cite it, and while any
-is listed the confidence is below High. Python carries the inherited limitations and the
-restricted status; do not restate them as findings.
+figures and state the limits; the assessment's confidence is then below High. CONTEXT also
+lists the CP-1A signals for CP-2 under `cp1a_signals`: a Critical gap in the CP-1A gaps ledger,
+a Critical disclosure item in its disclosure log, and its readiness judgment of CP-2 when that
+is anything but READY (or when CP-1A records no readiness judgment of CP-2 at all). While any
+signal is listed the confidence is below High. Restate each signal that has a ref in a `gaps`
+row whose `cp1a_refs` cite it. A BLOCKED or missing readiness judgment is also a limitation
+Python records, so the module is restricted. Python carries the inherited limitations and the
+status; do not restate them as findings.
 
 Prohibited: no peer ranking, no instrument recommendation and no recovery conclusion in any
 text field. Relative value and security selection belong to CP-3, the committee's action bias

@@ -60,9 +60,9 @@ from deploy_vii.cp2_synthesis import (
     context_block,
     cp1a_catalogue,
     cp2_module,
+    cp2_signals,
     cp2_upstream,
     credit_synthesis,
-    critical_gaps,
     submit_cp2_step,
     validate_credit_synthesis,
 )
@@ -91,6 +91,8 @@ TRANSLATION = "credit_translation.r01"
 DEBT_SCHEDULE = "T2D.7.r01"
 REPORTING = "T2D.3.r01"
 SEGMENT_GAP = "gaps_ledger.r01"
+CP2_READINESS = "downstream_readiness.r01"  # CP-1A judges CP-2 first
+ABSENT = "absent"
 ISSUER = "Synthetic issuer"
 
 
@@ -166,13 +168,40 @@ def cp1_head(pack: PreparedPack) -> Module:
     return module_of(pack, "CP-1", facts=(cp1_fact(pack), leverage_fact(), unsettled_fact()))
 
 
-def cp1a_head(pack: PreparedPack, gaps: tuple[Gap, ...] | None = None) -> Module:
-    """The CP-1A head Python composes from the synthetic CP-1A submission (its gaps replaced
-    when `gaps` is given); restricted when it records any own limitation."""
-    submission = submission_fixture(pack)
+def cp1a_head(
+    pack: PreparedPack,
+    gaps: tuple[Gap, ...] | None = None,
+    *,
+    cp2_status: str = "READY_WITH_LIMITATIONS",
+    disclosures: tuple[str, ...] | None = None,
+) -> Module:
+    """The CP-1A head Python composes from the synthetic CP-1A submission; restricted when it
+    records any own limitation. `gaps` replaces its gaps; `disclosures` replaces its disclosure
+    log by one item per severity; `cp2_status` is its readiness judgment of CP-2 (the fixture's
+    own is READY_WITH_LIMITATIONS), and ABSENT composes it over a run whose plan has no CP-2,
+    so CP-1A judges no CP-2 at all."""
+    scope = pack
+    if cp2_status == ABSENT:
+        run = pack.run.model_copy(update={"requested_modules": ("CP-0", "CP-1", "CP-1A")})
+        scope = PreparedPack.model_validate_json(
+            pack.model_copy(update={"run": run}).model_dump_json()
+        )
+    submission = submission_fixture(scope)
+    changes: dict[str, object] = {}
     if gaps is not None:
-        submission = submission.model_copy(update={"gaps": gaps})
-    module = cp1a_module(business_context(pack, submission), (), 0)
+        changes["gaps"] = gaps
+    if disclosures is not None:
+        item = submission.disclosure_items[0]
+        changes["disclosure_items"] = tuple(
+            item.model_copy(update={"item": f"Disclosure {chr(65 + i)}", "severity": severity})
+            for i, severity in enumerate(disclosures)
+        )
+    if cp2_status != ABSENT:
+        changes["consumers"] = tuple(
+            c.model_copy(update={"status": cp2_status}) if c.module_id == MODULE_ID else c
+            for c in submission.consumers
+        )
+    module = cp1a_module(business_context(scope, submission.model_copy(update=changes)), (), 0)
     status = "restricted" if module.limitations else "accepted"
     return module.model_copy(update={"status": status})
 
@@ -278,7 +307,7 @@ def synthesis(**changes: object) -> CreditSynthesisSubmission:
                 affected_analysis="Business risk",
                 severity="Material",
                 action="Obtain the segment note",
-                cp1a_refs=(SEGMENT_GAP,),
+                cp1a_refs=(SEGMENT_GAP, CP2_READINESS),
             ),
         ),
     )
@@ -394,7 +423,7 @@ def test_referenced_cp1_figures_are_carried_verbatim() -> None:
 
 def test_empty_registers_are_explicit_rows_and_only_required_ones_limit() -> None:
     pack = pack_fixture()
-    up = upstream_of(pack)
+    up = upstream_of(pack, cp1a=cp1a_head(pack, cp2_status="READY"))  # no signal to restate
     empty = synthesis(strengths=(), risks=(), gaps=())
     assert validate_credit_synthesis(pack, empty, up) == ()
     report = credit_synthesis(pack, empty, up)
@@ -424,7 +453,8 @@ def test_an_insufficient_assessment_is_an_own_limitation() -> None:
         ),
         gaps=(),
     )
-    report = credit_synthesis(pack, insufficient, upstream_of(pack))
+    ready = upstream_of(pack, cp1a=cp1a_head(pack, cp2_status="READY"))  # no signal to restate
+    report = credit_synthesis(pack, insufficient, ready)
     assert report.limitations == (
         "Credit assessment is Insufficient Information: One synthetic line only",
     )
@@ -534,7 +564,8 @@ def test_every_row_needs_a_basis_unless_it_is_insufficient_information() -> None
     assert "assessment: an Insufficient Information confidence states its limitation" in found
     assert not any("assessment: a" in i and "cites" in i for i in found)  # its figure is a basis
     gap = base.gaps[0].model_copy(update={"cp1a_refs": ()})
-    assert issues_of(synthesis(gaps=(gap,))) == ()  # a gap needs no basis
+    ready = upstream_of(pack_fixture(), cp1a=cp1a_head(pack_fixture(), cp2_status="READY"))
+    assert issues_of(synthesis(gaps=(gap,)), ready) == ()  # a gap needs no basis
 
 
 def test_text_is_never_blank_and_malformed_references_are_issues() -> None:
@@ -560,7 +591,8 @@ def test_a_blocked_cp1a_offers_no_rows_and_caps_confidence() -> None:
         validate_credit_synthesis(pack, figures_only(assessment=high), blocked)
     )
     assert validate_credit_synthesis(pack, synthesis(assessment=synthesis().assessment.model_copy(
-        update={"confidence": "High"})), upstream_of(pack)) == ()  # fmt: skip
+        update={"confidence": "High"})),
+        upstream_of(pack, cp1a=cp1a_head(pack, cp2_status="READY"))) == ()  # fmt: skip
 
 
 def critical(gap: str = "No debt schedule") -> Gap:
@@ -575,8 +607,10 @@ def critical(gap: str = "No debt schedule") -> Gap:
 
 def test_each_critical_cp1a_gap_is_restated_and_caps_confidence() -> None:
     pack = pack_fixture()
-    head = cp1a_head(pack, gaps=(critical(), *submission_fixture(pack).gaps))
-    assert critical_gaps(head) == ("gaps_ledger.r01",)
+    head = cp1a_head(pack, gaps=(critical(), *submission_fixture(pack).gaps), cp2_status="READY")
+    assert [(item.ref, item.status) for item in cp2_signals(head)] == [
+        ("gaps_ledger.r01", "Critical")
+    ]
     up = upstream_of(pack, cp1a=head)
     found = validate_credit_synthesis(pack, synthesis(), up)
     assert (
@@ -592,6 +626,70 @@ def test_each_critical_cp1a_gap_is_restated_and_caps_confidence() -> None:
     high = synthesis().assessment.model_copy(update={"confidence": "High"})
     assert "assessment.confidence: capped below High because CP-1A records a Critical gap" in (
         validate_credit_synthesis(pack, synthesis(assessment=high), up)
+    )
+
+
+def test_a_critical_disclosure_item_is_restated_and_caps_confidence() -> None:
+    pack = pack_fixture()
+    head_ = cp1a_head(pack, cp2_status="READY", disclosures=("Material", "Critical"))
+    assert [(item.ref, item.status) for item in cp2_signals(head_)] == [("T2D.7.r02", "Critical")]
+    up = upstream_of(pack, cp1a=head_)
+    restate = (
+        "gaps: restate the Critical CP-1A disclosure item T2D.7.r02 in a gaps row that cites it"
+    )
+    assert restate in validate_credit_synthesis(pack, synthesis(), up)
+    gap = synthesis().gaps[0].model_copy(update={"cp1a_refs": (SEGMENT_GAP, "T2D.7.r02")})
+    assert validate_credit_synthesis(pack, synthesis(gaps=(gap,)), up) == ()
+    high = synthesis().assessment.model_copy(update={"confidence": "High"})
+    capped = "assessment.confidence: capped below High because CP-1A records a Critical disclosure"
+    assert f"{capped} item" in validate_credit_synthesis(
+        pack, synthesis(assessment=high, gaps=(gap,)), up
+    )
+
+
+@pytest.mark.parametrize("status", ["READY_WITH_LIMITATIONS", "CONDITIONAL", "BLOCKED"])
+def test_a_cp2_readiness_below_ready_is_restated_and_caps_confidence(status: str) -> None:
+    pack = pack_fixture()
+    up = upstream_of(pack, cp1a=cp1a_head(pack, cp2_status=status))
+    assert [(item.ref, item.status) for item in up.signals] == [(CP2_READINESS, status)]
+    unstated = synthesis().gaps[0].model_copy(update={"cp1a_refs": (SEGMENT_GAP,)})
+    assert (
+        f"gaps: restate CP-1A's {status} readiness of CP-2 ({CP2_READINESS}) in a gaps row "
+        "that cites it"
+    ) in validate_credit_synthesis(pack, synthesis(gaps=(unstated,)), up)
+    high = synthesis().assessment.model_copy(update={"confidence": "High"})
+    assert f"assessment.confidence: capped below High because CP-1A judges CP-2 {status}" in (
+        validate_credit_synthesis(pack, synthesis(assessment=high), up)
+    )
+    assert validate_credit_synthesis(pack, synthesis(), up) == ()
+    limited = "CP-1A judges CP-2 BLOCKED: Segment and transaction gaps"
+    assert (limited in credit_synthesis(pack, synthesis(), up).limitations) == (status == "BLOCKED")
+
+
+def test_a_ready_cp2_readiness_sends_no_signal() -> None:
+    pack = pack_fixture()
+    up = upstream_of(pack, cp1a=cp1a_head(pack, cp2_status="READY"))
+    assert up.signals == ()
+    high = synthesis().assessment.model_copy(update={"confidence": "High"})
+    assert validate_credit_synthesis(pack, synthesis(assessment=high), up) == ()
+    assert credit_synthesis(pack, synthesis(), up).limitations == (
+        "Gap (Material): No segment disclosure",
+    )
+
+
+def test_a_missing_cp2_readiness_row_limits_and_caps() -> None:
+    pack = pack_fixture()
+    up = upstream_of(pack, cp1a=cp1a_head(pack, cp2_status=ABSENT))
+    assert [(item.ref, item.status) for item in up.signals] == [(None, ABSENT)]
+    high = synthesis().assessment.model_copy(update={"confidence": "High"})
+    assert (
+        "assessment.confidence: capped below High because CP-1A records no readiness judgment "
+        "of CP-2"
+    ) in validate_credit_synthesis(pack, synthesis(assessment=high), up)
+    assert not any(i.startswith("gaps: restate") for i in validate_credit_synthesis(
+        pack, synthesis(), up))  # fmt: skip
+    assert "CP-1A records no readiness judgment of CP-2" in (
+        credit_synthesis(pack, synthesis(), up).limitations
     )
 
 
@@ -749,10 +847,30 @@ def test_the_context_block_prefills_figures_rows_gaps_and_statuses() -> None:
     assert rows[TRANSLATION]["cells"]["confidence"] == "Low"
     assert "conflict_log.none" not in rows and CP1_REFERENCES not in json.dumps(list(rows))
     assert set(rows) == set(cp1a_catalogue(head_))
-    assert block["critical_cp1a_gaps"] == ["gaps_ledger.r01"]
+    assert block["cp1a_signals"] == [
+        {
+            "ref": "gaps_ledger.r01",
+            "source": "gaps_ledger",
+            "status": "Critical",
+            "restate": True,
+            "limits": False,
+        },
+        {
+            "ref": CP2_READINESS,
+            "source": "downstream_readiness",
+            "status": "READY_WITH_LIMITATIONS",
+            "restate": True,
+            "limits": False,
+        },
+    ]
     assert block["inherited_limitations"] == ["Gap (Critical): No debt schedule"]
     blocked = context_block(pack, upstream_of(pack, cp1a=blocked_cp1a(pack)))
-    assert blocked["cp1a_rows"] == [] and blocked["critical_cp1a_gaps"] == []
+    assert blocked["cp1a_rows"] == [] and blocked["cp1a_signals"] == []
+    absent = context_block(pack, upstream_of(pack, cp1a=cp1a_head(pack, cp2_status=ABSENT)))
+    assert absent["cp1a_signals"] == [
+        {"ref": None, "source": "downstream_readiness", "status": ABSENT, "restate": False,
+         "limits": True}
+    ]  # fmt: skip
     assert "CP-1A is blocked" in str(blocked["cp1a_rows_note"])
     bare = Upstream(
         bound=up.bound, current=up.bound, cp1=module_of(pack, "CP-1"), cp1a=head_, inherited=()
@@ -890,25 +1008,46 @@ def settled_cp2(pack: PreparedPack, up: Upstream, submission: CreditSynthesisSub
     return result
 
 
-@settings(max_examples=60, deadline=None)
+READINESS = ("READY", "READY_WITH_LIMITATIONS", "CONDITIONAL", "BLOCKED", ABSENT)
+
+
+@settings(max_examples=100, deadline=None)
 @given(
     st.booleans(),
     st.lists(st.sampled_from(SEVERITIES), max_size=3),
+    st.lists(st.sampled_from(SEVERITIES), max_size=2),
+    st.sampled_from(READINESS),
     st.sampled_from(CONFIDENCES),
     st.booleans(),
 )
-def test_a_blocked_cp1a_or_a_critical_gap_always_limits_and_caps_cp2(
-    blocked: bool, severities: list[str], confidence: str, restate: bool
+def test_a_blocked_cp1a_or_any_cp1a_signal_always_limits_and_caps_cp2(
+    blocked: bool,
+    severities: list[str],
+    disclosures: list[str],
+    readiness: str,
+    confidence: str,
+    restate: bool,
 ) -> None:
     pack = public_pack()
     gaps = tuple(critical(f"Gap {chr(65 + i)}").model_copy(update={"severity": s})
                  for i, s in enumerate(severities))  # fmt: skip
-    cp1a = blocked_cp1a(pack) if blocked else cp1a_head(pack, gaps=gaps)
+    cp1a = (
+        blocked_cp1a(pack)
+        if blocked
+        else cp1a_head(pack, gaps=gaps, cp2_status=readiness, disclosures=tuple(disclosures))
+    )
     up = upstream_of(pack, cp1a=cp1a)
-    must = critical_gaps(cp1a)
+    # The expectation is read from the drawn inputs, not from the code under test.
+    capped = blocked or "Critical" in (*severities, *disclosures) or readiness != "READY"
+    limits = not blocked and readiness in {"BLOCKED", ABSENT}
+    assert bool(blocked or up.signals) == capped
+    must = tuple(item.ref for item in up.signals if item.ref is not None)
+    assert len(must) == (0 if blocked else (
+        severities.count("Critical") + disclosures.count("Critical")
+        + (readiness not in {"READY", ABSENT})))  # fmt: skip
     rows = tuple(
         SynthesisGap(
-            gap="A Critical CP-1A gap carried forward",
+            gap="A CP-1A signal carried forward",
             why_it_matters="Confidence depends on it",
             affected_analysis="Credit assessment",
             severity="Critical",
@@ -924,11 +1063,10 @@ def test_a_blocked_cp1a_or_a_critical_gap_always_limits_and_caps_cp2(
     )
     submission = figures_only(assessment=assessment, gaps=rows)
     issues = validate_credit_synthesis(pack, submission, up)
-    capped = blocked or bool(must)
     if capped and confidence == "High":
         assert any(i.startswith("assessment.confidence: capped below High") for i in issues)
     if must and not restate:
-        assert any(i.startswith("gaps: restate the Critical CP-1A gap") for i in issues)
+        assert any(i.startswith("gaps: restate") for i in issues)
     if issues:
         return
     result = settled_cp2(pack, up, submission)
@@ -943,12 +1081,17 @@ def test_a_blocked_cp1a_or_a_critical_gap_always_limits_and_caps_cp2(
         )
     if must:
         assert any(text.startswith("Gap (Critical)") for text in result.limitations)
+    assert limits == any(
+        text.startswith("CP-1A judges CP-2 BLOCKED")
+        or text == "CP-1A records no readiness judgment of CP-2"
+        for text in result.limitations
+    )
 
 
 def test_a_clean_public_cp2_over_a_clean_cp1a_is_accepted() -> None:
     """The other side of Property 2: without a blocked input or any limitation, `accepted`."""
     pack = public_pack()
-    up = upstream_of(pack, cp1a=cp1a_head(pack, gaps=()))
+    up = upstream_of(pack, cp1a=cp1a_head(pack, gaps=(), cp2_status="READY"))
     assert up.cp1a.status == "accepted"
     clean_cp0 = cp0_head(pack)
     assert clean_cp0.status == "restricted"  # its limitation is inherited, never penalised
@@ -978,7 +1121,9 @@ def test_the_verdict_and_composition_do_not_depend_on_row_order(
     if bare:
         findings.append(Finding(text="Cover is 2.4x.", cp1a_refs=(TRANSLATION,)))
     gaps = [
-        base.gaps[0].model_copy(update={"cp1a_refs": ("gaps_ledger.r02", "gaps_ledger.r01")}),
+        base.gaps[0].model_copy(
+            update={"cp1a_refs": ("gaps_ledger.r02", CP2_READINESS, "gaps_ledger.r01")}
+        ),
         base.gaps[0].model_copy(update={"gap": "No debt schedule", "cp1a_refs": (DEBT_SCHEDULE,)}),
     ]
     assessment = base.assessment.model_copy(update={"confidence": "High" if high else "Low"})
@@ -1060,15 +1205,20 @@ REF_POOL = (
     st.integers(min_value=1, max_value=5),
     st.booleans(),
     st.lists(st.lists(st.sampled_from(REF_POOL), min_size=1, max_size=3), min_size=1, max_size=4),
+    st.booleans(),
 )
 def test_reference_existence_matches_a_naive_set_reference(
-    rows: int, placeholder: bool, refs: list[list[str]]
+    rows: int, placeholder: bool, refs: list[list[str]], blocked: bool
 ) -> None:
     pack = pack_fixture()
-    up = upstream_of(pack, cp1a=synthetic_cp1a(pack, rows, placeholder))
+    head_ = synthetic_cp1a(pack, rows, placeholder)
+    if blocked:  # the bound input says blocked: no row is citable, whatever the module holds
+        head_ = head_.model_copy(update={"status": "blocked"})
+    up = upstream_of(pack, cp1a=head_)
     findings = tuple(Finding(text="Thin disclosure.", cp1a_refs=tuple(r)) for r in refs)
     submission = figures_only(key_findings=findings)
-    citable = {f"credit_translation.r{i:02d}" for i in range(1, rows + 1)}
+    rows_ = {f"credit_translation.r{i:02d}" for i in range(1, rows + 1)}
+    citable = set() if blocked else rows_
     naive = {(index, ref) for index, row in enumerate(refs) for ref in row if ref not in citable}
     found = {
         (int(m.group(1)), m.group(2))
@@ -1080,7 +1230,7 @@ def test_reference_existence_matches_a_naive_set_reference(
         )
     }
     assert found == naive
-    assert set(cp1a_catalogue(up.cp1a)) == citable
+    assert set(cp1a_catalogue(up.cp1a)) == rows_ and set(up.catalogue) == citable
 
 
 IDS = ("prepared-pack", "CP-0", "CP-1", "CP-1A")
@@ -1222,11 +1372,19 @@ def test_the_method_text_names_the_r14_tables_and_states_no_figure() -> None:
     assert len(brief.splitlines()) < 90
     for table_id in REQUIRED_TABLES:
         assert f"`{table_id}`" in brief
-    for anchor in ("decision 0005", "SKILL.md", "Reader question", "cp1a_refs", "Prohibited"):
+    for anchor in (
+        "decision 0005",
+        "SKILL.md",
+        "Reader question",
+        "cp1a_refs",
+        "Prohibited",
+        "disclosure",
+        "readiness judgment of CP-2",
+    ):
         assert anchor in brief
     # The only digits outside labels are the r14 table ids, the decision number it records and
     # the contract and CONTEXT key names (identifiers, never figures).
-    keys = {"cp1a_refs", "cp1a_rows", "cp1_facts", "critical_cp1a_gaps"}
+    keys = {"cp1a_refs", "cp1a_rows", "cp1_facts", "cp1a_signals"}
     assert {f.strip("`") for f in bare_figures(brief)} <= {*REQUIRED_TABLES, "0005", *keys}
 
 
@@ -1292,7 +1450,7 @@ def test_the_bound_input_status_not_the_module_decides_a_blocked_cp1a() -> None:
         for item in bound_inputs(pack, cp0, cp1, head_)
     )
     up = Upstream(bound=bound, current=bound, cp1=cp1, cp1a=head_, inherited=())
-    assert up.catalogue == {} and up.critical == ()
+    assert up.catalogue == {} and up.signals == ()
     found = validate_credit_synthesis(pack, synthesis(), up)
     assert "key_findings[1].cp1a_refs: unknown CP-1A row credit_translation.r01" in found
     assert not any(i.startswith("gaps: restate") for i in found)

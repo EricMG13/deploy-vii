@@ -213,13 +213,88 @@ def _cell_text(fact: Fact) -> str:
     return fact.text if fact.text is not None else spelled(fact)
 
 
-def critical_gaps(cp1a: Module) -> tuple[str, ...]:
-    """The `gaps_ledger` rows of a CP-1A head whose severity is Critical, as catalogue ids."""
-    return tuple(
-        f"gaps_ledger.{fact.row_id}"
-        for fact in cp1a.facts
-        if fact.table_id == "gaps_ledger" and fact.field == "severity" and fact.text == "Critical"
-    )
+ABSENT = "absent"
+SignalSource = Literal["gaps_ledger", "T2D.7", "downstream_readiness"]
+
+
+@dataclass(frozen=True)
+class Signal:
+    """One CP-1A signal for CP-2 (fix round 1 ruling). Every signal caps the assessment's
+    confidence below High. One with a `ref` must be restated by a `gaps` row that cites it; a
+    BLOCKED or absent CP-2 readiness judgment is also an own limitation (`limits`).
+
+    `source` is the CP-1A register: a Critical `gaps_ledger` row, a Critical `T2D.7` disclosure
+    item, or the `downstream_readiness` row of CP-2 (status other than READY). `ref` is None when
+    CP-1A judged no CP-2 at all (`status` ABSENT). `detail` is that row's Gap cell."""
+
+    source: SignalSource
+    ref: str | None
+    status: str
+    detail: str = ""
+
+    @property
+    def limits(self) -> bool:
+        return self.source == "downstream_readiness" and self.status in {"BLOCKED", ABSENT}
+
+    @property
+    def reason(self) -> str:
+        if self.source == "gaps_ledger":
+            return "CP-1A records a Critical gap"
+        if self.source == "T2D.7":
+            return "CP-1A records a Critical disclosure item"
+        if self.status == ABSENT:
+            return "CP-1A records no readiness judgment of CP-2"
+        return f"CP-1A judges CP-2 {self.status}"
+
+    @property
+    def restatement(self) -> str:
+        if self.source == "gaps_ledger":
+            what = f"the Critical CP-1A gap {self.ref}"
+        elif self.source == "T2D.7":
+            what = f"the Critical CP-1A disclosure item {self.ref}"
+        else:
+            what = f"CP-1A's {self.status} readiness of CP-2 ({self.ref})"
+        return f"gaps: restate {what} in a gaps row that cites it"
+
+    @property
+    def limitation(self) -> str:
+        return self.reason if self.status == ABSENT else f"{self.reason}: {self.detail}"
+
+
+def _cells(cp1a: Module, table: ReportTable) -> Iterator[tuple[TableRow, dict[str, Fact]]]:
+    """Each row of a CP-1A register with its cells by column field (the row header, the first
+    r14 column of a keyed register, is the row's label, not a cell)."""
+    facts = {fact.fact_id: fact for fact in cp1a.facts}
+    fields = [column.field for column in table.columns]
+    for row in table.rows:
+        yield row, {f: facts[i] for f, i in zip(fields, row.fact_ids, strict=True)}
+
+
+def cp2_signals(cp1a: Module) -> tuple[Signal, ...]:
+    """The CP-1A signals for CP-2 in a CP-1A head, in register order: Critical `gaps_ledger`
+    rows, Critical `T2D.7` disclosure items, then CP-1A's readiness judgment of CP-2: its
+    `downstream_readiness` row (Module is the row header, joined with the Status and Gap cells
+    of the same row) when the status is not READY, or an ABSENT signal when CP-1A judged no CP-2
+    (`business_context.cp1a_consumers` did not list it)."""
+    tables = {table.table_id: table for table in cp1a.tables}
+    signals: list[Signal] = []
+    sources: tuple[SignalSource, ...] = ("gaps_ledger", "T2D.7")
+    for source in sources:
+        table = tables.get(source)
+        for row, cells in _cells(cp1a, table) if table else ():
+            severity = cells.get("severity")
+            if severity is not None and severity.text == "Critical":
+                signals.append(Signal(source, f"{source}.{row.row_id}", "Critical"))
+    table = tables.get("downstream_readiness")
+    judged = [(r, c) for r, c in (_cells(cp1a, table) if table else ()) if r.label == MODULE_ID]
+    if not judged:
+        signals.append(Signal("downstream_readiness", None, ABSENT))
+    for row, cells in judged:
+        status, gap = cells["status"].text, cells["gap"].text
+        if status != "READY":
+            ref = f"downstream_readiness.{row.row_id}"
+            signals.append(Signal("downstream_readiness", ref, str(status), gap or NONE_STATED))
+    return tuple(signals)
 
 
 @dataclass(frozen=True)
@@ -249,8 +324,9 @@ class Upstream:
         return {} if self.cp1a_status == "blocked" else cp1a_catalogue(self.cp1a)
 
     @property
-    def critical(self) -> tuple[str, ...]:
-        return () if self.cp1a_status == "blocked" else critical_gaps(self.cp1a)
+    def signals(self) -> tuple[Signal, ...]:
+        """None under a blocked CP-1A: the blocked input itself caps and restricts."""
+        return () if self.cp1a_status == "blocked" else cp2_signals(self.cp1a)
 
 
 def _bound_module(store: Execution, attempt: Attempt, module_id: str) -> Module:
@@ -368,23 +444,18 @@ def _basis_issues(path: str, row: SynthesisRow, bound: Mapping[str, Fact]) -> li
 
 
 def _propagation_issues(submission: CreditSynthesisSubmission, upstream: Upstream) -> list[str]:
-    """Decision 0007 and ruling 5 on the submission: a blocked CP-1A or a Critical CP-1A gap
-    caps the assessment below High, and every Critical gap is restated by a citing gaps row."""
+    """Decision 0007, ruling 5 and the fix round 1 ruling on the submission: a blocked CP-1A or
+    any CP-1A signal for CP-2 caps the assessment below High, and every signal with a ref is
+    restated by a gaps row that cites it."""
     issues: list[str] = []
-    critical = upstream.critical
-    if upstream.cp1a_status == "blocked":
-        reason: str | None = "CP-1A is blocked"
-    elif critical:
-        reason = "CP-1A records a Critical gap"
-    else:
-        reason = None
-    if reason and submission.assessment.confidence == "High":
-        issues.append(f"assessment.confidence: capped below High because {reason}")
+    signals = upstream.signals
+    blocked = ["CP-1A is blocked"] if upstream.cp1a_status == "blocked" else []
+    reasons = list(dict.fromkeys((*blocked, *(item.reason for item in signals))))
+    if reasons and submission.assessment.confidence == "High":
+        issues.append(f"assessment.confidence: capped below High because {'; '.join(reasons)}")
     restated = {ref for gap in submission.gaps for ref in gap.cp1a_refs}
     issues.extend(
-        f"gaps: restate the Critical CP-1A gap {ref} in a gaps row that cites it"
-        for ref in critical
-        if ref not in restated
+        item.restatement for item in signals if item.ref is not None and item.ref not in restated
     )
     return issues
 
@@ -756,9 +827,11 @@ def credit_synthesis(
     pack = PreparedPack.model_validate_json(pack.model_dump_json())
     submission = CreditSynthesisSubmission.model_validate_json(submission.model_dump_json())
     out = _Composer(prose.bind(referencable(upstream.cp1.facts)), upstream.catalogue)
-    # Own limitations: the gaps rows (CP-1A's wording), an empty required register and an
-    # Insufficient Information assessment. Inherited ones are settlement's (`execution.settle`).
+    # Own limitations: the gaps rows (CP-1A's wording), a BLOCKED or absent CP-1A readiness
+    # judgment of CP-2, an empty required register and an Insufficient Information assessment.
+    # Inherited ones are settlement's (`execution.settle`).
     out.limitations.extend(f"Gap ({g.severity}): {out.text(g.gap)}" for g in submission.gaps)
+    out.limitations.extend(item.limitation for item in upstream.signals if item.limits)
     for compose in (_assessment, _sides, _findings, _risks_and_gaps):
         compose(submission, out)
     referenced = [
@@ -886,11 +959,12 @@ def submit_cp2_step(store: Execution, ticket_id: str, step_id: str, payload: str
 def context_block(pack: PreparedPack, upstream: Upstream) -> dict[str, object]:
     """What the `credit_synthesis` CONTEXT block adds to the pack facts, all Python's: the
     upstream statuses, the CP-1 facts a figure reference may name (as CP-1A's block), the CP-1A
-    rows `cp1a_refs` may cite, the Critical CP-1A gaps to restate and the limitations settlement
-    will inherit."""
+    rows `cp1a_refs` may cite, the CP-1A signals for CP-2 (each caps the confidence; those with a
+    ref are restated in `gaps`; `limits` ones restrict the module) and the limitations
+    settlement will inherit."""
     facts = referencable(upstream.cp1.facts)
     blocked = upstream.cp1a_status == "blocked"
-    critical = upstream.critical
+    signals = upstream.signals
     return {
         "upstream": [
             {"module_id": item.input_id, "status": item.status}
@@ -923,12 +997,23 @@ def context_block(pack: PreparedPack, upstream: Upstream) -> dict[str, object]:
             if blocked
             else "Cite a CP-1A row only by listing its ref in a row's cp1a_refs."
         ),
-        "critical_cp1a_gaps": list(critical),
-        "critical_cp1a_gaps_note": (
-            "Restate each listed gap in a gaps row whose cp1a_refs cite it; while any is listed "
-            "the assessment's confidence is below High."
-            if critical
-            else "No Critical CP-1A gap is recorded."
+        "cp1a_signals": [
+            {
+                "ref": item.ref,
+                "source": item.source,
+                "status": item.status,
+                "restate": item.ref is not None,
+                "limits": item.limits,
+            }
+            for item in signals
+        ],
+        "cp1a_signals_note": (
+            "While any signal is listed the assessment's confidence is below High. Restate each "
+            "signal whose restate is true in a gaps row whose cp1a_refs cite its ref; one whose "
+            "limits is true is also a limitation Python records."
+            if signals
+            else "CP-1A records no Critical gap, no Critical disclosure item and a READY "
+            "judgment of CP-2."
         ),
         "inherited_limitations": list(upstream.inherited),
     }
