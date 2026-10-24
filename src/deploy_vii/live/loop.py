@@ -63,7 +63,12 @@ from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_4
 from deploy_vii.live.draw import Draw, draw
 from deploy_vii.live.ledger import CapExceeded, Ledger, Settlement, utc_stamp
 from deploy_vii.live.prompts import TOOL_LOOP_SUBMITS, PromptError, build, schema_text
-from deploy_vii.live.retention import AttemptLocator, AttemptWriter, response_envelope
+from deploy_vii.live.retention import (
+    TOOL_TRANSCRIPT,
+    AttemptLocator,
+    AttemptWriter,
+    response_envelope,
+)
 from deploy_vii.live.runner import (
     COHORT,
     IN_FLIGHT_EXHAUSTED_MARK,
@@ -229,6 +234,8 @@ class Call:
     nudged: bool = False
     tool_time_s: float = 0.0
     sent: bool = False
+    not_re_sent: bool = False  # an in-flight 402 no call could follow (review A item 6)
+    transcript_sha256: str | None = None  # of tool-calls.jsonl as written
     clock: Callable[[], str] = utc_stamp
 
     def event(self, name: str, **fields: object) -> None:
@@ -245,8 +252,8 @@ class ToolStepResult:
     submit), no-submit (no submit was judged), no-response (no usable reply, a provider schema
     error included), withheld-fallback, or ineligible (nothing sent). `verdict` is the harness's
     wording of how the step ended. `attempt_id` is the call that made the last judged submit
-    (else the last call); `cost_usd` sums every call's settled charge and `held` says whether
-    any call held its reservation."""
+    (else the last call); `cost_usd` sums every call's settled charge, `held_usd` is the part
+    of it held at a reservation, and `held` says whether any call held its reservation."""
 
     step_id: str
     attempt_id: str
@@ -260,6 +267,7 @@ class ToolStepResult:
     directory: Path
     journal: Attempt | None
     cost_usd: Decimal
+    held_usd: Decimal
     held: bool
     issues: tuple[str, ...]
     attempt_pending: bool
@@ -382,6 +390,7 @@ def _prepare(
             upstream=_upstream(store, attempt, spec.step_id),
             repair_issues=repair.issues,
             submit_tool=submit_name(spec.step_id),
+            submits=limits.max_submits,  # the prompt states the loop's own limit
         )
     ]
     context = None
@@ -433,12 +442,13 @@ def _decision(candidate: PinnedCandidate, level: str) -> EffortDecision:
     return replace(candidate, requested_effort=None).effort_for(level)
 
 
-def _new_call(step: _Step, ctx: _Context) -> Call:
+def _new_call(step: _Step, ctx: _Context, elapsed: float) -> Call:
+    """The next call, timed out at the rest of the step's wall clock as the loop head measured
+    it (`elapsed` < the deadline there; review A item 4: no second clock read)."""
     number = len(step.calls) + 1
     attempt_id = f"{step.prefix}-{number}"
     level = step.level()
     decision = _decision(step.candidate, level)
-    elapsed = ctx.monotonic() - step.started
     chat = ChatRequest(
         model=step.candidate.slug,
         messages=tuple(step.conversation),
@@ -533,7 +543,7 @@ def run_tool_step(
                 step.verdict = LIMIT
                 step.verdict_reason = f"{len(step.calls)} calls, {elapsed:.1f} s"
                 break
-            _call(step, ctx)
+            _call(step, ctx, elapsed)
             if step.wait_s is not None:
                 sleep(step.wait_s)
                 step.wait_s = None
@@ -544,8 +554,8 @@ def run_tool_step(
     return _result(step, ctx)
 
 
-def _call(step: _Step, ctx: _Context) -> None:
-    call = _new_call(step, ctx)
+def _call(step: _Step, ctx: _Context, elapsed: float) -> None:
+    call = _new_call(step, ctx, elapsed)
     ctx.writer.begin(call.locator, _request_record(step, call, ctx))
     call.event("drawn", draw=step.drawn.to_record(), effort=call.effort.to_record())
     if call.retry_of is not None:
@@ -591,9 +601,12 @@ def _call(step: _Step, ctx: _Context) -> None:
         _after(step, call, ctx)
     except BaseException as error:
         call.failure = error
+        try:
+            _close(step, call, ctx)
+        except BaseException as closing:  # review A item 1: never hide the original failure
+            raise closing from error
         raise
-    finally:
-        _close(step, call, ctx)
+    _close(step, call, ctx)
     if call.credit is not None and call.credit.exhausted is not None:
         raise CreditExhausted(call.credit, step.attempt.ticket_id)
 
@@ -666,13 +679,15 @@ def _turn(step: _Step, call: Call, ctx: _Context) -> None:
     results: list[tuple[str, str]] = []
     for index, tool_call in enumerate(result.tool_calls, 1):
         entry: dict[str, Any] = {"call": call.number, "index": index, **asdict(tool_call)}
+        # A final verdict (an accepted or the last allowed submit) stands: any later call of the
+        # turn, a malformed one included, is only noted (review A item 5).
+        if step.verdict != NOT_RUN:
+            call.transcript.append(entry | {"status": "not executed: the step has a final verdict"})
+            continue
         if tool_call.problem is not None:
             step.verdict, step.verdict_reason = "rejected: malformed tool call", tool_call.problem
             call.transcript.append(entry | {"status": "error"})
             return
-        if step.verdict != NOT_RUN:
-            call.transcript.append(entry | {"status": "not executed: the step has a final verdict"})
-            continue
         started = ctx.monotonic()
         status, text, verdict = _execute(step, call, tool_call.name, tool_call.arguments)
         duration = ctx.monotonic() - started
@@ -787,6 +802,7 @@ def _after(step: _Step, call: Call, ctx: _Context) -> None:
     elif step.verdict == NOT_RUN:
         if call.number >= step.limits.max_calls or elapsed + (step.wait_s or 0) >= deadline:
             # No call can follow: neither a retry nor an in-flight re-send (not waited out).
+            call.not_re_sent = step.wait_s is not None
             step.retry_pending, step.wait_s = False, None
             step.verdict, step.verdict_reason = LIMIT, f"{call.number} calls, {elapsed:.1f} s"
     if step.verdict == NOT_RUN or not step.submits or step.journal is not None:
@@ -819,23 +835,53 @@ def _after(step: _Step, call: Call, ctx: _Context) -> None:
 def _close(step: _Step, call: Call, ctx: _Context) -> None:
     """Settle the call (when it was reserved) and seal it; the transcript before the seal."""
     if call.failure is not None:
-        call.status = "interrupted"
-        call.error = redact(f"{type(call.failure).__name__}: {call.failure}", ctx.key)
-        call.event("interrupted", error=call.error)
-    if not call.responded:
-        _record_response(call, ctx)
-    cost = _cost(step.candidate, call.result)
-    call.cost = cost
+        _interrupted(call, call.failure, ctx)
+    # Review A item 1: the reservation is settled exactly once on every exit path. When the
+    # response cannot be retained or the cost cannot be computed, the whole reservation is held
+    # (worst case) and that error leaves after the settle and the seal attempt.
+    cost = _Cost(None, "unknown", "cost not computed; reservation held as worst case")
     try:
-        reason = f"{cost.reason}; status={call.status}"
-        if call.credit is not None and call.credit.transient:
-            exhausted = call.credit.exhausted is not None
-            reason += IN_FLIGHT_EXHAUSTED_MARK if exhausted else IN_FLIGHT_SETTLE_MARK
-        call.settlement = ctx.ledger.settle(call.attempt_id, cost.amount, reason)
-        call.event("ledger_settled", charged=call.settlement.charged, basis=cost.basis)
+        try:
+            if not call.responded:
+                _record_response(call, ctx)
+            cost = _cost(step.candidate, call.result)
+        except BaseException as error:
+            if call.failure is None:
+                _interrupted(call, error, ctx)
+            raise
+        finally:
+            call.cost = cost
+            call.settlement = ctx.ledger.settle(call.attempt_id, cost.amount, _reason(call, cost))
+            call.event("ledger_settled", charged=call.settlement.charged, basis=cost.basis)
     finally:
-        ctx.writer.record_tools(call.locator, call.transcript)
+        _record_tools(call, ctx)
         _seal(step, call, ctx, cost)
+
+
+def _interrupted(call: Call, error: BaseException, ctx: _Context) -> None:
+    call.status = "interrupted"
+    call.error = redact(f"{type(error).__name__}: {error}", ctx.key)
+    call.event("interrupted", error=call.error)
+
+
+def _reason(call: Call, cost: _Cost) -> str:
+    """The settle reason. An in-flight 402 ends with the runner's marks (`in_flight_refused`
+    counts neither as a model try); one on a call no call can follow says it was not re-sent."""
+    reason = f"{cost.reason}; status={call.status}"
+    if call.credit is None or not call.credit.transient:
+        return reason
+    if call.credit.exhausted is not None:
+        return reason + IN_FLIGHT_EXHAUSTED_MARK
+    if call.not_re_sent:
+        reason += "; not re-sent: no call can follow"
+    return reason + IN_FLIGHT_SETTLE_MARK
+
+
+def _record_tools(call: Call, ctx: _Context) -> None:
+    """Retain the transcript and keep the hash of the bytes written (the manifest binds it)."""
+    ctx.writer.record_tools(call.locator, call.transcript)
+    path = ctx.writer.path_for(call.locator) / TOOL_TRANSCRIPT
+    call.transcript_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _seal_unsent(step: _Step, call: Call, ctx: _Context, status: str, reason: str) -> None:
@@ -961,6 +1007,8 @@ def _manifest(step: _Step, call: Call, ctx: _Context) -> dict[str, Any]:
             "schema_sha256": hashlib.sha256(schema_text(step.spec.schema).encode()).hexdigest(),
             "request_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
             "declared_inputs": [],
+            # The evidence file the absence and cited-page rules read (review A item 3).
+            "tool_transcript_sha256": call.transcript_sha256,
             "snapshot_sha256": step.snapshot_sha256,
             "journal_inputs": {item.input_id: item.sha256 for item in step.attempt.inputs},
         },
@@ -1071,6 +1119,7 @@ def _result(step: _Step, ctx: _Context) -> ToolStepResult:
         directory=ctx.writer.path_for(holder.locator),
         journal=step.journal,
         cost_usd=settled + held,
+        held_usd=held,
         held=held > 0 or any(c.settlement and c.settlement.unreconciled for c in step.calls),
         issues=last.issues if last is not None and step.journal is not None else (),
         attempt_pending=_pending(step.store, step.attempt.ticket_id),

@@ -65,7 +65,7 @@ one more record plus its schemas, composer and prompt contract.
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
 | `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
 | `loop.py` | Task 8.0d: `run_tool_step` (one CP-1 stage as a tool loop, ported from `devtools/hybrid_cp1.py`; one attempt directory and ledger attempt per call; `tool-calls.jsonl` beside `output.md`), `ToolLimits`, `ToolStepResult`, `call_nudge`, `transient`. Schema-check rejections do not apply to tool-loop steps (their schema is sent as the submit tool's parameters); a runtime 400 that names the schema ends the step as `provider-schema-error`. |
-| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`), `tool_specs`, the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). |
+| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`), `tool_specs`, the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
 
 ## Rules and where they are enforced
 
@@ -367,13 +367,16 @@ section). Common options of the four batch commands:
 (saved models JSON; without it the catalog is fetched), `--report-directory`, `--max-tokens N`
 (task 2.10: the completion budget of every call in the batch, every model alike, default 16000,
 `runner.DEFAULT_MAX_TOKENS`; a positive integer, no per-model syntax; it goes through the context
-fit below, into each manifest's `budgets.max_tokens` and into the report header),
+fit below, into each manifest's `budgets.max_tokens` and into the report header; one-shot
+steps only: a tool-loop step (task 8.0d) uses `loop.ToolLimits`, and with the tool loop on the
+header says so),
 `--timeout SECONDS` (task 7.0c: the request deadline of every call, every model alike, default 600,
 `client.DEFAULT_TIMEOUT_SECONDS`; a positive finite number in Python float syntax, so `1e3` is
 1000 s; into each manifest's `budgets.timeout_s` and `budgets.deadline_s` and into the report
 header as `- Timeout:`, shown as a float, `1800.0`; Sol at about 70 completion tokens a second
 needs up to 15 minutes for 64,000 tokens, so raise it with the budget; `make live-module` takes
-`TIMEOUT=`). There is no key
+`TIMEOUT=`; one-shot steps only, as for `--max-tokens`: a tool-loop call gets the rest of
+its step's `ToolLimits.deadline_s`). There is no key
 option: the runner reads the DC-7 file from settings at dispatch, taking the token at
 `credential_token_index`.
 

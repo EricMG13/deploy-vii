@@ -137,6 +137,46 @@ def test_a_tool_call_without_a_function_is_kept_with_its_reason() -> None:
     assert call.problem == "malformed tool call without a function" and call.call_id == ""
 
 
+@pytest.mark.parametrize(
+    ("function", "problem"),
+    [
+        ({"arguments": "{}"}, "malformed tool call without a function name"),
+        ({"name": 7, "arguments": "{}"}, "malformed tool call without a function name"),
+        ({"name": "", "arguments": "{}"}, "malformed tool call without a function name"),
+        ({"name": "search_pack"}, "malformed tool call without text arguments"),
+        (
+            {"name": "search_pack", "arguments": {"query": "x"}},
+            "malformed tool call without text arguments",
+        ),
+    ],
+)
+def test_a_tool_call_without_a_text_name_or_arguments_is_malformed(
+    function: dict[str, object], problem: str
+) -> None:
+    """Review B item 12: never a tool named "None" or arguments of ""."""
+    item = {"id": "c1", "type": "function", "function": function}
+    message = {"role": "assistant", "tool_calls": [item]}
+    body = {
+        "id": "g",
+        "model": "m",
+        "choices": [{"finish_reason": "tool_calls", "message": message}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0},
+    }
+    client = ChatClient(lambda _: Response(200, json.dumps(body).encode()))
+    request = ChatRequest(
+        model="m",
+        messages=({"role": "user", "content": "go"},),
+        max_tokens=10,
+        response_format={},
+        reasoning_effort=None,
+        accepted_model_ids=("m",),
+        tools=tool_specs("financials"),
+        tool_choice="required",
+    )
+    (call,) = client.complete(request, key=FAKE_KEY).tool_calls
+    assert call.problem == problem and json.loads(call.arguments) == item
+
+
 # --- pack tools ------------------------------------------------------------------------------
 
 

@@ -108,7 +108,9 @@ arguments, status and full result, each submit's verdict and any call-limit nudg
   locators, the verdict, the settled and held USD, the evidence rules and the limits.
 
 The last call's block is the step's. `manifest.json` records the tools offered, `tool_choice`,
-the previous call and the retried call.
+the previous call and the retried call, and its `hashes` include `tool-calls.jsonl`
+(`tool_transcript_sha256`). In the batch report a tool-loop step's USD cell is the step's total
+over its calls, with any held part named: `<total> (reservation held <held>)`.
 
 Each attempt is immutable after completion. Repairs create a new attempt linked
 to its predecessor. Store hashes and publish the completed manifest after its

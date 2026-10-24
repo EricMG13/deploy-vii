@@ -35,7 +35,9 @@ from deploy_vii.live.schema import (
     strict_copy,
     strict_schema,
 )
+from deploy_vii.live.settings import StepEffort
 from deploy_vii.live.submission import quality_inputs
+from deploy_vii.live.tools import ToolRules
 from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import modules
 from tests.product.live_support import (
@@ -2144,7 +2146,12 @@ class ToolChain(Chain):
             return ok(self.payload(step), model=body["model"])
         step = body["tools"][-1]["function"]["name"].removeprefix("submit_")
         if body["messages"][-1]["role"] != "tool":
-            return tool_reply(("s", "search_pack", '{"query": "revenue"}'), model=body["model"])
+            found = tool_reply(("s", "search_pack", '{"query": "revenue"}'), model=body["model"])
+            if step != "narrative":
+                return found
+            unmeasured = json.loads(found.body)  # no usage at all: the reservation is held
+            del unmeasured["usage"]
+            return Response(200, json.dumps(unmeasured).encode())
         return tool_reply(("c", f"submit_{step}", self.payload(step)), model=body["model"])
 
 
@@ -2179,3 +2186,28 @@ def test_the_module_driver_runs_the_four_stages_as_tool_loops(tmp_path: Path) ->
     path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b1.jsonl"
     assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["provider"] == "openrouter"
     assert len(Ledger(path, Decimal("5.00")).state().attempts) == 10
+    # Fix round 1 (review B items 8 to 10): the report says what each line covers.
+    assert "completeness floor: off (user decision 24 Oct 2026)" in report
+    scope = "per call (one-shot steps; tool-loop steps: see Tool loop)"
+    assert f"- Max tokens: 16000 {scope}" in report and f"- Timeout: 600.0 s {scope}" in report
+    assert "completeness floor: off" in report.split("- Tool loop:")[1].splitlines()[0]
+    held = next(
+        r for r in Ledger(path, Decimal("5.00")).state().attempts if r.basis and "held" in r.basis
+    )
+    total, kept = held.charged_usd + Decimal("0.01"), held.charged_usd
+    assert rows[3][8] == f"{format(total, 'f')} ({cli.HELD} {format(kept, 'f')})"
+    assert cli.HELD_FOOTNOTE in report
+
+
+def test_the_one_shot_budget_options_say_tool_loops_have_their_own() -> None:
+    parser = argparse.ArgumentParser()
+    cli.configure(parser)
+    text = " ".join(parser._subparsers._group_actions[0].choices["module"].format_help().split())
+    assert text.count("one-shot steps only; tool-loop steps use their own limits") == 2
+
+
+def test_the_tool_loop_line_states_a_set_completeness_floor() -> None:
+    plan = cli.ToolLoop({"financials": StepEffort.of("high")}, ToolRules(floor=3))
+    (line,) = cli._tool_loop_lines(plan)
+    assert line.endswith("; completeness floor: 3 statement lines per expected cell")
+    assert cli._tool_loop_lines(None) == []

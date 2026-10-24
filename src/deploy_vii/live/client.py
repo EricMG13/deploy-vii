@@ -584,8 +584,9 @@ def _tool_turn(raw: bytes) -> tuple[dict[str, Any], tuple[ToolCall, ...]]:
 
     The message is parsed from the stored (key-scrubbed) body with plain JSON numbers, so it can
     be sent back in the next request unmodified (`reasoning_details` included); a body Decimal
-    parse would not serialise. Each tool call needs a string id and a function object; one that
-    lacks either is kept as its JSON text with the reason (`ToolCall.problem`)."""
+    parse would not serialise. Each tool call needs a string id and a function object with a
+    non-empty text name and text arguments; one that lacks any of them is kept as its JSON text
+    with the reason (`ToolCall.problem`)."""
     document = json.loads(raw.decode("utf-8", errors="replace"))
     choices = document.get("choices") if isinstance(document, dict) else None
     choice = (choices or [{}])[0] if isinstance(choices, list) else {}
@@ -603,10 +604,14 @@ def _tool_call(item: object) -> ToolCall:
     function = item.get("function")
     if not isinstance(function, dict):
         return ToolCall("", "", json.dumps(item), "malformed tool call without a function")
-    arguments = function.get("arguments")
-    return ToolCall(
-        item["id"], str(function.get("name")), arguments if isinstance(arguments, str) else ""
-    )
+    # Review B item 12: a call without a text name or text arguments is malformed, never a tool
+    # named "None" or arguments of "".
+    name, arguments = function.get("name"), function.get("arguments")
+    if not isinstance(name, str) or not name:
+        return ToolCall("", "", json.dumps(item), "malformed tool call without a function name")
+    if not isinstance(arguments, str):
+        return ToolCall("", "", json.dumps(item), "malformed tool call without text arguments")
+    return ToolCall(item["id"], name, arguments)
 
 
 def _failed(

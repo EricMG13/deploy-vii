@@ -158,6 +158,15 @@ class CliError(Exception):
 
 
 @dataclass(frozen=True)
+class ToolLoop:
+    """Settings `tool_loop` on (task 8.0d): each named step's effort plan and the rules its
+    submits are checked against."""
+
+    efforts: Mapping[str, StepEffort]
+    rules: ToolRules
+
+
+@dataclass(frozen=True)
 class Cell:
     cell_id: str
     case_id: str
@@ -364,14 +373,15 @@ def configure(parser: argparse.ArgumentParser) -> None:
         type=_max_tokens,
         default=DEFAULT_MAX_TOKENS,
         help=f"completion budget per call, every model (default {DEFAULT_MAX_TOKENS}); "
-        "a model whose context or completion limit cannot hold it is ineligible",
+        "a model whose context or completion limit cannot hold it is ineligible; "
+        "one-shot steps only; tool-loop steps use their own limits",
     )
     common.add_argument(
         "--timeout",
         type=_timeout_s,
         default=DEFAULT_TIMEOUT_SECONDS,
         help="request deadline per call in seconds, every model (default 600): each socket "
-        "operation and the whole call",
+        "operation and the whole call; one-shot steps only; tool-loop steps use their own limits",
     )
     common.add_argument("--catalog", type=Path, help="saved models JSON; else fetched")
     common.add_argument("--report-directory", type=Path, default=REPORT_DIRECTORY)
@@ -507,16 +517,15 @@ def _run_cell(
     rejections: Mapping[tuple[str, str, str], str],
     repair: bool,
     sleep: Callable[[float], None],
-    tool_efforts: Mapping[str, StepEffort] | None = None,
-    tool_rules: ToolRules | None = None,
+    tool_loop: ToolLoop | None = None,
 ) -> None:
     """Run one cell's steps in order, module by module. With `repair` (the `module` driver) a
     validator rejection that leaves the attempt pending is followed by that step's one repair
     within the attempt (task 7.0g); a rejection that finishes the attempt is followed by the
     module's one MC-7 repair attempt, which restarts the module from its first step. The cell
-    ends at the first step that is not accepted. With `tool_efforts` (settings `tool_loop`,
-    task 8.0d) each step it names runs as a tool loop (`live.loop`) at that effort plan under
-    `tool_rules`; its repair within the attempt is a second tool loop."""
+    ends at the first step that is not accepted. With `tool_loop` (settings `tool_loop`, task
+    8.0d) each step it names runs as a tool loop (`live.loop`) at that effort plan under its
+    rules; its repair within the attempt is a second tool loop."""
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
 
@@ -532,7 +541,9 @@ def _run_cell(
                 item.attempt_id,
                 item.status,
                 item.classification or "none",
-                usd_cell(item.cost_usd, item.held),
+                _tool_usd_cell(item)
+                if isinstance(item, ToolStepResult)
+                else usd_cell(item.cost_usd, item.held),
                 len(item.issues),
                 prompt_bound=item.prompt_tokens_upper_bound,
                 repair=attempt.number,
@@ -542,8 +553,7 @@ def _run_cell(
         )
 
     def send(step_id: str, attempt: Attempt) -> DispatchResult | ToolStepResult:
-        if tool_efforts is not None and step_id in tool_efforts:
-            assert tool_rules is not None
+        if tool_loop is not None and step_id in tool_loop.efforts:
             looped = run_tool_step(
                 StepSpec(step_id, cell.case_id, (), max_tokens=max_tokens, timeout_s=timeout_s),
                 store=store,
@@ -556,8 +566,8 @@ def _run_cell(
                 key_path=key_path,
                 key_index=key_index,
                 bytes_per_token=bytes_per_token,
-                effort=tool_efforts[step_id],
-                rules=tool_rules,
+                effort=tool_loop.efforts[step_id],
+                rules=tool_loop.rules,
                 sleep=sleep,
                 # The calls already spent keep their row when the loop raises (cap, credit).
                 on_stop=partial(row, step_id, attempt),
@@ -732,12 +742,19 @@ def usd_cell(charged: Decimal | None, held: bool) -> str:
     return f"{HELD} {format(charged, 'f')}" if held else format(charged, "f")
 
 
+def _tool_usd_cell(item: ToolStepResult) -> str:
+    """A tool loop's USD column (review B item 10): the step's total over its calls, measured and
+    held charges together, with the held part named so the cell says what it sums."""
+    total = format(item.cost_usd, "f")
+    return f"{total} ({HELD} {format(item.held_usd, 'f')})" if item.held else total
+
+
 def _money_text(value: Decimal | None) -> str:
     return "-" if value is None else format(value, "f")
 
 
 def _held_footnote(rows: Sequence[Row]) -> list[str]:
-    return [HELD_FOOTNOTE, ""] if any(row.cost.startswith(HELD) for row in rows) else []
+    return [HELD_FOOTNOTE, ""] if any(HELD in row.cost for row in rows) else []
 
 
 def _text(value: object) -> str:
@@ -791,17 +808,24 @@ def _repairs_dispatched(rows: Sequence[Row]) -> str:
     )
 
 
-def _tool_loop_lines(efforts: Mapping[str, StepEffort] | None) -> list[str]:
-    """The report's tool-loop line (task 8.0d): its steps, effort plans and limits, which replace
-    the max-tokens and timeout lines for those steps."""
-    if not efforts:
+def _tool_loop_lines(tool_loop: ToolLoop | None) -> list[str]:
+    """The report's tool-loop line (task 8.0d): its steps, effort plans, limits and completeness
+    floor; the limits replace the max-tokens and timeout lines for those steps."""
+    if tool_loop is None or not tool_loop.efforts:
         return []
     plans = ", ".join(
-        f"{step} {plan.effort} (ceiling {plan.ceiling})" for step, plan in efforts.items()
+        f"{step} {plan.effort} (ceiling {plan.ceiling})" for step, plan in tool_loop.efforts.items()
+    )
+    floor = tool_loop.rules.floor
+    floor_text = (
+        "completeness floor: off (user decision 24 Oct 2026)"
+        if floor is None
+        else f"completeness floor: {floor} statement lines per expected cell"
     )
     return [
         f"- Tool loop: {plans}; per step at most {LIMITS.max_calls} calls, {LIMITS.max_submits} "
-        f"submits and {LIMITS.deadline_s} s, {LIMITS.max_tokens} max tokens per call"
+        f"submits and {LIMITS.deadline_s} s, {LIMITS.max_tokens} max tokens per call; "
+        f"{floor_text}"
     ]
 
 
@@ -816,7 +840,7 @@ def render_report(
     default_effort: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
-    tool_efforts: Mapping[str, StepEffort] | None = None,
+    tool_loop: ToolLoop | None = None,
 ) -> str:
     """Summary tables only; counts come from the registry and the retained results."""
     state = ledger.state()
@@ -836,6 +860,11 @@ def render_report(
     )
     live = {definition.module_id for definition in STEPS.values()}
     refused = sum(row.status == NOT_AUTHORIZED for row in batch.rows)
+    scope = (
+        "(one-shot steps; tool-loop steps: see Tool loop)"
+        if tool_loop is not None and tool_loop.efforts
+        else "(every model)"
+    )
     steps_header = ("Cell", "Case", "Step", "Model", "Seed", "Attempt", "Status", "Class", "USD")
     pool_header = (
         "Model",
@@ -857,9 +886,9 @@ def render_report(
         f"- Catalog: {pool.catalog_source} (sha256 {pool.catalog_sha256}), looked up "
         f"{pool.looked_up_at}",
         f"- Registry modules with a live step contract: {len(live)} of {len(modules())}",
-        f"- Max tokens: {max_tokens} per call (every model)",
-        f"- Timeout: {timeout_s} s per call (every model)",
-        *_tool_loop_lines(tool_efforts),
+        f"- Max tokens: {max_tokens} per call {scope}",
+        f"- Timeout: {timeout_s} s per call {scope}",
+        *_tool_loop_lines(tool_loop),
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
         f"- Repairs dispatched: {_repairs_dispatched(batch.rows)}",
@@ -1064,8 +1093,10 @@ def run_live(
     )
     default_effort = args.effort or settings.default_effort
     cells = _cells(args, pool, seed)
-    tool_efforts = _tool_efforts(settings, args.effort, cells)  # bad effort raises before spend
-    tool_rules = ToolRules(floor=settings.completeness_floor)
+    efforts = _tool_efforts(settings, args.effort, cells)  # bad effort raises before spend
+    tool_loop = (
+        None if efforts is None else ToolLoop(efforts, ToolRules(floor=settings.completeness_floor))
+    )
     ledger = Ledger(ledgers / f"{batch_id}.jsonl", args.cap, provider=OPENROUTER)
     ledger.state()  # an opened ledger is bound to its first cap; a different one raises here
     usage_client = ChatClient(
@@ -1094,8 +1125,7 @@ def run_live(
                 rejections=rejections,
                 repair=args.live_command == "module",
                 sleep=sleep,
-                tool_efforts=tool_efforts,
-                tool_rules=tool_rules,
+                tool_loop=tool_loop,
             )
     except CapExceeded as stop:
         batch.stopped = f"cap: {stop}"
@@ -1117,7 +1147,7 @@ def run_live(
                 default_effort,
                 args.max_tokens,
                 args.timeout,
-                tool_efforts,
+                tool_loop,
             ),
             sys.exception(),
         )

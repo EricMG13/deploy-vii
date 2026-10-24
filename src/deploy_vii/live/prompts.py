@@ -798,13 +798,15 @@ def build(
     cp1_facts: Sequence[Fact] = (),
     scope: Mapping[str, Any] | None = None,
     submit_tool: str | None = None,
+    submits: int = TOOL_LOOP_SUBMITS,
 ) -> list[Message]:
     """`scope` is the `quality` step's QA scope (`quality_scope`), required there and refused
     for every other step (MC-10: only the step's declared inputs).
 
-    `submit_tool` (task 8.0d) builds a tool-loop prompt: rule 5 is `tools_rule(submit_tool)`
-    and no pack SOURCE block is sent (the model reads what it cites through the tools), so
-    declared pack inputs are refused there. Every other prompt is unchanged."""
+    `submit_tool` (task 8.0d) builds a tool-loop prompt: rule 5 is `tools_rule(submit_tool,
+    submits)`, `submits` being the loop's own submit limit, and no pack SOURCE block is sent
+    (the model reads what it cites through the tools), so declared pack inputs are refused
+    there. Every other prompt is unchanged."""
     contract = STEP_CONTRACTS.get(step_id)
     if contract is None:
         raise PromptError(f"no contract is defined for step {step_id}")
@@ -832,7 +834,7 @@ def build(
             f"{PAGE_SPAN_RULE} {HYPHEN_COPY_RULE}",
             "4. Where evidence is missing or ambiguous, say so in the schema's gap or limitation "
             "fields. Never guess, and never do arithmetic: Python computes every number.",
-            NO_TOOLS_RULE if submit_tool is None else tools_rule(submit_tool),
+            NO_TOOLS_RULE if submit_tool is None else tools_rule(submit_tool, submits),
             f"6. {COMPACT_OUTPUT_RULE}",
             "JSON Schema:",
             schema_text(schema),

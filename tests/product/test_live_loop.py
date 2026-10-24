@@ -1,5 +1,6 @@
 """Task 8.0d: a CP-1 stage as a tool loop, with injected transports and a fake clock only."""
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -15,6 +16,7 @@ from hypothesis import strategies as st
 
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.execution import Execution
+from deploy_vii.live import loop
 from deploy_vii.live.catalog import ModelSelection, PinnedPool
 from deploy_vii.live.client import ChatClient, ChatResult, Request, Response, TransportError, Usage
 from deploy_vii.live.credit import CreditExhausted
@@ -32,7 +34,12 @@ from deploy_vii.live.loop import (
 )
 from deploy_vii.live.prompts import tools_rule
 from deploy_vii.live.retention import TOOL_TRANSCRIPT, AttemptWriter
-from deploy_vii.live.runner import IN_FLIGHT_SETTLE_MARK, StepSpec
+from deploy_vii.live.runner import (
+    IN_FLIGHT_EXHAUSTED_MARK,
+    IN_FLIGHT_SETTLE_MARK,
+    StepSpec,
+    in_flight_refused,
+)
 from deploy_vii.live.settings import StepEffort, load_settings
 from deploy_vii.live.tools import UNBACKED_ABSENCE, PackTools, ToolRules
 from tests.product.live_support import catalog_of, catalog_row, make_rtf_key
@@ -514,6 +521,126 @@ def test_an_interrupted_call_settles_and_seals_before_the_error_leaves(rig: Rig)
     assert record.status == "settled" and record.charged_usd == record.reserved_usd
     manifest = rig.manifest(first(rig, 1))
     assert manifest["status"] == "interrupted" and manifest["error"].startswith("KeyboardInterrupt")
+
+
+# --- fix round 1 ---------------------------------------------------------------------------------
+
+
+def chain(error: BaseException | None) -> list[BaseException]:
+    found = []
+    while error is not None:
+        found.append(error)
+        error = error.__cause__ or error.__context__
+    return found
+
+
+def test_a_failure_retaining_the_response_still_settles_the_call_once(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review A item 1: the reservation is settled on every exit path, and a failure while
+    closing the call never hides the original one."""
+
+    def broken(*_args: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.writer, "record_response", broken)
+    with pytest.raises(BaseException) as caught:
+        rig.run(rig.script(search()))
+    assert any(isinstance(e, OSError) and str(e) == "disk full" for e in chain(caught.value))
+    (record,) = rig.ledger.state().attempts
+    assert record.status == "settled" and record.charged_usd == record.reserved_usd  # held
+
+
+def test_a_failure_computing_the_cost_holds_the_reservation(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: object) -> None:
+        raise ArithmeticError("bad usage")
+
+    monkeypatch.setattr(loop, "_cost", broken)
+    with pytest.raises(ArithmeticError):
+        rig.run(rig.script(search()))
+    (record,) = rig.ledger.state().attempts
+    assert record.status == "settled" and record.charged_usd == record.reserved_usd
+    assert rig.manifest(first(rig, 1))["status"] == "interrupted"
+
+
+def test_a_second_in_flight_402_in_one_step_is_exhaustion(rig: Rig) -> None:
+    """Review A item 2: the second in-flight refusal of a step is exhaustion. It is settled
+    with the exhaustion mark, so neither refusal counts as a model try; the step's last judged
+    submit has entered the journal before CreditExhausted leaves."""
+    waits: list[float] = []
+    script = rig.script(
+        submit("{}", "a"), Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402)
+    )
+    with pytest.raises(CreditExhausted):
+        rig.run(script, sleep=waits.append, rules=NO_RULES)
+    assert waits == [120]
+    _, first_refusal, second = rig.ledger.state().attempts
+    assert (first_refusal.basis or "").endswith(IN_FLIGHT_SETTLE_MARK)
+    assert (second.basis or "").endswith(IN_FLIGHT_EXHAUSTED_MARK)
+    assert in_flight_refused(first_refusal) and in_flight_refused(second)
+    assert first_refusal.charged_usd == second.charged_usd == 0
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    assert [s.step_id for s in attempt.step_repairs] == ["source_context"]
+
+
+def test_the_manifest_hashes_the_tool_transcript(rig: Rig) -> None:
+    """Review A item 3: the evidence file the citation rules read is bound by its hash."""
+    rig.run(rig.script(search(), submit(rig.context)))
+    for number in (1, 2):
+        directory = rig.directory(first(rig, number))
+        digest = hashlib.sha256((directory / TOOL_TRANSCRIPT).read_bytes()).hexdigest()
+        assert rig.manifest(first(rig, number))["hashes"]["tool_transcript_sha256"] == digest
+
+
+class Reads:
+    """A monotonic clock that answers from a list, then keeps its last value."""
+
+    def __init__(self, *values: float) -> None:
+        self.values, self.now = list(values), 0.0
+
+    def __call__(self) -> float:
+        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
+
+
+def test_a_call_gets_the_rest_of_the_deadline_the_loop_head_measured(rig: Rig) -> None:
+    """Review A item 4: a second clock read after the head's check could leave no time."""
+    rig.clock = Reads(0.0, 3599.0, 3601.0)  # started, the loop head, any later read
+    rig.run(rig.script(tool_reply(content="no", finish="stop")))
+    request = json.loads((rig.directory(first(rig, 1)) / "request.json").read_text())
+    assert request["non_secret_parameters"]["timeout_s"] == 1.0
+
+
+def test_a_malformed_call_after_an_accepted_submit_leaves_the_step_accepted(rig: Rig) -> None:
+    """Review A item 5: once a submit is accepted the verdict is final; a later malformed call
+    in the same turn is only a transcript note."""
+    body = json.loads(submit(rig.context).body)
+    body["choices"][0]["message"]["tool_calls"].append({"id": "x", "type": "function"})
+    result = rig.run(rig.script(Response(200, json.dumps(body).encode())), rules=NO_RULES)
+    assert (result.status, result.verdict) == ("accepted", "accepted")
+    lines = (rig.directory(first(rig, 1)) / TOOL_TRANSCRIPT).read_text().splitlines()
+    note = json.loads(lines[-1])
+    assert note["status"] == "not executed: the step has a final verdict"
+    assert note["problem"] == "malformed tool call without a function"
+
+
+def test_an_in_flight_402_on_the_last_call_says_it_was_not_re_sent(rig: Rig) -> None:
+    """Review A item 6: the settle reason says which case the in-flight mark covers."""
+    rig.run(rig.script(Response(402, IN_FLIGHT_402)), limits=ToolLimits(max_calls=1))
+    (record,) = rig.ledger.state().attempts
+    assert (record.basis or "").endswith(
+        f"; not re-sent: no call can follow{IN_FLIGHT_SETTLE_MARK}"
+    )
+    assert in_flight_refused(record)
+
+
+def test_the_prompt_states_the_steps_own_submit_limit(rig: Rig) -> None:
+    """Review B item 11."""
+    script = rig.script(tool_reply(content="no", finish="stop"))
+    rig.run(script, limits=ToolLimits(max_submits=2))
+    system = script.bodies()[0]["messages"][0]["content"]
+    assert tools_rule("submit_source_context", 2) in system and "at most 2 submits" in system
 
 
 @pytest.mark.parametrize(

@@ -85,7 +85,8 @@ narrative = { effort = "medium", ceiling = "high" }
 readiness = { effort = "medium", ceiling = "high" }
 
 # Task 8.0d: the `financials` completeness floor (statement lines per expected statement and
-# source scope) is off until the user confirms its threshold. Measured on the recorded Sol medium
+# source scope) stays off: user decision, 24 Oct 2026, revisited after the cheaper-model choice
+# and the CP-1 handoff comparison. Measured on the recorded Sol medium
 # transcript hybrid-cp1-6 (accepted there): any floor of 1 or more rejects it, which holds IS and
 # CFS lines for FY2025 only and BS lines for 2025-12-31 only. To turn it on:
 # [model_tests.completeness_floor]

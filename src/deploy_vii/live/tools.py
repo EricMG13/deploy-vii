@@ -21,9 +21,11 @@ added to the journal's own issues for the submit (`live.submission.submit_model_
   A cell is covered by at least the floor's number of lines in a book bound to the scope's
   entity, in periods the scope matches (`scope_matches_period`; for BS, a period ending on the
   scope's date). Quarters and other part-year durations are not fiscal years and expect none.
-- `absence_issues`: a claim that something is not in the source (a source's
-  `event_scan: no_events_identified`, a `missing` observation, a `not_disclosed` disclosure)
-  needs a recorded `search_pack` over that source (or over every source) earlier in the step.
+- `absence_issues`: a claim that something is not in the source needs a recorded search
+  earlier in the step. A `source_context` source's `event_scan: no_events_identified` needs a
+  `search_pack` over that source (or over every source). A `financials` `missing` observation
+  or `not_disclosed` disclosure needs only some `search_pack` in the step, over any source: the
+  payload does not name the source the absent value belongs to.
 - `unread_citation_issues`: every `page:N` the payload cites was returned by `read_pages`
   earlier in the step. Other locators are not pages and are not checked by this rule.
 """
