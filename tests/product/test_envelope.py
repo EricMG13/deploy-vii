@@ -2,6 +2,8 @@
 
 import hashlib
 import re
+import tracemalloc
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -10,6 +12,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+import deploy_vii.envelope as envelope_writer
+from deploy_vii.canonical_tables import COLUMNS, CanonicalTables
 from deploy_vii.contracts import (
     Citation,
     Claim,
@@ -21,6 +25,7 @@ from deploy_vii.contracts import (
     TableColumn,
     TableRow,
 )
+from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.envelope import (
     SECTIONS,
@@ -32,8 +37,13 @@ from deploy_vii.envelope import (
     register_envelope,
     write_envelope,
 )
+from deploy_vii.financial_contracts import FinancialBook, SegmentAllocation, SegmentObservation
+from deploy_vii.model_interface import SCHEMAS as INTERFACE_SCHEMAS
+from deploy_vii.narrative_projection import SCHEMAS as NARRATIVE_SCHEMAS
 from deploy_vii.table_markdown import read_table_markdown
 from tests.product.test_cp1_workflow import staged
+from tests.product.test_financials import _C, observed
+from tests.product.test_model_readiness import ready_case
 
 RUN = Run(
     run_id="envelope-run",
@@ -368,6 +378,73 @@ def test_fixture_registers_round_trip_with_every_table_placed_once(
     (tmp_path / "envelope.md").write_text(markdown)
 
 
+# Task 7.12: tracemalloc peaks (the Python heap) measured when adopted, plus 25 % headroom.
+WRITE_PEAK_BOUND = 478_000_000  # 382.2 MB measured (416.9 MB before)
+REGISTER_PEAK_BOUND = 79_000_000  # 63.3 MB measured (293.8 MB before task 7.12)
+
+
+def _traced_peak[A, T](call: Callable[[A], T], argument: A) -> tuple[T, int]:
+    """The call's result and its tracemalloc peak above what was traced when it began. An
+    outside tracer (``PYTHONTRACEMALLOC``) is measured from ``reset_peak()`` and left running
+    (task 7.15); otherwise tracing starts and stops around the call."""
+    outside = tracemalloc.is_tracing()
+    if not outside:
+        tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        result = call(argument)
+        return result, tracemalloc.get_traced_memory()[1] - before
+    finally:
+        if not outside:
+            tracemalloc.stop()
+
+
+def test_the_traced_peak_neither_counts_nor_ends_an_outside_tracer() -> None:
+    """Task 7.15 (7.12 review): under an outside tracer (``PYTHONTRACEMALLOC``) the helper
+    measures from ``reset_peak()`` and leaves the tracer running, so what was traced before
+    the call is not in the peak."""
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        held = bytearray(20_000_000)
+        size, peak = _traced_peak(lambda n: len(bytearray(n)), 2_000_000)
+        assert size == 2_000_000 and 2_000_000 <= peak < 10_000_000, peak
+        assert tracemalloc.is_tracing()
+        del held
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+
+
+def test_the_synthetic_case_hashes_its_json_bytes_within_its_memory_bounds(
+    fixture_envelope: tuple[Envelope, str, str], tmp_path: Path
+) -> None:
+    """The writer hashes ``__pydantic_serializer__.to_json()`` bytes and re-validates from them
+    (task 7.12). Those are the bytes ``content_hash()`` encodes back from ``model_dump_json()``,
+    which is ``to_json().decode()`` with the same defaults in pydantic 2.14.1 / pydantic-core
+    2.50.1 (read when adopted); a dependency bump that changes either fails here and in
+    ``test_replay``, never silently in a provenance hash.
+
+    The bounds are tracemalloc peaks, deterministic for one interpreter. ``ru_maxrss`` would be
+    vacuous here: it is the process's high-water mark, already reached when this module's
+    fixture wrote the same envelope.
+    """
+    envelope, markdown, sidecar = fixture_envelope
+    store, attempt = staged(tmp_path)
+    registers = cp1_registers(store, attempt.ticket_id)
+    for model in (registers, envelope, envelope.module):
+        assert envelope_writer._content_hash(model) == model.content_hash()
+    rebuilt, register_peak = _traced_peak(register_envelope, registers)
+    assert rebuilt == envelope
+    del registers, rebuilt
+    written, write_peak = _traced_peak(write_envelope, envelope)
+    assert written == (markdown, sidecar)
+    assert register_peak < REGISTER_PEAK_BOUND, register_peak
+    assert write_peak < WRITE_PEAK_BOUND, write_peak
+
+
 def test_fixture_tampering_with_a_statement_cell_is_detected(
     fixture_envelope: tuple[Envelope, str, str],
 ) -> None:
@@ -423,3 +500,98 @@ def test_qa_text_that_looks_like_a_gap_marker_is_not_a_marker() -> None:
     markdown, sidecar = write_envelope(envelope)
     assert "| minor | MINOR | open | ∅ G999 |" in markdown
     assert read_envelope(markdown, sidecar) == envelope
+
+
+def segmented_book() -> FinancialBook:
+    """`ready_case` with one operating segment carrying each period's revenue and its slot."""
+    value = ready_case()
+    revenue = {r.period_id: r.value.amount for r in value.accounts if r.metric_id == "revenue"}
+    segments = tuple(
+        SegmentObservation(
+            segment_id="gaming",
+            segment_name="Gaming",
+            segment_type="OPERATING_SEGMENT",
+            display_priority=1,
+            period_id=period_id,
+            revenue=observed(f"segment.{period_id}", str(amount)),
+            classification_citations=(_C,),
+        )
+        for period_id, amount in revenue.items()
+    )
+    allocation = SegmentAllocation(
+        slot_id="DIVISION_1",
+        slot_label="Gaming",
+        component_segment_ids=("gaming",),
+        rationale="Synthetic single-segment forecast mapping",
+    )
+    return FinancialBook.model_validate(
+        {
+            **value.model_dump(),
+            "segments": segments,
+            "segment_allocation": (allocation,),
+            "segment_disclosure": value.segment_disclosure.model_copy(update={"status": "partial"}),
+        }
+    )
+
+
+@pytest.fixture(scope="module")
+def segmented_registers(tmp_path_factory: pytest.TempPathFactory) -> CanonicalTables:
+    store, attempt = staged(tmp_path_factory.mktemp("segmented"), book=segmented_book())
+    return cp1_registers(store, attempt.ticket_id)
+
+
+def test_a_segmented_book_places_its_segment_allocation_in_module_handoff(
+    segmented_registers: CanonicalTables,
+) -> None:
+    # Task 7.7 (e1-cp1-7): before the placement, write_envelope raised
+    # "No r14 envelope section for table: segment-allocation" for every segmented issuer.
+    envelope = register_envelope(segmented_registers)
+    table = next(t for t in envelope.module.tables if t.table_id == "segment-allocation")
+    assert table.interface_id == "cp1.cp_model_segment_allocation" and len(table.rows) == 1
+    markdown, sidecar = write_envelope(envelope)
+    assert envelope_issues(markdown, sidecar) == ()
+    handoff = markdown[markdown.index("\n## Module Handoff\n") :]
+    assert handoff.count("\n### segment-allocation — Model Segment Allocation\n") == 1
+    slot = next(
+        f
+        for f in cp1_quality_inputs(segmented_registers).coverage
+        if f.field_id == "canonical-handoff"
+    )
+    assert slot.present, slot.rationale
+
+
+def test_every_table_the_cp1_module_can_carry_has_exactly_one_section(
+    fixture_envelope: tuple[Envelope, str, str], segmented_registers: CanonicalTables
+) -> None:
+    # Derived from the producers: the register, model-interface and narrative schemas (the
+    # conditional segment-allocation included) and the tables both fixtures emit (the
+    # statement tables T4.4-T4.6 have no exported schema).
+    placed = [table_id for _, ids in SECTIONS for table_id in ids]
+    assert len(placed) == len(set(placed))
+    carried = {
+        *COLUMNS,
+        *INTERFACE_SCHEMAS,
+        *NARRATIVE_SCHEMAS,
+        *(t.table_id for t in fixture_envelope[0].module.tables),
+        *(t.table_id for t in segmented_registers.module.tables),
+    }
+    assert carried == set(placed)
+    handoff = dict(SECTIONS)["Module Handoff"]
+    assert tuple(key for key in INTERFACE_SCHEMAS if key in handoff) == handoff
+
+
+def test_an_unsegmented_envelope_gains_only_the_segment_allocation_line(
+    fixture_envelope: tuple[Envelope, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envelope, markdown, sidecar = fixture_envelope
+    assert all(t.table_id != "segment-allocation" for t in envelope.module.tables)
+    before = tuple(
+        (name, tuple(i for i in ids if i != "segment-allocation")) for name, ids in SECTIONS
+    )
+    monkeypatch.setattr(envelope_writer, "SECTIONS", before)
+    prior_markdown, prior_sidecar = write_envelope(envelope)
+    assert prior_sidecar == sidecar
+    line = "### segment-allocation\n\nNot produced: segment-allocation is not in this module.\n\n"
+    anchor = "### operating-kpis — "
+    assert prior_markdown.count(anchor) == 1
+    assert markdown == prior_markdown.replace(anchor, line + anchor)

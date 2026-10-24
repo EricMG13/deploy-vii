@@ -13,6 +13,11 @@ from deploy_vii.prose import valid_syntax
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=160)]
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+# Task 7.0i: marks a hash binding Python fills before the journal validates (a field's
+# `json_schema_extra`); the value names the binding kind `live.submission.prefill` resolves. The
+# sent schema leaves the property out (`live.schema`, "drop-prefilled"); the stored contract still
+# requires it, so the validators still check the value Python wrote.
+PREFILLED_MARKER = "x-deploy-vii-prefilled"
 Text = Annotated[str, Field(min_length=1)]
 # Model prose: literal text plus {ref|unit} figure and [ref] chip references (decision 0005
 # MC-2). The syntax is checked here; references resolve where the facts are (prose_issues).
@@ -133,7 +138,7 @@ class Source(Contract):
 
 class Citation(Contract):
     source_id: Identifier
-    source_sha256: Hash
+    source_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "source"})
     locator: Text
     quote: Text
 

@@ -19,7 +19,8 @@ require separate qualification.
 
 Haiku 5.5 remains an optional worker candidate for simple classification or
 extraction. Separately, the user's model-assisted test pool is the set named in
-decision 0005, currently GPT-6.1 Sol at high (amendment, 22 Oct 2026; the Luna, GLM 5.3
+decision 0005, currently GPT-6.1 Sol at medium (amendment, 22 Oct 2026; the effort by the user's decision
+of 24 Oct 2026; the Luna, GLM 5.3
 Flash and latest DeepSeek pool is superseded), under the [testing policy](testing-and-telemetry.md);
 that is product testing through OpenRouter, not development routing. Python still
 owns arithmetic.

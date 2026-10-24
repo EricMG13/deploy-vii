@@ -7,7 +7,7 @@ from pydantic import Field
 
 from deploy_vii.canonical_audit import DefinitionReview
 from deploy_vii.context_binding import FinancialContextBinding
-from deploy_vii.contracts import Contract, Hash, Identifier, Text
+from deploy_vii.contracts import PREFILLED_MARKER, Contract, Hash, Identifier, Text
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview
 from deploy_vii.model_readiness import ModelReadinessReport, assess_model_readiness
 from deploy_vii.narrative import (
@@ -79,7 +79,7 @@ class ConsumerAssessment(Contract):
 
 class DownstreamReview(Contract):
     schema_version: Literal["downstream-review/1"] = "downstream-review/1"
-    inputs_sha256: Hash
+    inputs_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "step-inputs"})
     consumers: tuple[ConsumerAssessment, ...] = ()
 
 

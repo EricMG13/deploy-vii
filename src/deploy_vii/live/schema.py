@@ -19,6 +19,24 @@ Round 3 (bisects schema-2026-10-22-bisect and -bisect2, OpenAI): a nullable arra
 `anyOf: [{type: "array", items, ...bounds}, {"type": "null"}]` instead of a `type` union
 ("nullable-array-anyof"), and `oneOf` + `discriminator` as `anyOf` ("oneof-anyof"); both are
 lossless, because every such array defaults to `[]` and the stored contract keeps its tags.
+Task 7.0d (E1 batch e1-cp1-3: 131 amounts sent as printed strings such as "3,624"): a `Number`
+node, marked `DECIMAL_MARKER` by `financial_contracts`, is Pydantic's Decimal union `anyOf:
+[{type: number, ...bounds}, {type: string}]` (null joins it when nullable). The sent copy keeps
+the number branch with its bounds and any null branch and drops the string branch
+("decimal-number-only"); the marker, not the shape, selects the node, so a genuine number-or-text
+union is never rewritten, and a marked node of any other shape raises ValueError. The stored
+contract still accepts a string amount (a stored payload replays unchanged).
+Fix round 1: an id node marked `PREFIXED_ENUM_MARKER` (`StatementLine.item_id`,
+`BalanceMovementBridge.balance_item_id`) is replaced whole by `anyOf` [{type: string, enum},
+{type: string, pattern}] from the marker's lists ("prefixed-enum"): a listed r14 statement item
+or an `other:` id. The flat list is a superset per statement; Python still enforces the split.
+Task 7.0i (E1 batch e1-cp1-5: three `financials` attempts copied a wrong 64-hex
+`context_step_sha256`): the model supplies no hash. A property marked `PREFILLED_MARKER` (its
+value names the binding kind; every hash binding of the CP-1 step contracts carries one) is left
+out of its object's `properties` and `required` ("drop-prefilled"), because Python fills it before
+the journal validates (`live.submission.prefill`, which finds the marked properties of a payload
+with `marked_fields`). A marker anywhere but on an object's property, or one whose value is not a
+kind name, raises ValueError, so it never reaches the provider.
 `pattern`, `format`, `minItems`, `maxItems`, `anyOf` and `$ref` are kept. The relaxation only
 widens what the provider is asked to enforce: the reply is still validated by the unchanged
 Pydantic contract, so every dropped constraint is still enforced on the way in.
@@ -35,10 +53,15 @@ relaxations applied (`schema_relaxations`).
 import copy
 import json
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
+
+from deploy_vii.contracts import PREFILLED_MARKER as PREFILLED_MARKER
+from deploy_vii.financial_contracts import DECIMAL_MARKER as DECIMAL_MARKER
+from deploy_vii.financial_contracts import PREFIXED_ENUM_MARKER as PREFIXED_ENUM_MARKER
 
 ANNOTATIONS = ("title", "description")
 # Present in the step schemas; acceptance under strict mode is not stated in the fetched docs.
@@ -67,10 +90,19 @@ RELAXATIONS = (
     "drop-length",
     "nullable-array-anyof",
     "oneof-anyof",
+    "decimal-number-only",
+    "prefixed-enum",
+    "drop-prefilled",
 )
 _LENGTH = frozenset({"minLength", "maxLength"})
-# Keys whose values are data (names, constants, defaults), never schema nodes.
-_DATA = frozenset({"enum", "const", "required", "default", "discriminator"})
+# The keywords a Decimal union's branches may carry (`_kind`); a later Pydantic may add a
+# `pattern` to the string branch.
+_NUMBER_KEYS = frozenset(
+    {"type", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"}
+)
+_STRING_KEYS = frozenset({"type", "pattern"})
+# Keys whose values are data (names, constants, defaults, marker lists), never schema nodes.
+_DATA = frozenset({"enum", "const", "required", "default", "discriminator", PREFIXED_ENUM_MARKER})
 
 
 def _nodes(node: object) -> Iterator[dict[str, Any]]:
@@ -193,7 +225,83 @@ def _relaxed_node(node: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"schema node cannot be relaxed (oneOf beside anyOf): {node}")
     # Round 3 (bisects schema-2026-10-22-bisect and -bisect2): OpenAI refuses a nullable array
     # written as a type union and accepts the `anyOf` form; it refuses `oneOf` ("narrative").
-    return _array_to_any_of(_one_of_to_any_of(node))
+    return _drop_prefilled(_prefixed_enum(_number_only(_array_to_any_of(_one_of_to_any_of(node)))))
+
+
+def prefilled_kind(node: object) -> str | None:
+    """The binding kind a schema node's `PREFILLED_MARKER` names (a non-empty string), or None."""
+    kind = node.get(PREFILLED_MARKER) if isinstance(node, dict) else None
+    return kind if isinstance(kind, str) and kind else None
+
+
+def _drop_prefilled(node: dict[str, Any]) -> dict[str, Any]:
+    """An object node without its `PREFILLED_MARKER` properties and their `required` entries
+    ("drop-prefilled"); any other node is returned as it is. Children are relaxed first, so a
+    marked property still carries its marker here; one left anywhere else is refused by
+    `relax`."""
+    properties = node.get("properties")
+    if not isinstance(properties, dict):
+        return node
+    kept = {name: child for name, child in properties.items() if prefilled_kind(child) is None}
+    if len(kept) == len(properties):
+        return node
+    out = {**node, "properties": kept}
+    if isinstance(node.get("required"), list):
+        out["required"] = [name for name in node["required"] if name in kept]
+    return out
+
+
+def _prefixed_enum(node: dict[str, Any]) -> dict[str, Any]:
+    """A `PREFIXED_ENUM_MARKER` node replaced whole by `anyOf` [{string, enum}, {string,
+    pattern}] from the marker's lists ("prefixed-enum"); annotations stay outside. Any other node
+    is returned as it is; a marked node that is not a plain string (its own `pattern` aside, which
+    the marker's two branches replace) or whose marker is not {enum: [str, ...], pattern: str}
+    raises ValueError."""
+    if PREFIXED_ENUM_MARKER not in node:
+        return node
+    marker = node[PREFIXED_ENUM_MARKER]
+    own = {key for key in node if key not in {*ANNOTATIONS, PREFIXED_ENUM_MARKER}}
+    if not (
+        node.get("type") == "string"
+        and own <= {"type", "pattern"}
+        and isinstance(marker, dict)
+        and set(marker) == {"enum", "pattern"}
+        and isinstance(marker["enum"], list)
+        and marker["enum"]
+        and all(isinstance(value, str) for value in marker["enum"])
+        and isinstance(marker["pattern"], str)
+    ):
+        raise ValueError(f"schema node cannot be relaxed (prefixed-enum marker): {node}")
+    outer = {key: node[key] for key in ANNOTATIONS if key in node}
+    listed = {"type": "string", "enum": list(marker["enum"])}
+    return {**outer, "anyOf": [listed, {"type": "string", "pattern": marker["pattern"]}]}
+
+
+def _kind(branch: object) -> str:
+    """The kind of one Decimal union branch: number or string (keys within `_NUMBER_KEYS`,
+    `_STRING_KEYS`), null, or other."""
+    if branch == _NULL:
+        return "null"
+    for kind, keys in (("number", _NUMBER_KEYS), ("string", _STRING_KEYS)):
+        if isinstance(branch, dict) and branch.get("type") == kind and set(branch) <= keys:
+            return kind
+    return "other"
+
+
+def _number_only(node: dict[str, Any]) -> dict[str, Any]:
+    """A `DECIMAL_MARKER` node without its string branch and marker ("decimal-number-only"): the
+    number branch alone, or `anyOf` [number, null] where the node admits null. Any other node is
+    returned as it is; a marked node whose `anyOf` is not one number and one string branch
+    (and at most one null branch) raises ValueError."""
+    if DECIMAL_MARKER not in node:
+        return node
+    branches: list[Any] = node["anyOf"] if isinstance(node.get("anyOf"), list) else []
+    kinds = [_kind(branch) for branch in branches]
+    if sorted(kinds) not in (["number", "string"], ["null", "number", "string"]):
+        raise ValueError(f"schema node cannot be relaxed (decimal marker on another shape): {node}")
+    outer = {key: value for key, value in node.items() if key not in {"anyOf", DECIMAL_MARKER}}
+    kept = [branch for branch, kind in zip(branches, kinds, strict=True) if kind != "string"]
+    return {**outer, "anyOf": kept} if len(kept) > 1 else {**kept[0], **outer}
 
 
 Rule = Callable[[dict[str, Any]], dict[str, Any]]
@@ -231,7 +339,11 @@ def relax(schema: dict[str, Any]) -> dict[str, Any]:
     A shape the relaxation cannot express (a null `const`, a null enum member whose type does
     not admit null, `const` beside `enum`) raises ValueError, so nothing is sent for it."""
     drop = _without(_LENGTH)
-    return _map_schema(schema, lambda node: _relaxed_node(drop(node)))
+    sent = _map_schema(schema, lambda node: _relaxed_node(drop(node)))
+    left = [node for node in _nodes(sent) if PREFILLED_MARKER in node]
+    if left:
+        raise ValueError(f"schema node cannot be relaxed (prefilled marker off a property): {left}")
+    return sent
 
 
 def relaxations(schema: dict[str, Any]) -> list[str]:
@@ -253,6 +365,12 @@ def relaxations(schema: dict[str, Any]) -> list[str]:
             found.add("nullable-array-anyof")
         if "oneOf" in node:
             found.add("oneof-anyof")
+        if DECIMAL_MARKER in node:
+            found.add("decimal-number-only")
+        if PREFIXED_ENUM_MARKER in node:
+            found.add("prefixed-enum")
+        if prefilled_kind(node) is not None:
+            found.add("drop-prefilled")
     return [name for name in RELAXATIONS if name in found]
 
 
@@ -534,7 +652,12 @@ RELAXATIONS_BASIS = (
     "nullable-enum is named by shape: wherever the sent schema has an enum under a type that "
     "admits null (strict_copy already builds that shape); const-to-enum, drop-length, "
     "nullable-array-anyof and oneof-anyof are named where the strict copy had const, "
-    "minLength or maxLength, a type: [array, null] node with items, or oneOf"
+    "minLength or maxLength, a type: [array, null] node with items, or oneOf; "
+    f"decimal-number-only where it had a {DECIMAL_MARKER} node (a Decimal amount, sent as a "
+    f"JSON number only); prefixed-enum where it had a {PREFIXED_ENUM_MARKER} node (an id sent as "
+    "a listed value or a prefixed id, e.g. a statement item or other:<id>); drop-prefilled where "
+    f"it had a {PREFILLED_MARKER} property (a field Python fills before validation, so the "
+    "model is not asked for it)"
 )
 
 
@@ -608,12 +731,70 @@ class _Walker:
                 self.fill(chosen, value, path)
 
 
-def _dump(value: object) -> str:
+@dataclass(frozen=True)
+class Marked:
+    """One `PREFILLED_MARKER` property of a payload object, present or not: its JSON path, the
+    object that holds it, the binding kind and the enclosing objects by their `$defs` name
+    (outermost first)."""
+
+    path: str
+    holder: dict[str, Any]
+    name: str
+    kind: str
+    within: tuple[tuple[str, dict[str, Any]], ...]
+
+    def enclosing(self, definition: str) -> dict[str, Any] | None:
+        """The innermost enclosing object of `definition`, or None."""
+        return next((obj for name, obj in reversed(self.within) if name == definition), None)
+
+
+def marked_fields(model: type[BaseModel], document: dict[str, Any]) -> tuple[Marked, ...]:
+    """Every marked property of `document`, walked with `model`'s own schema as `normalise`
+    walks it (a union branch only where it is determined), in document order."""
+    schema = model.model_json_schema()
+    walker = _Walker(schema)
+    found: list[Marked] = []
+
+    def visit(node: object, value: object, path: str, within: tuple[Any, ...]) -> None:
+        name = _ref_name(node) if isinstance(node, dict) else None
+        if name is not None and isinstance(value, dict):
+            within = (*within, (name, value))
+        spec = walker.resolve(node)
+        if isinstance(value, dict) and "properties" in spec:
+            for key, prop in spec["properties"].items():
+                kind = prefilled_kind(prop)
+                if kind is not None:
+                    found.append(Marked(f"{path}{key}", value, key, kind, within))
+                elif key in value:
+                    visit(prop, value[key], f"{path}{key}.", within)
+        elif isinstance(value, list) and "items" in spec:
+            for index, item in enumerate(value):
+                visit(spec["items"], item, f"{path}{index}.", within)
+        elif "anyOf" in spec or "oneOf" in spec:
+            chosen = walker.branch(spec, value)
+            if chosen is not None:
+                visit(chosen, value, path, within)
+
+    visit(schema, document, "", ())
+    return tuple(found)
+
+
+def json_object(payload: str) -> dict[str, Any] | None:
+    """`payload` parsed as a JSON object, floats as Decimal (`exact_json` keeps their digits);
+    None for anything else: invalid or truncated JSON, NaN or Infinity, or a non-object."""
+    try:
+        document = json.loads(payload, parse_float=Decimal, parse_constant=_refuse_constant)
+    except ValueError:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def exact_json(value: object) -> str:
     """JSON text that keeps every parsed number's exact digits (floats were parsed as Decimal)."""
     if isinstance(value, dict):
-        return "{" + ",".join(f"{json.dumps(k)}:{_dump(v)}" for k, v in value.items()) + "}"
+        return "{" + ",".join(f"{json.dumps(k)}:{exact_json(v)}" for k, v in value.items()) + "}"
     if isinstance(value, list):
-        return "[" + ",".join(_dump(item) for item in value) + "]"
+        return "[" + ",".join(exact_json(item) for item in value) + "]"
     if isinstance(value, Decimal):
         return str(value)
     return json.dumps(value, ensure_ascii=False)
@@ -624,14 +805,11 @@ def normalise(model: type[BaseModel], payload: str) -> tuple[str, tuple[str, ...
 
     Unchanged (same string, no paths) when nothing needed resolving or the text is not a JSON
     object; Pydantic then reports whatever is wrong with it."""
-    try:
-        document = json.loads(payload, parse_float=Decimal, parse_constant=_refuse_constant)
-    except ValueError:
-        return payload, ()
-    if not isinstance(document, dict):
+    document = json_object(payload)
+    if document is None:
         return payload, ()
     walker = _Walker(model.model_json_schema())
     walker.fill(model.model_json_schema(), document, "")
     if not walker.paths:
         return payload, ()
-    return _dump(document), tuple(walker.paths)
+    return exact_json(document), tuple(walker.paths)

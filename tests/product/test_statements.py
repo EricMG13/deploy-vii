@@ -3,6 +3,7 @@
 from decimal import Decimal, localcontext
 
 import pytest
+from pydantic import ValidationError
 
 from deploy_vii.financial_adapter import kernel_registers
 from deploy_vii.financial_contracts import (
@@ -533,8 +534,6 @@ def test_income_tax_benefit_is_not_turned_into_an_expense() -> None:
 
 
 def test_noncanonical_sign_normalization_requires_explicit_source_evidence() -> None:
-    from pydantic import ValidationError
-
     row = line("sga", "sga", "20", 1, statement="IS")
     raw = row.model_dump()
     raw["sign_convention"] = "outflow_magnitude"
@@ -561,8 +560,6 @@ def test_noncanonical_sign_normalization_requires_explicit_source_evidence() -> 
 
 @pytest.mark.parametrize("coefficient", [True, False, 1.0, "1", 0, 2])
 def test_statement_coefficients_are_exact_integer_signs(coefficient: object) -> None:
-    from pydantic import ValidationError
-
     from deploy_vii.financial_contracts import StatementContribution
 
     with pytest.raises(ValidationError):
@@ -610,3 +607,22 @@ def test_all_statement_balances_require_consistent_same_date_values() -> None:
     value = value.model_copy(update={"statement_lines": (*value.statement_lines[:-1], consistent)})
     pack, review = freeze(value)
     assert validate_financial_review(pack, review) == ()
+
+
+def test_the_sign_evidence_messages_name_their_remedy() -> None:
+    """Task 7.0f: a REPAIR block should say what to change (E1 batch 4)."""
+    raw = line("sga", "sga", "20", 1, statement="IS").model_dump()
+    raw["sign_convention"] = "outflow_magnitude"
+    with pytest.raises(ValidationError) as missing:
+        StatementLine.model_validate(raw)
+    assert (
+        "outflow magnitude normalization requires source evidence: cite the span that prints "
+        "the magnitude in `sign_citations`, or use `sign_convention: signed`"
+    ) in str(missing.value)
+    raw["statement"] = "BS"
+    with pytest.raises(ValidationError) as balance:
+        StatementLine.model_validate(raw)
+    assert (
+        "balance-sheet amounts are signed balances, not outflow magnitudes: use "
+        "`sign_convention: signed`"
+    ) in str(balance.value)

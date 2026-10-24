@@ -177,11 +177,16 @@ def test_derived_operand_gaps_keep_parent_and_operand_periods() -> None:
 def test_binding_scope_collision_does_not_attach_unrelated_dates_to_context_gap() -> None:
     pack, context, financial, definition, binding = case()
     source = context.sources[0]
+    # Task 7.14: one entity's historical scopes must share a currency (the validator rejects a
+    # difference), so the differing currency sits on a forecast scope, which is only a gap.
     source = source.model_copy(
         update={
             "scopes": (
                 source.scopes[0].model_copy(update={"scope_id": "issuer"}),
-                source.scopes[1].model_copy(update={"currency": "EUR"}),
+                source.scopes[1],
+                source.scopes[1].model_copy(
+                    update={"scope_id": "outlook", "period_kind": "forecast", "currency": "EUR"}
+                ),
             )
         }
     )
@@ -193,7 +198,7 @@ def test_binding_scope_collision_does_not_attach_unrelated_dates_to_context_gap(
         for g in report.gaps
         if g.origin == "context" and "Different source currency" in g.description
     )
-    assert {p.reference for p in gap.periods} == {"issuer", "Q2"}
+    assert {p.reference for p in gap.periods} == {"issuer", "Q2", "outlook"}
 
 
 def test_kpi_gap_tracks_actual_operand_bases_and_null_adapter_inputs() -> None:

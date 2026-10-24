@@ -25,6 +25,7 @@ from deploy_vii.narrative import (
 from deploy_vii.narrative_projection import _fields, project_narrative
 from deploy_vii.prose import bind
 from deploy_vii.report_view import resolve
+from tests.product.evidence import evidence_path
 from tests.product.oracle import expected_by_fact
 from tests.product.test_canonical_gaps import case
 from tests.product.test_canonical_tables import cells
@@ -255,9 +256,7 @@ def test_narrative_preview_offline_exact_claims_and_provenance(
     assert line in markdown.split("\n") and "interface-fact:" not in line
     assert claim.claim_id in line
     assert "<script>window.injected" not in markdown and "<img src" not in markdown
-    evidence = (
-        Path("artifacts/rendering/narrative-projection") / tmp_path.parent.name / tmp_path.name
-    )
+    evidence = evidence_path("narrative-projection", tmp_path)
     evidence.mkdir(parents=True)
     for name in ("view.json", "tables.md", "complete.json", "candidate.html"):
         (evidence / name).write_bytes((path.parent / name).read_bytes())

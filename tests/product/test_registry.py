@@ -86,7 +86,17 @@ def test_coverage_map_cp_model_matches_dc5() -> None:
     deferred = contract["deferred"]["xlsx_workbook"]
     assert "Credit Snapshot" in deferred["required_sheet_names"]
     assert "DC-5" in deferred["reason"]
-    assert entry["implementation"].startswith("partial")
+    assert entry["implementation"].startswith("implemented")
     edges = {(e["source"], e["target"]) for e in coverage["reference_edges"]}
     assert ("CP-1", "CP-MODEL") in edges
     assert ("CP-0", "CP-MODEL") not in edges
+
+
+def test_coverage_map_cp1a_records_task_7_2() -> None:
+    path = Path(__file__).resolve().parents[2] / "docs/methodology/r14-coverage.json"
+    coverage = json.loads(path.read_text())
+    entry = next(m for m in coverage["modules"] if m["module_id"] == "CP-1A")
+    assert entry["implementation"] == (
+        "partial (contract, validator, bindings; T2D.8/T2D.9 derived in Python; live E1 pending)"
+    )
+    assert entry["analytical_qualification"] == "unrun"

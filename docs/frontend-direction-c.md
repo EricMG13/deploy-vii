@@ -190,3 +190,11 @@ resolved text. The raw run text never reaches a text node, and a claim that does
 stops the render. Tested by `test_claim_runs_render_through_runs_renderer` (browser) and
 `test_claim_runs_reach_the_data_island_resolved`. The Front Page shows no claims, so the
 pixel baselines are unchanged.
+
+## Observations for the design pass
+
+Recorded, not changed:
+
+- Front Page company panel (M7 task 7.10, from the real-pack render of the first full
+  chain): prose cells such as the business description and the country render in monospace.
+  Recorded for the design pass against the design-system reference.

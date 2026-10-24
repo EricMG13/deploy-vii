@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field, ValidationError
 
 from deploy_vii.canonical_audit import _positions
-from deploy_vii.contracts import Citation, Contract, Hash, Identifier
+from deploy_vii.contracts import PREFILLED_MARKER, Citation, Contract, Hash, Identifier
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_validation import records, validate_financial_review
 from deploy_vii.preparation import PreparedPack
@@ -19,8 +19,10 @@ class BookEntityBinding(Contract):
 
 class FinancialContextBinding(Contract):
     schema_version: Literal["financial-context-binding/1"] = "financial-context-binding/1"
-    financial_review_sha256: Hash
-    source_context_review_sha256: Hash
+    financial_review_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "financial-review"})
+    source_context_review_sha256: Hash = Field(
+        json_schema_extra={PREFILLED_MARKER: "source-context-review"}
+    )
     books: Annotated[tuple[BookEntityBinding, ...], Field(min_length=1, max_length=20)]
 
 

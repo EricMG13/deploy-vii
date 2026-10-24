@@ -5,6 +5,7 @@ import hashlib
 import json
 import socket
 import stat
+import tomllib
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -12,12 +13,20 @@ from typing import Any
 
 import pytest
 
+from deploy_vii.cp1_workflow import (
+    PROMOTED,
+    FinancialStage,
+    FinancialSubmission,
+    write_cp1_envelope,
+)
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live import cli
+from deploy_vii.live.catalog import PinnedCandidate
 from deploy_vii.live.client import CHAT_URL, KEY_URL, Request, Response
 from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import Ledger
-from deploy_vii.live.prompts import schema_text
+from deploy_vii.live.prompts import QUALITY_BLOCK_ID, schema_text
 from deploy_vii.live.schema import (
     VariantRefused,
     bisect_variant,
@@ -26,6 +35,8 @@ from deploy_vii.live.schema import (
     strict_copy,
     strict_schema,
 )
+from deploy_vii.live.submission import quality_inputs
+from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import modules
 from tests.product.live_support import (
     FAKE_KEY,
@@ -36,9 +47,15 @@ from tests.product.live_support import (
     make_rtf_key,
     ok,
 )
-from tests.product.test_execution import fixture_store
+from tests.product.test_business_context import submission_fixture
+from tests.product.test_cp1_workflow import at_ceiling
+from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
+from tests.product.test_live_credit import ACCOUNT, CREDIT_402, IN_FLIGHT_402
+from tests.product.test_live_runner import no_wait
+from tests.product.test_narrative import populated
 from tests.product.test_readiness import as_submission, readiness_fixture
+from tests.product.test_workflow import cp1_case
 
 LUNA, GLM, DEEPSEEK = "openai/gpt-6-luna", "z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017"
 SETTINGS = """
@@ -132,10 +149,15 @@ class Rig:
         ]
         return out + (["--cap", cap] if cap else [])
 
-    def run(self, argv: list[str], responder: cli.Transport) -> int:
+    def run(
+        self,
+        argv: list[str],
+        responder: cli.Transport,
+        sleep: Callable[[float], None] = no_wait,
+    ) -> int:
         parser = argparse.ArgumentParser()
         cli.configure(parser)
-        return cli.execute(parser.parse_args(argv), transport=responder)
+        return cli.execute(parser.parse_args(argv), transport=responder, sleep=sleep)
 
     def report(self, batch: str = "b1") -> str:
         return (self.reports / f"live-{batch}.md").read_text(encoding="utf-8")
@@ -258,6 +280,52 @@ def test_unsupported_module_fails_before_spending(rig: Rig) -> None:
     assert responder.requests == [] and not (rig.reports / "live-b1.md").exists()
 
 
+class StepResponder(Responder):
+    """Answers each chat call with the content for its step (the response_format name)."""
+
+    def __init__(self, contents: dict[str, str]) -> None:
+        super().__init__("")
+        self.contents = contents
+
+    def __call__(self, request: Request) -> Response:
+        if request.url != KEY_URL:
+            step = json.loads(request.body or b"{}")["response_format"]["json_schema"]["name"]
+            self.content = self.contents[step]
+        return super().__call__(request)
+
+
+def test_module_cp1a_runs_cp0_then_its_one_step(rig: Rig) -> None:
+    """Task 7.2: `module --module CP-1A` (or its alias CP-2C) is CP-0, then business_context."""
+    contents = {
+        "source_readiness": rig.review,
+        "business_context": submission_fixture().model_dump_json(),
+    }
+    responder = StepResponder(contents)
+    assert rig.run(rig.argv("module", "--module", "CP-2C"), responder) == 0
+    rows = step_lines(rig.report(), "module-00")
+    assert [(r[1], r[2], r[6]) for r in rows] == [
+        ("cp-1a", "source_readiness", "accepted"),
+        ("cp-1a", "business_context", "accepted"),
+    ]
+    assert len(responder.requests) == 2
+
+
+def test_module_cp1a_records_a_cp0_that_does_not_authorise_it(rig: Rig) -> None:
+    document = json.loads(rig.review)
+    for consumer in document["consumers"]:
+        if consumer["module_id"] == "CP-1A":
+            consumer["readiness"] = "CONDITIONAL"
+            consumer["missing_source"] = "Ownership filings"
+    responder = StepResponder({"source_readiness": json.dumps(document)})
+    assert rig.run(rig.argv("module", "--module", "CP-1A"), responder) == 0
+    rows = step_lines(rig.report(), "module-00")
+    assert [(r[2], r[6]) for r in rows] == [
+        ("source_readiness", "accepted"),
+        ("business_context", "not-authorized"),
+    ]
+    assert len(responder.requests) == 1  # nothing was sent for CP-1A
+
+
 def test_probe_draws_each_eligible_model_and_stops_a_cell_on_rejection(rig: Rig) -> None:
     responder = Responder(rig.review, junk_after_first=True)
     assert rig.run(rig.argv("probe", "--draws-per-model", "2"), responder) == 0
@@ -292,9 +360,34 @@ def test_regression_order_is_seeded_and_matched(rig: Rig) -> None:
             r[3] for r in step_lines(rig.report(batch), f"{case}-") if r[2] == "source_readiness"
         ]
 
-    for case in ("cp0", "cp1"):
+    for case in ("cp0", "cp1", "cp1a"):  # task 7.0h: cp1a follows cp1, drawing after them
         assert sorted(order("r1", case)) == sorted([LUNA, GLM, DEEPSEEK])  # matched arms
         assert order("r1", case) == order("r2", case)  # same seed, same order
+    cells = [r[1] for r in step_lines(rig.report("r1"), "cp") if r[2] == "source_readiness"]
+    assert cells == ["cp0"] * 3 + ["cp1"] * 3 + ["cp1a"] * 3
+
+
+def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
+    assert cli.REGRESSION_CASES == (
+        ("cp0", cli.CP0_STEPS),
+        ("cp1", cli.FULL_CHAIN),
+        ("cp1a", cli.CP1A_CHAIN),
+    )
+    assert cli.CP1A_CHAIN[-1] == "business_context" and cli.CP1A_CHAIN[:-1] == cli.CP0_STEPS
+    # Task 7.4: the CP-1 chain ends in the QA review whose acceptance promotes CP-1.
+    assert cli.CP1_CHAIN == ("source_context", "financials", "narrative", "readiness", "quality")
+    assert cli.FULL_CHAIN == (*cli.CP0_STEPS, *cli.CP1_CHAIN)
+
+
+def test_the_cp1_module_and_regression_cells_plan_five_cp1_steps() -> None:
+    (module,) = cli._module_cells("CP-1", 7)
+    assert module.steps == cli.FULL_CHAIN and module.steps[1:] == cli.CP1_CHAIN
+    pool = fixture_pool()
+    cells = cli._regression_cells(pool, [item.slug for item in pool.eligible], 7)
+    planned = {cell.case_id: cell.steps for cell in cells}
+    assert planned["cp1"] == ("source_readiness", *cli.CP1_CHAIN)
+    assert planned["cp1"][-1] == "quality" and len(planned["cp1"]) == 6
+    assert planned["cp0"] == cli.CP0_STEPS and planned["cp1a"] == cli.CP1A_CHAIN
 
 
 def test_cap_exhaustion_stops_the_batch_and_sends_nothing(rig: Rig) -> None:
@@ -425,6 +518,118 @@ def test_credit_exhaustion_mid_batch_aborts_cleanly_with_its_own_exit_code(
     assert "Traceback" not in out and FAKE_KEY not in out
     assert "Stopped: aborted: CreditExhausted" in rig.report()
     assert len(served.requests) == 2  # the 402 stopped the batch: no later cell, no other model
+
+
+def refuses_after_first(served: Responder, *bodies: bytes) -> Callable[[Request], Response]:
+    """Answer the first chat call, then each of `bodies` as a 402, then answer again."""
+    queue = list(bodies)
+
+    def transport(request: Request) -> Response:
+        if served.requests and request.url != KEY_URL and queue:
+            served.requests.append(request)
+            return Response(402, queue.pop(0))
+        return served(request)
+
+    return transport
+
+
+def test_an_in_flight_402_mid_batch_waits_and_retries_and_both_attempts_are_reported(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 7.8 (batch e1-cp1-8): the in-flight refusal no longer aborts the batch."""
+    served = Responder(rig.review)
+    waits: list[float] = []
+    code = rig.run(rig.argv("canary"), refuses_after_first(served, IN_FLIGHT_402), waits.append)
+    assert code == 0 and waits == [120]
+    rows = step_lines(rig.report(), "canary-")
+    assert rows[0][6:8] == ["accepted", "ok"]
+    assert rows[1][6:9] == ["no-response", "insufficient_credit", "0"]
+    assert rows[2][7] == "ok"  # the re-send got a model answer (the validator's verdict aside)
+    assert rows[1][5] != rows[2][5] and rows[1][2] == rows[2][2]  # same step, a new attempt
+    assert len(rows) == len(served.requests)  # every chat call has its row
+    assert "- Stopped: no" in rig.report()
+    assert ACCOUNT not in capsys.readouterr().out
+
+
+def test_a_second_in_flight_402_aborts_naming_both_attempts(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    served = Responder(rig.review)
+    waits: list[float] = []
+    transport = refuses_after_first(served, IN_FLIGHT_402, IN_FLIGHT_402)
+    code = rig.run(rig.argv("canary"), transport, waits.append)
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_CREDIT == 4 and waits == [120]
+    assert "reason in_flight_budget_exhausted" in out and "again after one retry of" in out
+    assert "ticket pending; coordinator decision (DC-8)" in out
+    stopped = next(line for line in rig.report().splitlines() if line.startswith("- Stopped:"))
+    assert stopped.startswith("- Stopped: aborted: CreditExhausted (reason in_flight_budget")
+    assert len(served.requests) == 3
+    # The first refusal has its row; the raising re-send is named on the abort line.
+    rows = step_lines(rig.report(), "canary-")
+    assert [row[6:8] for row in rows] == [
+        ["accepted", "ok"],
+        ["no-response", "insufficient_credit"],
+    ]
+    assert rows[1][5] in out
+
+
+def first_refused_row(rig: Rig) -> list[str]:
+    rows = step_lines(rig.report(), "canary-")
+    assert len(rows) == 2 and rows[0][6] == "accepted"
+    assert rows[1][6:9] == ["no-response", "insufficient_credit", "0"]
+    return rows[1]
+
+
+def test_a_cap_refusal_on_the_re_send_still_reports_the_refused_attempt(rig: Rig) -> None:
+    """Fix round 1 (F1): the refused attempt is reported even when the re-send raises."""
+    served = Responder(rig.review)
+    ledger_path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b1.jsonl"
+
+    def elsewhere_takes_the_cap(seconds: float) -> None:
+        # Something outside this batch reserves what is left while the runner waits.
+        ledger = cli.open_ledger(ledger_path)
+        ledger.reserve("outside-this-batch", ledger.state().remaining)
+
+    code = rig.run(
+        rig.argv("canary"), refuses_after_first(served, IN_FLIGHT_402), elsewhere_takes_the_cap
+    )
+    assert code == cli.EXIT_CAP and len(served.requests) == 2  # the re-send was never sent
+    first_refused_row(rig)
+    assert "- Stopped: cap: " in rig.report()
+
+
+def test_a_transport_error_on_the_re_send_still_reports_the_refused_attempt(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    served = Responder(rig.review)
+    refusals = refuses_after_first(served, IN_FLIGHT_402)
+
+    def then_the_connection_drops(request: Request) -> Response:
+        if request.url != KEY_URL and len(served.requests) == 2:
+            served.requests.append(request)
+            raise ConnectionError("reset")
+        return refusals(request)
+
+    waits: list[float] = []
+    code = rig.run(rig.argv("canary"), then_the_connection_drops, waits.append)
+    assert code == cli.EXIT_FAILED and waits == [120] and len(served.requests) == 3
+    first_refused_row(rig)
+    assert "- Stopped: aborted: TransportError" in rig.report()
+    assert "TransportError" in capsys.readouterr().out
+
+
+def test_a_credit_402_aborts_with_the_affordable_budget_on_both_lines(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 7.8 (batch e1-cp1-9): the owner sees what the balance can afford."""
+    served = Responder(rig.review)
+    code = rig.run(rig.argv("canary"), refuses_after_first(served, CREDIT_402))
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_CREDIT
+    budget = "reason openrouter_credits; requested max_tokens 128000, affordable 91075"
+    assert budget in out and ACCOUNT not in out
+    assert f"- Stopped: aborted: CreditExhausted ({budget}; HTTP 402)" in rig.report()
 
 
 def test_a_402_inside_choices_stops_the_batch_as_dc8_requires(
@@ -570,11 +775,18 @@ def test_catalog_rule_report_says_so(rig: Rig) -> None:
     assert "- Pool: catalog rule" in rig.report()
 
 
-def test_the_one_model_catalog_rule_pool_runs_sol_at_high_with_a_trivial_draw(rig: Rig) -> None:
-    """Decision 0005 amendment: the project's pool (settings/project.toml) is Sol alone."""
+def test_the_one_model_catalog_rule_pool_runs_sol_at_medium_with_a_trivial_draw(
+    rig: Rig,
+) -> None:
+    """Decision 0005 amendment: the project's pool (settings/project.toml) is Sol alone, at the
+    project's default effort, `medium` since the 24 Oct 2026 amendment (task 7.15 item 8)."""
     project = (Path("settings") / "project.toml").read_text(encoding="utf-8")
     block = project[project.index("[[model_tests.candidates]]") : project.index("[frontend]")]
-    template = SETTINGS.format(key=rig.key)
+    effort = tomllib.loads(project)["model_tests"]["default_effort"]
+    template = SETTINGS.format(key=rig.key).replace(
+        'default_effort = "high"', f'default_effort = "{effort}"'
+    )
+    assert f'default_effort = "{effort}"' in template
     start, end = template.index("[[model_tests.candidates]]"), template.index("[ci]")
     rig.settings.write_text(template[:start] + block + template[end:], encoding="utf-8")
     catalog = rig.root / "sol.json"
@@ -584,12 +796,12 @@ def test_the_one_model_catalog_rule_pool_runs_sol_at_high_with_a_trivial_draw(ri
     argv = [*rig.argv("module", "--module", "CP-0"), "--catalog", str(catalog)]
     assert rig.run(argv, responder) == 0
     assert {b["model"] for b in chat_bodies(responder)} == {SOL}
-    assert {json.dumps(b["reasoning"]) for b in chat_bodies(responder)} == {'{"effort": "high"}'}
+    assert {json.dumps(b["reasoning"]) for b in chat_bodies(responder)} == {'{"effort": "medium"}'}
     text = rig.report()
     assert "- Pool: catalog rule" in text
     pool_section = text.split("## Pool", 1)[1].split("## Steps", 1)[0]
     (row,) = step_lines(pool_section, "openai/")
-    assert row[0] == SOL and row[1] == "yes" and row[3:5] == ["high (default)", "high"]
+    assert row[0] == SOL and row[1] == "yes" and row[3:5] == ["medium (default)", "medium"]
     assert len([line for line in pool_section.splitlines() if line.startswith("| ")]) == 3
     manifests = list((rig.root / "artifacts" / "model-tests" / "b1").rglob("manifest.json"))
     draws = {json.loads(m.read_text())["draw"]["algorithm"] for m in manifests}
@@ -676,7 +888,7 @@ def test_a_cp0_that_does_not_authorize_cp1_ends_each_cell_and_the_batch_goes_on(
     for gated, refused in zip(rows[::2], rows[1::2], strict=True):
         assert refused[3:5] == gated[3:5]  # the cell's drawn model and seed
         # No attempt, status not-authorized, class ok, USD 0, no issues.
-        assert refused[5:] == ["none", "not-authorized", "ok", "0", "0"]
+        assert refused[5:11] == ["none", "not-authorized", "ok", "0", "0", "-"]
     assert "- Stopped: no" in text
     assert "- Cells planned: 3; steps run: 3; not authorized by CP-0: 3" in text
     batch = rig.root / "artifacts" / "model-tests" / "b1"
@@ -792,6 +1004,46 @@ def test_a_non_positive_max_tokens_is_refused_by_the_parser(value: str) -> None:
             parser.parse_args([*word, "--cap", "1", "--directory", "d", "--max-tokens", value])
 
 
+def _deadlines(rig: Rig, batch: str) -> set[tuple[float, float]]:
+    manifests = list((rig.root / "artifacts" / "model-tests" / batch).rglob("manifest.json"))
+    assert manifests
+    budgets = [json.loads(m.read_text())["budgets"] for m in manifests]
+    return {(b["timeout_s"], b["deadline_s"]) for b in budgets}
+
+
+def test_timeout_reaches_every_request_manifest_and_the_report_header(rig: Rig) -> None:
+    """Task 7.0c: the request deadline is per call, every model; the default stays 600 s."""
+    argv = [*rig.argv("probe"), *four_models(rig), "--models", FOUR, "--timeout", "1800"]
+    assert rig.run(argv, Responder(rig.review)) == 0
+    assert _deadlines(rig, "b1") == {(1800.0, 1800.0)}
+    assert "- Timeout: 1800.0 s per call (every model)" in rig.report()
+    argv = [*rig.argv("probe", batch="b2"), *four_models(rig), "--models", FOUR]
+    assert rig.run(argv, Responder(rig.review)) == 0
+    assert _deadlines(rig, "b2") == {(600.0, 600.0)}
+    assert "- Timeout: 600.0 s per call (every model)" in rig.report("b2")
+
+
+def test_exponent_notation_timeout_is_accepted_and_reaches_the_manifests(rig: Rig) -> None:
+    argv = [*rig.argv("probe"), *four_models(rig), "--models", FOUR, "--timeout", "1e3"]
+    assert rig.run(argv, Responder(rig.review)) == 0
+    assert _deadlines(rig, "b1") == {(1000.0, 1000.0)}
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf", "slow"])
+def test_a_bad_timeout_is_refused_by_the_parser(value: str, rig: Rig) -> None:
+    parser = argparse.ArgumentParser()
+    cli.configure(parser)
+    for word in (["probe"], ["module", "--module", "CP-0"], ["regression"], ["canary"]):
+        assert parser.parse_args([*word, "--cap", "1", "--directory", "d"]).timeout == 600.0
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args([*word, "--cap", "1", "--directory", "d", "--timeout", value])
+        assert refused.value.code == 2
+    with pytest.raises(SystemExit):
+        parser.parse_args([*rig.argv("probe"), "--timeout", value])
+    assert not (rig.root / "artifacts" / "model-tests" / ".ledgers").exists()
+    assert not list(rig.reports.glob("live-*.md"))
+
+
 def test_one_batch_with_an_ineligible_model_a_refused_cp1_and_a_deadline_hold_then_reconcile(
     rig: Rig,
 ) -> None:
@@ -840,21 +1092,84 @@ def test_one_batch_with_an_ineligible_model_a_refused_cp1_and_a_deadline_hold_th
     assert all(not a[0].endswith("source_context-1") for a in attempts)
 
     assert rig.run(reconcile_argv(rig), served) == 0
-    assert ledger_state() == before  # nothing to look up: the hold stands, no adjust line
+    # Task 7.0: nothing to look up, but it is the only hold and the account usage moved by
+    # exactly the other two attempts' costs, so the deadline call is adjusted to 0.
+    reserved_after, spent_after, attempts_after = ledger_state()
+    assert reserved_after == 0 and spent_after == Decimal("0.00066")
+    assert [a for a in attempts_after if a[0] == held[0]] == [(held[0], Decimal(0), Decimal(0))]
+    (record,) = [a for a in ledger(rig).state().attempts if a.attempt_id == held[0]]
+    assert record.adjustment is not None and record.adjustment.source == "account-usage-delta"
     reconciled = (rig.reports / "live-b1-reconciled.md").read_text(encoding="utf-8")
     statuses = sorted(r[6] for r in step_lines(reconciled, "probe-"))
     assert statuses == sorted(
         ["no-response", "ineligible", "accepted", "accepted", "not-authorized", "not-authorized"]
     )
     (outcome,) = [
-        line for line in reconciled.splitlines() if held[0] in line and "unresolved" in line
+        line for line in reconciled.splitlines() if held[0] in line and "reconciled |" in line
     ]
-    assert "no provider_request_id recorded; nothing to look up" in outcome
-    assert "Looked up this run: 1; reconciled 0, unresolved 1" in reconciled
+    assert "no generation id; account usage moved 0.00066" in outcome
+    assert "Looked up this run: 1; reconciled 1, unresolved 0" in reconciled
 
 
 def ledger(rig: Rig, batch: str = "b1") -> Ledger:
     return cli.open_ledger(rig.root / "artifacts" / "model-tests" / ".ledgers" / f"{batch}.jsonl")
+
+
+# --- 7.0: report tables -----------------------------------------------------------------------
+
+
+def test_a_cell_without_model_output_is_counted_as_no_response_never_as_a_rejection(
+    rig: Rig,
+) -> None:
+    """Probe-5 analysis: the cohort table had no column for no-response outcomes. Luna's call
+    passes its deadline (held), GLM's provider fails inside a 200 (5xx-in-200), DeepSeek returns
+    a payload the validator rejects; only DeepSeek's cell is a rejection."""
+    served = Responder("{}")
+
+    def transport(request: Request) -> Response:
+        if request.url == KEY_URL:
+            return served(request)
+        model = json.loads(request.body or b"{}")["model"]
+        served.requests.append(request)
+        if model == LUNA:
+            raise TimeoutError(f"wall-clock deadline of {request.timeout_s} s exceeded")
+        if model == GLM:
+            return Response(200, choice_error_body(error={"code": 502, "message": "Upstream"}))
+        return ok("{}", model=model)
+
+    assert rig.run(rig.argv("probe"), transport) == 0
+    text = rig.report()
+    rows = {r[3]: r for r in step_lines(text, "probe-")}
+    assert rows[LUNA][6:8] == ["no-response", "timeout"] and rows[LUNA][8].startswith("reservation")
+    assert rows[GLM][6:8] == ["no-response", "http_error"]
+    assert rows[LUNA][9] == rows[GLM][9] == "-"  # no payload reached the validator
+    assert rows[DEEPSEEK][6] == "rejected" and int(rows[DEEPSEEK][9]) > 0
+    cohorts = text.split("## Cohorts", 1)[1]
+    assert "| Cohort | Attempts | Accepted | Rejected | No response | Pooled | Qualification |" in (
+        cohorts
+    )
+    (pool,) = step_lines(cohorts, "openrouter-pool")
+    assert pool[1:5] == ["3", "0", "1", "2"]
+
+
+def test_the_pool_table_prints_the_prompt_token_bound_beside_the_reservation(rig: Rig) -> None:
+    assert rig.run(rig.argv("module", "--module", "CP-0"), Responder(rig.review)) == 0
+    text = rig.report()
+    pool_section = text.split("## Pool", 1)[1].split("## Steps", 1)[0]
+    assert (
+        "| Model | Eligible | Reason | Requested effort | Effort sent | Prompt token bound "
+        "(largest) | Reserved USD per attempt (largest) |" in pool_section
+    )
+    (manifest,) = (rig.root / "artifacts" / "model-tests" / "b1").rglob("manifest.json")
+    record = json.loads(manifest.read_text(encoding="utf-8"))
+    metrics = json.loads((manifest.parent / "metrics.json").read_text(encoding="utf-8"))
+    bound = metrics["estimate"]["prompt_tokens_upper_bound"]
+    assert isinstance(bound, int) and bound > 0
+    drawn = [r for r in step_lines(pool_section, "") if r[0] == record["model"]]
+    (row,) = drawn
+    assert row[5] == str(bound) and Decimal(row[6]) == Decimal(record["budgets"]["reserved_usd"])
+    undrawn = [r for r in step_lines(pool_section, "") if r[0] not in {record["model"], "Model"}]
+    assert undrawn and all(r[5] == "-" for r in undrawn if r[0] != "---")
 
 
 # --- 2.11: `live schema-check` ----------------------------------------------------------------
@@ -966,8 +1281,8 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
     others = [rows[key] for key in rows if key != (LUNA, "source_context")]
     assert [row[2:6] for row in others] == [["accepted", "truncated", "200", "0.0000123"]] * 3
     assert rows[(GLM, "source_context")][8] == (
-        "nullable-enum, const-to-enum, drop-length, nullable-array-anyof"
-    )
+        "nullable-enum, const-to-enum, drop-length, nullable-array-anyof, drop-prefilled"
+    )  # task 7.0i: pack_sha256 and every citation's source_sha256 are filled by Python
     readiness = rows[(GLM, "source_readiness")]
     assert readiness[8] == "none" and readiness[10:] == ["-", "-"]
     # The Keywords column: every JSON-Schema keyword of the sent schema, annotations left out.
@@ -997,11 +1312,51 @@ def test_schema_check_sends_one_minimal_strict_call_per_model_and_step_and_repor
         "const-to-enum",
         "drop-length",
         "nullable-array-anyof",
+        "drop-prefilled",
     ]
     assert record["journal"] == "none: schema-check submits nothing"
     # Nothing was submitted: no journal copy, the execution journal is unchanged.
     assert not (rig.store.directory / "live").exists()
     assert rig.store.read().content_hash() == journal
+
+
+DETAIL_ACCOUNT = "u-account-77"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        f"upstream refused: user_id={DETAIL_ACCOUNT}",  # not JSON: copied as it is
+        json.dumps({"error": {"type": "invalid_request_error", "user_id": DETAIL_ACCOUNT}}),
+    ],
+    ids=["not-json", "escaped-key"],
+)
+def test_schema_check_withholds_a_provider_detail_that_names_the_account_id(
+    rig: Rig, raw: str
+) -> None:
+    """Task 7.15 item 4, end to end: `error.metadata.raw` with a surviving `user_id` never
+    reaches `checks/classification.json`, the manifest or the report's `Provider detail`; the
+    fixed note stands in for the whole detail and the body is withheld (task 7.11 item 6)."""
+    error = {"code": 400, "message": "Provider returned error", "metadata": {"raw": raw}}
+    body = json.dumps({"error": error}).encode()
+    assert DETAIL_ACCOUNT.encode() in body and (b"user_id=" in body or b'\\"user_id\\"' in body)
+    responder = SchemaResponder({(LUNA, "source_context")}, refusal=body)
+    argv = check_argv(rig, "--models", LUNA, "--steps", "source_context")
+    assert rig.run(argv, responder) == 0
+    note = "<provider detail withheld: account id>"
+    text = rig.report("s1")
+    row = check_rows(text)[(LUNA, "source_context")]
+    assert row[2:5] == ["http_error", "http_error", "400"] and row[11] == note
+    evidence = rig.root / "artifacts" / "model-tests" / "s1" / "schema-check"
+    (manifest,) = evidence.rglob("manifest.json")
+    directory = manifest.parent
+    classification = json.loads((directory / "checks" / "classification.json").read_text())
+    assert classification["error_detail"] == note
+    assert json.loads((directory / "manifest.json").read_text())["error_detail"] == note
+    assert json.loads((directory / "response.json").read_text())["body_text"] is None
+    for path in [*directory.rglob("*"), *rig.reports.rglob("*")]:
+        if path.is_file():
+            assert DETAIL_ACCOUNT not in path.read_text(encoding="utf-8", errors="replace"), path
 
 
 def test_schema_check_cap_refusal_sends_nothing_and_stops_the_batch(rig: Rig) -> None:
@@ -1081,7 +1436,9 @@ def test_a_400_that_does_not_name_the_schema_is_reported_and_never_blocks(rig: R
     assert row[10] == "no: the 400 does not name the schema"
     responder = Responder(rig.review)
     assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], responder) == 0
-    assert len(responder.requests) == 2  # CP-0, then source_context was sent
+    # CP-0, source_context and its step repair (task 7.0g), then the MC-7 repair attempt's
+    # source_context and its step repair: the responder answers every step with a CP-0 review.
+    assert len(responder.requests) == 5
     _, context = step_lines(rig.report(), "module-00")[:2]
     assert context[2] == "source_context" and context[6] != "ineligible"
 
@@ -1242,3 +1599,527 @@ def test_a_variant_that_cannot_be_built_is_reported_and_not_sent(
     sent = [schema for _, _, schema in responder.schemas()]
     assert all('"$ref"' in json.dumps(schema) for schema in sent)  # no inlined variant went out
     assert f"- {LUNA} readiness: none accepted" in text
+
+
+# --- 7.0e: the module driver dispatches the one MC-7 repair -----------------------------------
+
+# The Steps table's last column: `-` a first try of the first attempt, `step` the step's repair
+# within that attempt (task 7.0g), `1` the MC-7 repair attempt and `1+step` a step repair in it.
+REPAIR_COLUMN = 10
+BAD = "not json"
+OUTAGE = "outage"
+TRUNC = "truncated"  # a completion cut at the --max-tokens budget (finish_reason length)
+UPGRADE = "upgrade"  # a QA review that lifts one lineage above its ceiling (task 7.4)
+CRITICAL = "critical"  # a QA review with one open CRITICAL finding: QA Blocked (fix round 1)
+CHAIN = ("source_readiness", "source_context", "financials", "narrative", "readiness", "quality")
+
+
+class Chain:
+    """Fake transport for one CP-1 `module` cell. `script` lists, per chat call in order, the
+    step the cell must ask for and whether to answer it validly, with `BAD` (a payload the
+    validator rejects), `UPGRADE` (for `quality`: one lineage above its ceiling), `CRITICAL`
+    (for `quality`: an open CRITICAL finding, so QA is Blocked) or `OUTAGE` (HTTP 500: no model
+    output). Each valid payload is built from the cell's own journal, so a
+    step is accepted exactly as the validators would."""
+
+    def __init__(
+        self,
+        rig: Rig,
+        extraction: FinancialSubmission,
+        script: list[tuple[str, str]],
+        usage: str = "1.5",
+    ) -> None:
+        self.rig, self.extraction, self.script = rig, extraction, script
+        base = rig.store.read().attempts[-1]  # the case's CP-1 attempt: its source_context step
+        self.context = rig.store.payload(base.steps[0].payload_sha256)
+        self.requests: list[Request] = []
+        self.usage = Decimal(usage)
+        self.cell = "module-00"  # the cell journal the valid payloads are built from
+
+    def payload(self, step: str) -> str:
+        journal = Execution(self.rig.store.directory / "live" / "b1" / self.cell)
+        valid = {s.step_id: s for s in journal.read().attempts[-1].steps if s.status == "valid"}
+        if step == "source_readiness":
+            return self.rig.review
+        if step == "source_context":
+            return self.context
+        if step == "financials":
+            context_hash = valid["source_context"].content_hash()
+            return self.extraction.model_copy(
+                update={"context_step_sha256": context_hash}
+            ).model_dump_json()
+        if step == "narrative":
+            stage = FinancialStage.model_validate_json(step_text(journal, valid["financials"]))
+            return populated(stage.narrative_inputs).model_dump_json()
+        if step == "readiness":
+            inputs = DownstreamInputs.model_validate_json(step_text(journal, valid["narrative"]))
+            return DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+        assert step == "quality", step
+        # What a model returns: the at-ceiling review without the binding Python fills.
+        ticket = journal.read().attempts[-1].ticket_id
+        review = json.loads(at_ceiling(quality_inputs(journal, ticket)).model_dump_json())
+        del review["inputs_sha256"]
+        return json.dumps(review)
+
+    def upgraded(self) -> str:
+        """The quality review with its first Calculated lineage lifted to Directly Sourced."""
+        review = json.loads(self.payload("quality"))
+        evidence = review["claims"][0]["evidence"]
+        lifted = next(e for e in evidence if e["lineage_class"] == "Calculated")
+        lifted["lineage_class"] = "Directly Sourced"
+        return json.dumps(review)
+
+    def critical(self) -> str:
+        """The quality review with one open CRITICAL finding (its arithmetic blocks QA)."""
+        review = json.loads(self.payload("quality"))
+        review["findings"] = [
+            {
+                "finding_id": "qa.synthetic-critical",
+                "severity": "CRITICAL",
+                "status": "open",
+                "description": "Synthetic critical defect",
+                "references": [],
+                "resolution": None,
+            }
+        ]
+        return json.dumps(review)
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL:
+            return key_status(format(self.usage, "f"))
+        step, verdict = self.script[len(self.requests)]  # a call beyond the script fails loudly
+        self.requests.append(request)
+        self.usage += Decimal("0.00033")
+        if verdict == OUTAGE:
+            return Response(500, b"upstream down")
+        model = json.loads(request.body or b"{}")["model"]
+        if verdict == TRUNC:
+            return ok('{"sch', model=model, finish_reason="length")
+        if verdict == UPGRADE:
+            return ok(self.upgraded(), model=model)
+        if verdict == CRITICAL:
+            return ok(self.critical(), model=model)
+        return ok(BAD if verdict == BAD else self.payload(step), model=model)
+
+    def user_prompts(self) -> list[str]:
+        return [json.loads(r.body or b"{}")["messages"][1]["content"] for r in self.requests]
+
+
+def chain_rig(tmp_path: Path) -> tuple[Rig, FinancialSubmission]:
+    """A rig whose pack is the CP-1 case that passes every validator (fake transport only)."""
+    (tmp_path / "rig").mkdir(parents=True)
+    rig = Rig(tmp_path / "rig")
+    # The synthetic CP-1 case is large (its narrative step is not context-eligible at the
+    # production 3 bytes per token bound); this changes only the ineligibility test, not a request.
+    rig.settings.write_text(
+        SETTINGS.format(key=rig.key).replace("lower_bound = 3.0", "lower_bound = 300.0"),
+        encoding="utf-8",
+    )
+    (tmp_path / "case").mkdir()
+    store, _, extraction = cp1_case(tmp_path / "case")
+    rig.store = store
+    review = ReadinessReview.model_validate_json(
+        store.payload(store.read().attempts[0].steps[0].payload_sha256)
+    )
+    rig.review = as_submission(review).model_dump_json()
+    return rig, extraction
+
+
+def ok_steps(*steps: str) -> list[tuple[str, str]]:
+    return [(step, "ok") for step in steps]
+
+
+def module_rows(rig: Rig) -> list[list[str]]:
+    return step_lines(rig.report(), "module-00")
+
+
+def retained_manifests(rig: Rig) -> list[dict[str, Any]]:
+    batch = rig.root / "artifacts" / "model-tests" / "b1"
+    return [json.loads(p.read_text(encoding="utf-8")) for p in batch.glob("*/*/*/manifest.json")]
+
+
+def run_chain(
+    tmp_path: Path, script: list[tuple[str, str]], cap: str = "5.00"
+) -> tuple[Rig, Chain, int]:
+    rig, extraction = chain_rig(tmp_path)
+    chain = Chain(rig, extraction, script)
+    return rig, chain, rig.run(rig.argv("module", "--module", "CP-1", cap=cap), chain)
+
+
+def test_a_rejected_financials_step_is_repaired_within_its_attempt_and_the_cell_runs_on(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0g (a): the rejected step alone is re-sent with its own issues; the attempt goes on
+    to narrative and readiness and the module repair is not spent."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), *ok_steps(*CHAIN[2:])]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
+        ("source_readiness", "accepted", "-"),
+        ("source_context", "accepted", "-"),
+        ("financials", "rejected", "-"),
+        ("financials", "accepted", "step"),
+        ("narrative", "accepted", "-"),
+        ("readiness", "accepted", "-"),
+        ("quality", "accepted", "-"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 1 (module repair attempts 0, within-attempt step repairs 1)" in (
+        text
+    )
+    assert "- Stopped: no" in text and "| Issues | Repair |" in text
+    manifests = {m["attempt_id"]: m for m in retained_manifests(rig)}
+    links = manifests[rows[3][5]]["links"]
+    assert links["step_repair_of_attempt_id"] == rows[2][5]
+    assert links["repair_of_ticket_id"] is None and links["retry_of_attempt_id"] is None
+    assert manifests[rows[3][5]]["retries"]["step_try"] == 2
+    prompts = chain.user_prompts()
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, False, False]
+    assert "- (root): Invalid JSON" in prompts[3]
+
+
+def test_a_step_rejected_twice_falls_back_to_the_module_repair(tmp_path: Path) -> None:
+    """Task 7.0g (b): the step's own repair is rejected too, so the journal finishes the attempt
+    and the 7.0e module repair re-runs the whole module from its first step."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", BAD)]
+    script += ok_steps(*CHAIN[1:])
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
+        ("source_readiness", "accepted", "-"),
+        ("source_context", "accepted", "-"),
+        ("financials", "rejected", "-"),
+        ("financials", "rejected", "step"),
+        ("source_context", "accepted", "1"),
+        ("financials", "accepted", "1"),
+        ("narrative", "accepted", "1"),
+        ("readiness", "accepted", "1"),
+        ("quality", "accepted", "1"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 2 (module repair attempts 1, within-attempt step repairs 1)" in (
+        text
+    )
+    manifests = {m["attempt_id"]: m for m in retained_manifests(rig)}
+    assert manifests[rows[5][5]]["links"]["repair_of_ticket_id"] is not None
+    assert manifests[rows[5][5]]["links"]["step_repair_of_attempt_id"] is None
+    prompts = chain.user_prompts()
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 3 + [True, False, True] + [False] * 3
+
+
+def test_a_second_rejection_ends_the_cell_without_a_third_attempt(tmp_path: Path) -> None:
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", BAD)]
+    script += [("source_context", "ok"), ("financials", BAD), ("financials", BAD)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)  # nothing is sent beyond it
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "-"),
+        ("financials", "rejected", "step"),
+        ("source_context", "accepted", "1"),
+        ("financials", "rejected", "1"),
+        ("financials", "rejected", "1+step"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 3 (module repair attempts 1, within-attempt step repairs 2)" in (
+        text
+    )
+    assert "- Stopped: no" in text
+
+
+@pytest.mark.parametrize(
+    ("sent", "unsent", "counted"),
+    [
+        (3, ("financials", "ineligible", "step"), "0 (module repair attempts 0, within-attempt "),
+        (4, ("source_context", "ineligible", "1"), "1 (module repair attempts 0, within-attempt "),
+    ],
+)
+def test_a_repair_whose_first_step_is_ineligible_is_not_counted_as_dispatched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sent: int,
+    unsent: tuple[str, str, str],
+    counted: str,
+) -> None:
+    """An ineligible step is sealed unsent, so a repair that stops there sent nothing: the
+    step's repair within the attempt (3 calls fit) or the module repair attempt (4 fit)."""
+    original = PinnedCandidate.misfit
+    calls: list[int] = []
+
+    def misfit_after(self: PinnedCandidate, prompt_bound: int, max_tokens: int) -> str | None:
+        calls.append(prompt_bound)
+        if len(calls) > sent:  # the calls before the repair fit; the repair's first does not
+            return "context too small (test)"
+        return original(self, prompt_bound, max_tokens)
+
+    monkeypatch.setattr(PinnedCandidate, "misfit", misfit_after)
+    script = [*ok_steps(*CHAIN[:2]), *[("financials", BAD)] * (sent - 2)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == sent
+    rejected = [("financials", "rejected", "-"), ("financials", "rejected", "step")]
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        *rejected[: sent - 2],
+        unsent,
+    ]
+    assert f"- Repairs dispatched: {counted}" in rig.report()
+
+
+def test_a_truncated_first_try_is_not_resent_and_ends_the_cell(tmp_path: Path) -> None:
+    """Task 7.0h (a): a cut at the --max-tokens budget is no validator verdict the model can act
+    on, so the step's repair is left unused, no module repair begins and the cell ends."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", TRUNC)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 3  # nothing is re-sent
+    assert [(r[2], r[6], r[7], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "truncated", "-")
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 0 (module repair attempts 0, within-attempt step repairs 0)" in (
+        text
+    )
+    assert "- Truncated: 1" in text and "- Stopped: no" in text
+
+
+def test_a_truncated_step_repair_ends_the_cell_without_a_module_repair(tmp_path: Path) -> None:
+    """Task 7.0h (c): the validator rejects the first try, the re-send is cut at the budget."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", TRUNC)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 4
+    assert [(r[2], r[6], r[7], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "rejected", "ok", "-"),
+        ("financials", "rejected", "truncated", "step"),
+    ]
+    text = rig.report()
+    assert "- Repairs dispatched: 1 (module repair attempts 0, within-attempt step repairs 1)" in (
+        text
+    )
+    assert "- Truncated: 1" in text
+
+
+def test_a_cut_cell_does_not_stop_the_batch(rig: Rig) -> None:
+    """Task 7.0h (a): every cell of a regression is cut at its first step; each is counted and
+    the batch still plans, runs and reports all of them."""
+
+    def cut(request: Request) -> Response:
+        if request.url == KEY_URL:
+            return key_status("1.5")
+        model = json.loads(request.body or b"{}")["model"]
+        return ok('{"sch', model=model, finish_reason="length")
+
+    assert rig.run(rig.argv("regression", batch="r1"), cut) == 0
+    text = rig.report("r1")
+    assert "- Truncated: 9" in text and "- Cells planned: 9;" in text
+
+
+def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
+    """A no-response is no validator verdict: the journal ticket stays pending, so no repair
+    is begun, and the batch (here one cell) ends normally."""
+    script = [*ok_steps(*CHAIN[:2]), ("financials", OUTAGE)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == 3
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)][2:] == [
+        ("financials", "no-response", "-")
+    ]
+    assert "- Repairs dispatched: 0" in rig.report()
+
+
+def test_a_cap_that_cannot_cover_the_repair_ends_the_batch_without_a_partial_row(
+    tmp_path: Path,
+) -> None:
+    """The repair prompt carries the REPAIR block, so its request is longer than the first
+    attempt's (at this rig's 300 bytes per token the two reservations may still be equal, the
+    token bound being a ceiling). A cap equal to the first reservation covers that attempt, and
+    after its charge cannot cover the repair's: nothing is sent and the repair has no row."""
+    script = [("source_readiness", BAD), *ok_steps(*CHAIN)]
+    measured, chain_measured, _ = run_chain(tmp_path / "measure", script)  # ample cap
+    first, repair = ledger(measured).state().attempts[:2]
+    first_request, repair_request = chain_measured.requests[:2]
+    assert len(repair_request.body or b"") > len(first_request.body or b"")
+    assert repair.reserved_usd >= first.reserved_usd
+    rig, chain, status = run_chain(tmp_path / "capped", script, cap=format(first.reserved_usd, "f"))
+    assert status == cli.EXIT_CAP and len(chain.requests) == 1
+    text = rig.report()
+    assert "- Stopped: cap" in text and "- Repairs dispatched: 0" in text
+    assert [(r[2], r[6]) for r in module_rows(rig)] == [("source_readiness", "rejected")]
+
+
+def test_a_refused_repair_fails_the_batch_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = Execution.begin
+    calls: list[str] = []
+
+    def refuse_second(store: Execution, module_id: str) -> Attempt:
+        calls.append(module_id)
+        if calls.count("CP-1") == 3:  # the case's own begin, the cell's first, then the repair
+            raise ValueError("Input set is settled or its one repair has been consumed")
+        return original(store, module_id)
+
+    monkeypatch.setattr(Execution, "begin", refuse_second)
+    script = [*ok_steps(*CHAIN[:2]), ("financials", BAD), ("financials", BAD)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == cli.EXIT_FAILED and len(chain.requests) == 4
+    assert "Stopped: aborted: ValueError" in rig.report()
+
+
+def test_a_cp0_accepted_on_repair_still_authorizes_cp1(tmp_path: Path) -> None:
+    script = [("source_readiness", BAD), *ok_steps(*CHAIN)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)] == [
+        ("source_readiness", "rejected", "-"),
+        ("source_readiness", "accepted", "1"),
+        ("source_context", "accepted", "-"),
+        ("financials", "accepted", "-"),
+        ("narrative", "accepted", "-"),
+        ("readiness", "accepted", "-"),
+        ("quality", "accepted", "-"),
+    ]
+    assert "- Repairs dispatched: 1" in rig.report()
+    assert "<<<REPAIR" in chain.user_prompts()[1]
+
+
+def cell_journal(rig: Rig, cell: str = "module-00") -> Execution:
+    return Execution(rig.store.directory / "live" / "b1" / cell)
+
+
+def test_a_cp1_module_cell_runs_five_steps_and_its_quality_review_promotes_cp1(
+    tmp_path: Path,
+) -> None:
+    """Task 7.4: the fifth step's accepted review is the promotion, so a live cell reaches a
+    promoted CP-1 head whose canonical envelope exports."""
+    rig, chain, status = run_chain(tmp_path, ok_steps(*CHAIN))
+    assert status == 0 and len(chain.requests) == len(CHAIN)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in module_rows(rig)] == [
+        (step, "accepted", "-") for step in CHAIN
+    ]
+    journal = cell_journal(rig)
+    attempt = journal.read().attempts[-1]
+    assert attempt.status == "finished" and not attempt.issues
+    assert [s.step_id for s in attempt.steps] == list(CHAIN[1:])
+    head = next(h for h in journal.read().heads if h.module_id == "CP-1")
+    assert head.status == "restricted" and head.qualification == PROMOTED
+    exported = write_cp1_envelope(journal, tmp_path / "envelope")
+    assert exported == tmp_path / "envelope" / "envelope.md"
+    body = json.loads(chain.requests[-1].body or b"{}")
+    assert body["response_format"]["json_schema"]["name"] == "quality"
+    assert f"<<<CONTEXT id={QUALITY_BLOCK_ID} sha256=" in body["messages"][1]["content"]
+
+
+def test_a_rejected_quality_review_takes_the_module_repair_and_promotes_on_it(
+    tmp_path: Path,
+) -> None:
+    """R2: `quality` settles the module, so its rejection finishes the attempt (no step repair
+    within it); the 7.0e module repair re-runs the CP-1 chain from source_context and the
+    repaired review carries the rejected one's issues."""
+    script = [*ok_steps(*CHAIN[:-1]), ("quality", UPGRADE), *ok_steps(*CHAIN[1:])]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows] == [
+        *[(step, "accepted", "-") for step in CHAIN[:-1]],
+        ("quality", "rejected", "-"),
+        *[(step, "accepted", "1") for step in CHAIN[1:]],
+    ]
+    assert "- Repairs dispatched: 1 (module repair attempts 1, within-attempt step repairs 0)" in (
+        rig.report()
+    )
+    prompts = chain.user_prompts()
+    assert [("<<<REPAIR" in p) for p in prompts] == [False] * 6 + [False] * 4 + [True]
+    assert "QA lineage upgrade rejected: " in prompts[-1]
+    journal = cell_journal(rig)
+    first, repair = journal.read().attempts[-2:]
+    assert first.status == "finished" and first.step_repairs == ()
+    assert repair.number == 1 and repair.status == "finished" and not repair.issues
+    head = next(h for h in journal.read().heads if h.module_id == "CP-1")
+    assert head.qualification == PROMOTED and head.result_sha256 == repair.result_sha256
+
+
+def test_a_blocked_qa_verdict_stands_and_ends_the_cell_without_a_module_repair(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 (coordinator ruling): a Blocked QA verdict is an analytical outcome, not a
+    defect to repair, so the cell ends at it (as at a truncation) and the journal keeps it."""
+    script = [*ok_steps(*CHAIN[:-1]), ("quality", CRITICAL)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)  # nothing is re-sent
+    rows = module_rows(rig)
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows][-1] == ("quality", "rejected", "-")
+    text = rig.report()
+    assert "- Repairs dispatched: 0 (module repair attempts 0, within-attempt step repairs 0)" in (
+        text
+    )
+    assert "- Stopped: no" in text
+    journal = cell_journal(rig)
+    cp1 = [a for a in journal.read().attempts if a.module_id == "CP-1"]
+    assert len(cp1) == 1 and cp1[0].status == "finished"  # no repair attempt was begun
+    (blocked,) = cp1[0].issues
+    assert blocked.startswith("CP-1 QA Blocked: confidence ")
+    assert blocked.endswith("; a Blocked handoff is not promoted")
+    assert not [h for h in journal.read().heads if h.module_id == "CP-1"]
+
+
+def test_a_validator_rejection_beside_a_blocked_line_still_takes_the_module_repair() -> None:
+    blocked = "CP-1 QA Blocked: confidence 12 (Insufficient Information); "
+    blocked += "a Blocked handoff is not promoted"
+    assert cli.qa_blocked_only("quality", (blocked,))
+    assert not cli.qa_blocked_only("quality", ())
+    assert not cli.qa_blocked_only("quality", (blocked, "QA review does not bind current inputs"))
+    assert not cli.qa_blocked_only("quality", ("QA review does not bind current inputs",))
+
+
+@pytest.mark.parametrize("step_id", [s for s in cli.FULL_CHAIN + cli.CP1A_CHAIN if s != "quality"])
+def test_a_blocked_looking_issue_on_another_step_is_an_ordinary_rejection(step_id: str) -> None:
+    """Task 7.10 item 2: only the `quality` step emits the QA Blocked verdict, so only there does
+    it stand unrepaired; the same text on any other step takes the module repair as usual."""
+    blocked = "CP-1 QA Blocked: confidence 12 (Insufficient Information); "
+    blocked += "a Blocked handoff is not promoted"
+    assert not cli.qa_blocked_only(step_id, (blocked,))
+
+
+def test_a_truncated_quality_review_finishes_the_attempt_and_ends_the_cell(
+    tmp_path: Path,
+) -> None:
+    """A cut `quality` is still submitted (as every truncated payload is), and the step settles
+    the module: the attempt finishes rejected, its four accepted stages are not promoted, and
+    the 7.0h guard ends the cell without a module repair, as for CP-0."""
+    script = [*ok_steps(*CHAIN[:-1]), ("quality", TRUNC)]
+    rig, chain, status = run_chain(tmp_path, script)
+    assert status == 0 and len(chain.requests) == len(script)
+    assert [(r[2], r[6], r[7], r[REPAIR_COLUMN]) for r in module_rows(rig)][-1] == (
+        "quality",
+        "rejected",
+        "truncated",
+        "-",
+    )
+    assert "- Repairs dispatched: 0" in rig.report() and "- Truncated: 1" in rig.report()
+    cp1 = [a for a in cell_journal(rig).read().attempts if a.module_id == "CP-1"]
+    assert len(cp1) == 1 and cp1[0].status == "finished" and cp1[0].issues
+
+
+def test_probe_cells_are_never_repaired(rig: Rig) -> None:
+    """Only the `module` driver spends the repair; a probe is one measured draw per cell."""
+    responder = Responder(rig.review, junk_after_first=True)
+    assert rig.run(rig.argv("probe"), responder) == 0
+    assert len(responder.requests) == 4  # unchanged: one CP-0 call per cell, one extra step
+    assert "- Repairs dispatched: 0" in rig.report()
+
+
+def test_a_probe_cp1_rejection_leaves_the_attempt_pending_with_its_step_repair(
+    tmp_path: Path,
+) -> None:
+    """Task 7.0g fix 1: a single-attempt driver never re-sends, so a first CP-1 rejection ends
+    the cell with the journal attempt pending and the try kept in `step_repairs` (the journal
+    no longer finishes it rejected)."""
+    rig, extraction = chain_rig(tmp_path)
+    chain = Chain(rig, extraction, [*ok_steps(*CHAIN[:2]), ("financials", BAD)])
+    chain.cell = "probe-00"
+    assert rig.run([*rig.argv("probe"), "--models", LUNA], chain) == 0
+    assert len(chain.requests) == 3  # no re-send
+    rows = step_lines(rig.report(), "probe-00")
+    assert [(r[2], r[6], r[REPAIR_COLUMN]) for r in rows][2:] == [("financials", "rejected", "-")]
+    journal = Execution(rig.store.directory / "live" / "b1" / "probe-00").read().attempts[-1]
+    assert journal.module_id == "CP-1" and journal.status == "pending"
+    assert [s.step_id for s in journal.step_repairs] == ["financials"]
+    assert [s.step_id for s in journal.steps] == ["source_context"]

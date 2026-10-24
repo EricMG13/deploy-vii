@@ -327,6 +327,28 @@ def test_default_transport_maps_urllib_outcomes(monkeypatch: pytest.MonkeyPatch)
         urllib_transport(Request(url="file:///etc/passwd", method="GET", headers={}))
 
 
+def test_the_retry_after_header_of_an_error_reply_reaches_the_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 7.8: an in-flight 402 may state its wait only as the HTTP header; only that one
+    header is kept (in memory), never the others."""
+    headers = Message()
+    headers["Retry-After"] = "120"
+    headers["X-Other"] = "not kept"
+
+    def http_error(http: object, timeout: float) -> None:
+        raise urllib.error.HTTPError(CHAT_URL, 402, "Payment Required", headers, io.BytesIO(b"{}"))
+
+    install(monkeypatch, http_error)
+    request = Request(url=CHAT_URL, method="POST", headers={}, body=b"{}", timeout_s=7.0)
+    assert urllib_transport(request) == Response(402, b"{}", retry_after="120")
+    reply = Response(402, b'{"error":{"code":402}}', retry_after="120")
+    result = ChatClient(FakeTransport(reply)).complete(make_request(), key=FAKE_KEY)
+    assert result.classification == "insufficient_credit" and result.retry_after == "120"
+    plain = ChatClient(FakeTransport(Response(402, b"{}"))).complete(make_request(), key=FAKE_KEY)
+    assert plain.retry_after is None
+
+
 # --- 2.7a: errors reported inside a 200 body (probe-2 fixtures) ----------------------------
 
 PROBE_FIXTURES = Path(__file__).parent / "fixtures" / "live"
@@ -413,6 +435,110 @@ def test_the_provider_detail_is_taken_only_from_a_raw_text_and_scrubbed(
     body = json.dumps({"error": {"code": 400, "message": "refused", "metadata": metadata}})
     result = classify(Response(400, body.encode()))
     assert result.classification == "http_error" and result.error_detail == detail
+
+
+ACCOUNT = "u-account-77"
+WITHHELD = "<provider detail withheld: account id>"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Not JSON: the raw text is copied as it is, account id and all.
+        {"code": 400, "message": "m", "metadata": {"raw": f"refused: user_id={ACCOUNT}"}},
+        # The upstream body as a JSON string with no message: copied whole, so the escaped
+        # `\"user_id\"` of the reply body becomes a `"user_id"` pair in the detail.
+        {
+            "code": 400,
+            "message": "m",
+            "metadata": {"raw": json.dumps({"error": {"type": "billing", "user_id": ACCOUNT}})},
+        },
+        # The key spelled with a JSON escape: no `user_id` bytes, but the same key when read.
+        {"code": 400, "message": "m", "metadata": {"raw": '{"error": {"user\\u005fid": 77}}'}},
+        # The same escape in a raw longer than the cap: the cut text is no longer JSON, so the
+        # check reads the provider's text before it is cut.
+        {
+            "code": 400,
+            "message": "m",
+            "metadata": {"raw": '{"error": {"user\\u005fid": 77, "pad": "' + "x" * 600 + '"}}'},
+        },
+        # OpenRouter's own message and a provider label are the same detail.
+        {"code": 400, "message": f"user_id {ACCOUNT} refused"},
+        {"code": 400, "message": "m", "metadata": {"raw": "r", "provider_name": "user_id"}},
+    ],
+    ids=["not-json", "escaped-key", "json-escape", "truncated", "message", "label"],
+)
+def test_a_detail_in_which_the_account_id_survives_is_withheld_whole(
+    error: dict[str, object],
+) -> None:
+    """Task 7.15 item 4: `error_detail` is a sibling of the stored body (task 7.11 item 6) and
+    reaches `checks/classification.json`, the schema-check manifest and its report, so the
+    same byte check applies; a surviving `user_id` replaces the whole detail with a fixed
+    note. The body itself is untouched (DC-7 reads it as received)."""
+    body = json.dumps({"error": error}).encode()
+    result = classify(Response(400, body))
+    assert result.classification == "http_error" and result.http_status == 400
+    assert result.error_detail == WITHHELD
+    assert result.raw == body
+
+
+@pytest.mark.parametrize(
+    "raw, names_schema",
+    [
+        (f"user_id={ACCOUNT}: Invalid schema for response_format 'x'", True),
+        (f"user_id={ACCOUNT}: max_tokens is below the minimum", False),
+        # Only the detail as it was kept before 7.15 counts: words past the cap never did.
+        (f"user_id={ACCOUNT} " + "x" * 600 + " invalid_json_schema", False),
+        ("Invalid schema for response_format 'x'", True),
+    ],
+    ids=["withheld-words", "withheld-no-words", "words-past-the-cap", "kept-words"],
+)
+def test_the_schema_words_are_read_from_the_detail_before_it_is_withheld(
+    raw: str, names_schema: bool
+) -> None:
+    """Fix round 1 (7.15 review): withholding the text does not change the schema verdict,
+    so the client records whether the detail it would have kept names the schema."""
+    body = json.dumps({"error": {"code": 400, "message": "m", "metadata": {"raw": raw}}})
+    result = classify(Response(400, body.encode()))
+    assert result.detail_names_schema is names_schema
+    assert (result.error_detail == WITHHELD) is ("user_id" in raw)
+
+
+def test_a_detail_outside_the_reply_body_account_id_is_kept() -> None:
+    """Only what `error_detail` keeps is checked: an account id elsewhere in `metadata.raw`
+    (the message is taken from it) leaves the detail as it was."""
+    raw = json.dumps({"error": {"message": "Invalid schema", "user_id": ACCOUNT}})
+    body = json.dumps({"error": {"code": 400, "message": "m", "metadata": {"raw": raw}}})
+    result = classify(Response(400, body.encode()))
+    assert result.error_detail == "HTTP 400: m; Invalid schema"
+
+
+@pytest.mark.parametrize(
+    "status, document",
+    [
+        (402, {"error": {"code": 402, "message": f"no credit for user_id {ACCOUNT}"}}),
+        (200, {"error": {"code": 504, "message": f"timeout user_id={ACCOUNT}"}}),
+        (
+            200,
+            {
+                "id": "gen-1",
+                "choices": [
+                    {
+                        "finish_reason": "error",
+                        "message": {"content": None},
+                        "error": {"code": 502, "message": f"user_id={ACCOUNT}"},
+                    }
+                ],
+            },
+        ),
+    ],
+    ids=["credit", "body-error", "choice-error"],
+)
+def test_every_error_detail_path_withholds_a_surviving_account_id(
+    status: int, document: dict[str, object]
+) -> None:
+    result = classify(Response(status, json.dumps(document).encode()))
+    assert result.error_detail == WITHHELD
 
 
 @pytest.mark.parametrize(

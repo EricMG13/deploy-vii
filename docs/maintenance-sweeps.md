@@ -1,7 +1,7 @@
 # Refactoring and optimisation sweeps
 
-Design added 20 October 2026 for later development. No sweep, benchmark or
-performance change has been executed in Deploy VII.
+Design added 20 October 2026 for later development. Sweeps executed since are
+recorded under [Sweeps performed](#sweeps-performed).
 
 ## Cadence
 
@@ -62,5 +62,46 @@ measured comparison, uncertainty and next action. Publish through the
 a semantic change or replace live layer acceptance. This document does not
 authorize starting implementation or live tests.
 
+## Sweeps performed
+
+### M7 7.12: envelope write path memory (23 October 2026, optimisation pass)
+
+- **Scope.** `envelope.write_envelope` and `register_envelope` on the synthetic
+  `staged()` case (3,529,566-character Markdown, 43,202,184-character sidecar).
+  Trigger: measured memory regression (the 4 GiB Linux parity VM killed 14 test files).
+- **Baseline** (base 1f9070f, macOS 26.5.1 arm64, Python 3.13.15, pydantic 2.14.1,
+  `ru_maxrss` per stage, three runs): `write_envelope` adds 0.525 to 0.528 GB
+  (peak 1.338 to 1.347 GB, 1.52 to 1.63 s); `register_envelope` adds 0.26 to 0.28 GB.
+- **Profile.** The largest avoidable cost is the str form of large JSON. The JSON holds
+  an em dash, so a `model_dump_json()` str takes two bytes per character (86 MB for
+  the 43 MB module). `content_hash()` then encodes it back for hashing. This happens
+  once for the module hash and once for the 57 MB registers hash, and once more for the
+  re-validation input. The other two costs are fixed by design: the validated copy of
+  the envelope (about 0.18 GB with its input) and the returned sidecar str (about
+  0.13 GB).
+- **Change (adopted, coordinator ruling, 23 October 2026).** The envelope writer
+  hashes the module and the registers from `__pydantic_serializer__.to_json()` bytes,
+  which are the bytes `content_hash()` hashes, and re-validates from those bytes.
+  Ordering the sidecar dump first had no effect and was dropped.
+- **Equivalence.** The change is byte-identical. 309 distinct write/read/register
+  inputs across 15 envelope test files and the replay corpus gave the same outputs,
+  refusal texts and issues. Tests pin `_content_hash` to `content_hash()` for the
+  synthetic case and for every envelope and register set the corpus replays.
+- **Comparison** (three stage runs each; two runs of the round-trip test process):
+  - `write_envelope` delta: 0.525 to 0.528 GB before, 0.393 to 0.399 GB after (-25 %).
+  - Pipeline peak: 1.34 GB before, 0.98 GB after (-27 %).
+  - `register_envelope` delta: about 0.27 GB before, 0.03 to 0.05 GB after.
+  - Round-trip test process: 1.52 GB before, 1.04 GB after (-31 %).
+  - tracemalloc peak bounds, with 25 % headroom, guard `register_envelope` (63.3 MB)
+    and `write_envelope` (382.2 MB). Only the first bound fails on the old code.
+- **Not kept: one session-scoped staging** (`conftest.py`) for the read-only fixtures.
+  Serial `test_envelope.py` plus `test_cp1_workflow.py` peaked at 3.74 and 4.03 GB with it
+  and at 3.77, 3.89 and 4.01 GB without it, after the change above (4.41 GB at base). Staging
+  reuses freed memory, so the peak comes from single heavy tests: the promotion test
+  adds 2.0 GB in one call. A shared staging does not move that.
+- **Kept fixed by design.** The re-validated copy (the trust boundary) and the
+  returned sidecar str (the `(str, str)` API).
+- **Uncertainty.** No Linux figure; no real pack (absent).
+
 Not verified: sweep duration, performance gain or maintained equivalence on real
-Deploy VII code/packs; implementation has not begun.
+Deploy VII packs (no sweep has run on one); the 7.12 figures are macOS only.
