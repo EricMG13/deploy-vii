@@ -5,26 +5,63 @@ exercised on bytes it did not produce. Every row is synthetic: a fictional issue
 fictional providers, no market data.
 """
 
+import io
+import shutil
 import sys
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from deploy_vii.contracts import Run
 from deploy_vii.inputs.rv_quotes import (
     COLUMNS,
     FIX,
+    LETTERS,
+    LEVELS,
+    MEDIA_TYPE,
     Issue,
     ValidationReport,
+    validate_rv_bytes,
     validate_rv_quotes,
 )
+from deploy_vii.preparation import PreparationRequest, SourceRequest, load_pack, prepare
 from scripts.build_templates import README_LINES, SYNTHETIC_ROWS, build, workbook_bytes
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / "docs" / "templates" / "rv-quotes.template.xlsx"
 
 FILE = "quotes.xlsx"
+# The brief's contract, stated here independently of the module's constants.
+BRIEF_COLUMNS = (
+    "provider",
+    "as_of",
+    "issuer",
+    "facility_id",
+    "instrument",
+    "quote_kind",
+    "price",
+    "yield_pct",
+    "spread_bps",
+    "bid",
+    "ask",
+    "currency",
+    "note",
+)
+REQUIRED_COLUMNS = (
+    "provider",
+    "as_of",
+    "issuer",
+    "facility_id",
+    "instrument",
+    "quote_kind",
+    "currency",
+)
 HEADER_FIX = (
     "set row 1 to exactly: provider, as_of, issuer, facility_id, instrument, quote_kind, "
     "price, yield_pct, spread_bps, bid, ask, currency, note (A1 to M1, nothing after M1)"
@@ -68,6 +105,13 @@ def write(
 
 def rendered(report: ValidationReport) -> list[str]:
     return [issue.render() for issue in report.issues]
+
+
+def test_contract_is_the_briefs() -> None:
+    assert COLUMNS == BRIEF_COLUMNS
+    assert LEVELS == ("price", "yield_pct", "spread_bps", "bid", "ask")
+    assert LETTERS == tuple("ABCDEFGHIJKLM")
+    assert MEDIA_TYPE == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def test_issue_renders_file_sheet_cell_problem_and_fix() -> None:
@@ -237,6 +281,13 @@ def test_duplicate_quote_key_is_one_issue_on_the_later_row(tmp_path: Path) -> No
         " repeated value"
     ]
     assert report.rows == 3
+
+
+def test_rows_with_an_invalid_key_cell_are_not_also_duplicates(tmp_path: Path) -> None:
+    row = VALID | {"provider": None}
+    report = validate_rv_quotes(write(tmp_path, [row, row]))
+    assert [issue.cell for issue in report.issues] == ["A2", "A3"]
+    assert {issue.problem for issue in report.issues} == {"provider is empty"}
 
 
 def test_blank_rows_between_quotes_are_skipped(tmp_path: Path) -> None:
@@ -412,3 +463,124 @@ def test_readme_documents_every_column_and_fix() -> None:
     assert "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in readme
     assert "sheet:rv_quotes" in readme
     assert "third_party" in readme
+
+
+def test_prepare_freezes_the_template_as_a_ready_source_with_rv_quotes_locators(
+    tmp_path: Path,
+) -> None:
+    shutil.copy(TEMPLATE, tmp_path / "rv-quotes.xlsx")
+    run = Run(
+        run_id="rv-template",
+        issuer_id="example-holdings",
+        issuer_name="Example Holdings Ltd (synthetic)",
+        as_of=date(2026, 10, 15),
+        case_kind="synthetic",
+    )
+    request = PreparationRequest(
+        run=run,
+        sources=(
+            SourceRequest(source_id="rv-quotes", path="rv-quotes.xlsx", media_type=MEDIA_TYPE),
+        ),
+    )
+    pack = prepare(request, tmp_path, tmp_path / "pack")
+    assert load_pack(tmp_path / "pack") == pack
+    (source,) = pack.sources
+    assert source.status == "ready"
+    quotes = {s.locator: s for s in source.spans if s.locator.startswith("sheet:rv_quotes!")}
+    assert quotes["sheet:rv_quotes!A1"].text == "provider"
+    assert [quotes[f"sheet:rv_quotes!{letter}1"].text for letter in LETTERS] == list(COLUMNS)
+    assert quotes["sheet:rv_quotes!G2"].text == "98.75"
+    assert quotes["sheet:rv_quotes!B2"].text == "2026-09-30"
+    stored = sum(1 for row in SYNTHETIC_ROWS for column in COLUMNS if row.get(column))
+    assert len(quotes) == len(COLUMNS) + stored
+    assert not any(span.hidden or span.formula for span in quotes.values())
+
+
+def test_a_file_too_large_to_prepare_is_one_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deploy_vii import preparation
+
+    monkeypatch.setattr(preparation, "MAX_BYTES", 4)
+    assert rendered(validate_rv_quotes(TEMPLATE)) == [
+        "rv-quotes.template.xlsx:rv_quotes!A1: prepare cannot read this file as an OOXML"
+        " workbook: Preparation failed (ValueError): Source exceeds extraction byte limit"
+        f" — fix: {FIX['workbook']}"
+    ]
+
+
+WORD = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .&()'-",
+    min_size=1,
+    max_size=24,
+).filter(str.strip)
+LEXEME = st.decimals(
+    min_value=Decimal("-1000000"),
+    max_value=Decimal("1000000"),
+    places=4,
+    allow_nan=False,
+    allow_infinity=False,
+).map(str)
+
+
+@st.composite
+def quote_rows(draw: st.DrawFn) -> list[dict[str, str]]:
+    """Valid synthetic rows: distinct quote keys (the facility id carries the row index), a
+    provider that is never the issuer, at least one numeric level and bid not above ask."""
+    issuer = "Issuer " + draw(WORD)
+    rows = []
+    for index in range(draw(st.integers(min_value=1, max_value=6))):
+        row = {
+            "provider": "Provider " + draw(WORD),
+            "as_of": draw(st.dates(date(2000, 1, 1), date(2099, 12, 31))).isoformat(),
+            "issuer": issuer,
+            "facility_id": f"F{index}-"
+            + draw(st.from_regex(r"[A-Za-z0-9_-]{0,8}", fullmatch=True)),
+            "instrument": draw(WORD),
+            "quote_kind": draw(st.sampled_from(("observed", "indicative_talk"))),
+            "currency": draw(st.from_regex(r"[A-Z]{3}", fullmatch=True)),
+            "note": draw(st.one_of(st.just(""), WORD)),
+        }
+        for level in draw(st.lists(st.sampled_from(LEVELS), min_size=1, unique=True)):
+            row[level] = draw(LEXEME)
+        if "bid" in row and "ask" in row and Decimal(row["bid"]) > Decimal(row["ask"]):
+            row["bid"], row["ask"] = row["ask"], row["bid"]
+        rows.append(row)
+    return rows
+
+
+def openpyxl_bytes(rows: list[dict[str, str]]) -> bytes:
+    book = openpyxl.Workbook()
+    worksheet = book.active
+    assert worksheet is not None
+    worksheet.title = "rv_quotes"
+    worksheet.append(list(COLUMNS))
+    for row in rows:
+        worksheet.append([row.get(column) or None for column in COLUMNS])
+    stream = io.BytesIO()
+    book.save(stream)
+    return stream.getvalue()
+
+
+@settings(max_examples=60, deadline=None)
+@given(quote_rows())
+def test_valid_rows_written_through_the_builder_report_ok(rows: list[dict[str, str]]) -> None:
+    report = validate_rv_bytes("p.xlsx", workbook_bytes(rows))
+    assert rendered(report) == []
+    assert report.rows == len(rows)
+    # Differential: an independent writer (openpyxl, levels as text cells) reads the same.
+    assert validate_rv_bytes("p.xlsx", openpyxl_bytes(rows)) == report
+
+
+@settings(max_examples=60, deadline=None)
+@given(quote_rows(), st.data())
+def test_emptying_one_required_cell_is_exactly_one_issue_naming_it(
+    rows: list[dict[str, str]], data: st.DataObject
+) -> None:
+    index = data.draw(st.integers(min_value=0, max_value=len(rows) - 1))
+    column = data.draw(st.sampled_from(REQUIRED_COLUMNS))
+    rows[index] = rows[index] | {column: ""}
+    report = validate_rv_bytes("p.xlsx", workbook_bytes(rows))
+    cell = f"{LETTERS[COLUMNS.index(column)]}{index + 2}"
+    assert [(issue.cell, issue.problem) for issue in report.issues] == [
+        (cell, f"{column} is empty")
+    ]
+    assert report.rows == len(rows)
