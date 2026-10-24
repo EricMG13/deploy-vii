@@ -147,14 +147,14 @@ CELLS = (
 # hybrid-cp1-1, on that batch's OpenRouter ledger). Decision 0005's amendment superseded Luna.
 EXTRA_CELLS = (Cell("luna-xhigh", "openai/gpt-6-luna", "openrouter", "xhigh"),)
 SKIPPED_BY_USER = "skipped by user"  # user decision, 24 Oct 2026: "skip opus high"
-# Top-level Anthropic `cache_control` only for steps that make several calls. In hybrid-cp1-1,
-# opus-medium's narrative and readiness were single calls that wrote 321,972 and 397,890 tokens
-# to the 5-minute cache at the write rate and read none back.
-CACHE_CONTROL_BY_STEP = {
-    "source_context": True,
-    "financials": True,
-    "narrative": False,
-    "readiness": False,
+# Top-level Anthropic `cache_control` (default 5-minute TTL) goes on every step: narrative and
+# readiness were multi-call in most hybrid-cp1-1/-2 cells. Each within-step cache miss there
+# followed a call longer than 300 s; a top-level `ttl` of "1h" is documented but unmeasured.
+CACHE_CONTROL = {
+    "sent": "top-level {'type': 'ephemeral'} on every step (default 5-minute TTL)",
+    "observed": "hybrid-cp1-1: every within-step cache miss (3) followed a call longer than "
+    "300 s (633.4, 557.3, 329.0 s), the 5-minute TTL; no read followed such a call",
+    "unmeasured_option": "top-level ttl '1h' (documented values '5m', '1h'); not measured",
 }
 # From this many calls left, each turn's tool results end with one line saying so.
 NUDGE_FROM_CALLS_LEFT = 3
@@ -282,8 +282,6 @@ class Provider(Protocol):
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
         timeout_s: float,
-        *,
-        step_id: str,
     ) -> Prepared: ...
 
     def send(self, cell: Cell, prepared: Prepared, key: str) -> Reply: ...
@@ -305,8 +303,6 @@ class OpenRouter:
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
         timeout_s: float,
-        *,
-        step_id: str,  # unused: OpenRouter sends no cache directive
     ) -> Prepared:
         candidate = self.candidates[cell.model]
         request = cp0.ToolChatRequest(
@@ -569,9 +565,8 @@ class Anthropic:
         system: str,
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
-        step_id: str,
     ) -> dict[str, Any]:
-        body = {
+        return {
             "model": cell.model,
             "max_tokens": MAX_TOKENS,
             "system": system,
@@ -580,11 +575,9 @@ class Anthropic:
             "tool_choice": {"type": self.tool_choice},
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": cell.effort},
+            "cache_control": {"type": "ephemeral"},  # every step: see CACHE_CONTROL
             "stream": True,
         }
-        if CACHE_CONTROL_BY_STEP[step_id]:
-            body["cache_control"] = {"type": "ephemeral"}
-        return body
 
     def prepare(
         self,
@@ -593,10 +586,8 @@ class Anthropic:
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
         timeout_s: float,
-        *,
-        step_id: str,
     ) -> Prepared:
-        payload = exact_json(self.body(cell, system, conversation, tools, step_id)).encode()
+        payload = exact_json(self.body(cell, system, conversation, tools)).encode()
         bound = token_bound(len(payload), self.bytes_per_token)
         needed = bound + MAX_TOKENS
         return Prepared(
@@ -956,7 +947,9 @@ def completeness(payload: str) -> dict[str, Any] | None:
 
     Statement lines by `statement` and by the fiscal year of their period (`unknown` when the
     book lists no such period); accounts, balance movements and their bridges, statement
-    identities; definition assessments and the distinct observation ids they name."""
+    identities; definition assessments and the distinct observation ids they name. Only string
+    or integer ids are matched: anything else counts as unknown, with the reason recorded (a
+    paid call's payload is measured, never raised on)."""
     try:
         document = json.loads(payload)
     except ValueError:
@@ -966,11 +959,26 @@ def completeness(payload: str) -> dict[str, Any] | None:
     by_statement: Counter[str] = Counter()
     by_year: Counter[str] = Counter()
     sizes: Counter[str] = Counter()
+    reasons: list[str] = []
+
+    def note(reason: str) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+
     for book in _objects(document.get("financial"), "books"):
-        years = {p.get("period_id"): str(p.get("fiscal_year")) for p in _objects(book, "periods")}
+        years: dict[str | int, str] = {}
+        for period in _objects(book, "periods"):
+            ident = _scalar_id(period.get("period_id"))
+            if ident is None:
+                note("a period's period_id is not a string or integer; its lines count as unknown")
+            else:
+                years[ident] = str(period.get("fiscal_year"))
         for line in _objects(book, "statement_lines"):
             by_statement[str(line.get("statement"))] += 1
-            by_year[years.get(line.get("period_id"), "unknown")] += 1
+            ident = _scalar_id(line.get("period_id"))
+            if ident is None:
+                note("a statement line's period_id is not a string or integer; counted as unknown")
+            by_year["unknown" if ident is None else years.get(ident, "unknown")] += 1
         for key in (
             "accounts",
             "balance_movements",
@@ -996,14 +1004,37 @@ def completeness(payload: str) -> dict[str, Any] | None:
         "statement_identities": sizes["statement_identities"],
         "definition_assessments": len(assessments),
         "definition_observation_ids": len(observed),
+        "reasons": reasons,
     }
 
 
+def _scalar_id(value: object) -> str | int | None:
+    """A usable id: a string or an integer (not a bool); None for anything else."""
+    return value if isinstance(value, str | int) and not isinstance(value, bool) else None
+
+
 def completeness_drop(submits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Later financials submits with fewer statement lines or balance movements than the first
-    (beside `submit_shrinkage`, which counts citations, limitations, claims and objects)."""
-    rows = [{"submit": item["submit"], "counts": item["completeness"]} for item in submits]
-    return cp0.shrinkage(rows, COMPLETENESS_COUNTED)
+    """Later financials submits with fewer statement lines or balance movements than the most
+    any earlier submit held (so 5 -> 200 -> 50 is a drop at the third). It sits beside
+    `submit_shrinkage`, which counts citations, limitations, claims and objects."""
+    basis = "each later submit vs the most any earlier submit held"
+    if len(submits) < 2:
+        return {"flag": False, "dropped": [], "basis": "fewer than two submits"}
+    most: dict[str, int] = {}
+    dropped: list[dict[str, Any]] = []
+    for index, item in enumerate(submits):
+        counts = item["completeness"]
+        if counts is None:
+            if index:  # a later submit that is not an object holds nothing the earlier ones did
+                dropped.append({"submit": item["submit"], "not_a_json_object": True})
+            continue
+        fewer = {
+            k: [most[k], counts[k]] for k in COMPLETENESS_COUNTED if counts[k] < most.get(k, 0)
+        }
+        if fewer:
+            dropped.append({"submit": item["submit"], "most_before_then_now": fewer})
+        most = {k: max(most.get(k, 0), counts[k]) for k in COMPLETENESS_COUNTED}
+    return {"flag": bool(dropped), "dropped": dropped, "basis": basis}
 
 
 def completeness_from_log(path: Path) -> list[dict[str, Any]]:
@@ -1119,9 +1150,11 @@ class Harness:
 
 def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Call | None:
     """Retain the request, reserve, send, settle, retain the scrubbed reply. None: not sent
-    (the step's verdict says why). A refused reservation raises ProviderStop."""
+    (the step's verdict says why). A refused reservation, or any ledger error, raises
+    ProviderStop. Attempt ids are `<batch>:<cell>-<step>-call-NN`, so batches sharing a ledger
+    cannot collide (hybrid-cp1-1 and -2 wrote the earlier `<cell>-<step>-call-NN`)."""
     number = len(step.calls) + 1
-    attempt = f"{cell.cell_id}-{step.step_id}-call-{number:02d}"
+    attempt = attempt_id(harness.batch_directory.name, cell.cell_id, step.step_id, number)
     if prepared.misfit is not None:
         step.verdict, step.verdict_reason = "not sent: misfit", prepared.misfit
         return None
@@ -1130,12 +1163,13 @@ def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Cal
     ledger = harness.ledgers[cell.provider]
     try:
         ledger.reserve(attempt, prepared.reserve)
-    except CapExceeded as error:
+    except (CapExceeded, LedgerError) as error:
         raise ProviderStop(f"{attempt} not sent: {error}") from None
     call = Call(
         number, prepared.reserve, prepared.bound, len(prepared.payload), prepared.tool_choice
     )
     step.calls.append(call)
+    unsettled = None
     try:
         provider = harness.providers[cell.provider]
         call.reply = provider.send(cell, prepared, harness.keys[cell.provider])
@@ -1149,7 +1183,10 @@ def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Cal
             if reply
             else "no response received; reservation held"
         )
-        call.settlement = ledger.settle(attempt, cost, reason)
+        try:
+            call.settlement = ledger.settle(attempt, cost, reason)
+        except LedgerError as error:  # the reservation stays held; the reply is still retained
+            unsettled = f"{attempt} not settled, reservation held: {error}"
     kind = call.reply.raw_kind if call.reply is not None else "json"
     response = step.directory / f"call-{number:02d}-response.{kind}"
     if call.reply is not None and call.reply.raw is not None:
@@ -1158,7 +1195,23 @@ def send(harness: Harness, cell: Cell, step: StepRun, prepared: Prepared) -> Cal
     else:
         detail = call.transport_error or (call.reply.error_detail if call.reply else None)
         cp0._write(response, {"no_body": detail})
+    if unsettled is not None:
+        raise ProviderStop(unsettled)
     return call
+
+
+def attempt_id(batch_id: str, cell_id: str, step_id: str, number: int) -> str:
+    return f"{batch_id}:{cell_id}-{step_id}-call-{number:02d}"
+
+
+def attempt_owner(attempt: str) -> tuple[str | None, str]:
+    """(batch, cell) of a CP-1 attempt id; batch None for the earlier unprefixed ids."""
+    batch, _, rest = attempt.rpartition(":")
+    head = rest.rsplit("-call-", 1)[0]
+    for step_id in CP1_STEPS:
+        if head.endswith(f"-{step_id}"):
+            return batch or None, head[: -len(step_id) - 1]
+    return batch or None, head
 
 
 def run_step(harness: Harness, cell: Cell, step: StepRun, base: Path, ticket: str) -> None:
@@ -1185,9 +1238,7 @@ def run_step(harness: Harness, cell: Cell, step: StepRun, base: Path, ticket: st
                 break
             timeout = harness.deadline_s - elapsed
             provider = harness.providers[cell.provider]
-            prepared = provider.prepare(
-                cell, system, conversation, tools, timeout, step_id=step.step_id
-            )
+            prepared = provider.prepare(cell, system, conversation, tools, timeout)
             call = send(harness, cell, step, prepared)
             if call is None:
                 break
@@ -1263,7 +1314,9 @@ def _turn(
     left = MAX_CALLS - call.number
     if results and 0 < left <= NUDGE_FROM_CALLS_LEFT:  # one line, on the turn's last result
         ident, text = results[-1]
-        results[-1] = (ident, f"{text}\n{call_nudge(left, step.step_id)}")
+        nudge = call_nudge(left, step.step_id)
+        results[-1] = (ident, f"{text}\n{nudge}")
+        cp0._append(log, {"call": call.number, "nudge": nudge, "appended_to": ident})
     conversation.extend(provider.tool_results(results))
 
 
@@ -1543,7 +1596,7 @@ def step_prompts(
             per_cell = {}
             for cell in cells:
                 prepared = providers[cell.provider].prepare(
-                    cell, system, conversation, tools, DEFAULT_TIMEOUT_SECONDS, step_id=step_id
+                    cell, system, conversation, tools, DEFAULT_TIMEOUT_SECONDS
                 )
                 per_cell[cell.cell_id] = {
                     "request_bytes": len(prepared.payload),
@@ -1582,8 +1635,9 @@ def parser() -> argparse.ArgumentParser:
     )
     command.add_argument("--dry-run", action="store_true", help="plan only: no model call")
     command.add_argument("--batch-id", default=BATCH_ID)
-    command.add_argument("--cap-openrouter", type=cp0._money, default=CAPS["openrouter"])
-    command.add_argument("--cap-anthropic", type=cp0._money, default=CAPS["anthropic"])
+    # Default: CAPS for a new ledger; an existing ledger's opening cap (a given cap must match).
+    command.add_argument("--cap-openrouter", type=cp0._money)
+    command.add_argument("--cap-anthropic", type=cp0._money)
     command.add_argument("--seed", type=int, help="cell order seed; else drawn and recorded")
     command.add_argument("--cp0-journal", type=Path, default=CP0_JOURNAL)
     command.add_argument("--artifact-root", type=Path, default=cp0.ARTIFACT_ROOT)
@@ -1651,23 +1705,58 @@ def _ledger_plans(
 ) -> dict[str, LedgerPlan]:
     """A new `<batch>-<provider>.jsonl` per provider (it must not exist), or an existing ledger
     with the cap its first line records: --openrouter-ledger's for OpenRouter, the batch's own
-    under --resume (attempt ids are cell-prefixed, so cells cannot collide). Raises ValueError
-    to refuse."""
+    under --resume. A --cap-* given for an existing ledger must equal that cap. Raises
+    ValueError to refuse."""
     plans = {}
     for name in providers:
-        given = args.openrouter_ledger if name == "openrouter" else None
-        path = given or directory / f"{args.batch_id}-{name}.jsonl"
-        if given is not None or args.resume:
+        path = _ledger_path(args, name, directory)
+        given_cap = args.cap_openrouter if name == "openrouter" else args.cap_anthropic
+        if args.resume or (name == "openrouter" and args.openrouter_ledger is not None):
             if not path.is_file():
                 raise ValueError(f"ledger {path.name} does not exist")
             state = open_ledger(path).state()
+            if given_cap is not None and given_cap != state.cap:
+                raise ValueError(
+                    f"{name} cap {given_cap} differs from {path.name}'s opening cap {state.cap}"
+                )
             plans[name] = LedgerPlan(path, state.cap, state.remaining, True)
             continue
         if path.exists():
             raise ValueError(f"{path.name} already exists; use a new --batch-id")
-        cap = args.cap_openrouter if name == "openrouter" else args.cap_anthropic
+        cap = CAPS[name] if given_cap is None else given_cap
         plans[name] = LedgerPlan(path, cap, cap, False)
     return plans
+
+
+def _ledger_path(args: argparse.Namespace, provider: str, directory: Path) -> Path:
+    given: Path | None = args.openrouter_ledger if provider == "openrouter" else None
+    return given or directory / f"{args.batch_id}-{provider}.jsonl"
+
+
+def _refuse_traces(args: argparse.Namespace, directory: Path, batch_directory: Path) -> None:
+    """Raises ValueError when a ledger already holds attempts for this batch and a cell it is
+    to run, or a cell to be recorded as skipped left any trace: a step call, or a ledger
+    attempt of this batch or an unprefixed one of that cell. (An unprefixed attempt of a cell
+    to run belongs to whichever batch has that cell's directory; `_cell_numbers` refuses
+    started cells.)"""
+    cells: tuple[Cell, ...] = (*args.cells, *args.skipped_by_user)
+    owners: dict[str, set[tuple[str | None, str]]] = {}
+    for provider in {cell.provider for cell in cells}:
+        path = _ledger_path(args, provider, directory)
+        attempts = open_ledger(path).state().attempts if path.is_file() else ()
+        owners[provider] = {attempt_owner(a.attempt_id) for a in attempts}
+    for cell in args.cells:
+        if (args.batch_id, cell.cell_id) in owners[cell.provider]:
+            name = _ledger_path(args, cell.provider, directory).name
+            raise ValueError(f"{name} already holds attempts for {args.batch_id} {cell.cell_id}")
+    for cell in args.skipped_by_user:
+        held = owners[cell.provider] & {(args.batch_id, cell.cell_id), (None, cell.cell_id)}
+        calls = sorted((batch_directory / cell.cell_id).glob("*/call-*-request.json"))
+        if held or calls:
+            raise ValueError(
+                f"{cell.cell_id} cannot be recorded as skipped: {len(calls)} step call(s) "
+                f"retained, ledger attempts {'held' if held else 'none'}"
+            )
 
 
 def _cell_numbers(args: argparse.Namespace, batch_directory: Path) -> dict[str, int]:
@@ -1723,7 +1812,8 @@ def main(
         return _refuse(f"prior ledgers hold {spend.total} USD; with {headroom} more > {ceiling}")
     try:
         numbers = _cell_numbers(args, batch_directory)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+        _refuse_traces(args, ledgers, batch_directory)
+    except (OSError, ValueError, KeyError, TypeError, LedgerError) as error:
         return _refuse(f"{args.batch_id}: {error}")
     try:
         pack, system, user = cp1_start(args.cp0_journal)
@@ -1780,7 +1870,7 @@ def main(
     first_calls = {}
     for cell in order:
         prepared = providers[cell.provider].prepare(
-            cell, system, first, tools, DEFAULT_TIMEOUT_SECONDS, step_id=CP1_STEPS[0]
+            cell, system, first, tools, DEFAULT_TIMEOUT_SECONDS
         )
         first_calls[cell.cell_id] = {
             "request_bytes": len(prepared.payload),
@@ -1815,7 +1905,7 @@ def main(
             "cost_basis": "computed-from-list-prices",
             "tool_choice": "any first; auto after a 400 naming tool_choice",
             "thinking": {"type": "adaptive"},
-            "cache_control_by_step": CACHE_CONTROL_BY_STEP,
+            "cache_control": CACHE_CONTROL,
         },
         "harness_rules": {
             "call_limit_nudge": {

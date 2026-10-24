@@ -333,7 +333,6 @@ def test_the_anthropic_request_has_the_documented_shape() -> None:
         [{"role": "user", "content": "u"}],
         tools,
         60.0,
-        step_id="source_context",
     )
     body = json.loads(prepared.payload)
     assert body == {
@@ -632,7 +631,9 @@ def test_a_cap_stops_that_provider_and_the_other_provider_goes_on(
     harness = make_harness(tmp_path, transport, case.frozen, caps=caps)
     cells = runs(harness, "opus-medium", "sonnet-max", "sol-medium")
     summary = cp1.run_batch(harness, cells, seed=2)
-    assert cells[0].verdict.startswith("stopped at source_context: opus-medium-source_context-")
+    assert cells[0].verdict.startswith(
+        "stopped at source_context: batch:opus-medium-source_context-"
+    )
     assert cells[1].verdict == "not run: anthropic stopped"
     assert cells[2].verdict == "accepted"
     assert set(summary["stopped_providers"]) == {"anthropic"}
@@ -886,7 +887,7 @@ def test_the_connection_is_closed_once_message_stop_is_read() -> None:
 
     provider = cp1.Anthropic(open_stream, Decimal("3.0"), tool_choice="auto")
     user = [{"role": "user", "content": "u"}]
-    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 60, step_id="narrative")
+    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 60)
     assert provider.send(CELL["opus-high"], prepared, ANT_KEY).classification == "ok"
     assert closed == [True]
 
@@ -906,7 +907,7 @@ def test_an_idle_stream_is_cut_at_the_idle_limit() -> None:
 
     provider = cp1.Anthropic(silent_after_start, Decimal("3.0"), tool_choice="auto")
     user = [{"role": "user", "content": "u"}]
-    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 900.0, step_id="financials")
+    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 900.0)
     reply = provider.send(CELL["opus-high"], prepared, ANT_KEY)
     assert seen == [cp1.IDLE_S]
     assert reply.classification == "stream-incomplete" and reply.cost is None
@@ -958,7 +959,7 @@ def test_luna_runs_on_the_earlier_batchs_openrouter_ledger(
     state = Ledger(shared, Decimal(15)).state()
     names = [a.attempt_id for a in state.attempts]
     assert names[0] == "sol-high-source_context-call-01"
-    assert all(n.startswith("luna-xhigh-") for n in names[1:]) and len(names) == 5
+    assert all(n.startswith("hybrid-cp1-2:luna-xhigh-") for n in names[1:]) and len(names) == 5
     assert not (tmp_path / "root" / ".ledgers" / "hybrid-cp1-2-openrouter.jsonl").exists()
     assert (tmp_path / "root" / "hybrid-cp1-2" / "luna-xhigh" / "metrics.json").exists()
 
@@ -1053,7 +1054,7 @@ def test_a_resume_runs_only_the_named_cell_and_records_the_skip(
     assert anthropic.read_bytes().startswith(before[anthropic.name])
     names = [a.attempt_id for a in Ledger(anthropic, Decimal(25)).state().attempts]
     assert names[0] == "opus-medium-source_context-call-01"
-    assert len(names) == 5 and all(n.startswith("sonnet-xhigh-") for n in names[1:])
+    assert len(names) == 5 and all(n.startswith("hybrid-cp1-1:sonnet-xhigh-") for n in names[1:])
 
 
 @pytest.mark.parametrize(
@@ -1095,41 +1096,28 @@ def test_a_resume_needs_the_batchs_ledger(
 # --- corrective fixes: caching per step, completeness, call-limit nudge -------------------------
 
 
-@pytest.mark.parametrize(
-    ("step_id", "cached"),
-    [("source_context", True), ("financials", True), ("narrative", False), ("readiness", False)],
-)
-def test_top_level_cache_control_is_sent_only_for_multi_call_steps(
-    step_id: str, cached: bool
-) -> None:
+@pytest.mark.parametrize("step_id", ["source_context", "financials", "narrative", "readiness"])
+def test_top_level_cache_control_is_sent_on_every_step(step_id: str) -> None:
+    # Review C3: narrative and readiness were multi-call in most cells; caching stays on.
     provider = cp1.Anthropic(as_stream(FakeTransport()), Decimal("3.0"))
     user = [{"role": "user", "content": "u"}]
-    tools = cp1.step_tools(step_id)
-    prepared = provider.prepare(CELL["opus-medium"], "s", user, tools, 60.0, step_id=step_id)
+    prepared = provider.prepare(CELL["opus-medium"], "s", user, cp1.step_tools(step_id), 60.0)
     body = json.loads(prepared.payload)
-    assert cp1.CACHE_CONTROL_BY_STEP[step_id] is cached
-    if cached:
-        assert body["cache_control"] == {"type": "ephemeral"}
-    else:
-        assert "cache_control" not in body
-    # Everything else is the same request either way.
-    assert body["stream"] is True and body["tool_choice"] == {"type": "any"}
-    assert body["messages"] == user and body["max_tokens"] == 128000
+    assert body["cache_control"] == {"type": "ephemeral"}  # no ttl: the default 5 minutes
 
 
-def test_the_plan_records_the_cache_table_and_the_harness_rules(
+def test_the_plan_records_the_cache_ttl_observation_and_the_harness_rules(
     case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     fake_keys(monkeypatch)
     args = cli(tmp_path, case.frozen, "--dry-run", "--seed", "7")
     assert cp1.main(args, transport=unexpected_send) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert plan["anthropic"]["cache_control_by_step"] == {
-        "source_context": True,
-        "financials": True,
-        "narrative": False,
-        "readiness": False,
-    }
+    cache = plan["anthropic"]["cache_control"]
+    assert "every step" in cache["sent"]
+    assert "longer than 300 s" in cache["observed"]
+    assert "1h" in cache["unmeasured_option"]
+    assert "cache_control_by_step" not in plan["anthropic"]
     assert plan["harness_rules"]["call_limit_nudge"]["from_calls_left"] == 3
     assert "submit" in plan["harness_rules"]["call_limit_nudge"]["text"]
 
@@ -1159,6 +1147,18 @@ def test_the_call_limit_nudge_appears_from_the_third_last_call_only(
             "the step must end with submit_source_context."
         ), number
         assert sum(text.count("calls remain") for text in texts) == 1
+    # Review C5: the retained tool log records the line on the turn that carried it.
+    log = run.steps[0].directory / "tool-calls.jsonl"
+    entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    nudges = [(e["call"], e["nudge"]) for e in entries if "nudge" in e]
+    assert nudges == [
+        (
+            cp1.MAX_CALLS - left,
+            f"Harness: {left} of {cp1.MAX_CALLS} calls remain in this step; "
+            "the step must end with submit_source_context.",
+        )
+        for left in (3, 2, 1)
+    ]
 
 
 # A financials payload shaped like sol-high's two submits: the second has 143 statement lines
@@ -1212,6 +1212,7 @@ def test_completeness_counts_lines_by_statement_and_fiscal_year() -> None:
         "statement_identities": 8,
         "definition_assessments": 5,
         "definition_observation_ids": 7,
+        "reasons": [],
     }
     second = cp1.completeness(SOL_HIGH_SECOND)
     assert second is not None
@@ -1225,7 +1226,25 @@ def test_completeness_counts_lines_by_statement_and_fiscal_year() -> None:
     assert counted is not None and counted["statement_lines_by_fiscal_year"]["unknown"] == 1
 
 
-def test_a_later_submit_with_fewer_lines_or_movements_sets_completeness_drop() -> None:
+def test_completeness_counts_a_payload_with_unhashable_period_ids_and_says_why() -> None:
+    # Review C2: a list or object where an id belongs raised TypeError after the call was paid.
+    odd = json.loads(SOL_HIGH_SECOND)
+    book = odd["financial"]["books"][0]
+    book["periods"].append({"period_id": ["FY2022"], "fiscal_year": "2022"})
+    book["statement_lines"].append({"statement": "BS", "period_id": {"id": "FY2025"}})
+    odd["definition"]["assessments"].append({"observation_ids": [["nested"], "r25"]})
+    counted = cp1.completeness(json.dumps(odd))
+    assert counted is not None
+    assert counted["statement_lines"] == 144
+    assert counted["statement_lines_by_fiscal_year"] == {"2024": 40, "2025": 103, "unknown": 1}
+    assert counted["definition_observation_ids"] == 7
+    assert counted["reasons"] == [
+        "a period's period_id is not a string or integer; its lines count as unknown",
+        "a statement line's period_id is not a string or integer; counted as unknown",
+    ]
+
+
+def test_completeness_drop_compares_each_submit_with_the_most_seen_before() -> None:
     first = {"submit": 1, "completeness": cp1.completeness(SOL_HIGH_FIRST)}
     second = {"submit": 2, "completeness": cp1.completeness(SOL_HIGH_SECOND)}
     assert cp1.completeness_drop([first, second]) == {
@@ -1233,13 +1252,31 @@ def test_a_later_submit_with_fewer_lines_or_movements_sets_completeness_drop() -
         "dropped": [
             {
                 "submit": 2,
-                "first_then_now": {"statement_lines": [284, 143], "balance_movements": [5, 0]},
+                "most_before_then_now": {
+                    "statement_lines": [284, 143],
+                    "balance_movements": [5, 0],
+                },
             }
         ],
-        "basis": "each later submit vs the first",
+        "basis": "each later submit vs the most any earlier submit held",
     }
     assert cp1.completeness_drop([first, first | {"submit": 2}])["flag"] is False
     assert cp1.completeness_drop([first])["flag"] is False
+    # Review C4: 5 -> 200 -> 50 lines is a drop at submit 3, though 50 > the first's 5.
+    rows = [
+        {"submit": n, "completeness": {"statement_lines": lines, "balance_movements": moves}}
+        for n, (lines, moves) in enumerate([(5, 0), (200, 40), (50, 10)], start=1)
+    ]
+    assert cp1.completeness_drop(rows)["dropped"] == [
+        {
+            "submit": 3,
+            "most_before_then_now": {"statement_lines": [200, 50], "balance_movements": [40, 10]},
+        }
+    ]
+    unreadable = [rows[0], {"submit": 2, "completeness": None}, rows[2]]
+    assert cp1.completeness_drop(unreadable)["dropped"] == [
+        {"submit": 2, "not_a_json_object": True}
+    ]
 
 
 def test_financials_metrics_carry_completeness_beside_the_shrink_flag(
@@ -1294,3 +1331,116 @@ def test_completeness_is_back_filled_from_a_retained_tool_log(tmp_path: Path) ->
     assert rows[1]["completeness"]["balance_movements"] == 0
     assert cp1.completeness_drop(rows)["flag"] is True
     assert log.read_bytes() == before  # read only
+
+
+# --- review C1 / C7: shared ledgers, skips and caps ---------------------------------------------
+
+
+def luna_args(tmp_path: Path, frozen: Path, batch: str, shared: Path, *extra: str) -> list[str]:
+    args = cli(tmp_path, frozen, "--cells", "luna-xhigh", "--batch-id", batch, *extra)
+    return [*args, "--openrouter-ledger", str(shared), "--seed", "1", "--step-seconds", "3600"]
+
+
+def test_a_cell_reused_on_a_shared_ledger_runs_under_its_own_batch_ids(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review C1: the second batch's ids equalled the first's and the reserve raised.
+    fake_keys(monkeypatch)
+    shared = earlier_batch_ledger(tmp_path)
+    for batch, model in (("hybrid-cp1-2", "m1"), ("hybrid-cp1-3", "m2")):
+        transport = FakeTransport(*[Model(case, tmp_path / model, LUNA)] * 4)
+        args = luna_args(tmp_path, case.frozen, batch, shared)
+        assert cp1.main(args, transport=transport, stream_transport=unexpected_stream) == 0
+    capsys.readouterr()
+    names = [a.attempt_id for a in Ledger(shared, Decimal(15)).state().attempts]
+    assert names[0] == "sol-high-source_context-call-01"  # an earlier, unprefixed id still reads
+    assert [n.split(":")[0] for n in names[1:]] == ["hybrid-cp1-2"] * 4 + ["hybrid-cp1-3"] * 4
+    assert (tmp_path / "root" / "hybrid-cp1-3" / "batch-summary.json").exists()
+
+
+def test_a_batch_and_cell_the_ledger_already_holds_is_refused_before_any_directory(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    shared = earlier_batch_ledger(tmp_path)
+    ledger = Ledger(shared, Decimal(15))
+    ledger.reserve("hybrid-cp1-2:luna-xhigh-source_context-call-01", Decimal(1))
+    ledger.settle("hybrid-cp1-2:luna-xhigh-source_context-call-01", Decimal("0.01"), "usage.cost")
+    args = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", shared)
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert "already holds attempts for hybrid-cp1-2 luna-xhigh" in capsys.readouterr().err
+    assert not (tmp_path / "root" / "hybrid-cp1-2").exists()
+
+
+def test_a_ledger_error_in_send_stops_the_provider_not_the_batch(
+    case: Case, tmp_path: Path
+) -> None:
+    transport = FakeTransport()  # nothing may be sent
+    harness = make_harness(tmp_path, transport, case.frozen)
+    taken = "batch:opus-medium-source_context-call-01"  # the id the first call would use
+    harness.ledgers["anthropic"].reserve(taken, Decimal(1))
+    cells = runs(harness, "opus-medium", "opus-high")
+    summary = cp1.run_batch(harness, cells, seed=1)
+    assert not transport.requests
+    assert "reserves" in summary["stopped_providers"]["anthropic"]
+    assert cells[0].verdict.startswith("stopped at source_context: ")
+    assert cells[1].verdict == "not run: anthropic stopped"
+
+
+@pytest.mark.parametrize("trace", ["step calls", "ledger attempt"])
+def test_a_skip_is_refused_for_a_cell_that_already_made_calls(
+    case: Case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    trace: str,
+) -> None:
+    fake_keys(monkeypatch)
+    batch, _ = stopped_batch(tmp_path)
+    if trace == "step calls":
+        step = batch / "opus-high" / "source_context"
+        step.mkdir()
+        (step / "call-01-request.json").write_text("{}", encoding="utf-8")
+    else:
+        ledger = Ledger(batch.parent / ".ledgers" / "hybrid-cp1-1-anthropic.jsonl", Decimal(25))
+        ledger.reserve("opus-high-source_context-call-01", Decimal(1))
+    args = cli(tmp_path, case.frozen, "--resume", "--cells", "sonnet-xhigh")
+    args += ["--skipped-by-user", "opus-high"]
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert "opus-high cannot be recorded as skipped" in capsys.readouterr().err
+    assert sorted(p.name for p in batch.iterdir() if p.is_file()) == ["plan.json"]
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--resume", "--cells", "sonnet-xhigh", "--cap-anthropic", "30"), "anthropic cap 30"),
+        (("--resume", "--cells", "sol-medium", "--cap-openrouter", "16"), "openrouter cap 16"),
+    ],
+)
+def test_a_cap_that_differs_from_an_existing_ledgers_cap_is_refused(
+    case: Case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: tuple[str, ...],
+    message: str,
+) -> None:
+    fake_keys(monkeypatch)
+    batch, _ = stopped_batch(tmp_path)
+    shutil.rmtree(batch / "sol-medium")  # not started, so only the cap can refuse it
+    args = cli(tmp_path, case.frozen, "--dry-run", *extra)
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert f"{message} differs from" in capsys.readouterr().err
+
+
+def test_a_shared_ledger_cap_given_explicitly_must_match_and_then_runs(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    shared = earlier_batch_ledger(tmp_path)
+    refused = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", shared, "--cap-openrouter", "20")
+    assert cp1.main([*refused, "--dry-run"], transport=unexpected_send) == 2
+    assert "openrouter cap 20 differs from" in capsys.readouterr().err
+    same = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", shared, "--cap-openrouter", "15")
+    assert cp1.main([*same, "--dry-run"], transport=unexpected_send) == 0
