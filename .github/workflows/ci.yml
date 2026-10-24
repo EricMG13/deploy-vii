@@ -32,11 +32,12 @@ jobs:
       - run: uv sync --locked
       - run: make check
       - run: make dev-check
-  product:
-    name: Product checks
+  changes:
+    name: Detect code changes
     runs-on: ubuntu-24.04
-    # 75: M6 took 36m49s on the hosted 4-vCPU runner and M7 adds tests (24 Oct 2026)
-    timeout-minutes: 75
+    timeout-minutes: 10
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,27 +59,100 @@ jobs:
           fi
           [ "$code" = false ] || code=true
           echo "code=$code" >> "$GITHUB_OUTPUT"
-      - if: steps.changes.outputs.code == 'true'
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+  product-static:
+    name: Product static checks
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: '0.12.5'
           python-version: '3.13.15'
-      - if: steps.changes.outputs.code == 'true'
-        run: uv sync --locked
-      - if: steps.changes.outputs.code == 'true'
-        run: uv run --locked playwright install --with-deps chromium
-      - if: steps.changes.outputs.code == 'true'
-        run: make product-check
-      - name: Report
-        if: always()
+      - run: uv sync --locked
+      - run: make product-static
+  product-shard:
+    name: Product tests (${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    # 75: M6 took 36m49s on the hosted 4-vCPU runner and M7 adds tests (24 Oct 2026); each
+    # shard runs a subset of tests/product (.github/shards/product.txt)
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [shard-a, shard-b, shard-c]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.5'
+          python-version: '3.13.15'
+      - run: uv sync --locked
+      - run: uv run --locked playwright install --with-deps chromium
+      - run: make coverage-shard SHARD=${{ matrix.shard }}
         env:
-          CODE: ${{ steps.changes.outputs.code }}
+          COVERAGE_FILE: cov-${{ matrix.shard }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cov-${{ matrix.shard }}
+          path: cov-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 3
+  product-coverage:
+    name: Product coverage (combined)
+    needs: [changes, product-shard]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.5'
+          python-version: '3.13.15'
+      - run: uv sync --locked
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cov-*
+          merge-multiple: true
+      - name: Combine shard data and enforce the coverage floor
         run: |
-          case "$CODE" in
-            false) echo "docs-only diff: Product checks test run skipped (hygiene and secrets still ran)" ;;
-            true) echo "full suite ran (make product-check above)" ;;
-            *) echo "detection unknown: full suite ran" ;;
-          esac
+          uv run --locked coverage combine cov-shard-*
+          uv run --locked coverage report
+  product:
+    name: Product checks
+    needs: [changes, product-static, product-shard, product-coverage]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULTS: ${{ needs.changes.result }} ${{ needs.product-static.result }} ${{ needs.product-shard.result }} ${{ needs.product-coverage.result }}
+        run: |
+          # One status for branch rules. Docs-only: every test job must be skipped.
+          # Otherwise (including an unknown detection): every job must have succeeded.
+          set -- $RESULTS
+          [ "$1" = success ] || { echo "detection failed: $RESULTS"; exit 1; }
+          shift
+          if [ "$CODE" = false ]; then
+            for r in "$@"; do [ "$r" = skipped ] || { echo "unexpected result: $RESULTS"; exit 1; }; done
+            echo "docs-only diff: Product checks test run skipped (hygiene and secrets still ran)"
+          else
+            for r in "$@"; do [ "$r" = success ] || { echo "Product checks failed: $RESULTS"; exit 1; }; done
+            echo "full suite ran (static checks, 3 test shards, combined coverage floor)"
+          fi
   secrets:
     name: Secrets
     runs-on: ubuntu-24.04
