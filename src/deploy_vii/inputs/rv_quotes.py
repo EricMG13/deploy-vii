@@ -92,6 +92,7 @@ FIX: Mapping[str, str] = {
     ),
     "read": "check the path and that the file is readable",
 }
+ECHO = 80  # characters of a cell value a message quotes
 # What `zipfile` raises for damaged members beyond `prepare_source`'s own refusals.
 DAMAGED = (zlib.error, EOFError, RuntimeError)
 ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
@@ -231,14 +232,17 @@ def header_issue(grid: Mapping[tuple[int, int], Span]) -> tuple[str, str] | None
     for column, expected in enumerate(COLUMNS, 1):
         found = text(grid, column, 1)
         if found != expected:
-            shown = f"'{found}'" if found else "empty"
+            shown = f"'{echo(found)}'" if found else "empty"
             return f"{LETTERS[column - 1]}1", f"header is {shown}, expected '{expected}'"
     extra = sorted(column for column, row in grid if row == 1 and column > len(COLUMNS))
     for column in extra:
         found = text(grid, column, 1)
         if found:
             letters = cell_letters(column)
-            return f"{letters}1", f"header is '{found}', expected nothing after {LETTERS[-1]}1"
+            return (
+                f"{letters}1",
+                f"header is '{echo(found)}', expected nothing after {LETTERS[-1]}1",
+            )
     return None
 
 
@@ -287,22 +291,22 @@ def column_problem(name: str, values: Mapping[str, str]) -> tuple[str, str] | No
         return f"{name} is empty", FIX[name]
     if name == "provider" and folded(value) == folded(values["issuer"]):
         issuer = (
-            f"provider '{value}' is the issuer; a quote the issuer supplies is not "
+            f"provider '{echo(value)}' is the issuer; a quote the issuer supplies is not "
             "third-party evidence"
         )
         return issuer, FIX["issuer_provider"]
     problem: str | None = None
     if name == "as_of" and not iso_date(value):
         kind = "an Excel date serial, not" if SERIAL.match(value) else "not"
-        problem = f"as_of '{value}' is {kind} an ISO date YYYY-MM-DD"
+        problem = f"as_of '{echo(value)}' is {kind} an ISO date YYYY-MM-DD"
     elif name == "facility_id" and not IDENTIFIER.match(value):
-        problem = f"facility_id '{value}' has characters other than letters, digits, - and _"
+        problem = f"facility_id '{echo(value)}' has characters other than letters, digits, - and _"
     elif name == "quote_kind" and value not in QUOTE_KINDS:
-        problem = f"quote_kind '{value}' is not observed or indicative_talk"
+        problem = f"quote_kind '{echo(value)}' is not observed or indicative_talk"
     elif name == "currency" and not CURRENCY.match(value):
-        problem = f"currency '{value}' is not a three-letter ISO 4217 code"
+        problem = f"currency '{echo(value)}' is not a three-letter ISO 4217 code"
     elif name in LEVELS and value and not NUMBER.match(value):
-        problem = f"{name} '{value}' is not a number"
+        problem = f"{name} '{echo(value)}' is not a number"
     if problem is None:
         return None
     return problem, FIX["number"] if name in LEVELS else FIX[name]
@@ -321,8 +325,13 @@ def level_findings(
     if bid and ask and not {"bid", "ask"} & flagged and Decimal(bid) > Decimal(ask):
         bid_cell, ask_cell = LETTERS[COLUMNS.index("bid")], LETTERS[COLUMNS.index("ask")]
         cell = f"{bid_cell}{row}:{ask_cell}{row}"
-        return [(cell, f"bid {bid} exceeds ask {ask}", FIX["bid_ask"])]
+        return [(cell, f"bid {echo(bid)} exceeds ask {echo(ask)}", FIX["bid_ask"])]
     return []
+
+
+def echo(value: str) -> str:
+    """A cell value as a message quotes it: at most `ECHO` characters, then an ellipsis."""
+    return value if len(value) <= ECHO else value[:ECHO] + "…"
 
 
 def folded(value: str) -> str:

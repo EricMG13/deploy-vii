@@ -293,6 +293,40 @@ def test_a_value_with_a_line_break_still_renders_as_one_line(tmp_path: Path) -> 
     ]
 
 
+@pytest.mark.parametrize(
+    "change, cell, column",
+    [
+        ({"currency": "X" * 32000}, "L2", "currency"),
+        ({"quote_kind": "q" * 32000}, "F2", "quote_kind"),
+        ({"price": None, "bid": "9" * 32000, "ask": "1"}, "J2:K2", "bid"),
+    ],
+)
+def test_a_long_cell_value_is_echoed_to_80_characters(
+    tmp_path: Path, change: dict[str, Any], cell: str, column: str
+) -> None:
+    (issue,) = validate_rv_quotes(write(tmp_path, [VALID | change])).issues
+    long = change[column]
+    assert issue.cell == cell
+    assert long[:80] + "…" in issue.problem
+    assert long[:81] not in issue.problem
+    # The 80-character echo plus the fixed problem and fix wording stay well under 300.
+    assert len(issue.problem) < 200
+    assert len(issue.render()) < 300
+    assert issue.render().startswith(f"{FILE}:rv_quotes!{cell}: ")
+
+
+def test_a_long_header_value_is_echoed_to_80_characters(tmp_path: Path) -> None:
+    (issue,) = validate_rv_quotes(
+        write(tmp_path, [VALID], header=("h" * 32000, *COLUMNS[1:]))
+    ).issues
+    assert issue.problem == f"header is '{'h' * 80}…', expected 'provider'"
+
+
+def test_an_80_character_value_is_echoed_whole(tmp_path: Path) -> None:
+    (issue,) = validate_rv_quotes(write(tmp_path, [VALID | {"currency": "X" * 80}])).issues
+    assert issue.problem == f"currency '{'X' * 80}' is not a three-letter ISO 4217 code"
+
+
 def test_rows_with_an_invalid_key_cell_are_not_also_duplicates(tmp_path: Path) -> None:
     row = VALID | {"provider": None}
     report = validate_rv_quotes(write(tmp_path, [row, row]))
