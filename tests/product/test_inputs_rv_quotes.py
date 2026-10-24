@@ -283,6 +283,15 @@ def test_duplicate_quote_key_is_one_issue_on_the_later_row(tmp_path: Path) -> No
     assert report.rows == 3
 
 
+def test_a_value_with_a_line_break_still_renders_as_one_line(tmp_path: Path) -> None:
+    report = validate_rv_quotes(write(tmp_path, [VALID | {"currency": "US\nD\t"}]))
+    assert report.issues[0].problem == "currency 'US\nD' is not a three-letter ISO 4217 code"
+    assert rendered(report) == [
+        f"{FILE}:rv_quotes!L2: currency 'US\\nD' is not a three-letter ISO 4217 code"
+        f" — fix: {CURRENCY_FIX}"
+    ]
+
+
 def test_rows_with_an_invalid_key_cell_are_not_also_duplicates(tmp_path: Path) -> None:
     row = VALID | {"provider": None}
     report = validate_rv_quotes(write(tmp_path, [row, row]))

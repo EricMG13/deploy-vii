@@ -103,7 +103,12 @@ class Issue(Contract):
     fix: str
 
     def render(self) -> str:
-        return f"{self.file}:{self.sheet}!{self.cell}: {self.problem} — fix: {self.fix}"
+        """One line: a cell value's line breaks or other control characters are escaped."""
+        line = f"{self.file}:{self.sheet}!{self.cell}: {self.problem} — fix: {self.fix}"
+        return "".join(
+            char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+            for char in line
+        )
 
 
 class ValidationReport(Contract):
