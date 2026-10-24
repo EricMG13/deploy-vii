@@ -770,9 +770,9 @@ leaves it unchanged.
   holds the refused attempt; `dispatch(..., on_in_flight=)` hands it over before the wait, which
   the CLI uses to give it its own report row even when the re-send raises (cap refusal,
   connection failure, a second refusal). A second in-flight 402 is exhaustion: its credit block
-  says `exhausted: true` and the detail names both attempts, and (task 8.0a) its settle reason
-  carries no "not a model try" mark: like any credit 402 it is not re-sent, so it counts as the
-  try it was if the ticket is dispatched again. `live schema-check` does not retry: an in-flight 402 there stops the check
+  says `exhausted: true` and the detail names both attempts; it is still no model try, and
+  (task 8.0a) its settle reason ends with `; in-flight 402 again: treated as exhaustion`
+  instead of the "not a model try" mark (`in_flight_refused` accepts either). `live schema-check` does not retry: an in-flight 402 there stops the check
   as exhaustion, named as in flight. The CLI abort line and the report's `Stopped:` line carry
   `CreditState.summary()`, e.g. `Stopped: aborted: CreditExhausted (reason openrouter_credits;
   requested max_tokens 128000, affordable 91075; HTTP 402)`; `EXIT_CREDIT` stays 4.

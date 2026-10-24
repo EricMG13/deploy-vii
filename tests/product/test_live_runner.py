@@ -2267,10 +2267,13 @@ def test_a_second_in_flight_402_is_exhaustion_and_both_attempts_are_sealed(
     assert [a.status for a in rig.store.read().attempts] == ["pending"]  # repair kept
 
 
-def test_only_the_re_sent_in_flight_402_is_settled_as_no_model_try(tmp_path: Path) -> None:
-    """Task 8.0a (M7 whole-lane review A.3): the settle mark follows the outcome. The first
-    in-flight 402 is re-sent, so it is no model try; the second is exhaustion (DC-8), settled
-    as any credit 402 is, without the mark, although its body still reads transient."""
+def test_the_second_in_flight_402_is_settled_as_exhaustion_and_still_no_model_try(
+    tmp_path: Path,
+) -> None:
+    """Task 8.0a (M7 whole-lane review A.3; fix round 1): the settle wording follows the outcome
+    and the try count does not move. The first in-flight 402 is re-sent and settled "not a model
+    try"; the second is exhaustion (DC-8) and says so, without that mark, but it is still no
+    model try: the next dispatch on the still-pending ticket is try 1, as at base."""
     rig = make_rig(tmp_path)
     transport = FakeTransport(Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402))
     with pytest.raises(CreditExhausted):
@@ -2278,14 +2281,30 @@ def test_only_the_re_sent_in_flight_402_is_settled_as_no_model_try(tmp_path: Pat
     first, second = sorted(rig.ledger.state().attempts, key=lambda record: record.attempt_id)
     assert runner.in_flight_refused(first)
     assert (first.basis or "").endswith(runner.IN_FLIGHT_SETTLE_MARK)
-    assert not runner.in_flight_refused(second) and second.status == "settled"
+    assert runner.in_flight_refused(second) and second.status == "settled"
     assert runner.IN_FLIGHT_SETTLE_MARK not in (second.basis or "")
+    assert (second.basis or "").endswith(runner.IN_FLIGHT_EXHAUSTED_MARK)
     (sealed,) = [
         load(path)
         for path in (rig.root / "artifacts").rglob("manifest.json")
         if load(path)["attempt_id"] == second.attempt_id
     ]
     assert sealed["credit"]["transient"] is True and sealed["credit"]["exhausted"] is True
+    third = rig.run(ChatClient(FakeTransport(reply(rig))))
+    assert third.status == "accepted"
+    assert load(attempt_dir(third) / "manifest.json")["retries"]["attempt_number"] == 1
+
+
+def test_a_third_dispatch_after_two_in_flight_402s_is_still_the_first_model_try(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 pin, independent of the mark names: base ceba3dc counted neither refusal."""
+    rig = make_rig(tmp_path)
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402))
+    with pytest.raises(CreditExhausted):
+        rig.run(ChatClient(transport), sleep=Waits())
+    third = rig.run(ChatClient(FakeTransport(reply(rig))))
+    assert load(attempt_dir(third) / "manifest.json")["retries"]["attempt_number"] == 1
 
 
 def test_a_credit_402_does_not_wait_and_reports_the_affordable_budget(tmp_path: Path) -> None:

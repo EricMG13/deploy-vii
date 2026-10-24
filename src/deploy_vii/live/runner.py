@@ -77,6 +77,9 @@ IN_FLIGHT_DEFAULT_WAIT_S = 120  # when the refusal states no Retry-After
 IN_FLIGHT_MAX_WAIT_S = 300
 # Ends the ledger settle reason of an in-flight 402 (`in_flight_refused`).
 IN_FLIGHT_SETTLE_MARK = "; in-flight 402: not a model try"
+# Ends it for the second in-flight 402 of one try, which is exhaustion (task 8.0a); it is no
+# model try either (`in_flight_refused`).
+IN_FLIGHT_EXHAUSTED_MARK = "; in-flight 402 again: treated as exhaustion"
 SUBMITTED = frozenset({"ok", "truncated"})
 # Each module's last step, whose acceptance is the module's (`journal_outcome`, task 8.0a).
 SETTLING_STEPS = settling_steps()
@@ -368,8 +371,13 @@ def in_flight_refused(record: AttemptRecord) -> bool:
     """Whether the ledger settled this attempt as an in-flight 402 (task 7.8, fix round 1):
     credit is not a model failure, so such an attempt uses up no `max_retries` try. The mark is
     the end of the settle reason `_close` writes; the charge is known zero, so no `adjust`
-    (held charges only) can replace it."""
-    return record.status == "settled" and (record.basis or "").endswith(IN_FLIGHT_SETTLE_MARK)
+    (held charges only) can replace it. Task 8.0a: the second in-flight refusal, exhaustion, ends
+    with `IN_FLIGHT_EXHAUSTED_MARK` instead and counts the same; ledgers written before 8.0a
+    carry `IN_FLIGHT_SETTLE_MARK` on both refusals."""
+    basis = record.basis or ""
+    return record.status == "settled" and basis.endswith(
+        (IN_FLIGHT_SETTLE_MARK, IN_FLIGHT_EXHAUSTED_MARK)
+    )
 
 
 def next_attempt_id(
@@ -574,7 +582,8 @@ def _interrupt_if_exhausted(plan: _Plan, store: Execution, run: _Run, why: str) 
 def _re_sent(run: _Run) -> bool:
     """Whether `dispatch` re-sends this attempt: an in-flight 402 not yet treated as exhaustion
     (task 7.8). The second in-flight refusal still reads transient but is exhaustion
-    (`_refusal`), so it is neither re-sent nor settled as "not a model try" (task 8.0a)."""
+    (`_refusal`): it is not re-sent, and its settle reason says so (`IN_FLIGHT_EXHAUSTED_MARK`,
+    task 8.0a) while it still counts as no model try."""
     return run.credit is not None and run.credit.transient and run.credit.exhausted is None
 
 
@@ -885,8 +894,11 @@ def _close(plan: _Plan, ledger: Ledger, writer: AttemptWriter, run: _Run, key: s
     cost = _cost(plan.candidate, run.result)
     try:
         reason = f"{cost.reason}; status={run.status}"
+        # `_plan` counts no try for either (`in_flight_refused`); only the wording differs.
         if _re_sent(run):
-            reason += IN_FLIGHT_SETTLE_MARK  # `_plan` counts no try for it
+            reason += IN_FLIGHT_SETTLE_MARK
+        elif run.credit is not None and run.credit.transient:
+            reason += IN_FLIGHT_EXHAUSTED_MARK
         run.settlement = ledger.settle(plan.attempt_id, cost.amount, reason)
         plan.event("ledger_settled", charged=run.settlement.charged, basis=cost.basis)
     finally:
