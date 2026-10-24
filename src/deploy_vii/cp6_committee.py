@@ -80,6 +80,7 @@ from deploy_vii.cp2_synthesis import CatalogueRow, cp1a_catalogue
 from deploy_vii.cp3_relative_value import KIND_LABEL as CP3_KIND_LABEL
 from deploy_vii.cp3_relative_value import REQUIRED_TABLES as CP3_REGISTERS
 from deploy_vii.cp3_relative_value import cp2_catalogue
+from deploy_vii.cp5_integrity import KIND_LABEL as CP5_KIND_LABEL
 from deploy_vii.cp5_integrity import SUPPORT_WORD
 from deploy_vii.execution import (
     Attempt,
@@ -119,7 +120,16 @@ CP5_CITABLE = (FINDINGS, "T5B.6", "T5B.7", "T5B.8")
 # (`cp5_integrity._verdict_tables`); any other text there is a Python mark on the claim.
 NO_PYTHON_FINDING = "None"
 _FINDING_ID = re.compile(r"CP-5-FINDING-[0-9]{3}")
-_CP4 = re.compile(r"(?<![A-Za-z0-9-])CP-4(?![A-Za-z0-9])")
+CP4 = "CP-4"
+# What CP-5 writes (`cp5_integrity.integrity_review` and `_status_tables`) that CP-6 reads to
+# tell CP-4 content from a mere mention: findings that say a module was outside the review,
+# the origin of a T5B.7 row restating one of CP-5's own findings, and the T5B.6 result of a
+# module CP-5 did not evaluate.
+NO_CONTENT_KINDS = frozenset(
+    {CP5_KIND_LABEL["blocked_upstream"], CP5_KIND_LABEL["empty_evaluated_set"]}
+)
+FINDING_ORIGIN = "CP-5 finding"
+NOT_EVALUATED_RESULT = "Blocked upstream: not evaluated"
 # The CP-2 T2.7 side cell names the Front Page column a challenge sits beside.
 THESIS_CHALLENGE = "cp6.thesis_challenge"
 STRENGTH_CHALLENGES = "cp6.strength_challenges"
@@ -329,8 +339,8 @@ class Cp5Review:
 
     `flagged` holds each (module, claim id) CP-5 does not hold supported: a verdict other than
     Supported or a Python mark (T5B.4), or a party to a contradiction (T5B.3). `cp4_rows` are
-    the finding (T5.9) and report-level limitation (T5B.7) rows that name CP-4. `unreadable`
-    lists claim names that do not read as `<module> <claim id>`."""
+    the rows that carry CP-4 content (`cp4_rows`). `unreadable` lists claim names that do not
+    read as `<module> <claim id>`."""
 
     findings: tuple[Cp5Finding, ...]
     flagged: frozenset[tuple[str, str]]
@@ -358,6 +368,42 @@ def _register_rows(head: Module, table_id: str) -> list[tuple[TableRow, dict[str
 def _said(cells: Mapping[str, Fact], field: str) -> str:
     cell = cells.get(field)
     return cell.text or "" if cell is not None else ""
+
+
+def _where_modules(where: str) -> tuple[str, ...]:
+    """The modules a T5.9 Where cell names (`cp5_integrity.Finding.where`): `<module> claim|fact
+    <id>`, `<subject> (<module>, ...)` for a figure mismatch, `<module> <claim>; ...` for a
+    contradiction."""
+    if where.endswith(")") and " (" in where:
+        return tuple(where[where.rindex(" (") + 2 : -1].split(", "))
+    return tuple(part.split(" ")[0] for part in where.split("; "))
+
+
+def cp4_rows(
+    cp5: Module, findings: Sequence[Cp5Finding], verdict: Mapping[str, str]
+) -> frozenset[str]:
+    """The CP-5 rows that carry CP-4 content (fix round 1, ruling 6): a finding about CP-4's own
+    claims, facts or figures, and the T5B.7 row restating such a finding. None unless CP-5
+    evaluated CP-4 (its T5B.8 evaluated set, not its not-evaluated list, and no T5B.6 Blocked
+    upstream result); a Blocked upstream finding, an inherited limitation and a gap row never
+    carry CP-4 content."""
+    evaluated = verdict.get("evaluated", "").split(", ")
+    outside = verdict.get("not_evaluated", "").split(", ")
+    results = {row.label: _said(cells, "result") for row, cells in _register_rows(cp5, "T5B.6")}
+    if CP4 not in evaluated or CP4 in outside or results.get(CP4) == NOT_EVALUATED_RESULT:
+        return frozenset()
+    carrying = {
+        f.finding_id: f.ref
+        for f in findings
+        if f.kind not in NO_CONTENT_KINDS and CP4 in _where_modules(f.where)
+    }
+    restated = {
+        f"T5B.7.{row.row_id}"
+        for row, cells in _register_rows(cp5, "T5B.7")
+        if _said(cells, "origin") == FINDING_ORIGIN
+        and _said(cells, "limitation").partition(" ")[0] in carrying
+    }
+    return frozenset({*carrying.values(), *restated})
 
 
 def cp5_review(cp5: Module) -> Cp5Review:
@@ -389,21 +435,14 @@ def cp5_review(cp5: Module) -> Cp5Review:
             unreadable.append(name)
         else:
             flagged.add((module_id, claim_id))
-    cp4 = {
-        f"{table_id}.{row.row_id}"
-        for table_id in (FINDINGS, "T5B.7")
-        for row, cells in _register_rows(cp5, table_id)
-        if _CP4.search(" ".join((row.label, *(c.text or "" for c in cells.values()))))
-    }
+    verdict = {row.row_id: _said(cells, "value") for row, cells in _register_rows(cp5, "T5B.8")}
     return Cp5Review(
         findings=findings,
         flagged=frozenset(flagged),
         unsupported=len(_register_rows(cp5, "T5B.2")),
         contradictions=len(contradictions),
-        cp4_rows=frozenset(cp4),
-        verdict=MappingProxyType(
-            {row.row_id: _said(cells, "value") for row, cells in _register_rows(cp5, "T5B.8")}
-        ),
+        cp4_rows=cp4_rows(cp5, findings, verdict),
+        verdict=MappingProxyType(verdict),
         unreadable=tuple(dict.fromkeys(unreadable)),
     )
 
@@ -469,6 +508,24 @@ class Upstream:
         found = next((f.ref for f in self.review.findings if f.finding_id == ref), None)
         return found if found in self.cp5_rows else None
 
+    @cached_property
+    def claim_rows(self) -> frozenset[tuple[str, str]]:
+        """The CP-2 and CP-3 rows that bear a claim (T2.1.assessment, T2.10.kfNN, T3.4.preference,
+        T3.1.iNN with a market observation): the only rows CP-5 reviews, so the only rows that
+        can support a call (fix round 1, ruling 3). Gap and limitation rows never do."""
+        return frozenset(
+            (head.module_id, claim.claim_id)
+            for head, rows in ((self.cp2, self.cp2_rows), (self.cp3, self.cp3_rows))
+            for claim in head.claims
+            if claim.claim_id in rows
+        )
+
+    @property
+    def cp4_evidence(self) -> frozenset[str]:
+        """The CP-5 rows carrying CP-4 content (`Cp5Review.cp4_rows`); none while CP-4 is
+        blocked up CP-6's own input chain."""
+        return frozenset() if CP4 in self.blocked_upstream else self.review.cp4_rows
+
     @property
     def blocked_upstream(self) -> tuple[str, ...]:
         """Every blocked module up the bound input chain, bound ones included."""
@@ -481,6 +538,12 @@ class Upstream:
         blocked ancestor, a CP-5 handoff that is not accepted, and CP-5's unsupported claims
         and contradictions. An optional upstream the run does not select is silent."""
         reasons = [f"{module_id} is blocked upstream" for module_id in self.blocked_upstream]
+        return (*reasons, *self.cp5_caps)
+
+    @property
+    def cp5_caps(self) -> tuple[str, ...]:
+        """The CP-5 reasons among `caps`; each comes with an own limitation (`limits`)."""
+        reasons: list[str] = []
         if self.status(CP5) != "accepted":
             reasons.append(f"CP-5 is {self.status(CP5) or 'absent'}")
         if self.review.unsupported:
@@ -515,7 +578,7 @@ class Upstream:
     @property
     def limits(self) -> tuple[str, ...]:
         """CP-6's own limitations from its upstream: each blocked ancestor (a blocked read
-        optional one in the decision 0007 wording) and a restricted CP-5 handoff. An optional
+        optional one in the decision 0007 wording) and every CP-5 cap. An optional
         upstream the run does not select records none: `current_inputs` refuses a selected one
         that is unrun or stale, so blocked is the only missing state a bound attempt shows."""
         texts = [
@@ -524,12 +587,11 @@ class Upstream:
             else f"Blocked upstream {m}: its outputs are outside CP-6's evidence"
             for m in self.blocked_upstream
         ]
-        if self.status(CP5) == "restricted":
+        if self.cp5_caps:
             ids = [finding.finding_id for finding in self.review.findings]
+            found = f"; findings {', '.join(ids)}" if ids else ""
             texts.append(
-                f"CP-5 handoff is restricted: {len(ids)} findings ({', '.join(ids)})"
-                if ids
-                else "CP-5 handoff is restricted: its own limitations are inherited"
+                f"CP-5 handoff caps the confidence below High: {'; '.join(self.cp5_caps)}{found}"
             )
         return tuple(texts)
 
@@ -734,8 +796,8 @@ def _recommendation_issues(
             f"recommendation.confidence: capped below High because {'; '.join(upstream.caps)}"
         )
     if not insufficient:
-        support = [(CP2, r) for r in dict.fromkeys(row.basis.cp2_refs) if r in upstream.cp2_rows]
-        support += [(CP3, r) for r in dict.fromkeys(row.basis.cp3_refs) if r in upstream.cp3_rows]
+        cited = [(CP2, r) for r in row.basis.cp2_refs] + [(CP3, r) for r in row.basis.cp3_refs]
+        support = [key for key in dict.fromkeys(cited) if key in upstream.claim_rows]
         unflagged = [key for key in support if key not in upstream.review.flagged]
         # A figure supports the call only where the call is argued: its limitation is not.
         argued = row.model_copy(update={"limitation": None})
@@ -745,8 +807,8 @@ def _recommendation_issues(
                 issues.append(f"recommendation.basis: rests only on CP-5-flagged claims ({named})")
             else:
                 issues.append(
-                    "recommendation.basis: cites no CP-2 or CP-3 row or CP-1 figure CP-5 leaves "
-                    "unflagged"
+                    "recommendation.basis: cites no CP-2 or CP-3 claim row or CP-1 figure CP-5 "
+                    "leaves unflagged"
                 )
     for index, view in enumerate(submission.recovery_view):
         path = f"recovery_view[{index}]"
@@ -756,7 +818,7 @@ def _recommendation_issues(
                     f"{path}: an Insufficient Information recovery view states its limitation"
                 )
             continue
-        if not any(upstream.cp5_ref(r) in upstream.review.cp4_rows for r in view.basis.cp5_refs):
+        if not any(upstream.cp5_ref(r) in upstream.cp4_evidence for r in view.basis.cp5_refs):
             issues.append(
                 f"{path}: a recovery view that is not Insufficient Information cites a CP-5 "
                 "finding or limitation carrying CP-4 evidence"
@@ -1386,10 +1448,17 @@ def context_block(pack: PreparedPack, upstream: Upstream) -> dict[str, object]:
             else "CP-1 offers no referencable figure: write no figure at all (labels only)."
         ),
         "cp2_rows": [
-            {**entry, "challengeable": entry["ref"] in upstream.challengeable}
+            {
+                **entry,
+                "challengeable": entry["ref"] in upstream.challengeable,
+                "claim": (CP2, entry["ref"]) in upstream.claim_rows,
+            }
             for entry in _rows_of(upstream.cp2_rows)
         ],
-        "cp3_rows": _rows_of(upstream.cp3_rows),
+        "cp3_rows": [
+            {**entry, "claim": (CP3, entry["ref"]) in upstream.claim_rows}
+            for entry in _rows_of(upstream.cp3_rows)
+        ],
         "cp5_rows": _rows_of(upstream.cp5_rows),
         "rows_note": (
             "Cite rows only by listing their refs in cp2_refs, cp3_refs and cp5_refs (a CP-5 "
@@ -1401,12 +1470,14 @@ def context_block(pack: PreparedPack, upstream: Upstream) -> dict[str, object]:
             for f in review.findings
         ],
         "cp5_flagged_claims": [list(key) for key in sorted(review.flagged)],
-        "cp5_cp4_rows": sorted(review.cp4_rows),
+        "cp5_cp4_rows": sorted(upstream.cp4_evidence),
         "cp5_verdict": dict(review.verdict),
         "cp5_note": (
             "A recommendation that is not Insufficient Information cites at least one CP-2 or "
-            "CP-3 row outside cp5_flagged_claims or a CP-1 figure. A recovery view that is not "
-            "Insufficient Information cites a cp5_cp4_rows ref; without one it is a gap."
+            "CP-3 row whose claim is true and that is outside cp5_flagged_claims, or names a "
+            "CP-1 figure in its rationale or conditions; gap rows support nothing. A recovery "
+            "view that is not Insufficient Information cites a cp5_cp4_rows ref; without one it "
+            "is a gap."
         ),
         "optional_upstream": [
             {

@@ -43,17 +43,21 @@ What to return:
 - `recommendation`: the action bias, rationale, conditions, confidence, limitation and basis.
 - `thesis_challenges`: one row per challenged CP-2 row, as above.
 - `recovery_view`: each recovery view with its subject, view, confidence, limitation and
-  basis. Without a CP-5 finding or limitation carrying CP-4 evidence (listed under
-  `cp5_cp4_rows`), a recovery view is Insufficient Information and states its limitation.
+  basis. Without a CP-5 finding or limitation carrying CP-4 content (listed under
+  `cp5_cp4_rows`; never a blocked CP-4, an inherited limitation or a gap row), a recovery view
+  is Insufficient Information and states its limitation.
 - `risks`: each risk to the action bias with its mechanic, implication, severity and basis.
 - `gaps`: what the committee lacks, why it matters, what it affects, its severity and action.
 
 The CP-5 rule. CP-6 runs only after CP-5's handoff is Passed or Restricted; a blocked required
 upstream refuses the step. A restricted CP-5, unsupported or partly supported claims and
 contradictions keep the confidence below High (so no High Overweight or Underweight) and
-Python records the limitation. A recommendation that is not Insufficient Information cites at
-least one CP-2 or CP-3 row CP-5 does not flag (`cp5_flagged_claims`) or a CP-1 figure: a
-recommendation resting only on flagged claims is refused.
+Python records the limitation. A recommendation that is not Insufficient Information is
+supported by at least one CP-2 or CP-3 row that bears a claim (marked claim under `cp2_rows`
+and `cp3_rows`: the credit assessment, a key finding, the preference, an instrument's market
+observation) and that CP-5 does not flag (`cp5_flagged_claims`), or by a CP-1 figure in its
+rationale or conditions: a recommendation resting only on flagged claims is refused. Gap and
+limitation rows support nothing; cite them only for a limitation.
 
 Gap propagation. Any blocked module up the input chain (listed under `blocked_ancestors` and
 `confidence_caps`) keeps the confidence below High and is an own limitation; the run is never

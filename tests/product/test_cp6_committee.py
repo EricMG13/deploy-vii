@@ -28,12 +28,13 @@ from deploy_vii.bindings import BindingMap, validate_bindings
 from deploy_vii.bindings.cp2 import CP2 as CP2_MAP
 from deploy_vii.bindings.cp6 import CP6
 from deploy_vii.business_context import CP1_REFERENCES, PROHIBITED, Confidence, Gap, spelled
-from deploy_vii.contracts import Fact, Input, Module, ModuleView, View
+from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, View
 from deploy_vii.cp2_synthesis import STRENGTHS, THESIS, WEAKNESSES
 from deploy_vii.cp3_relative_value import cp3_module, relative_value, submit_cp3_step
 from deploy_vii.cp5_integrity import (
     ClaimRef,
     Contradiction,
+    ReviewScope,
     cp5_module,
     integrity_review,
     review_scope,
@@ -65,7 +66,6 @@ from deploy_vii.cp6_committee import (
     call_scale,
     committee_challenge,
     context_block,
-    cp5_catalogue,
     cp5_review,
     cp6_module,
     cp6_prohibited_issues,
@@ -425,7 +425,8 @@ def test_own_limitations_name_the_gaps_the_recovery_gap_and_the_cp5_handoff() ->
     assert ids and up.status("CP-5") == "restricted"
     assert report.limitations == (
         "Gap (Material): No covenant or legal evidence",
-        f"CP-5 handoff is restricted: {len(ids)} findings ({', '.join(ids)})",
+        "CP-5 handoff caps the confidence below High: CP-5 is restricted; CP-5 marks 2 claims "
+        f"unsupported or partly supported; findings {', '.join(ids)}",
         "Recovery view is Insufficient Information: No CP-4 evidence reaches CP-6",
     )
 
@@ -592,20 +593,43 @@ def test_a_recommendation_resting_only_on_cp5_flagged_claims_is_rejected() -> No
         "recommendation.basis: rests only on CP-5-flagged claims (CP-2 T2.1.assessment, "
         "CP-2 T2.10.kf02, CP-3 T3.4.preference)"
     ) in issues_of(committee(recommendation=flagged), up)
+    # A row that bears no claim (a thesis point) is never reviewed, so it is no support.
     with_row = flagged.model_copy(update={"basis": basis(cp2=(ASSESSMENT, THESIS_ROW))})
-    assert issues_of(committee(recommendation=with_row), up) == ()
+    assert (
+        "recommendation.basis: rests only on CP-5-flagged claims (CP-2 T2.1.assessment)"
+    ) in issues_of(committee(recommendation=with_row), up)
+    with_claim = flagged.model_copy(update={"basis": basis(cp2=(ASSESSMENT,), cp3=("T3.1.i01",))})
+    assert issues_of(committee(recommendation=with_claim), up) == ()
     with_figure = flagged.model_copy(update={"rationale": recommendation().rationale})
     assert issues_of(committee(recommendation=with_figure), up) == ()
     only_cp5 = flagged.model_copy(update={"basis": basis(cp5=(review.findings[0].finding_id,))})
     assert (
-        "recommendation.basis: cites no CP-2 or CP-3 row or CP-1 figure CP-5 leaves unflagged"
-        in (issues_of(committee(recommendation=only_cp5), up))
+        "recommendation.basis: cites no CP-2 or CP-3 claim row or CP-1 figure CP-5 leaves "
+        "unflagged" in (issues_of(committee(recommendation=only_cp5), up))
     )
     # An Insufficient Information bias may rest on CP-5's findings alone.
     honest = only_cp5.model_copy(
         update={"action_bias": "Insufficient Information", "confidence": "Insufficient Information"}
     )
     assert issues_of(committee(recommendation=honest), up) == ()
+
+
+def test_gap_and_limitation_rows_are_never_support_for_a_call() -> None:
+    """Fix round 1 ruling 3: support comes from claim-bearing rows or CP-1 figures; a gap row
+    is cited only as the basis of a limitation."""
+    up = upstream_of(cp5=clean_cp5())
+    gap = recommendation(
+        action_bias="Overweight",
+        rationale="Thin disclosure is the open question.",
+        basis=basis(cp2=("T2.12.g01",), cp3=("T3.10.g01",)),
+    )
+    assert (
+        "recommendation.basis: cites no CP-2 or CP-3 claim row or CP-1 figure CP-5 leaves unflagged"
+    ) in issues_of(committee(recommendation=gap), up)
+    claimed = gap.model_copy(
+        update={"basis": basis(cp2=("T2.12.g01", FINDING), cp3=("T3.10.g01",))}
+    )
+    assert issues_of(committee(recommendation=claimed), up) == ()
 
 
 def test_a_figure_in_the_limitation_is_no_support_for_the_recommendation() -> None:
@@ -640,7 +664,11 @@ def test_a_cp5_restricted_handoff_limits_and_caps_below_high() -> None:
             "2 claims unsupported or partly supported; CP-5 records 1 contradictions"
         ) in issues_of(committee(recommendation=high), up)
     report = committee_challenge(market_pack(), committee(), up)
-    assert any(text.startswith("CP-5 handoff is restricted: ") for text in report.limitations)
+    assert (
+        "CP-5 handoff caps the confidence below High: CP-5 is restricted; CP-5 marks 2 claims "
+        "unsupported or partly supported; CP-5 records 1 contradictions; findings "
+        + ", ".join(f.finding_id for f in cp5_review(up.cp5).findings)
+    ) in report.limitations
 
 
 def test_a_clean_cp5_allows_a_high_directional_bias() -> None:
@@ -727,21 +755,117 @@ def test_recovery_needs_cp4_evidence_through_cp5_or_is_insufficient() -> None:
     )
 
 
-def test_a_cp5_row_naming_cp4_carries_recovery_evidence() -> None:
-    up = upstream_of()
-    rows = cp5_catalogue(up.cp5)
-    review = cp5_review(up.cp5)
-    assert review.cp4_rows <= set(rows)
-    naming = {
+CP4_BLOCK = "Malformed candidate: (root): Invalid JSON"
+CP4_CLAIM = "covenant_capacity"
+
+
+def cp4_head(*, blocked: bool = False) -> Module:
+    """A SYNTHETIC CP-4 head: blocked (limitations only) or carrying one covenant claim."""
+    run = market_pack().run
+    identity = {"run_id": run.run_id, "issuer_id": run.issuer_id, "as_of": run.as_of}
+    if blocked:
+        return Module(**identity, module_id="CP-4", status="blocked", limitations=(CP4_BLOCK,))
+    claim = Claim(
+        claim_id=CP4_CLAIM,
+        text="The secured lenders hold a first lien over the operating assets.",
+        citations=(),
+    )
+    return Module(**identity, module_id="CP-4", status="accepted", claims=(claim,))
+
+
+@lru_cache(maxsize=1)
+def blocked_cp4_cp5() -> Module:
+    """CP-5 over CP-3 and a blocked CP-4: a Blocked upstream finding and the inherited
+    "Upstream CP-4 blocked" limitation, both naming CP-4 without carrying its content."""
+    pack, cp3, cp4 = market_pack(), heads()["CP-3"], cp4_head(blocked=True)
+    items = tuple((entry(head), head) for head in (cp3, cp4))
+    scope = ReviewScope(
+        pack=pack,
+        inputs=tuple(item for item, _ in items),
+        heads=items,
+        blocked=frozenset({"CP-4"}),
+        inherited=(f"Upstream CP-4 blocked: {CP4_BLOCK}",),
+    )
+    report = integrity_review(scope, review_all(scope))
+    return cp5_module(report, scope.inputs, 0).model_copy(update={"status": report.status})
+
+
+@lru_cache(maxsize=1)
+def evaluated_cp4_cp5() -> Module:
+    """CP-5 over CP-3 and an evaluated CP-4 whose covenant claim it marks unsupported: a
+    finding that carries CP-4 content."""
+    support = {("CP-4", CP4_CLAIM): "unsupported"}
+    return cp5_head(market_pack(), (heads()["CP-3"], cp4_head()), support)
+
+
+def recovery_on(ref: str, confidence: Confidence = "Medium") -> RecoveryView:
+    return RecoveryView(
+        subject="Secured lenders",
+        view="The first lien leaves the secured lenders well placed.",
+        confidence=confidence,
+        limitation=None,
+        basis=basis(cp5=(ref,)),
+    )
+
+
+NO_CP4 = (
+    "recovery_view[0]: a recovery view that is not Insufficient Information cites a CP-5 "
+    "finding or limitation carrying CP-4 evidence"
+)
+
+
+def test_a_blocked_cp4_carries_no_recovery_evidence_through_cp5() -> None:
+    """Fix round 1 (e): a blocked CP-4, CP-5's inherited "Upstream CP-4 blocked" row and its
+    Blocked upstream finding name CP-4 but carry none of its content."""
+    cp5 = blocked_cp4_cp5()
+    facts = cells_of(cp5)
+    refs = [f"T5B.7.{r.row_id}" for t in cp5.tables if t.table_id == "T5B.7" for r in t.rows]
+    inherited = next(
         ref
-        for ref, row in rows.items()
-        if ref.split(".")[0] in {"T5.9", "T5B.7"}
-        and re.search(
-            r"(?<![A-Za-z0-9-])CP-4(?![A-Za-z0-9])",
-            " ".join([row.label, *dict(row.cells).values()]),
-        )
+        for ref in refs
+        if facts[f"{ref}.origin"].text == "Inherited"
+        and facts[f"{ref}.limitation"].text == f"Upstream CP-4 blocked: {CP4_BLOCK}"
+    )
+    finding = next(f.finding_id for f in cp5_review(cp5).findings if f.kind == "Blocked upstream")
+    for blocked in (frozenset({"CP-4"}), frozenset()):  # CP-5's own not-evaluated list suffices
+        up = upstream_of(cp5=cp5, blocked=blocked)
+        for ref in (inherited, finding):
+            found = issues_of(committee(recovery_view=(recovery_on(ref),)), up)
+            assert NO_CP4 in found, (ref, blocked)
+
+
+def test_a_cp5_finding_carrying_cp4_content_supports_a_recovery_view() -> None:
+    up = upstream_of(cp5=evaluated_cp4_cp5())
+    review = cp5_review(up.cp5)
+    finding = next(f for f in review.findings if f.where == f"CP-4 claim {CP4_CLAIM}")
+    for confidence in ("Low", "Medium"):
+        view = recovery_on(finding.finding_id, confidence)  # type: ignore[arg-type]
+        assert issues_of(committee(recovery_view=(view,)), up) == ()
+    # Even so, a CP-4 that CP-6 sees blocked carries nothing.
+    blocked = upstream_of(cp5=evaluated_cp4_cp5(), blocked=frozenset({"CP-4"}))
+    assert blocked.cp4_evidence == frozenset()
+    assert NO_CP4 in issues_of(committee(recovery_view=(recovery_on(finding.ref),)), blocked)
+
+
+def test_cp4_evidence_rows_match_an_explicit_reference() -> None:
+    """The differential: Python's CP-4 evidence rows against row ids read off each fixture by
+    hand (no shared rule). Only the evaluated CP-4's unsupported-claim finding (T5.9.f001) and
+    its own limitation row (T5B.7.r001) carry CP-4 content; the blocked CP-4's finding and
+    inherited row carry none."""
+    expected = {
+        "default": frozenset(),
+        "blocked": frozenset(),
+        "evaluated": frozenset({"T5.9.f001", "T5B.7.r001"}),
     }
-    assert review.cp4_rows == naming
+    found = {
+        "default": upstream_of().cp4_evidence,
+        "blocked": upstream_of(cp5=blocked_cp4_cp5(), blocked=frozenset({"CP-4"})).cp4_evidence,
+        "evaluated": upstream_of(cp5=evaluated_cp4_cp5()).cp4_evidence,
+    }
+    assert found == expected
+    evaluated = cells_of(evaluated_cp4_cp5())
+    assert evaluated["T5.9.f001.where"].text == f"CP-4 claim {CP4_CLAIM}"
+    assert evaluated["T5B.7.r001.origin"].text == "CP-5 finding"
 
 
 # --- prohibited phrases (ruling 3) ----------------------------------------------------------
@@ -839,7 +963,7 @@ def test_the_step_settles_cp6_with_the_python_candidate(tmp_path: Path) -> None:
     cp6 = head(store, MODULE_ID)
     assert cp6.status == "restricted"
     assert "Synthetic case; not real issuer qualification" in cp6.limitations
-    assert any(text.startswith("CP-5 handoff is restricted") for text in cp6.limitations)
+    assert any(text.startswith("CP-5 handoff caps the confidence") for text in cp6.limitations)
     assert settled_call(cp6).action_bias == "Neutral"
     record = next(h for h in store.read().heads if h.module_id == MODULE_ID)
     assert record.qualification is not None
@@ -949,6 +1073,13 @@ def test_the_context_block_prefills_heads_catalogues_findings_and_statuses() -> 
     rows = {r["ref"]: r for r in block["cp2_rows"]}
     assert {ASSESSMENT, THESIS_ROW, STRENGTH, WEAKNESS, FINDING} <= rows.keys()
     assert rows[STRENGTH]["challengeable"] and not rows[CP2_RISK]["challengeable"]
+    assert rows[ASSESSMENT]["claim"] and not rows[THESIS_ROW]["claim"]
+    assert not rows["T2.12.g01"]["claim"]
+    assert {r["ref"] for r in block["cp3_rows"] if r["claim"]} == {
+        PREFERENCE,
+        "T3.1.i01",
+        "T3.1.i02",
+    }
     assert PREFERENCE in {r["ref"] for r in block["cp3_rows"]}
     findings = cp5_review(up.cp5).findings
     assert [f["finding_id"] for f in block["cp5_findings"]] == [f.finding_id for f in findings]
@@ -1034,7 +1165,9 @@ def test_composed_figures_are_the_upstream_facts_and_nothing_else_resolves(
 ) -> None:
     pack, up = market_pack(), upstream_of()
     text = " ".join(words)
-    rec = recommendation(rationale=text, basis=basis(cp2=(THESIS_ROW, *cp2), cp3=tuple(cp3)))
+    # The preference is an unflagged claim of the default CP-5: the call's support.
+    support = basis(cp2=(THESIS_ROW, *cp2), cp3=(PREFERENCE, *cp3))
+    rec = recommendation(rationale=text, basis=support)
     submission = committee(recommendation=rec)
     issues = validate_committee(pack, submission, up)
     bad_cp2 = [r for r in cp2 if r not in CP2_OFFERED]
@@ -1131,7 +1264,15 @@ def test_upstream_gaps_always_limit_and_cap_and_propagate_monotonically(
     submission = committee(recommendation=rec, thesis_challenges=challenges()[:3])
     issues = validate_committee(pack, submission, up)
     capped = blocked != "none" or cp5 != "clean"
+    # Every cap has its own limitation (fix round 1, item 4).
+    assert bool(up.caps) == capped
+    for module_id in up.blocked_upstream:
+        assert any(module_id in text for text in up.limits), module_id
+    if any(reason.startswith("CP-5") for reason in up.caps):
+        assert any(text.startswith("CP-5 handoff caps the confidence") for text in up.limits)
     if not issues:
+        report = committee_challenge(pack, submission, up)
+        assert set(up.limits) <= set(report.limitations)
         assert not (capped and confidence == "High")
         assert not (capped and bias in {"Overweight", "Underweight"} and confidence == "High")
         assert evidence or insufficient
