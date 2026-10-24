@@ -1228,12 +1228,48 @@ def test_dispatch_refuses_tickets_the_journal_would_refuse(tmp_path: Path) -> No
         rig.ticket_id, "CP-0", ("a", "b"), "a", "raw", lambda p, a: StepValidation(output="x")
     )
     assert ok_step.steps[0].status == "valid"
-    with pytest.raises(ValueError, match="already retains its review step"):
+    with pytest.raises(ValueError, match="CP-0 already retains its one step"):  # task 8.0a
         rig.run(ChatClient(idle))
     rig.store.interrupt(rig.ticket_id, "resolve the fixture ticket")
     with pytest.raises(ValueError, match="finished or already retains"):
         rig.run(ChatClient(idle))
     assert idle.requests == [] and rig.ledger.state().attempts == ()
+
+
+@pytest.mark.parametrize("module_id", ["CP-0", "CP-1A"])
+def test_an_invalid_one_step_response_finishes_the_ticket_in_the_same_write(
+    tmp_path: Path, module_id: str
+) -> None:
+    """Task 8.0a fix round 1: `submit_cp0_review` and `submit_cp1a_step` retain their step only
+    through `Execution.submit_step`; a one-step module repairs nothing within the attempt, so an
+    invalid response is settled in the write that retains it (`_save_finished`). No pending
+    ticket ever holds an invalid step, which is why `expected_step` may count valid steps."""
+    from deploy_vii.execution import (
+        WITHIN_ATTEMPT_REPAIR,
+        Execution,
+        ExecutionSnapshot,
+        StepValidation,
+    )
+
+    assert module_id not in WITHIN_ATTEMPT_REPAIR
+    rig = make_rig(tmp_path) if module_id == "CP-0" else cp1a_rig(tmp_path)
+    store, ticket = rig.store, rig.ticket_id
+    writes: list[int] = []
+    original = Execution._write
+
+    def counted(self: Execution, snapshot: ExecutionSnapshot) -> None:
+        writes.append(len(writes))
+        original(self, snapshot)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Execution, "_write", counted)
+        attempt = store.submit_step(
+            ticket, module_id, ("only",), "only", "raw", lambda p, a: StepValidation(issues=("x",))
+        )
+    assert attempt.status == "finished" and [s.status for s in attempt.steps] == ["invalid"]
+    held = next(a for a in store.read().attempts if a.ticket_id == ticket)
+    assert held.status == "finished" and held.steps[-1].status == "invalid"
+    assert len(writes) == 2  # the pending submission, then the invalid step with its settlement
 
 
 @pytest.mark.parametrize(

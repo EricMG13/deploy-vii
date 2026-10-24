@@ -144,11 +144,12 @@ def test_the_next_step_walks_each_base_chain(module_id: str, chain: tuple[str, .
 @pytest.mark.parametrize(
     ("module_id", "chain", "message"),
     [
-        ("CP-0", BASE_CP0_STEPS, "CP-0 already retains its review step; resume it through"),
+        # Task 8.0a (fix round 1): one neutral wording for every one-step module, CP-1A's base
+        # text (base CP-0: "CP-0 already retains its review step; ..."); the refusal is raised
+        # before anything is reserved, sent or written.
+        ("CP-0", BASE_CP0_STEPS, "CP-0 already retains its one step; resume it through"),
         ("CP-1", BASE_CP1_PROMOTION, "every CP-1 step is already retained"),
-        # Task 8.0a: one wording for every one-step module (base: "CP-1A already retains its one
-        # step; ..."); the refusal is raised before anything is reserved, sent or written.
-        ("CP-1A", ("business_context",), "CP-1A already retains its review step; resume it"),
+        ("CP-1A", ("business_context",), "CP-1A already retains its one step; resume it"),
     ],
 )
 def test_a_complete_chain_is_refused_with_the_base_wording(

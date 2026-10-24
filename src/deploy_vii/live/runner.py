@@ -312,15 +312,16 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
         raise ValueError("a step response is pending; resume it before dispatching another")
     # Task 8.0a: the module's registry chain (CP-1: the four stages, then the `quality` review
     # whose acceptance is the promotion). On a pending ticket the journal keeps valid steps
-    # only (an invalid one finishes the attempt in the same write), so `done` is its position.
+    # only, so `done` is its position: every module (CP-0's `submit_cp0_review` and CP-1A's
+    # `submit_cp1a_step` included) retains steps through `Execution.submit_step`, which settles
+    # an invalid response that is not repaired within the attempt in the write that retains it
+    # (`_save_finished`), and keeps a repaired first try in `step_repairs`, not `steps`.
     steps = step_chain(module_id).steps
     done = sum(1 for item in attempt.steps if item.status == "valid")
     if done < len(steps):
         return steps[done]
     if len(steps) == 1:
-        raise ValueError(
-            f"{module_id} already retains its review step; resume it through the journal"
-        )
+        raise ValueError(f"{module_id} already retains its one step; resume it through the journal")
     raise ValueError(f"every {module_id} step is already retained")
 
 
