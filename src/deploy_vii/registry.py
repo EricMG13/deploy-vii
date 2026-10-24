@@ -145,7 +145,9 @@ class StepChain:
     `projections`: (consumer, producer) -> what a later step is shown of an earlier one (task
     7.5), every such pair exactly once, so a dispatch never meets an unlisted pair.
     `pack_sources`: the steps whose validators check spans against the pack text, the only ones
-    sent SOURCE blocks (task 7.5, R6). A record breaking any of these raises ValueError.
+    sent SOURCE blocks (task 7.5, R6). `tool_steps` (task 8.0d): the steps the live runner may
+    run as a tool loop (`live.loop`): read-only pack tools and the step's own submit tool, no
+    SOURCE blocks. A record breaking any of these raises ValueError.
     """
 
     module_id: str
@@ -155,6 +157,7 @@ class StepChain:
     prefilled: Mapping[str, frozenset[str]] = field(default_factory=dict)
     projections: Mapping[tuple[str, str], str] = field(default_factory=dict)
     pack_sources: frozenset[str] = frozenset()
+    tool_steps: frozenset[str] = frozenset()
 
     @property
     def settling(self) -> str:
@@ -186,6 +189,8 @@ class StepChain:
             raise ValueError(
                 f"{name} sends pack sources to {', '.join(extra)}, not one of its steps"
             )
+        if extra := sorted(self.tool_steps - steps):
+            raise ValueError(f"{name} runs {', '.join(extra)} as a tool loop, not one of its steps")
         pairs = self.pairs()
         for pair in self.projections:
             if pair not in pairs:
@@ -282,6 +287,9 @@ STEP_CHAINS = checked_chains(
                 ("quality", "readiness"): OMITTED,
             },
             pack_sources=frozenset({"source_context", "financials"}),
+            # Task 8.0d (user decision, 24 Oct 2026): the four stages the hybrid harness ran
+            # with pack tools (`devtools/hybrid_cp1.py`); the QA review stays one-shot.
+            tool_steps=frozenset({"source_context", "financials", "narrative", "readiness"}),
         ),
         # Task 7.2: CP-1A's one step; Python composes the registers as its output.
         StepChain(
@@ -344,6 +352,11 @@ def projections(chains: Sequence[StepChain] = STEP_CHAINS) -> dict[tuple[str, st
 
 def pack_source_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]:
     return frozenset(step_id for chain in chains for step_id in chain.pack_sources)
+
+
+def tool_loop_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]:
+    """The steps the live runner may run as a tool loop (task 8.0d)."""
+    return frozenset(step_id for chain in chains for step_id in chain.tool_steps)
 
 
 def module_route(module_id: str, chains: Sequence[StepChain] = STEP_CHAINS) -> tuple[str, ...]:

@@ -49,7 +49,15 @@ from deploy_vii.live.corpus import CORPUS_ROOT, REPOSITORY_ROOT, CorpusError, wr
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import NoEligibleModel, draw
-from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, LedgerError, utc_stamp
+from deploy_vii.live.ledger import (
+    OPENROUTER,
+    AttemptRecord,
+    CapExceeded,
+    Ledger,
+    LedgerError,
+    utc_stamp,
+)
+from deploy_vii.live.loop import LIMITS, NO_SUBMIT, TOOL_STEPS, ToolStepResult, run_tool_step
 from deploy_vii.live.prompts import schema_text
 from deploy_vii.live.reconcile import (
     USAGE_SCHEMA,
@@ -97,7 +105,14 @@ from deploy_vii.live.schema_check import (
     check_schema,
     schema_rejections,
 )
-from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsError, load_settings
+from deploy_vii.live.settings import (
+    DEFAULT_SETTINGS,
+    LiveSettings,
+    SettingsError,
+    StepEffort,
+    load_settings,
+)
+from deploy_vii.live.tools import ToolRules
 from deploy_vii.registry import canonical, module_route, modules, regression_cases, step_chain
 
 REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
@@ -166,19 +181,23 @@ class Row:
     prompt_bound: int | None = None  # prompt tokens upper bound of the attempt (Pool table)
     repair: int = 0  # the journal's attempt number: 0 a first attempt, 1 the MC-7 repair
     step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
+    # A tool-loop step's calls (task 8.0d), each its own attempt; `attempt_id` is the one that
+    # made the step's last judged submit, and `cost` sums every call's charge.
+    calls: tuple[str, ...] = ()
 
     def cells(self) -> tuple[object, ...]:
+        attempt = f"{self.attempt_id} ({len(self.calls)} calls)" if self.calls else self.attempt_id
         return (
             self.cell_id,
             self.case_id,
             self.step_id,
             self.model,
             "-" if self.seed is None else self.seed,
-            self.attempt_id,
+            attempt,
             self.status,
             self.classification,
             self.cost,
-            "-" if self.status == NO_RESPONSE else self.issue_count,
+            "-" if self.status in {NO_RESPONSE, NO_SUBMIT} else self.issue_count,
         )
 
     def step_cells(self) -> tuple[object, ...]:
@@ -488,16 +507,21 @@ def _run_cell(
     rejections: Mapping[tuple[str, str, str], str],
     repair: bool,
     sleep: Callable[[float], None],
+    tool_efforts: Mapping[str, StepEffort] | None = None,
+    tool_rules: ToolRules | None = None,
 ) -> None:
     """Run one cell's steps in order, module by module. With `repair` (the `module` driver) a
     validator rejection that leaves the attempt pending is followed by that step's one repair
     within the attempt (task 7.0g); a rejection that finishes the attempt is followed by the
     module's one MC-7 repair attempt, which restarts the module from its first step. The cell
-    ends at the first step that is not accepted."""
+    ends at the first step that is not accepted. With `tool_efforts` (settings `tool_loop`,
+    task 8.0d) each step it names runs as a tool loop (`live.loop`) at that effort plan under
+    `tool_rules`; its repair within the attempt is a second tool loop."""
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
 
-    def row(step_id: str, attempt: Attempt, item: DispatchResult) -> None:
+    def row(step_id: str, attempt: Attempt, item: DispatchResult | ToolStepResult) -> None:
+        calls = item.attempt_ids if isinstance(item, ToolStepResult) else ()
         batch.rows.append(
             Row(
                 cell.cell_id,
@@ -508,15 +532,38 @@ def _run_cell(
                 item.attempt_id,
                 item.status,
                 item.classification or "none",
-                usd_cell(item.cost_usd, bool(item.settlement and item.settlement.unreconciled)),
+                usd_cell(item.cost_usd, item.held),
                 len(item.issues),
                 prompt_bound=item.prompt_tokens_upper_bound,
                 repair=attempt.number,
                 step_try=item.step_try,
+                calls=calls,
             )
         )
 
-    def send(step_id: str, attempt: Attempt) -> DispatchResult:
+    def send(step_id: str, attempt: Attempt) -> DispatchResult | ToolStepResult:
+        if tool_efforts is not None and step_id in tool_efforts:
+            assert tool_rules is not None
+            looped = run_tool_step(
+                StepSpec(step_id, cell.case_id, (), max_tokens=max_tokens, timeout_s=timeout_s),
+                store=store,
+                ticket_id=attempt.ticket_id,
+                ledger=ledger,
+                pool=pool,
+                seed=cell.seed,
+                client=client,
+                writer=writer,
+                key_path=key_path,
+                key_index=key_index,
+                bytes_per_token=bytes_per_token,
+                effort=tool_efforts[step_id],
+                rules=tool_rules,
+                sleep=sleep,
+                # The calls already spent keep their row when the loop raises (cap, credit).
+                on_stop=partial(row, step_id, attempt),
+            )
+            row(step_id, attempt, looped)
+            return looped
         result = dispatch(
             StepSpec(
                 step_id,
@@ -547,7 +594,7 @@ def _run_cell(
 
     cp0_attempt = None
 
-    def play(steps: Sequence[str], attempt: Attempt) -> tuple[str, DispatchResult]:
+    def play(steps: Sequence[str], attempt: Attempt) -> tuple[str, DispatchResult | ToolStepResult]:
         """Send the steps in order; the last result, with its step, is the first non-accepted
         one, or the final."""
         nonlocal cp0_attempt
@@ -744,6 +791,20 @@ def _repairs_dispatched(rows: Sequence[Row]) -> str:
     )
 
 
+def _tool_loop_lines(efforts: Mapping[str, StepEffort] | None) -> list[str]:
+    """The report's tool-loop line (task 8.0d): its steps, effort plans and limits, which replace
+    the max-tokens and timeout lines for those steps."""
+    if not efforts:
+        return []
+    plans = ", ".join(
+        f"{step} {plan.effort} (ceiling {plan.ceiling})" for step, plan in efforts.items()
+    )
+    return [
+        f"- Tool loop: {plans}; per step at most {LIMITS.max_calls} calls, {LIMITS.max_submits} "
+        f"submits and {LIMITS.deadline_s} s, {LIMITS.max_tokens} max tokens per call"
+    ]
+
+
 def render_report(
     command: str,
     batch_id: str,
@@ -755,10 +816,11 @@ def render_report(
     default_effort: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
+    tool_efforts: Mapping[str, StepEffort] | None = None,
 ) -> str:
     """Summary tables only; counts come from the registry and the retained results."""
     state = ledger.state()
-    models = {row.attempt_id: row.model for row in batch.rows}
+    models = {name: row.model for row in batch.rows for name in (row.attempt_id, *row.calls)}
     reserved: dict[str, Decimal] = {}
     for record in state.attempts:
         model = models.get(record.attempt_id)
@@ -797,6 +859,7 @@ def render_report(
         f"- Registry modules with a live step contract: {len(live)} of {len(modules())}",
         f"- Max tokens: {max_tokens} per call (every model)",
         f"- Timeout: {timeout_s} s per call (every model)",
+        *_tool_loop_lines(tool_efforts),
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
         f"- Repairs dispatched: {_repairs_dispatched(batch.rows)}",
@@ -963,6 +1026,20 @@ def _open_batch(args: argparse.Namespace, settings: LiveSettings, batch_id: str)
     return report
 
 
+def _tool_efforts(
+    settings: LiveSettings, effort: str | None, cells: Sequence[Cell]
+) -> dict[str, StepEffort] | None:
+    """Each planned tool-loop step's effort plan when settings turn the tool loop on (task 8.0d):
+    `--effort` for every step when given, else the step's row of the settings table, else
+    `default_effort`; None when the loop is off."""
+    if not settings.tool_loop:
+        return None
+    planned = dict.fromkeys(step for cell in cells for step in cell.steps if step in TOOL_STEPS)
+    return {
+        step: StepEffort.of(effort) if effort else settings.step_effort(step) for step in planned
+    }
+
+
 def run_live(
     args: argparse.Namespace,
     *,
@@ -987,7 +1064,9 @@ def run_live(
     )
     default_effort = args.effort or settings.default_effort
     cells = _cells(args, pool, seed)
-    ledger = Ledger(ledgers / f"{batch_id}.jsonl", args.cap)
+    tool_efforts = _tool_efforts(settings, args.effort, cells)  # bad effort raises before spend
+    tool_rules = ToolRules(floor=settings.completeness_floor)
+    ledger = Ledger(ledgers / f"{batch_id}.jsonl", args.cap, provider=OPENROUTER)
     ledger.state()  # an opened ledger is bound to its first cap; a different one raises here
     usage_client = ChatClient(
         transport, key_path=settings.credential_file, key_index=settings.credential_token_index
@@ -1015,6 +1094,8 @@ def run_live(
                 rejections=rejections,
                 repair=args.live_command == "module",
                 sleep=sleep,
+                tool_efforts=tool_efforts,
+                tool_rules=tool_rules,
             )
     except CapExceeded as stop:
         batch.stopped = f"cap: {stop}"
@@ -1036,6 +1117,7 @@ def run_live(
                 default_effort,
                 args.max_tokens,
                 args.timeout,
+                tool_efforts,
             ),
             sys.exception(),
         )
@@ -1200,11 +1282,22 @@ def _spend_section(spend: tuple[SpendCrossCheck | None, str]) -> list[str]:
         if left
         else "- Not covered: no ledger opened before the origin"
     )
+    others = len(found.other_providers)
+    other_line = (
+        [
+            f"- Not counted: {others} ledger{'' if others == 1 else 's'} of another provider "
+            f"({', '.join(f'{name}: {who}' for name, who in found.other_providers)}), settled "
+            f"{format(found.other_providers_usd, 'f')} USD; the key's usage is OpenRouter's only"
+        ]
+        if others
+        else []
+    )
     return [
         *lines,
         f"- Origin: {found.origin_file}, usage {format(found.origin_usd, 'f')} USD at "
         f"{found.origin_at} (the earliest recorded before-check)",
         not_covered,
+        *other_line,
         f"- Key usage now: {format(found.now_usd, 'f')} USD at {found.now_at} "
         "(`GET /api/v1/key` at reconcile time)",
         f"- Billed since the origin: {format(found.billed_usd, 'f')} USD",
@@ -1543,7 +1636,7 @@ def run_schema_check(args: argparse.Namespace, *, transport: Transport | None = 
     report = _open_batch(args, settings, batch_id)
     catalog = Catalog.from_file(args.catalog) if args.catalog else Catalog.fetch(transport)
     pool = catalog.pin_selected(batch_id, args.models)
-    ledger = Ledger(root / ".ledgers" / f"{batch_id}.jsonl", args.cap)
+    ledger = Ledger(root / ".ledgers" / f"{batch_id}.jsonl", args.cap, provider=OPENROUTER)
     ledger.state()  # an opened ledger is bound to its first cap; a different one raises here
     usage_client = ChatClient(
         transport, key_path=settings.credential_file, key_index=settings.credential_token_index

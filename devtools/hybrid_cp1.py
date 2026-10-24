@@ -1963,7 +1963,12 @@ def main(
     harness = Harness(
         cp0_journal=args.cp0_journal,
         providers=providers,
-        ledgers={name: Ledger(plan.path, plan.cap) for name, plan in plans.items()},
+        # Task 8.0d: a new ledger records its provider, so the 7.14 spend cross-check counts
+        # only OpenRouter's; a shared or resumed one keeps whatever its first line records.
+        ledgers={
+            name: Ledger(plan.path, plan.cap, provider=None if plan.shared else name)
+            for name, plan in plans.items()
+        },
         keys={name: key.key for name, key in keys.items()},
         batch_directory=batch_directory,
         deadline_s=args.step_seconds,

@@ -1,7 +1,8 @@
 """Per-attempt evidence under artifacts/model-tests/<experiment>/<case>/<model>/<attempt>/.
 
 Layout from docs/testing-and-telemetry.md: manifest.json, request.json, response.json,
-output.md, events.jsonl, metrics.json, checks/ and render/. Files are written once (never
+output.md, events.jsonl, metrics.json, checks/ and render/; a tool-loop call (task 8.0d) also
+keeps its tool transcript, tool-calls.jsonl. Files are written once (never
 overwritten) through temp-file, fsync and link. Raw evidence is staged first; the manifest
 is written last, so a directory without manifest.json is an incomplete attempt. Nothing here
 receives the credential; as defence in depth every text is also scrubbed of key-shaped tokens.
@@ -23,6 +24,7 @@ from deploy_vii.live.client import ACCOUNT_ID, REDACTED, ChatResult, account_id_
 from deploy_vii.live.credential import scrub_key
 
 _SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$")
+TOOL_TRANSCRIPT = "tool-calls.jsonl"  # a tool-loop call's transcript (task 8.0d)
 
 
 class RetentionError(Exception):
@@ -175,6 +177,17 @@ class AttemptWriter:
         self._put(directory / "output.md", output or "")
         if redactions := response.get("body_redactions"):
             self._redacted[directory] = list(redactions)
+
+    def record_tools(self, locator: AttemptLocator, entries: Sequence[Mapping[str, Any]]) -> None:
+        """Retain a tool-loop call's transcript (task 8.0d) beside output.md, one JSON line per
+        entry: each tool call with its arguments, status and full result (the pages read and
+        searches run), each submit's verdict, any runner note. Written once, before the seal."""
+        directory = self.path_for(locator)
+        lines = (
+            json.dumps(entry, sort_keys=True, ensure_ascii=False, default=_default) + "\n"
+            for entry in entries
+        )
+        self._put(directory / TOOL_TRANSCRIPT, "".join(lines))
 
     def stage(
         self,

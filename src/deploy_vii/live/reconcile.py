@@ -65,6 +65,11 @@ cross-check (`spend_cross_check`): the key's usage now less the earliest recorde
 usage, against the settled charges of every ledger opened since that check (earlier ledgers are
 named, not counted), the difference named unattributed USD. It is reported only; nothing is
 settled or adjusted from it, and a failed key read for it leaves the exit code unchanged.
+
+Task 8.0d: the key's usage is OpenRouter's, so the cross-check counts only OpenRouter ledgers:
+those whose opening line records `openrouter`, or no provider at all (every ledger written
+before the field; `ledger.opening_provider`). A ledger of another provider (the hybrid
+harness's Anthropic ledgers, once they record it) is named with its settled sum, not counted.
 """
 
 import hashlib
@@ -87,11 +92,13 @@ from deploy_vii.live.ledger import (
     ADJUST_NEXT_BEFORE_SOURCE,
     ADJUST_SOURCE,
     ADJUST_USAGE_SOURCE,
+    OPENROUTER,
     STAMP,
     AttemptRecord,
     Ledger,
     LedgerError,
     LedgerState,
+    opening_provider,
 )
 from deploy_vii.live.retention import dump, write_once
 from deploy_vii.live.runner import COHORT
@@ -662,6 +669,9 @@ class SpendCrossCheck:
     ledgers: tuple[str, ...]
     excluded: tuple[str, ...]
     excluded_usd: Decimal
+    # Task 8.0d: ledgers of another provider (name and provider), not in the figure.
+    other_providers: tuple[tuple[str, str], ...] = ()
+    other_providers_usd: Decimal = Decimal(0)
 
     @property
     def billed_usd(self) -> Decimal:
@@ -710,13 +720,15 @@ def _origin(artifact_root: Path) -> tuple[_Origin | None, str]:
     return found[0], ""
 
 
-def _ledgers(artifact_root: Path) -> tuple[list[tuple[datetime, str, LedgerState]] | None, str]:
-    """Every ledger's opening time, name and replayed state, or None with why: no ledger, or
-    one that does not replay or records no opening time."""
+def _ledgers(
+    artifact_root: Path,
+) -> tuple[list[tuple[datetime, str, LedgerState, str]] | None, str]:
+    """Every ledger's opening time, name, replayed state and provider (`opening_provider`), or
+    None with why: no ledger, or one that does not replay or records no opening time."""
     paths = sorted((artifact_root / ".ledgers").glob("*.jsonl"))
     if not paths:
         return None, "no ledger under .ledgers"
-    read: list[tuple[datetime, str, LedgerState]] = []
+    read: list[tuple[datetime, str, LedgerState, str]] = []
     for path in paths:
         try:
             ledger = open_ledger(path)
@@ -726,10 +738,11 @@ def _ledgers(artifact_root: Path) -> tuple[list[tuple[datetime, str, LedgerState
             state = ledger.state()
         except LedgerError as error:
             return None, f"{path.name}: {error}"
-        at = _instant(json.loads(path.read_bytes().split(b"\n", 1)[0]).get("at"))
+        opening = json.loads(path.read_bytes().split(b"\n", 1)[0])
+        at = _instant(opening.get("at"))
         if at is None:
             return None, f"{path.name} records no opening time"
-        read.append((at, path.name, state))
+        read.append((at, path.name, state, opening_provider(opening)))
     return read, ""
 
 
@@ -749,8 +762,10 @@ def spend_cross_check(
     origin, why = _origin(artifact_root)
     if origin is None:
         return None, why
-    counted = [(name, state) for at, name, state in ledgers if at >= origin.at]
-    excluded = [(name, state) for at, name, state in ledgers if at < origin.at]
+    others = [(name, state, who) for _, name, state, who in ledgers if who != OPENROUTER]
+    own = [(at, name, state) for at, name, state, who in ledgers if who == OPENROUTER]
+    counted = [(name, state) for at, name, state in own if at >= origin.at]
+    excluded = [(name, state) for at, name, state in own if at < origin.at]
     fetched = client.fetch_key_status()
     reading = from_key_response(fetched.response, clock())
     key_file = dict(fetched.key_note) if fetched.key_note else None
@@ -773,6 +788,8 @@ def spend_cross_check(
         ledgers=tuple(name for name, _ in counted),
         excluded=tuple(name for name, _ in excluded),
         excluded_usd=sum((state.spent for _, state in excluded), Decimal(0)),
+        other_providers=tuple((name, who) for name, _, who in others),
+        other_providers_usd=sum((state.spent for _, state, _ in others), Decimal(0)),
     ), ""
 
 

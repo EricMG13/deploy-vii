@@ -77,7 +77,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -850,6 +850,26 @@ class Submitted:
     composition: Composition | None  # source_readiness only
 
 
+def _with_rules(
+    validate: Callable[[PreparedPack, Attempt], StepValidation],
+    rules: Callable[[str], tuple[str, ...]],
+    payload: str,
+) -> Callable[[PreparedPack, Attempt], StepValidation]:
+    """`validate`, then the tool-loop rule issues of the retained payload appended (task 8.0d).
+    They only add issues: a payload the stage rejects stays rejected, one it accepts is rejected
+    when a rule fails, and the stage's output is kept as `_validate_prefilled` keeps it."""
+
+    def run(pack: PreparedPack, attempt: Attempt) -> StepValidation:
+        outcome = validate(pack, attempt)
+        found = rules(payload)
+        if not found:
+            return outcome
+        issues = tuple(dict.fromkeys((*outcome.issues, *found)))
+        return StepValidation(output=outcome.output, issues=issues)
+
+    return run
+
+
 def submit_model_payload(
     store: Execution,
     ticket_id: str,
@@ -857,6 +877,7 @@ def submit_model_payload(
     payload: str,
     *,
     on_normalised: Callable[[tuple[str, ...]], None] | None = None,
+    rules: Callable[[str], tuple[str, ...]] | None = None,
 ) -> Submitted:
     """Enter one model payload (pool or proxy cohort) into the journal for `step_id`.
 
@@ -866,8 +887,14 @@ def submit_model_payload(
     pre-filled (`prefill`; see the module docstring); a payload the pre-fill leaves a marked field
     unset in is validated by `_validate_prefilled` (an unresolvable reference rejected with the
     validator's wording first; the "Field required" of a field the sent schema omits is dropped,
-    unless, with no unbound reference, those lines are the stage's only issues)."""
+    unless, with no unbound reference, those lines are the stage's only issues).
+
+    `rules` (task 8.0d, a tool-loop step's evidence rules, `live.tools.ToolRules`) receives the
+    retained payload and returns issues the journal adds to the step's own (`_with_rules`). It
+    applies to the four CP-1 stages only; for any other step it is refused."""
     step = STEPS[step_id]
+    if rules is not None and (step.module_id != "CP-1" or step_id == "quality"):
+        raise ValueError(f"tool-loop rules apply to the CP-1 stages, not to {step_id}")
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
@@ -885,17 +912,17 @@ def submit_model_payload(
     if step_id != "source_readiness":
         known = known_bindings(store, ticket_id, step_id)
         filled = prefill(step.schema, normalised, known, PREFILLED[step_id])
-        if filled.unbound or filled.unset:
-            journal = store.submit_step(
-                ticket_id,
-                "CP-1",
-                CP1_STEPS,
-                step_id,
-                filled.payload,
-                lambda pack, current: _validate_prefilled(store, known, step_id, pack, current),
-            )
-        else:
+        if not (filled.unbound or filled.unset or rules):
             journal = submit_cp1_step(store, ticket_id, step_id, filled.payload)
+            return Submitted(journal, filled.payload, resolved, filled.paths, filled.kinds, None)
+        validate: Callable[[PreparedPack, Attempt], StepValidation] = (
+            partial(_validate_prefilled, store, known, step_id)
+            if filled.unbound or filled.unset
+            else partial(validate_cp1_stage, store)
+        )
+        if rules is not None:
+            validate = _with_rules(validate, rules, filled.payload)
+        journal = store.submit_step(ticket_id, "CP-1", CP1_STEPS, step_id, filled.payload, validate)
         return Submitted(journal, filled.payload, resolved, filled.paths, filled.kinds, None)
     composition = compose_payload(store.pack(), normalised)
     if composition.review is not None and not composition.issues:

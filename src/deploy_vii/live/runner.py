@@ -159,6 +159,11 @@ class DispatchResult:
     in_flight: CreditState | None = None  # an in-flight 402 that `dispatch` retries (7.8)
     retried: "DispatchResult | None" = None  # the in-flight refused attempt this one re-sent
 
+    @property
+    def held(self) -> bool:
+        """Whether the charge is the held reservation, not a measured cost."""
+        return bool(self.settlement and self.settlement.unreconciled)
+
 
 @cache
 def code_sha256() -> str:

@@ -1,0 +1,85 @@
+{
+ "bytes_per_token": "3.0",
+ "effort": "medium",
+ "evidence_sha256": {
+  "call-01-response.json": "09f5f6db62f111239889b3790a46116d2df4958c81673baf2dcec835b2f76ff8",
+  "call-02-response.json": "0db5aa70034e2deebf71c22a71f6e3e0fb71c8f55d8e2c147a56d78923184127",
+  "call-03-response.json": "2b8dcd96cd1c7a2c2e4a954119338ca859134d5c345ae3d9b92a261e9842acff",
+  "call-04-response.json": "6ec1d5e3ec4b7ae61c47f817fbb37918cb85e4008525d8de59aa277879633f4e",
+  "tool-calls.jsonl": "7b2f2a5a51f0cd4e6c1c1a744cee4153ebc4ea8712275a9a54b4637a770ea78e"
+ },
+ "expected": {
+  "cost_settled_usd": "0.5938763",
+  "requests": [
+   {
+    "rest_sha256": "b9a6e4cc4c63deb54f0ff87f45c8fb60d3bfb07463cffdec36dc5c0b5c3b3c7b",
+    "system_sha256": "e7d5c7fea7ff4aa69aa8eb80e9c7a03a3fcfa682ed67c9ae1918661476b1c579"
+   },
+   {
+    "rest_sha256": "53a4125cfbfecde0a846240f1fa3626e906c27771a04f6d5f67b6b495ff7249d",
+    "system_sha256": "e7d5c7fea7ff4aa69aa8eb80e9c7a03a3fcfa682ed67c9ae1918661476b1c579"
+   },
+   {
+    "rest_sha256": "2c28685dd307fda183c029bdbc660b738d6527adc2433a934a25a079650ff71c",
+    "system_sha256": "e7d5c7fea7ff4aa69aa8eb80e9c7a03a3fcfa682ed67c9ae1918661476b1c579"
+   },
+   {
+    "rest_sha256": "5fece15ca7a08af134940a0495fc7f7cf0d962a7b195b8b4137fddbb7bf4a449",
+    "system_sha256": "e7d5c7fea7ff4aa69aa8eb80e9c7a03a3fcfa682ed67c9ae1918661476b1c579"
+   }
+  ],
+  "submits": [
+   {
+    "issues": [],
+    "outcome": "accepted"
+   }
+  ],
+  "tool_results_sha256": [
+   "f74f8f3752aad702316e8afd3c4edacb40162e3fbd42bc19299e6d456f663e7f",
+   "8bcf7db06165632ef26be81036c47d3647ec76f3cb959ab8b8a94ef53b06d28e",
+   "3ddf1c88e36cc8f60f5e24e7bdde63380eeaa534ea1afa0f828427057644ae61",
+   "070c160a6299c5438070b1aa737b14fc2992ed49579c14264884886a5876f971"
+  ],
+  "verdict": "accepted"
+ },
+ "kind": "harness",
+ "model": {
+  "canonical_slug": "openai/gpt-6.1-sol-20260929",
+  "context_length": 1050000,
+  "id": "openai/gpt-6.1-sol",
+  "max_completion_tokens": 128000,
+  "pricing": {
+   "completion": "0.000015",
+   "prompt": "0.000004"
+  }
+ },
+ "pack_sha256": "77395ae0091b14ec0a5539ae45d3be0b272f2931c00a8a53e3e39d16eddeaf3c",
+ "provenance": {
+  "batch_id": "hybrid-cp1-6",
+  "cell": "sol-medium",
+  "cohort": "openrouter-pool",
+  "harness": "devtools/hybrid_cp1.py"
+ },
+ "reply_files": [
+  "call-01-response.json",
+  "call-02-response.json",
+  "call-03-response.json",
+  "call-04-response.json"
+ ],
+ "rules": {
+  "checked": [
+   "absence",
+   "unread-citations"
+  ],
+  "submits": [
+   {
+    "issues": [],
+    "outcome": "accepted"
+   }
+  ]
+ },
+ "schema": "tool-transcript/1",
+ "start_journal": "artifacts/model-tests/hybrid-cp1-6/sol-medium/financials/journal-submit-2",
+ "step_id": "narrative",
+ "transcript": "artifacts/model-tests/hybrid-cp1-6/sol-medium/narrative"
+}

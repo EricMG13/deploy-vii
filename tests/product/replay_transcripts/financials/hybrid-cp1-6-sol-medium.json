@@ -1,0 +1,130 @@
+{
+ "bytes_per_token": "3.0",
+ "effort": "medium",
+ "evidence_sha256": {
+  "call-01-response.json": "820c68434391f5bfc27eebfcd7648e239d7007b70e75b5f630c4e2a224e25fec",
+  "call-02-response.json": "39b8aa067a132a6c5d10a96d7de5228ab0137c5e6be923bcc2cf2ee5b011931d",
+  "call-03-response.json": "221c705cb6ad7d056cf75a0dc92d5c0313f101eac1d66b916221408b20d9ef3d",
+  "call-04-response.json": "0ec5b3a30b93bb5754e4d2c124e6cc2f5b71bb60e28ae49a87075bca3942c2e5",
+  "call-05-response.json": "db4829e5032eb948546a1645bcd455468c6a306582e8b9f68c8158b933a54e49",
+  "call-06-response.json": "94ff66b6c105e3f4a75be3192933ad8756b91a1e818e94ebd80ff7c3bb916138",
+  "call-07-response.json": "b5df646d7d6a993cc8412e211f388a91731aa6b1721b6cce149adeb9078e0994",
+  "tool-calls.jsonl": "d996dfb119a67e183a11f083bc6573ac9773d2d7e402502b97c7dd387ea1af2e"
+ },
+ "expected": {
+  "cost_settled_usd": "0.6767638",
+  "requests": [
+   {
+    "rest_sha256": "675314227c4df6924120f2fdc6b0578f6add71755abdd07aff2fdf84f4047535",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   },
+   {
+    "rest_sha256": "3794f093367dd0dbe66e8959d2758318c6dd80d0d574ef8450aa4aa5f060ea43",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   },
+   {
+    "rest_sha256": "170c79336773ca85f71ae7798f99d571fdca3759a6d734cfbeb2ad88b0a4db83",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   },
+   {
+    "rest_sha256": "89dc638c573954614e3fcdde9620b50a50243e14866db09d56d38150dcaa0ea1",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   },
+   {
+    "rest_sha256": "c3b72bf1764fea90ddda4e0d331fbcaaf130aa95e60ebe928e74cdd8ff2c8800",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   },
+   {
+    "rest_sha256": "3a8c918f6835fb083e53c6e1b575e7d10474b9d99aee7c1f091c0a93296e4ea5",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   },
+   {
+    "rest_sha256": "fcea7d96d0474f837c16fa979688f9bc64dd353bd4bef1ba1ce634eecb4e3c80",
+    "system_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+   }
+  ],
+  "submits": [
+   {
+    "issues": [
+     "Quote/locator mismatch: quote not found under czr-2025-10k page:95 (normalised whitespace, quote marks and dashes): \"Reconciliation\""
+    ],
+    "outcome": "rejected"
+   },
+   {
+    "issues": [],
+    "outcome": "accepted"
+   }
+  ],
+  "tool_results_sha256": [
+   "3ddf1c88e36cc8f60f5e24e7bdde63380eeaa534ea1afa0f828427057644ae61",
+   "580bb6e803e99d1a05a9af3ae5aeb7882b392571f1cadeebc22d6341de832355",
+   "5b1fba1716c0c633271102718295555bca37c28438320a1d659dbb89a1161c3e",
+   "d04c84efad4eed3ba8bd5e276738782f680b570823d3cde4394cb8aab50f87ea",
+   "74fc5ade9baeef058b235f842c2445c7a342ceaf7c7dc0329ba8217ef26a0039",
+   "99dc6462b7c9827e5d7a0292c612759b0dcd32f8cede3069f5d48b38bcc56626",
+   "6cb86894c05511fc600d0242b970f265ac82627f4368e535e9b91435af89495d",
+   "ad11ec4bc3c0a447c45c8a67fdeec786c76155b59fc9b30a7991e6b1581b8b35",
+   "c0093619a0d78d1df40402e344afefcf4ed3f1162e4e263c3638cc966b40a9dc",
+   "1834f6a027857883fb834d529524e05ae627e785cb1af7ae14faafee4c145338",
+   "ad91e8024724e2a819b48d00ffad8aaff1f6ac20bc5af7c04a5420993a5f7e6d",
+   "94940c5b83f14e2d8988f0b1804c746e6d05b625e26cba94c6ea4839f25110a9",
+   "065f5cdd93af84e338bfb2969abb64f73ce0da09cf422bdc79936e1c484553f1",
+   "070c160a6299c5438070b1aa737b14fc2992ed49579c14264884886a5876f971"
+  ],
+  "verdict": "accepted"
+ },
+ "kind": "harness",
+ "model": {
+  "canonical_slug": "openai/gpt-6.1-sol-20260929",
+  "context_length": 1050000,
+  "id": "openai/gpt-6.1-sol",
+  "max_completion_tokens": 128000,
+  "pricing": {
+   "completion": "0.000015",
+   "prompt": "0.000004"
+  }
+ },
+ "pack_sha256": "77395ae0091b14ec0a5539ae45d3be0b272f2931c00a8a53e3e39d16eddeaf3c",
+ "provenance": {
+  "batch_id": "hybrid-cp1-6",
+  "cell": "sol-medium",
+  "cohort": "openrouter-pool",
+  "harness": "devtools/hybrid_cp1.py"
+ },
+ "reply_files": [
+  "call-01-response.json",
+  "call-02-response.json",
+  "call-03-response.json",
+  "call-04-response.json",
+  "call-05-response.json",
+  "call-06-response.json",
+  "call-07-response.json"
+ ],
+ "rules": {
+  "checked": [
+   "absence",
+   "unread-citations"
+  ],
+  "submits": [
+   {
+    "issues": [
+     "Quote/locator mismatch: quote not found under czr-2025-10k page:95 (normalised whitespace, quote marks and dashes): \"Reconciliation\""
+    ],
+    "outcome": "rejected"
+   },
+   {
+    "issues": [],
+    "outcome": "accepted"
+   }
+  ]
+ },
+ "schema": "tool-transcript/1",
+ "start_journal": "artifacts/model-tests/hybrid-cp1-6/sol-medium/source_context/journal-submit-1",
+ "step_id": "financials",
+ "system_prompt": {
+  "changed_by": "task 7.19 (QUOTE_PAGE_RULE)",
+  "now_sha256": "1cd1555964246c8a660a7950ad1615fed1cb2100c77ca94473ddd2e194213a21",
+  "recorded_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
+ },
+ "transcript": "artifacts/model-tests/hybrid-cp1-6/sol-medium/financials"
+}

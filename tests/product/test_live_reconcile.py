@@ -7,6 +7,7 @@ import os
 import socket
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -1592,3 +1593,34 @@ def test_a_failed_cross_check_read_leaves_the_exit_code_to_the_lookups(
     out = capsys.readouterr().out
     assert "spend cross-check not checked: " in out
     assert "sk-or-" not in report + out and "TESTONLY" not in report + out
+
+
+def test_the_cross_check_counts_only_openrouter_ledgers(tmp_path: Path) -> None:
+    """Task 8.0d item 8: the key's usage is OpenRouter's, so a ledger whose opening line names
+    another provider is named with its settled sum, not counted; a ledger that names none (every
+    ledger before 8.0d) is OpenRouter's, as is one that names `openrouter`."""
+    root = tmp_path / "model-tests"
+    two_batches(root)  # b-early 0.4 and b-late 0.6, both without a recorded provider
+    spent_ledger(root, "b-ant", T2, *charge("c-1", "2.5", T2))
+    spent_ledger(root, "b-or", T2, *charge("d-1", "0.1", T2))
+    for name, provider in (("b-ant", "anthropic"), ("b-or", "openrouter")):
+        path = root / ".ledgers" / f"{name}.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        lines[0] = json.dumps(json.loads(lines[0]) | {"provider": provider})
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    found, why = spend_cross_check(two_token_client(tmp_path, KeyOnly("11.25")), lambda: NOW, root)
+    assert why == "" and found is not None
+    assert found.ledgers == ("b-early.jsonl", "b-late.jsonl", "b-or.jsonl")
+    assert found.settled_usd == Decimal("1.1")
+    assert found.other_providers == (("b-ant.jsonl", "anthropic"),)
+    assert found.other_providers_usd == Decimal("2.5")
+    assert found.unattributed_usd == Decimal("0.15")
+    lines = cli._spend_section((found, ""))
+    assert (
+        "- Not counted: 1 ledger of another provider (b-ant.jsonl: anthropic), settled 2.5 USD; "
+        "the key's usage is OpenRouter's only"
+    ) in lines
+    assert not any(
+        x.startswith("- Not counted")
+        for x in cli._spend_section((replace(found, other_providers=()), ""))
+    )

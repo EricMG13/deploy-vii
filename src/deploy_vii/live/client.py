@@ -1,4 +1,7 @@
-"""OpenRouter chat client behind an injectable transport. No tools, no network in tests.
+"""OpenRouter chat client behind an injectable transport. No network in tests.
+
+Tools (task 8.0d) are offered only by the tool loop (`live.loop`): a request with `tools`
+reads back the assistant message and its tool calls; every other request is unchanged.
 
 Classification is closed: ok, fallback, truncated, http_error, insufficient_credit, timeout.
 Unknown usage fields are None with a reason, never zero. Response text that could carry
@@ -81,10 +84,15 @@ Transport = Callable[[Request], Response]
 
 @dataclass(frozen=True)
 class ChatRequest:
-    """The non-secret request: exactly what request.json retains."""
+    """The non-secret request: exactly what request.json retains.
+
+    Task 8.0d: with `tools` (OpenAI function-tool objects, as the hybrid harness sends them) the
+    body carries `tools` and `tool_choice` and no `response_format`, and `messages` is the tool
+    conversation: assistant turns as received (their `tool_calls` and `reasoning_details`
+    unmodified) and `tool` results. Without tools the body is byte for byte what it was."""
 
     model: str
-    messages: Sequence[Mapping[str, str]]
+    messages: Sequence[Mapping[str, Any]]
     max_tokens: int
     response_format: Mapping[str, Any]
     reasoning_effort: str | None  # None: reasoning is switched on without an effort value
@@ -92,10 +100,14 @@ class ChatRequest:
     timeout_s: float = DEFAULT_TIMEOUT_SECONDS
     # False: no `reasoning` parameter at all, the provider default applies (`live schema-check`).
     reasoning: bool = True
+    tools: Sequence[Mapping[str, Any]] = ()
+    tool_choice: str | None = None
 
     def __post_init__(self) -> None:
         if not self.reasoning and self.reasoning_effort is not None:
             raise ValueError("reasoning_effort needs reasoning: a request without it sends none")
+        if bool(self.tools) != (self.tool_choice is not None):
+            raise ValueError("tools and tool_choice are sent together or not at all")
 
     def body(self) -> dict[str, Any]:
         # Routing is pinned to the drawn model: no `models` list, no provider fallbacks,
@@ -112,7 +124,24 @@ class ChatRequest:
         }
         if not self.reasoning:
             del body["reasoning"]
+        if self.tools:
+            # A deep copy, so the retained body never aliases the caller's conversation.
+            del body["response_format"]
+            body["messages"] = json.loads(json.dumps(list(self.messages)))
+            body["tools"] = json.loads(json.dumps(list(self.tools)))
+            body["tool_choice"] = self.tool_choice  # `tools` is sent again on every request
         return body
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """One function call of an assistant turn (task 8.0d): its id, name and arguments as the
+    provider sent them (the arguments are JSON text), or why it is malformed."""
+
+    call_id: str
+    name: str
+    arguments: str
+    problem: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +179,11 @@ class ChatResult:
     # Whether `error_detail`, as the client composed it before any withholding, names the schema
     # (`SCHEMA_WORDS`), so a withheld detail keeps its schema verdict (task 7.15 fix round 1).
     detail_names_schema: bool = False
+    # Task 8.0d, a request with tools only: the assistant message as received (read from the
+    # key-scrubbed body; `reasoning_details` included), which the conversation sends back
+    # unmodified, and its tool calls in order. Empty for every request without tools.
+    message: Mapping[str, Any] | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
 
 
 def _count(value: object) -> int | None:
@@ -524,6 +558,7 @@ def _answer(
     classification: Classification = (
         "fallback" if mismatch else "truncated" if finish == "length" else "ok"
     )
+    turn, calls = _tool_turn(raw) if request.tools else (None, ())
     return ChatResult(
         classification=classification,
         http_status=status,
@@ -539,6 +574,38 @@ def _answer(
         usage=parse_usage(document.get("usage")),
         latency_s=latency,
         error_detail=None,
+        message=turn,
+        tool_calls=calls,
+    )
+
+
+def _tool_turn(raw: bytes) -> tuple[dict[str, Any], tuple[ToolCall, ...]]:
+    """The assistant message and its tool calls (task 8.0d), as the hybrid harness reads them.
+
+    The message is parsed from the stored (key-scrubbed) body with plain JSON numbers, so it can
+    be sent back in the next request unmodified (`reasoning_details` included); a body Decimal
+    parse would not serialise. Each tool call needs a string id and a function object; one that
+    lacks either is kept as its JSON text with the reason (`ToolCall.problem`)."""
+    document = json.loads(raw.decode("utf-8", errors="replace"))
+    choices = document.get("choices") if isinstance(document, dict) else None
+    choice = (choices or [{}])[0] if isinstance(choices, list) else {}
+    message = choice.get("message") if isinstance(choice, dict) else None
+    turn: dict[str, Any] = message if isinstance(message, dict) else {}
+    listed = turn.get("tool_calls")
+    if not isinstance(listed, list) or not listed:
+        return turn, ()
+    return turn, tuple(_tool_call(item) for item in listed)
+
+
+def _tool_call(item: object) -> ToolCall:
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+        return ToolCall("", "", json.dumps(item), "malformed tool call without an id")
+    function = item.get("function")
+    if not isinstance(function, dict):
+        return ToolCall("", "", json.dumps(item), "malformed tool call without a function")
+    arguments = function.get("arguments")
+    return ToolCall(
+        item["id"], str(function.get("name")), arguments if isinstance(arguments, str) else ""
     )
 
 

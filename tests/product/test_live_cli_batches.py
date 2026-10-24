@@ -52,6 +52,7 @@ from tests.product.test_cp1_workflow import at_ceiling
 from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
 from tests.product.test_live_credit import ACCOUNT, CREDIT_402, IN_FLIGHT_402
+from tests.product.test_live_loop import tool_reply
 from tests.product.test_live_runner import no_wait
 from tests.product.test_narrative import populated
 from tests.product.test_readiness import as_submission, readiness_fixture
@@ -2123,3 +2124,58 @@ def test_a_probe_cp1_rejection_leaves_the_attempt_pending_with_its_step_repair(
     assert journal.module_id == "CP-1" and journal.status == "pending"
     assert [s.step_id for s in journal.step_repairs] == ["financials"]
     assert [s.step_id for s in journal.steps] == ["source_context"]
+
+
+# --- 8.0d: the CP-1 stages as tool loops --------------------------------------------------------
+
+
+class ToolChain(Chain):
+    """The CP-1 cell with `tool_loop` on: each tool-loop step searches the pack once, then
+    submits its valid payload through `submit_<step>`; CP-0 and `quality` stay one-shot."""
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL:
+            return key_status(format(self.usage, "f"))
+        self.requests.append(request)
+        self.usage += Decimal("0.01")
+        body = json.loads(request.body or b"{}")
+        if "tools" not in body:
+            step = body["response_format"]["json_schema"]["name"]
+            return ok(self.payload(step), model=body["model"])
+        step = body["tools"][-1]["function"]["name"].removeprefix("submit_")
+        if body["messages"][-1]["role"] != "tool":
+            return tool_reply(("s", "search_pack", '{"query": "revenue"}'), model=body["model"])
+        return tool_reply(("c", f"submit_{step}", self.payload(step)), model=body["model"])
+
+
+def test_the_module_driver_runs_the_four_stages_as_tool_loops(tmp_path: Path) -> None:
+    rig, extraction = chain_rig(tmp_path)
+    text = rig.settings.read_text(encoding="utf-8")
+    rig.settings.write_text(
+        text.replace(
+            "[[model_tests.candidates]]",
+            'tool_loop = true\n\n[model_tests.step_effort]\nfinancials = { effort = "low" }\n\n'
+            "[[model_tests.candidates]]",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    chain = ToolChain(rig, extraction, [])
+    assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], chain) == 0
+    rows = module_rows(rig)
+    assert [(r[2], r[6]) for r in rows] == [(step, "accepted") for step in CHAIN]
+    assert [r[5].endswith("(2 calls)") for r in rows] == [False, True, True, True, True, False]
+    assert rows[1][8] == "0.02"  # the step's two settled calls
+    assert len(chain.requests) == 10
+    bodies = chat_bodies(chain)
+    assert [b.get("tool_choice") for b in bodies] == [None, *["required"] * 8, None]
+    efforts = [b["reasoning"] for b in bodies[1:9]]
+    assert efforts[:2] == [{"effort": "high"}] * 2  # default_effort: no row for the step
+    assert efforts[2:4] == [{"effort": "low"}] * 2  # financials' own row
+    report = rig.report()
+    assert (
+        "- Tool loop: source_context high (ceiling high), financials low (ceiling high)" in report
+    )
+    path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b1.jsonl"
+    assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["provider"] == "openrouter"
+    assert len(Ledger(path, Decimal("5.00")).state().attempts) == 10
