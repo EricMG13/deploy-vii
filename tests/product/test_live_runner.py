@@ -2032,8 +2032,9 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
             },
             False,
         ),
-        # Task 7.15 item 4: a withheld detail (the account id survives) names no schema, so
-        # only OpenAI's code still makes it a schema rejection.
+        # Task 7.15 item 4 and fix round 1: a withheld detail (the account id survives) keeps
+        # the verdict it had before 7.15, by OpenAI's code or by the schema words the detail
+        # named before it was withheld (`ChatResult.detail_names_schema`).
         (
             {
                 "code": 400,
@@ -2052,6 +2053,14 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
                 "message": "Provider returned error",
                 "metadata": {"raw": "user_id=u-1: Invalid schema for response_format 'x'"},
             },
+            True,
+        ),
+        (  # the account id withheld, but no schema words: no verdict on the schema, as before
+            {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {"raw": "user_id=u-1: max_tokens is below the minimum of 32"},
+            },
             False,
         ),
     ],
@@ -2065,6 +2074,7 @@ def test_a_bisect_record_neither_blocks_nor_lifts_a_cell(tmp_path: Path) -> None
         "google",
         "withheld-openai-code",
         "withheld-no-code",
+        "withheld-no-schema-words",
     ],
 )
 def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
@@ -2081,6 +2091,10 @@ def test_a_check_400_blocks_later_runs_only_when_it_is_schema_shaped(
     code = metadata.get("provider_error_code") if isinstance(metadata, dict) else None
     assert manifest["provider_error_code"] == code
     assert "u-1" not in json.dumps(manifest) and "u-1" not in (check.detail or "")
+    raw = metadata.get("raw") if isinstance(metadata, dict) else None
+    if isinstance(raw, str) and "user_id" in raw:
+        note = "<provider detail withheld: account id>"
+        assert manifest["error_detail"] == note and check.detail == note
 
 
 def run_check(

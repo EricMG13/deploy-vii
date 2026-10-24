@@ -515,8 +515,10 @@ is shown. Task 7.15: an `error_detail` in which the account id survives (the sto
 `client.account_id_left`, applied to the whole detail and to the provider text before its cap)
 is replaced whole by `<provider detail withheld: account id>` in every path, so it reaches neither
 `checks/classification.json`, the manifest nor this column; the reply body is still read as
-received for a 402 (DC-7). Such a 400 counts as a schema rejection only through
-`provider_error_code` `invalid_json_schema`, since the withheld detail names no schema.
+received for a 402 (DC-7). Withholding changes no verdict: the client reads the schema words on
+the detail as composed, before it is withheld (`ChatResult.detail_names_schema`, task 7.15 fix
+round 1), so such a 400 is a schema rejection exactly when it was before 7.15 (OpenAI's
+`invalid_json_schema` code, or a detail that names the schema).
 
 Runner use. `probe`, `module`, `regression` and `canary` read every `schema-check-attempt/1`
 manifest under their artifact root before the first cell (an unreadable one fails the batch

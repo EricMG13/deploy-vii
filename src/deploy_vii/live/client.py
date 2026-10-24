@@ -33,6 +33,13 @@ REDACTED = "<redacted>"
 # The whole `error_detail` when the account id survives in it (task 7.15 item 4).
 DETAIL_WITHHELD = "<provider detail withheld: account id>"
 _REDACTED_PAIR = re.compile(rb'(?<!\\)"user_id"\s*:\s*"' + re.escape(REDACTED.encode()) + rb'"')
+# A 400 is a verdict on the schema only when it says so (review fix, task 2.11): schema-check
+# sends what a real run does not (16 tokens, no reasoning, a one-line prompt), so a 400 about
+# those would otherwise block the paid path with nothing able to lift it. Without OpenAI's code,
+# only "invalid schema" (or "invalid_json_schema") or `response_format` names the schema; a bare
+# "json_schema" can be the request feature ("max_tokens too small for json_schema output").
+# Read here, on the detail before it is withheld (task 7.15 fix round 1); `runner.schema_shaped`.
+SCHEMA_WORDS = re.compile(r"invalid[ _](json[ _])?schema|response_format", re.IGNORECASE)
 USAGE_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
@@ -139,6 +146,9 @@ class ChatResult:
     provider_error_code: str | None = None
     # The HTTP `Retry-After` of a reply that is not a model answer (`Response.retry_after`).
     retry_after: str | None = None
+    # Whether `error_detail`, as the client composed it before any withholding, names the schema
+    # (`SCHEMA_WORDS`), so a withheld detail keeps its schema verdict (task 7.15 fix round 1).
+    detail_names_schema: bool = False
 
 
 def _count(value: object) -> int | None:
@@ -347,16 +357,28 @@ def _body_error_class(error: Mapping[str, Any]) -> Classification:
 
 
 def _classify(request: ChatRequest, response: Response, key: str, latency: float) -> ChatResult:
-    """`_classify_reply`, with an `error_detail` in which the account id survives replaced
-    whole by `DETAIL_WITHHELD` (task 7.15 item 4: the detail is written to
-    `checks/classification.json`, the schema-check manifest and its report). `raw` is kept
-    as received, so a 402 is still read from it (DC-7, `credit.from_dispatch_402`), and the
-    stored body has its own check (`retention.response_envelope`)."""
+    """`_classify_reply`, with every `error_detail` passed through `_withheld` once (the
+    provider branch withholds on its own evidence first). `raw` is kept as received, so a 402
+    is still read from it (DC-7, `credit.from_dispatch_402`), and the stored body has its own
+    check (`retention.response_envelope`)."""
     result = _classify_reply(request, response, key, latency)
+    return result if result.error_detail == DETAIL_WITHHELD else _withheld(result)
+
+
+def _withheld(result: ChatResult, *, account_id: bool = False) -> ChatResult:
+    """Record whether the detail names the schema, then replace it whole by `DETAIL_WITHHELD`
+    when the account id survives in it (or `account_id`: in the provider text before its cap).
+
+    Task 7.15 item 4: the detail is written to `checks/classification.json`, the schema-check
+    manifest and its report. Fix round 1: `detail_names_schema` is read on the detail as
+    composed, so withholding changes no schema verdict (`runner.schema_shaped`)."""
     detail = result.error_detail
-    if detail is not None and account_id_left(detail.encode()):
-        return replace(result, error_detail=DETAIL_WITHHELD)
-    return result
+    if detail is None:
+        return result
+    names = bool(SCHEMA_WORDS.search(detail))
+    if account_id or account_id_left(detail.encode()):
+        return replace(result, error_detail=DETAIL_WITHHELD, detail_names_schema=names)
+    return replace(result, detail_names_schema=names)
 
 
 def _classify_reply(
@@ -401,15 +423,13 @@ def _classify_reply(
     if response.status == 402 or error.get("code") == 402:
         return _failed(failure, message or None, "insufficient_credit")
     if not success:
-        provider = _provider_detail(error, key)
+        provider, account_id = _provider_detail(error, key)
         explained = "; ".join(part for part in (message, provider) if part) or None
         refused = replace(
             _failed(failure, explained),
             provider_error_code=_text(_as_dict(error.get("metadata")).get("provider_error_code")),
         )
-        if provider == DETAIL_WITHHELD:
-            return replace(refused, error_detail=DETAIL_WITHHELD)
-        return refused
+        return _withheld(refused, account_id=account_id)
     choices = document.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else None
     if not isinstance(choice, dict):
@@ -433,20 +453,21 @@ def _classify_reply(
     return answer
 
 
-def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
+def _provider_detail(error: Mapping[str, Any], key: str) -> tuple[str | None, bool]:
     """The upstream provider's own message from an OpenRouter error's `metadata.raw` (key
     scrubbed), prefixed with `provider_name` and `provider_error_code` where they are text.
 
     OpenRouter's `message` is generic ("Provider returned error"); the reason (probe-5b: "Invalid
     schema for response_format 'source_context' ...") is only inside `raw`. A raw JSON text gives
     its `error.message` (or `message`); any other raw text is kept as it is, up to
-    `PROVIDER_DETAIL_CHARS` characters (an HTML error page must not flood reports). A text in
-    which the account id survives (`account_id_left`) gives `DETAIL_WITHHELD`, and the caller
-    withholds the whole detail."""
+    `PROVIDER_DETAIL_CHARS` characters (an HTML error page must not flood reports). The flag
+    says whether the account id survives (`account_id_left`) in the text before that cap, where
+    cut JSON can no longer show an escaped key (task 7.15 item 4); the caller then withholds the
+    whole detail."""
     metadata = _as_dict(error.get("metadata"))
     raw = _text(metadata.get("raw"))
     if raw is None or not raw.strip():
-        return None
+        return None, False
     text = raw.strip()
     try:
         document = _as_dict(json.loads(text))
@@ -454,9 +475,7 @@ def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
         document = {}
     inner = _as_dict(document.get("error")) or document
     text = _text(inner.get("message")) or text
-    if account_id_left(text.encode()):
-        # Read before the cap: cut JSON no longer shows an escaped key (task 7.15 item 4).
-        return DETAIL_WITHHELD
+    account_id = account_id_left(text.encode())
     if len(text) > PROVIDER_DETAIL_CHARS:
         text = f"{text[:PROVIDER_DETAIL_CHARS]} [truncated from {len(text)} chars]"
     label = " ".join(
@@ -467,7 +486,7 @@ def _provider_detail(error: Mapping[str, Any], key: str) -> str | None:
         )
         if name
     )
-    return redact(f"{label}: {text}" if label else text, key)
+    return redact(f"{label}: {text}" if label else text, key), account_id
 
 
 def _choice_error_detail(error: object, status: int, key: str) -> str:

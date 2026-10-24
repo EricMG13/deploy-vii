@@ -39,6 +39,7 @@ from deploy_vii.live.catalog import PinnedCandidate, PinnedPool
 from deploy_vii.live.client import (
     CHAT_URL,
     DEFAULT_TIMEOUT_SECONDS,
+    SCHEMA_WORDS,
     ChatClient,
     ChatRequest,
     ChatResult,
@@ -1098,23 +1099,19 @@ SCHEMA_BISECT_RECORD = "schema-bisect-attempt/1"
 SCHEMA_CHECK_MAX_TOKENS = 16  # the brief's floor; a provider minimum above it answers a 400
 SCHEMA_CHECK_TIMEOUT_SECONDS = 120.0
 SCHEMA_CHECK_PROMPT = "Reply with one JSON object that conforms to the response format."
-# A 400 is a verdict on the schema only when it says so (review fix, task 2.11): schema-check
-# sends what a real run does not (16 tokens, no reasoning, a one-line prompt), so a 400 about
-# those would otherwise block the paid path with nothing able to lift it. Without OpenAI's code,
-# only "invalid schema" (or "invalid_json_schema") or `response_format` names the schema; a bare
-# "json_schema" can be the request feature ("max_tokens too small for json_schema output").
-_SCHEMA_WORDS = re.compile(r"invalid[ _](json[ _])?schema|response_format", re.IGNORECASE)
 
 
 def schema_shaped(result: ChatResult) -> bool:
     """True for an HTTP 400 whose provider code is `invalid_json_schema` or whose detail says
-    "invalid schema" or names `response_format`. Google's "Request contains an invalid argument"
-    does not."""
+    "invalid schema" or names `response_format` (`client.SCHEMA_WORDS`). Google's "Request
+    contains an invalid argument" does not. A detail withheld for its account id keeps the
+    verdict it had: the client read the words before withholding it (`detail_names_schema`,
+    task 7.15 fix round 1)."""
     if result.classification != "http_error" or result.http_status != 400:
         return False
     if result.provider_error_code == "invalid_json_schema":
         return True
-    return bool(_SCHEMA_WORDS.search(result.error_detail or ""))
+    return result.detail_names_schema or bool(SCHEMA_WORDS.search(result.error_detail or ""))
 
 
 @dataclass(frozen=True)

@@ -482,6 +482,28 @@ def test_a_detail_in_which_the_account_id_survives_is_withheld_whole(
     assert result.raw == body
 
 
+@pytest.mark.parametrize(
+    "raw, names_schema",
+    [
+        (f"user_id={ACCOUNT}: Invalid schema for response_format 'x'", True),
+        (f"user_id={ACCOUNT}: max_tokens is below the minimum", False),
+        # Only the detail as it was kept before 7.15 counts: words past the cap never did.
+        (f"user_id={ACCOUNT} " + "x" * 600 + " invalid_json_schema", False),
+        ("Invalid schema for response_format 'x'", True),
+    ],
+    ids=["withheld-words", "withheld-no-words", "words-past-the-cap", "kept-words"],
+)
+def test_the_schema_words_are_read_from_the_detail_before_it_is_withheld(
+    raw: str, names_schema: bool
+) -> None:
+    """Fix round 1 (7.15 review): withholding the text does not change the schema verdict,
+    so the client records whether the detail it would have kept names the schema."""
+    body = json.dumps({"error": {"code": 400, "message": "m", "metadata": {"raw": raw}}})
+    result = classify(Response(400, body.encode()))
+    assert result.detail_names_schema is names_schema
+    assert (result.error_detail == WITHHELD) is ("user_id" in raw)
+
+
 def test_a_detail_outside_the_reply_body_account_id_is_kept() -> None:
     """Only what `error_detail` keeps is checked: an account id elsewhere in `metadata.raw`
     (the message is taken from it) leaves the detail as it was."""
