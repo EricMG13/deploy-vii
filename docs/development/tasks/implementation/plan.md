@@ -399,7 +399,10 @@ reconciled report cross-checks spend against the key's usage; 7.15 closes the wh
 review's pre-PR fixes. Not landed: 7.1 (E1 for CP-0 and CP-1, its box below still open) and 7.3
 (E2, its box below still open): both were paused by the user on 23 Oct 2026 (all live testing)
 and resumed on 24 Oct 2026 at Sol medium (decision 0005, 24 Oct 2026 amendment), the next batch
-pending the user's choice of runner.
+pending the user's choice of runner. 7.16 landed (Python-owned hash fields never reach the
+model as "Field required"); the hybrid harness merged as devtools (97ae4bd); three of three
+Sol-medium model outcomes passed CP-1 through the harness on 24 Oct 2026 (one draw lost to a
+provider 502), recorded in the acceptance review §7.17; the product-runner port is M8 task 8.0d.
 
 - [ ] **7.1 E1 for CP-0 and CP-1** on Caesars. This closes B's adopted condition: real
   readiness populates the header, Evidence and Limitations. It also closes C's CP-1

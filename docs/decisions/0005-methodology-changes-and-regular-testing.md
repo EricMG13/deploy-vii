@@ -136,6 +136,8 @@ sets `default_effort` and `complex_effort` to `medium` (task 7.15). The user's w
 handoff to main to resume working and live testing on Sol medium." Live testing had been paused
 by the user on 23 Oct 2026; the next batch waits for the user's choice of runner.
 
+Evidence (24 Oct 2026): 3/3 CP-1 passes at Sol medium through the hybrid harness, US$1.35–2.29 per run, `financials` FY2025-only (99–102 lines); see m7-live-acceptance-review.md §7.17.
+
 Not verified:
 - provider and model availability, effort support and pricing at batch time;
 - whether a native Luna backup exists on this host;

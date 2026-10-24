@@ -523,3 +523,24 @@ Lane head: the 7.15 commits on `claude/m7-lane`, final code head b0de2d6 (fix ro
 ## 7.16 Unset pre-filled hashes are never "Field required" to the model
 
 In 2 of 2 shape-failing hybrid CP-1 `financials` submits (23–24 Oct 2026, two models) a balance-sheet period with a null `start_date` and no limitation left both `financial_review_sha256` fields unset with no unbound reference, so the plain path also told the model `definition.financial_review_sha256: Field required` and `binding.financial_review_sha256: Field required`; `submit_model_payload` now routes every payload with an unset marked field through `_validate_prefilled` (formerly `_validate_unbound`), which drops those lines (kept only when they are the stage's only issues), with the rejection, the retained payload and the `payload_prefilled` record unchanged.
+
+## 7.17 — CP-1 at Sol medium through the hybrid harness (24 Oct 2026)
+
+User decision (24 Oct 2026): "Run the Sol-medium live tests through the hybrid harness (hybrid-cp1-m7) merged into the M7 lane as devtools; port it into the product runner as an M8 task." Code head: lane 97ae4bd (3756b9b + harness 1a61696). These runs went through `devtools/hybrid_cp1.py`, not the product runner, so the 7.1 E1 box stays as it is until the 8.0d port runs E1 through the product runner; no box is ticked here.
+
+| Batch | Verdict | Wall s | USD | First-pass steps | financials submits | financials lines / years | Balance movements | Identities | Issue classes |
+|---|---|---|---|---|---|---|---|---|---|
+| hybrid-cp1-3 (draw 1) | accepted 4/4 | 821 | 1.3505 | 3/4 | 2 | 102 (BS 35 …; FY2025 only) | 0 | 9 | Quote/locator mismatch ×1 (financials submit 1) |
+| hybrid-cp1-4 (draw 2) | stopped at financials: no-response, HTTP 502 inside the stream (provider-side, after 240 s on the resubmit call; no retry in the harness) | 743 | 0.8083 | 1/2 | 1 (+1 lost) | submit 1: 103 (IS 26 / BS 36 / CFS 41; FY2025 102 + FY2024 1) | 5 | 5 | Quote/locator mismatch ×1, consolidated ×1 |
+| hybrid-cp1-5 (draw 3) | accepted 4/4 | 1,331 | 2.2902 | 3/4 | 2 | 101 (IS 26 / BS 34 / CFS 41; FY2025 100 + FY2024 1) | 5 | 10 | Quote/locator mismatch ×1 (page 95 "Reconciliation"); completeness drop flagged: 103 → 101 lines (CFS 43 → 41) on the resubmit |
+| hybrid-cp1-6 (draw 4, replaces the lost draw 2) | accepted 4/4 | 965 | 2.0216 | 3/4 | 2 | 99 (IS 25 / BS 33 / CFS 41; FY2025 only) | 0 | 12 | Quote/locator mismatch ×1 (page 95 "Reconciliation"); no completeness drop |
+
+Reading:
+
+- Acceptance: 3 of 3 model outcomes passed CP-1 in full (draws 1, 3, 4); draw 2 was lost to a provider-side HTTP 502 inside the stream (US$0.31 charged, no model verdict) because the harness does not retry a stream failure; wall clock 821 / 1,331 / 965 s, cost US$1.35 / 2.29 / 2.02 (mean US$1.89).
+- One recurring failure class: every `financials` first submit (4 of 4 including the lost draw) was rejected once for the quote "Reconciliation" not found on `czr-2025-10k page:95`, which the hybrid loop repairs in-loop at about US$0.3 and 4–7 minutes per draw; a deterministic locator correction or a prompt fact on the statement-page boundaries would remove one submit per run (candidate; a decision-0005 row if adopted).
+- Completeness is the limit, not acceptance: accepted `financials` hold 99–102 lines, FY2025 only (one FY2024 line in draw 3), balance movements 0 / 5 / 0, identities 9 / 10 / 12, and Sol at medium produces a single-year transcription that acceptance does not measure (the 8.0d completeness floor).
+- Spend: US$6.47 of the US$12 batch cap for four batches (shared ledger `.ledgers/hybrid-cp1-3-openrouter.jsonl`); US$60.11 of the US$200 ceiling across every ledger (OpenRouter 40.94 + Anthropic 19.17), no open reservation.
+- Cited pages were read in every step (`cited_not_read` = 0 throughout), and narrative and readiness passed first time in every draw.
+
+Not verified: n = 3 model outcomes on one issuer; no completeness floor yet; the harness's acceptance includes declared-partial transcriptions; downstream effect of the single-year `financials` on narrative/readiness content not compared across draws; the 502's billing (US$0.31) taken from the provider's usage.cost; these runs did not go through the product runner.
