@@ -91,6 +91,8 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal render --enve
 
    The page is `report/accepted.html`, or `refused.html` which states why. Rendering does
    not accept the page: browser acceptance stays unrun. **Gap:** no command opens it.
+   **Gap:** no command delivers a final Credit Snapshot; the CP-1 render above is the
+   nearest output.
 
 8. CP-MODEL, only when the run requests it and CP-1 is accepted or restricted:
 
@@ -115,10 +117,10 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal interrupt --t
 ```
 
 - **Gap:** there is no `resume` command. `begin` refuses while any attempt is pending
-  ("resume or explicitly interrupt it first"). To resume, re-run the same `*-submit` with
-  the same ticket and the same review text: the journal keeps each response before
-  validating it, so a crash mid-validation continues from the kept response. Different
-  text for the same step is refused. Details and line references: `references/resume.md`.
+  ("resume or explicitly interrupt it first"). To resume a step or response left pending
+  (for example a crash during validation), re-run the same `*-submit` with the same ticket
+  and the same review text; a step already valid is refused, and different text for the
+  same step is refused. Details and line references: `references/resume.md`.
   Behaviour after a killed host session is not verified.
 - **Gap:** only CP-0, CP-1 and CP-MODEL have submit or publish actions in the CLI. CP-1A
   and the later modules in `deploy-vii plan` cannot be submitted from here.
@@ -134,7 +136,10 @@ development test and names the cap (`references/commands.md`).
 ## Stop rules
 
 - Never exceed a cap in `settings/project.toml` (`recurring_caps_usd`,
-  `cumulative_ceiling_usd`) and never pass a larger `--cap` to `live`.
+  `cumulative_ceiling_usd`); read the numbers there, they are not copied here. Never pass
+  a larger `--cap` to `live`. The cumulative ceiling spans OpenRouter and Anthropic spend
+  together (decision 0006 DC-6, amendment of 24 Oct 2026:
+  `docs/decisions/0006-delegated-choices-and-orchestration.md`).
 - No credit top-up and no workaround for missing credit. If `live` exits with code 4
   (credit exhausted), stop and report; the ticket stays pending for the coordinator.
 - Report a refused or rejected result as it is. Never edit a journal, pack or output by

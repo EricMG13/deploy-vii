@@ -9,7 +9,10 @@ that head and drift).
 - An attempt's ticket is the only handle. Responses are stored by hash before they are
   validated (`submit_step` 725, `finish` 638), so a crash during validation leaves the
   response retained and the attempt pending.
-- Resume is implicit: submit the same ticket with the same review text again.
+- Resume is implicit: submit the same ticket with the same review text again. This resumes
+  only a step or response left pending (for example a crash during validation). A step that
+  is already valid is refused by the order check: "Submit the next module step in order"
+  (769-770).
   `submit_step` accepts a retained pending step only when the payload hash matches
   (773-781); otherwise "Step already retains a different response; resume or interrupt".
   `submit_cp0_review` and `promote_cp1` apply the same rule (`cp0_workflow.py` 43,
@@ -18,6 +21,12 @@ that head and drift).
   `WITHIN_ATTEMPT_REPAIR` (121) keeps the attempt pending and the next submission of that
   step is its one repair (811-820). Any other invalid response finishes the attempt;
   `begin` then opens the module's one repair attempt.
+- `begin` after `interrupt` (or after any finished attempt) turns on the previous attempt
+  for the same inputs: it is the module's one repair only if that attempt has `issues`
+  (619). `interrupt` settles with the issue "Interrupted: <reason>" (`settle` 413-415), so
+  the next `begin` is the repair (`number` 1, `repair_of` the interrupted ticket). A second
+  finished attempt for the same inputs (`len(previous) >= 2`) is refused, as is a first
+  attempt that finished without issues (settled).
 - `interrupt` (848) finishes a pending attempt with a reason. It records an interruption
   in the journal; it does not stop a host process or a running command.
 - `finish` refuses with "Ticket inputs have changed" when upstream evidence changed

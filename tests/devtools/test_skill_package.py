@@ -155,6 +155,10 @@ def test_parser_check_rejects_a_bad_flag(
         parse_with_real_parser("deploy-vii execution --directory d begin", monkeypatch, capsys)
     with pytest.raises(pytest.fail.Exception, match="real parser rejected"):
         parse_with_real_parser(
+            "deploy-vii execution --directory d status --no-such-flag", monkeypatch, capsys
+        )
+    with pytest.raises(pytest.fail.Exception, match="real parser rejected"):
+        parse_with_real_parser(
             "deploy-vii execution --directory d cp1-submit --ticket t --step nope --review r",
             monkeypatch,
             capsys,
@@ -171,3 +175,26 @@ def test_no_secret_or_acceptance_claim(path: Path) -> None:
 def test_gaps_are_labelled() -> None:
     body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     assert body.count("**Gap:**") >= 5
+
+
+TABLE_ONLY = [
+    "deploy-vii cp0 --pack p --review r --output o",
+    "deploy-vii preview --run r --output o",
+    "deploy-vii execution --directory d replace-pack --pack p",
+    "deploy-vii execution --directory d interface-preview --ticket t --output o",
+    "deploy-vii execution --directory d register-preview --ticket t --output o",
+    "deploy-vii live probe --directory d --cap 1",
+    "deploy-vii live regression --directory d --cap 1",
+    "deploy-vii live canary --directory d --cap 1",
+    "deploy-vii live corpus attempt case-1",
+    "deploy-vii live reconcile --directory d --batch-id b",
+    "deploy-vii live schema-check --models vendor/model",
+]
+
+
+@pytest.mark.parametrize("line", TABLE_ONLY)
+def test_table_only_commands_parse(
+    line: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Commands that references/commands.md lists in its tables, not in fenced blocks."""
+    parse_with_real_parser(line, monkeypatch, capsys)
