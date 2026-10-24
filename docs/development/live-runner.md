@@ -85,6 +85,11 @@ CP-5's `minItems: 2` is sent).
   the ready CP-0 `third_party` sources (the market evidence); a CP-3 pack without one sends no
   SOURCE block and an empty catalogue, which is not an error. Any other declared source is refused
   in `_plan`, before anything is spent. CP-2 and CP-5 receive no SOURCE block.
+- **CP-5 route.** CP-5 requires only CP-0, so its route is `source_readiness` then
+  `integrity_review`: it reviews the settled analyst heads the journal already holds and runs no
+  analyst itself. A `cp5` cell (module or regression) must therefore run after the analysts in the
+  same journal; over a journal without them it reviews nothing analyst-side (coordinator ruling,
+  task 8.6).
 - **CP-5.** The review scope is its own CONTEXT block, `integrity-scope`, with a hash header, as
   the QA scope is (`SCOPE_BLOCKS`). `integrity_projection` keeps of each fact module only the facts
   a claim names (`prose` refs), the facts Python flagged, and every member of an identity group;

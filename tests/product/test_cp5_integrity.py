@@ -491,7 +491,9 @@ def test_the_context_block_prefills_each_bound_module_and_the_source_list() -> N
 def test_the_step_entry_registers_cleanly_and_routes_after_cp0() -> None:
     chain = StepChain(module_id=MODULE_ID, cell="cp5", steps=CP5_STEPS)
     assert chain.settling == STEP_ID and chain.pack_sources == frozenset()  # ruling 2
-    chains = checked_chains((*STEP_CHAINS, chain))
+    # Task 8.6 registered this chain: it is the registry's, and the registry still checks clean.
+    assert chain in STEP_CHAINS
+    chains = checked_chains(STEP_CHAINS)
     assert module_route(MODULE_ID, chains) == ("source_readiness", STEP_ID)
     assert NOT_EVALUATED == frozenset({"CP-0"})
 

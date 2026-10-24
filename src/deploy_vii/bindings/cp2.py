@@ -6,7 +6,7 @@ thesis, the strengths and the weaknesses, each a ``Binding.section`` column with
 label. The Front Page tables hold one text per row (a prose block shows one line per bound
 fact); the full r14 registers, with category, basis and limitation columns, go to Evidence and
 the gaps ledger to Limitations, as ``bindings/cp1a.py`` does. Slots carry a ``cp2-`` prefix: a
-slot is unique across all shipped maps. Not yet in ``SHIPPED_MAPS`` (registration is separate).
+slot is unique across all shipped maps. Now in ``SHIPPED_MAPS`` since task 8.6.
 """
 
 from deploy_vii.bindings import Binding, BindingMap

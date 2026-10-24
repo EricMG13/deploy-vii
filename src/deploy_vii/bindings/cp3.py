@@ -7,8 +7,8 @@ rationale), then each instrument's fundamental view and market observation, labe
 CP-1 facility name. The full tables (instruments, market evidence with its cited quotes,
 preference, risks) and the referenced CP-1 facts go to Evidence and the gaps ledger to
 Limitations, as ``bindings/cp2.py`` does. FP 03's Relative Value blocks and the call band are
-M10. Slots carry a ``cp3-`` prefix: a slot is unique across all shipped maps. Not yet in
-``SHIPPED_MAPS`` (registration is separate).
+M10. Slots carry a ``cp3-`` prefix: a slot is unique across all shipped maps. Now in
+``SHIPPED_MAPS`` since task 8.6.
 """
 
 from deploy_vii.bindings import Binding, BindingMap
