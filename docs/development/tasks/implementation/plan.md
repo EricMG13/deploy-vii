@@ -498,10 +498,9 @@ applied under decision 0006 DC-6):
 | E2 | US$15 per milestone |
 | E3 | US$3 per week |
 
-Cumulative ceiling: US$200 of OpenRouter spend, including the first batch. Pause external
+Cumulative ceiling: US$200 across OpenRouter and Anthropic spend (decision 0006 DC-6
+amendment, 24 Oct 2026), including the first batch. Pause external
 testing and ask the user before exceeding it. The reservation ledger enforces every cap.
-The ceiling is one ceiling across OpenRouter and Anthropic-API spend; see the 24 Oct 2026
-amendment to decision 0006 DC-6.
 
 ## Per-task working rules
 
