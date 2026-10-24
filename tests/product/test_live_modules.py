@@ -334,6 +334,19 @@ def test_a_rule_issue_rejects_a_pack_step_its_validator_accepts_and_nothing_else
     assert both[1] == (*bare[1], "Rule: broken")
 
 
+def test_every_pack_tool_module_with_its_own_entry_has_a_ruled_validator() -> None:
+    """Review B4 (task 8.9 fix round 1): a submit a rule fails on a pack-tool step whose module
+    settles through its own entry is retained through `RULED_ENTRIES`; a module missing there
+    would raise KeyError only when a rule fires, so the two tables must agree."""
+    entered = {
+        submission.STEPS[step].module_id
+        for step in registry.pack_tool_steps()
+        if submission.STEPS[step].module_id in submission.MODULE_STEP_ENTRIES
+    }
+    assert entered == set(submission.RULED_ENTRIES) == {"CP-1A", "CP-3", "CP-4"}
+    assert set(submission.RULED_STEPS) == registry.pack_tool_steps()
+
+
 # --- prompts --------------------------------------------------------------------------------
 
 
