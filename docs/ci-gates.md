@@ -119,18 +119,22 @@ Missing private inputs or live access leave the relevant acceptance pending.
 
 On `pull_request` events the `Product checks` job (name and status unchanged) runs
 `.github/scripts/code_changed.sh` over the changed paths and skips its install and
-test steps only when every path matches the allow-list `docs/**`, `**/*.md`,
-`LICENSE*`, `.gitignore`, `.gitattributes`, `CODEOWNERS`. The default is fail-closed:
-an empty diff, a fetch or diff error, a non-PR event or any other path (including
-`src/`, `tests/`, `pyproject.toml`, `uv.lock`, `Makefile`, `.github/`, `settings/`,
-scripts and unknown files) runs the full suite. Hygiene, Secrets and the dependency
-audit always run. Concurrency groups by PR number and cancels superseded runs for
+test steps only when every path matches the allow-list: anything under `docs/`, top-level
+`*.md` (no slash), `LICENSE`, `LICENSE.*`, `LICENSE-*`, `.gitignore`, `.gitattributes`,
+`CODEOWNERS`. The default is fail-closed: an empty diff, a fetch or diff error, a non-PR
+event, any path with a slash outside `docs/` (so `src/.../x.md` counts as code) or any
+other path (including `src/`, `tests/`, `pyproject.toml`, `uv.lock`, `Makefile`,
+`.github/`, `settings/`, scripts and unknown files) runs the full suite. Repository
+hygiene and Secrets always run. `make audit` is a local gate for dependency changes; the
+"Dependency vulnerabilities" job lives in `.github/workflows/dependency-audit.yml` with
+its own `pull_request` path filter and weekly cron. Concurrency groups by PR number and cancels superseded runs for
 pull requests only; other events group by `run_id`, so a push to `main` is never
 cancelled.
 
 | Changed paths | Product test run |
 | :--- | :--- |
-| `docs/x.md`; `README.md`; `docs/my notes.md` | skipped |
+| `docs/x.md`; `README.md`; `CHANGELOG.md`; `docs/my notes.md`; `docs/sub/dir/x.md` | skipped |
+| `LICENSE_x/a.py`; `src/deploy_vii/prompts/x.md`; `tests/fixtures/notes.md` | full |
 | `docs/ci-gates.md` + `src/deploy_vii/x.py` | full |
 | `settings/project.toml`; `uv.lock`; `.github/workflows/ci.yml` | full |
 | `scripts/anything`; `tests/devtools/t.py`; `foo.txt` | full |

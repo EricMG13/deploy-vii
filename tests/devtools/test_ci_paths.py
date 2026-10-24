@@ -39,6 +39,12 @@ def classify(paths: list[str]) -> str:
         (["foo.txt"], "true"),
         (["src/with space/x.py"], "true"),
         ([], "true"),
+        (["LICENSE_x/a.py"], "true"),
+        (["src/deploy_vii/prompts/x.md"], "true"),
+        (["tests/fixtures/notes.md"], "true"),
+        (["docs/sub/dir/x.md"], "false"),
+        (["CHANGELOG.md"], "false"),
+        (["LICENSE.txt", "LICENSE-MIT"], "false"),
     ],
 )
 def test_classification(paths: list[str], expected: str) -> None:

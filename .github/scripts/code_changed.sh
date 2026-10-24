@@ -8,7 +8,9 @@ while IFS= read -r path || [ -n "$path" ]; do
   [ -z "$path" ] && continue
   count=$((count + 1))
   case "$path" in
-    docs/* | *.md | LICENSE* | .gitignore | .gitattributes | CODEOWNERS) ;;
+    docs/*) ;;
+    */*) echo true; exit 0 ;;
+    *.md | LICENSE | LICENSE.* | LICENSE-* | .gitignore | .gitattributes | CODEOWNERS) ;;
     *) echo true; exit 0 ;;
   esac
 done

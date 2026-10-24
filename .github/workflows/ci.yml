@@ -43,6 +43,7 @@ jobs:
           persist-credentials: false
       - name: Detect code changes
         id: changes
+        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
@@ -73,8 +74,11 @@ jobs:
         env:
           CODE: ${{ steps.changes.outputs.code }}
         run: |
-          if [ "$CODE" = true ]; then echo "full suite ran (make product-check above)"
-          else echo "docs-only diff: Product checks test run skipped (hygiene, secrets and audit still ran)"; fi
+          case "$CODE" in
+            false) echo "docs-only diff: Product checks test run skipped (hygiene and secrets still ran)" ;;
+            true) echo "full suite ran (make product-check above)" ;;
+            *) echo "detection unknown: full suite ran" ;;
+          esac
   secrets:
     name: Secrets
     runs-on: ubuntu-24.04
