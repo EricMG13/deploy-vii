@@ -373,6 +373,54 @@ def test_regression_order_is_seeded_and_matched(rig: Rig) -> None:
     assert cli.skipped_line(cli.unrecorded_cases()) in rig.report("r1").splitlines()
 
 
+def test_a_skipped_case_moves_no_other_cases_model_order_but_does_move_its_seeds() -> None:
+    """Task 8.7 (8.6 review): every case draws its shuffle, so skipping one leaves every other
+    case's model order as it is with nothing skipped; seeds are drawn over the planned cells
+    only, so a later case's seeds shift, while each seed still draws its cell's model."""
+    pool = fixture_pool()
+    slugs = [item.slug for item in pool.eligible]
+    every = frozenset(steps[-1] for _, steps in cli.REGRESSION_CASES)
+    whole = cli._regression_cells(pool, slugs, 7, every)
+    some = cli._regression_cells(pool, slugs, 7, every - {"business_context"})  # cp1a skipped
+
+    def models(cells: list[cli.Cell]) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        for cell in cells:
+            assert cell.seed is not None
+            found.setdefault(cell.case_id, []).append(draw(pool, cell.seed).slug)
+        return found
+
+    assert "cp1a" in models(whole) and "cp1a" not in models(some)
+    assert models(some) == {k: v for k, v in models(whole).items() if k != "cp1a"}
+    seeds = {c.cell_id: c.seed for c in whole}
+    assert [c.seed for c in some if c.case_id == "cp1"] == [
+        seeds[c.cell_id] for c in some if c.case_id == "cp1"
+    ]
+    assert [c.seed for c in some if c.case_id == "cp2"] != [
+        seeds[c.cell_id] for c in some if c.case_id == "cp2"
+    ]
+
+
+def test_the_report_names_the_cases_skipped_at_planning_time(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 8.7 (8.6 review): a corpus entry written while the batch runs (another process)
+    does not drop a case from the skipped line: the report names what was planned."""
+    real = cli.recorded_steps()
+    calls: list[int] = []
+
+    def recorded(*_: object) -> frozenset[str]:
+        calls.append(1)
+        return real if len(calls) == 1 else real | {"credit_synthesis"}
+
+    monkeypatch.setattr(cli, "recorded_steps", recorded)
+    assert rig.run(rig.argv("regression", batch="r1"), Responder(rig.review)) == 0
+    planned = cli.unrecorded_cases(real)
+    assert ("cp2", "credit_synthesis") in planned
+    assert cli.skipped_line(planned) in rig.report("r1").splitlines()
+    assert not step_lines(rig.report("r1"), "cp2-")
+
+
 def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
     assert cli.REGRESSION_CASES[:3] == (
         ("cp0", cli.CP0_STEPS),
@@ -380,7 +428,7 @@ def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
         ("cp1a", cli.CP1A_CHAIN),
     )
     # Task 8.6: then each new module's cell, in registry order.
-    assert [case for case, _ in cli.REGRESSION_CASES[3:]] == ["cp2", "cp4", "cp3", "cp5"]
+    assert [case for case, _ in cli.REGRESSION_CASES[3:]] == ["cp2", "cp4", "cp3", "cp5", "cp6"]
     assert cli.CP1A_CHAIN[-1] == "business_context" and cli.CP1A_CHAIN[:-1] == cli.CP0_STEPS
     # Task 7.4: the CP-1 chain ends in the QA review whose acceptance promotes CP-1.
     assert cli.CP1_CHAIN == ("source_context", "financials", "narrative", "readiness", "quality")

@@ -600,6 +600,44 @@ CP5_TEXT_RULE = (
     "figure and no reference. Python assigns every finding, contradiction and gap id and the "
     "status."
 )
+# Task 8.7: CP-6's committee challenge, after CP-5. Each rule states one check of
+# `cp6_committee.validate_committee`; the method text states the responsibilities.
+CP6_METHOD = _method("cp6.md")
+CP6_CHALLENGE_RULE = (
+    "`thesis_challenges` holds at least one row. Each names in `thesis_ref` a ref listed under "
+    "`cp2_rows` in the CONTEXT block whose `challengeable` is true (the thesis, a strength, a "
+    "weakness or a key finding), each at most once. Every recommendation, challenge, recovery "
+    "view and risk row cites at least one ref in its `basis`, written exactly: `cp2_refs` from "
+    "`cp2_rows`, `cp3_refs` from `cp3_rows`, `cp5_refs` from `cp5_rows` or a CP-5 `finding_id`; "
+    "or a `{ref|unit}` CP-1 figure in its text. An Insufficient Information recovery view needs "
+    "none."
+)
+CP6_RECOMMENDATION_RULE = (
+    "The recommendation's `action_bias` and `confidence` are Insufficient Information together, "
+    "and then its `limitation` says why. While `insufficient_information` lists any reason, the "
+    "action bias is Insufficient Information. A recovery view that is not Insufficient "
+    "Information cites in `cp5_refs` a ref listed under `cp5_cp4_rows`; without one it is "
+    "Insufficient Information and states its `limitation`."
+)
+CP6_CP5_RULE = (
+    "While `confidence_caps` lists any cap, every confidence is below High, the "
+    "recommendation's and each recovery view's. A recommendation that is not Insufficient "
+    "Information cites in `cp2_refs` or `cp3_refs` at least one row whose `claim` is true and "
+    "that `cp5_flagged_claims` does not list, or names a CP-1 figure in its rationale or "
+    "conditions (its limitation does not count). Gap and limitation rows support nothing."
+)
+CP6_RUN_TEXT_RULE = (
+    "Every text field is nonblank run text: digits only in period, filing and section labels and "
+    "the issuer's name; a figure only as `{ref|unit}` with a `ref` and `unit` listed under "
+    "`cp1_facts` (with none listed, write no figure). Never a bare number, never a `[ref]` chip, "
+    "and never a table id or a row ref in text: refs belong in the `basis`."
+)
+CP6_PROHIBITED_RULE = (
+    "No ranking against external peers, no buy, sell or switch phrase and no trade terms (a "
+    "target, entry or exit price or level, a position size) in any text field. An overweight, "
+    "neutral or underweight action bias, a recommendation and a recovery conclusion are this "
+    "module's output."
+)
 
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
@@ -761,6 +799,18 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"b. {CP5_REVIEW_RULE}\n"
         f"c. {CP5_CONTRADICTION_RULE}\n"
         f"d. {CP5_TEXT_RULE}"
+    ),
+    "committee_challenge": (
+        f"{CP6_METHOD}\n"
+        "Return judgments and references only: you receive no source text and quote nothing. "
+        "Python fills every identifier, table, figure, limitation, the call band and the "
+        "status.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {CP6_CHALLENGE_RULE}\n"
+        f"b. {CP6_RECOMMENDATION_RULE}\n"
+        f"c. {CP6_CP5_RULE}\n"
+        f"d. {CP6_RUN_TEXT_RULE}\n"
+        f"e. {CP6_PROHIBITED_RULE} The CONTEXT block is not a source and is never cited."
     ),
 }
 # The CONTEXT blocks besides the prepared pack's, each a step's Python scope as compact JSON

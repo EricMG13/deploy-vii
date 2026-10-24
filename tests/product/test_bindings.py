@@ -358,19 +358,20 @@ def test_cp1a_registers_bind_with_the_cp0_and_cp1_maps(cp1_view: View) -> None:
     assert validate_bindings(cp0_view(pack, cp0, accepted=False), maps) == ()
 
 
-# --- 8.6: CP-2, CP-4, CP-3 and CP-5 ship -------------------------------------------------------
+# --- 8.6: CP-2, CP-4, CP-3 and CP-5 ship; 8.7: CP-6 ---------------------------------------------
 
 
-def test_the_shipped_maps_add_cp2_cp4_cp3_and_cp5_in_registry_order() -> None:
+def test_the_shipped_maps_add_cp2_cp4_cp3_cp5_and_cp6_in_registry_order() -> None:
     from deploy_vii.bindings.cp1a import CP1A
     from deploy_vii.bindings.cp2 import CP2
     from deploy_vii.bindings.cp3 import CP3
     from deploy_vii.bindings.cp4 import CP4
     from deploy_vii.bindings.cp5 import CP5
+    from deploy_vii.bindings.cp6 import CP6
     from deploy_vii.bindings.cp_model import CP_MODEL
     from deploy_vii.bindings.shipped import SHIPPED_MAPS
 
-    assert SHIPPED_MAPS == (CP0, CP1, CP_MODEL, CP1A, CP2, CP4, CP3, CP5)
+    assert SHIPPED_MAPS == (CP0, CP1, CP_MODEL, CP1A, CP2, CP4, CP3, CP5, CP6)
     # One map per module and every slot once across the shipped maps.
     assert max(Counter(m.module_id for m in SHIPPED_MAPS).values()) == 1
     slots = Counter(e.slot for m in SHIPPED_MAPS for e in m.entries)
@@ -385,7 +386,12 @@ def composed_module(module_id: str) -> Module:
     from tests.product import test_cp3_relative_value as cp3_tests
     from tests.product import test_cp4_legal as cp4_tests
     from tests.product import test_cp5_integrity as cp5_tests
+    from tests.product import test_cp6_committee as cp6_tests
 
+    if module_id == "CP-6":
+        up = cp6_tests.upstream_of()
+        report = cp6_tests.committee_challenge(cp6_tests.market_pack(), cp6_tests.committee(), up)
+        return cp6_tests.cp6_module(report, up.bound, 0)
     if module_id == "CP-2":
         return cp2_tests.snapshot_with_cp2()[1]
     if module_id == "CP-3":
@@ -399,7 +405,7 @@ def composed_module(module_id: str) -> Module:
     return cp5_module(integrity_review(scope, cp5_tests.review_all(scope)), scope.inputs, 0)
 
 
-@pytest.mark.parametrize("module_id", ["CP-2", "CP-4", "CP-3", "CP-5"])
+@pytest.mark.parametrize("module_id", ["CP-2", "CP-4", "CP-3", "CP-5", "CP-6"])
 def test_each_new_modules_composed_facts_bind_once_under_the_shipped_maps(module_id: str) -> None:
     from deploy_vii.bindings.shipped import SHIPPED_MAPS
 

@@ -6,8 +6,8 @@ the journal only through `live.submission.submit_model_payload`: submit_cp0_revi
 submit_cp1_step (the same validators as any other input), or `store.submit_step` with the
 validator that rejects an uncomposable CP-0 submission or a CP-1 payload holding a reference
 Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4),
-or a one-step module's own entry (`MODULE_STEP_ENTRIES`: CP-1A, and CP-2/CP-4/CP-3/CP-5 since
-task 8.6, each sent its module context and only its bound sources).
+or a one-step module's own entry (`MODULE_STEP_ENTRIES`: CP-1A, CP-2/CP-4/CP-3/CP-5 since
+task 8.6 and CP-6 since task 8.7, each sent its module context and only its bound sources).
 For source_readiness Python composes the stored review from the model's submission; for every
 CP-1 step it pre-fills the hash bindings. The ledger is settled
 and the manifest sealed even if validation raises. A response from a model other than the
@@ -462,7 +462,8 @@ def _plan(
         repair_issues=repair.issues,
         # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
         cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
-        # Task 8.6: CP-2, CP-4 and CP-3 read their bound upstream through Python's view of it.
+        # Task 8.6: CP-2, CP-4 and CP-3 (task 8.7: and CP-6) read their bound upstream through
+        # Python's view of it.
         module_context=module_context(store, attempt, step.step_id),
         scope=scope,
     )

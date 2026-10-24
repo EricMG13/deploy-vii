@@ -58,7 +58,8 @@ Analyst modules, one live step each (registry `STEP_CHAINS`, task 8.6): CP-1A
 [credit synthesis](../../src/deploy_vii/methods/cp2.md); CP-4
 [legal covenants](../../src/deploy_vii/methods/cp4.md); CP-3
 [relative value](../../src/deploy_vii/methods/cp3.md); CP-5
-[integrity review](../../src/deploy_vii/methods/cp5.md). What each is sent:
+[integrity review](../../src/deploy_vii/methods/cp5.md); CP-6 (task 8.7)
+[committee challenge](../../src/deploy_vii/methods/cp6.md). What each is sent:
 [live runner, per-module context](live-runner.md#per-module-context-task-86).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). M1 (FFO
 interest coverage, DCF and DCF/debt) is implemented; next, in parallel, M2 runner and probe,

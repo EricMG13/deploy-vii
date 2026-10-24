@@ -102,7 +102,7 @@ def test_coverage_map_cp1a_records_task_7_2() -> None:
     assert entry["analytical_qualification"] == "unrun"
 
 
-@pytest.mark.parametrize("module_id", ["CP-2", "CP-4", "CP-3", "CP-5"])
+@pytest.mark.parametrize("module_id", ["CP-2", "CP-4", "CP-3", "CP-5", "CP-6"])
 def test_coverage_map_records_task_8_6_registration_and_pending_live_acceptance(
     module_id: str,
 ) -> None:

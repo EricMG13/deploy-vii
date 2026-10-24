@@ -1637,6 +1637,8 @@ ALL_STEPS = (
     "legal_covenants",
     "relative_value",
     "integrity_review",
+    # Task 8.7.
+    "committee_challenge",
 )
 
 

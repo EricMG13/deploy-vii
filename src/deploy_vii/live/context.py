@@ -27,18 +27,25 @@ Pack SOURCE blocks go only to a step whose validator checks spans against the pa
 Task 8.6: the one-step modules after CP-1A read settled heads, not retained steps. Their CONTEXT
 is Python's view of the attempt's bound upstream (`module_context`), each module's own
 `context_block`: CP-2 over `cp2_upstream`, CP-4 over `cp4_legal.upstream_of`, CP-3 over
-`cp3_upstream`, merged into the prepared-pack block as CP-1A's `cp1_facts` are. CP-5's review
-scope is its own block (`integrity_scope`), projected to the facts the review can name
-(`integrity_projection`). `declared_sources` narrows the SOURCE blocks: CP-4 is sent the ready
-sources CP-0 classes executed or filed, CP-3 the ready sources it classes `third_party`; every
-other step gets `step_sources`.
+`cp3_upstream` and (task 8.7) CP-6 over `cp6_upstream`, merged into the prepared-pack block as
+CP-1A's `cp1_facts` are. CP-5's review scope is its own block (`integrity_scope`), projected to
+the facts the review can name (`integrity_projection`). `declared_sources` narrows the SOURCE
+blocks: CP-4 is sent the ready sources CP-0 classes executed or filed, CP-3 the ready sources it
+classes `third_party`; every other step gets `step_sources`.
 """
 
 import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from deploy_vii import cp2_synthesis, cp3_relative_value, cp4_legal, cp5_integrity, prose
+from deploy_vii import (
+    cp2_synthesis,
+    cp3_relative_value,
+    cp4_legal,
+    cp5_integrity,
+    cp6_committee,
+    prose,
+)
 from deploy_vii.contracts import Fact, Module
 from deploy_vii.cp1_workflow import FinancialStage
 from deploy_vii.downstream_readiness import DownstreamInputs
@@ -93,6 +100,10 @@ MODULE_CONTEXTS: Mapping[str, Callable[[Execution, Attempt], dict[str, object]]]
     ),
     cp3_relative_value.STEP_ID: lambda store, attempt: cp3_relative_value.context_block(
         store.pack(), cp3_relative_value.cp3_upstream(store, attempt)
+    ),
+    # Task 8.7: CP-6 over the settled CP-1, CP-2, CP-3 and CP-5 heads its ticket binds.
+    cp6_committee.STEP_ID: lambda store, attempt: cp6_committee.context_block(
+        store.pack(), cp6_committee.cp6_upstream(store, attempt)
     ),
 }
 

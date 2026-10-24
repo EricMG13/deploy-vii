@@ -1,4 +1,5 @@
-"""Task 8.6: CP-2, CP-4, CP-3 and CP-5 registered in the live runner's shared tables.
+"""Task 8.6: CP-2, CP-4, CP-3 and CP-5 registered in the live runner's shared tables; task 8.7
+appends CP-6 (`committee_challenge`) the same way.
 
 SYNTHETIC journals and submissions come from each module's own tests (imported as modules, so
 none of their tests or fixtures is collected twice). No live call: every dispatch below goes to
@@ -18,7 +19,14 @@ import pytest
 from hypothesis import given, settings
 from pydantic import BaseModel
 
-from deploy_vii import cp2_synthesis, cp3_relative_value, cp4_legal, cp5_integrity, registry
+from deploy_vii import (
+    cp2_synthesis,
+    cp3_relative_value,
+    cp4_legal,
+    cp5_integrity,
+    cp6_committee,
+    registry,
+)
 from deploy_vii.contracts import Module
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live import cli, context, prompts, runner, submission
@@ -32,6 +40,7 @@ from tests.product import test_cp2_synthesis as cp2_tests
 from tests.product import test_cp3_relative_value as cp3_tests
 from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_cp5_integrity as cp5_tests
+from tests.product import test_cp6_committee as cp6_tests
 from tests.product.live_support import FakeTransport, fixture_pool, make_rtf_key
 from tests.product.test_live_runner import NOW, Rig, reply
 from tests.product.test_readiness import readiness_fixture
@@ -59,26 +68,38 @@ NEW_CHAINS = (
         pack_sources=frozenset({"relative_value"}),
     ),
     StepChain(module_id="CP-5", cell="cp5", steps=("integrity_review",)),
+    # Task 8.7: CP-6 quotes nothing (no pack sources).
+    StepChain(module_id="CP-6", cell="cp6", steps=("committee_challenge",)),
 )
 ROUTES = {
     "CP-2": (*CP1_ROUTE, "business_context", "credit_synthesis"),
     "CP-4": (*CP1_ROUTE, "legal_covenants"),
     "CP-3": (*CP1_ROUTE, "business_context", "credit_synthesis", "relative_value"),
     "CP-5": ("source_readiness", "integrity_review"),
+    # Task 8.7: CP-0, the CP-1 chain, CP-1A (CP-2's required producer), CP-2, CP-3, CP-5.
+    "CP-6": (
+        *CP1_ROUTE,
+        "business_context",
+        "credit_synthesis",
+        "relative_value",
+        "integrity_review",
+        "committee_challenge",
+    ),
 }
 SCHEMAS: dict[str, tuple[str, type[BaseModel]]] = {
     "credit_synthesis": ("CP-2", cp2_synthesis.CreditSynthesisSubmission),
     "legal_covenants": ("CP-4", cp4_legal.CovenantInterpretationSubmission),
     "relative_value": ("CP-3", cp3_relative_value.RelativeValueSubmission),
     "integrity_review": ("CP-5", cp5_integrity.IntegritySubmission),
+    "committee_challenge": ("CP-6", cp6_committee.CommitteeSubmission),
 }
-CONTEXT_STEPS = ("credit_synthesis", "legal_covenants", "relative_value")
+CONTEXT_STEPS = ("credit_synthesis", "legal_covenants", "relative_value", "committee_challenge")
 
 
 # --- the registry --------------------------------------------------------------------------
 
 
-def test_the_four_chains_follow_cp1a_in_the_brief_order() -> None:
+def test_the_new_chains_follow_cp1a_in_the_brief_order() -> None:
     assert registry.STEP_CHAINS[3:] == NEW_CHAINS
     assert [c.module_id for c in registry.STEP_CHAINS[:3]] == ["CP-0", "CP-1", "CP-1A"]
     # The modules' own step sequences are the registry's.
@@ -86,6 +107,7 @@ def test_the_four_chains_follow_cp1a_in_the_brief_order() -> None:
     assert cp4_legal.CP4_STEPS == registry.step_chain("CP-4").steps
     assert cp3_relative_value.CP3_STEPS == registry.step_chain("CP-3").steps
     assert cp5_integrity.CP5_STEPS == registry.step_chain("CP-5").steps
+    assert cp6_committee.CP6_STEPS == registry.step_chain("CP-6").steps
 
 
 @pytest.mark.parametrize("module_id", sorted(ROUTES))
@@ -95,9 +117,9 @@ def test_each_route_runs_the_required_producers_then_the_step(module_id: str) ->
     assert cell.steps == ROUTES[module_id] and cell.case_id == module_id.lower()
 
 
-def test_the_regression_cases_gain_the_four_cells_after_the_base_three() -> None:
+def test_the_regression_cases_gain_the_new_cells_after_the_base_three() -> None:
     cases = registry.regression_cases()
-    assert [cell for cell, _ in cases] == ["cp0", "cp1", "cp1a", "cp2", "cp4", "cp3", "cp5"]
+    assert [cell for cell, _ in cases] == ["cp0", "cp1", "cp1a", "cp2", "cp4", "cp3", "cp5", "cp6"]
     assert dict(cases[3:]) == {chain.cell: ROUTES[chain.module_id] for chain in NEW_CHAINS}
     assert cli.REGRESSION_CASES == cases
 
@@ -105,7 +127,7 @@ def test_the_regression_cases_gain_the_four_cells_after_the_base_three() -> None
 def test_only_the_quoting_steps_are_sent_pack_sources_and_each_step_settles() -> None:
     steps = registry.pack_source_steps()
     assert {"legal_covenants", "relative_value"} <= steps
-    assert not {"credit_synthesis", "integrity_review"} & steps
+    assert not {"credit_synthesis", "integrity_review", "committee_challenge"} & steps
     assert context.PACK_SOURCE_STEPS == steps
     assert set(SCHEMAS) <= registry.settling_steps() == runner.SETTLING_STEPS
     assert registry.projections() == registry.projections(registry.STEP_CHAINS[:3])
@@ -118,7 +140,7 @@ def test_only_the_quoting_steps_are_sent_pack_sources_and_each_step_settles() ->
 def test_each_step_has_its_modules_thin_submission_as_schema() -> None:
     for step_id, (module_id, schema) in SCHEMAS.items():
         assert submission.STEPS[step_id] == submission.StepDef(module_id, schema)
-    assert list(submission.STEPS)[-4:] == list(SCHEMAS)
+    assert list(submission.STEPS)[-5:] == list(SCHEMAS)
 
 
 def _objects(node: object) -> list[dict[str, Any]]:
@@ -147,6 +169,14 @@ def test_the_sent_schema_keeps_cp5s_two_claim_contradiction_minimum() -> None:
     assert refs["minItems"] == 2 and refs["items"] == {"$ref": "#/$defs/ClaimRef"}
 
 
+def test_the_sent_schema_keeps_cp6s_one_challenge_minimum() -> None:
+    sent = strict_schema(cp6_committee.CommitteeSubmission)
+    challenges = sent["properties"]["thesis_challenges"]
+    assert challenges["minItems"] == 1 and challenges["items"] == {
+        "$ref": "#/$defs/ThesisChallenge"
+    }
+
+
 def test_each_one_step_module_has_its_own_journal_entry() -> None:
     assert dict(submission.MODULE_STEP_ENTRIES) == {
         "CP-1A": submission.submit_cp1a_step,
@@ -154,6 +184,7 @@ def test_each_one_step_module_has_its_own_journal_entry() -> None:
         "CP-4": cp4_legal.submit_cp4_step,
         "CP-3": cp3_relative_value.submit_cp3_step,
         "CP-5": cp5_integrity.submit_cp5_step,
+        "CP-6": cp6_committee.submit_cp6_step,
     }
 
 
@@ -177,11 +208,17 @@ def cp5_case(tmp_path: Path) -> tuple[Execution, str]:
     return cp5_tests.journal(tmp_path / "store"), cp5_tests.review_all(scope).model_dump_json()
 
 
+def cp6_case(tmp_path: Path) -> tuple[Execution, str]:
+    """CP-0 to CP-5 settled by their own step functions over the CP-3 market pack."""
+    return cp6_tests.full_journal(tmp_path), cp6_tests.committee().model_dump_json()
+
+
 CASES: dict[str, Callable[[Path], tuple[Execution, str]]] = {
     "credit_synthesis": cp2_case,
     "legal_covenants": cp4_case,
     "relative_value": cp3_case,
     "integrity_review": cp5_case,
+    "committee_challenge": cp6_case,
 }
 
 
@@ -268,12 +305,20 @@ RULES = {
         prompts.CP5_CONTRADICTION_RULE,
         prompts.CP5_TEXT_RULE,
     ),
+    "committee_challenge": (
+        prompts.CP6_CHALLENGE_RULE,
+        prompts.CP6_RECOMMENDATION_RULE,
+        prompts.CP6_CP5_RULE,
+        prompts.CP6_RUN_TEXT_RULE,
+        prompts.CP6_PROHIBITED_RULE,
+    ),
 }
 METHODS = {
     "credit_synthesis": method("cp2.md"),
     "legal_covenants": method("cp4.md", until="## Tables"),
     "relative_value": method("cp3.md"),
     "integrity_review": method("cp5.md"),
+    "committee_challenge": method("cp6.md"),
 }
 
 
@@ -320,6 +365,15 @@ def test_the_rules_state_what_each_validator_checks() -> None:
         assert phrase in prompts.CP3_PROHIBITED_RULE
     assert "upstream evidence by `ref`" in prompts.CP5_REVIEW_RULE
     assert "two modules" in prompts.CP5_CONTRADICTION_RULE
+    assert "`challengeable` is true" in prompts.CP6_CHALLENGE_RULE
+    assert "at most once" in prompts.CP6_CHALLENGE_RULE
+    assert "Insufficient Information together" in prompts.CP6_RECOMMENDATION_RULE
+    assert "`insufficient_information`" in prompts.CP6_RECOMMENDATION_RULE
+    assert "`cp5_cp4_rows`" in prompts.CP6_RECOMMENDATION_RULE
+    assert "below High" in prompts.CP6_CP5_RULE and "`confidence_caps`" in prompts.CP6_CP5_RULE
+    assert "`cp5_flagged_claims`" in prompts.CP6_CP5_RULE
+    for phrase in ("buy", "sell", "switch", "peers", "position size"):
+        assert phrase in prompts.CP6_PROHIBITED_RULE
 
 
 def test_a_module_context_is_required_where_declared_and_refused_elsewhere() -> None:
@@ -379,6 +433,11 @@ def test_each_contexts_is_the_modules_own_block_over_the_bound_upstream(tmp_path
         cp3_relative_value.context_block(store.pack(), up3)
     )
     assert context.module_context(store, ticket, "integrity_review") is None
+    store, ticket = begun(tmp_path / "cp6", "committee_challenge")
+    up6 = cp6_committee.cp6_upstream(store, ticket)
+    assert context.module_context(store, ticket, "committee_challenge") == (
+        cp6_committee.context_block(store.pack(), up6)
+    )
     assert context.module_context(store, ticket, "business_context") is None
 
 
@@ -447,7 +506,8 @@ def test_an_absent_market_source_declares_nothing_and_offers_an_empty_catalogue(
 
 
 @pytest.mark.parametrize(
-    ("step_id", "expected"), [("source_context", ("filing",)), ("credit_synthesis", ())]
+    ("step_id", "expected"),
+    [("source_context", ("filing",)), ("credit_synthesis", ()), ("committee_challenge", ())],
 )
 def test_other_steps_declare_what_step_sources_gives(
     step_id: str, expected: tuple[str, ...], tmp_path: Path
@@ -612,6 +672,34 @@ def test_an_integrity_review_dispatch_sends_the_projected_scope_block(tmp_path: 
     assert head_of(rig.store, "CP-5").module_id == "CP-5"
 
 
+def test_a_committee_challenge_dispatch_settles_cp6_with_its_upstream_context(
+    tmp_path: Path,
+) -> None:
+    rig = module_rig(tmp_path, "committee_challenge")
+    transport = FakeTransport(reply(rig))
+    result = rig.run(ChatClient(transport), step=spec("committee_challenge"))
+    assert result.status == "accepted", result.issues
+    system, user, body = sent(transport)
+    assert body["response_format"]["json_schema"]["name"] == "committee_challenge"
+    assert METHODS["committee_challenge"] in system
+    shown = context_of(user)
+    assert [r["ref"] for r in shown["cp2_rows"] if r["challengeable"]]
+    assert {h["module_id"] for h in shown["heads"]} == {"CP-1", "CP-2", "CP-3", "CP-5"}
+    assert shown["action_biases"] == list(cp6_committee.ACTION_BIASES)
+    assert "<<<SOURCE" not in user  # CP-6 quotes nothing
+    settled = head_of(rig.store, "CP-6")
+    assert settled.status == "restricted"
+    assert cp6_committee.settled_call(settled).action_bias == "Neutral"
+
+
+def test_a_committee_challenge_declaring_a_pack_source_is_refused(tmp_path: Path) -> None:
+    rig = module_rig(tmp_path, "committee_challenge")
+    transport = FakeTransport(reply(rig))
+    with pytest.raises(prompts.PromptError, match="declares no pack sources"):
+        rig.run(ChatClient(transport), step=spec("committee_challenge", ("filing",)))
+    assert transport.requests == []
+
+
 # --- the CLI ------------------------------------------------------------------------------
 
 
@@ -672,6 +760,7 @@ def test_a_regression_plans_only_cases_with_a_recorded_corpus_entry(tmp_path: Pa
         ("cp4", "legal_covenants"),
         ("cp3", "relative_value"),
         ("cp5", "integrity_review"),
+        ("cp6", "committee_challenge"),
     )
     pool = fixture_pool()
     cells = cli._regression_cells(pool, [item.slug for item in pool.eligible], 7)
@@ -691,6 +780,6 @@ def test_the_skip_line_names_every_unrecorded_case_and_never_reads_as_a_pass() -
     assert line == (
         "- Cases skipped (no recorded corpus entry for the settling step; not run, not a pass): "
         "cp1a (business_context), cp2 (credit_synthesis), cp4 (legal_covenants), "
-        "cp3 (relative_value), cp5 (integrity_review)"
+        "cp3 (relative_value), cp5 (integrity_review), cp6 (committee_challenge)"
     )
     assert cli.skipped_line(()) is None

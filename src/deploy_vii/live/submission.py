@@ -99,6 +99,7 @@ from deploy_vii.cp2_synthesis import CreditSynthesisSubmission, submit_cp2_step
 from deploy_vii.cp3_relative_value import RelativeValueSubmission, submit_cp3_step
 from deploy_vii.cp4_legal import CovenantInterpretationSubmission, submit_cp4_step
 from deploy_vii.cp5_integrity import IntegritySubmission, submit_cp5_step
+from deploy_vii.cp6_committee import CommitteeSubmission, submit_cp6_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
 from deploy_vii.financial_contracts import FacilityObservation, FinancialBook, FinancialReview
@@ -231,16 +232,20 @@ STEPS: Mapping[str, StepDef] = step_definitions(
         "legal_covenants": CovenantInterpretationSubmission,
         "relative_value": RelativeValueSubmission,
         "integrity_review": IntegritySubmission,
+        # Task 8.7: CP-6's committee challenge, settled by `submit_cp6_step` as the four above.
+        "committee_challenge": CommitteeSubmission,
     }
 )
 # The one-step modules whose own entry retains, validates and settles the step (task 7.2 for
-# CP-1A, task 8.6 for the rest); the payload reaches it after null resolution only.
+# CP-1A, task 8.6 for CP-2 to CP-5, task 8.7 for CP-6); the payload reaches it after null
+# resolution only.
 MODULE_STEP_ENTRIES: Mapping[str, Callable[[Execution, str, str, str], Attempt]] = {
     "CP-1A": submit_cp1a_step,
     "CP-2": submit_cp2_step,
     "CP-4": submit_cp4_step,
     "CP-3": submit_cp3_step,
     "CP-5": submit_cp5_step,
+    "CP-6": submit_cp6_step,
 }
 # Task 7.0i: the model supplies no hash. Each hash binding of a CP-1 step contract is marked
 # `PREFILLED_MARKER` with its kind (so the sent schema leaves it out), and Python fills it before

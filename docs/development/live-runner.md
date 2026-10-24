@@ -60,7 +60,7 @@ one more record plus its schemas, composer and prompt contract.
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
 | `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4), `SCOPE_BLOCKS` (the QA scope and, task 8.6, CP-5's review scope as their own CONTEXT blocks). |
 | `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5); task 8.6: `module_context`, `declared_sources`, `integrity_scope` and `integrity_projection` ([per-module context](#per-module-context-task-86)). |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `MODULE_STEP_ENTRIES` (the one-step modules' journal entries: CP-1A, and since task 8.6 CP-2, CP-4, CP-3 and CP-5), `submit_model_payload` (decision 0008). |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `MODULE_STEP_ENTRIES` (the one-step modules' journal entries: CP-1A, since task 8.6 CP-2, CP-4, CP-3 and CP-5, and since task 8.7 CP-6), `submit_model_payload` (decision 0008). |
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
 | `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
@@ -69,22 +69,24 @@ one more record plus its schemas, composer and prompt contract.
 
 ### Per-module context (task 8.6)
 
-CP-2 (`credit_synthesis`), CP-4 (`legal_covenants`), CP-3 (`relative_value`) and CP-5
-(`integrity_review`) are one-step chains in registry `STEP_CHAINS`, after CP-1A. Each step's
-system prompt is its `methods/cp*.md` (CP-4's up to `## Tables`; the row rules state the table
-terms) plus a step contract that states its validator's checks. A valid payload settles the module
-at once through `MODULE_STEP_ENTRIES` (`submit_cp2_step`, `submit_cp4_step`, `submit_cp3_step`,
-`submit_cp5_step`); the sent schemas are the modules' own, strict as written (no relaxation, so
-CP-5's `minItems: 2` is sent).
+CP-2 (`credit_synthesis`), CP-4 (`legal_covenants`), CP-3 (`relative_value`), CP-5
+(`integrity_review`) and, since task 8.7, CP-6 (`committee_challenge`) are one-step chains in
+registry `STEP_CHAINS`, after CP-1A. Each step's system prompt is its `methods/cp*.md` (CP-4's
+up to `## Tables`; the row rules state the table terms) plus a step contract that states its
+validator's checks. A valid payload settles the module at once through `MODULE_STEP_ENTRIES`
+(`submit_cp2_step`, `submit_cp4_step`, `submit_cp3_step`, `submit_cp5_step`, `submit_cp6_step`);
+the sent schemas are the modules' own, strict as written (no relaxation, so CP-5's `minItems: 2`
+and CP-6's `thesis_challenges` `minItems: 1` are sent).
 
 - **Context.** `module_context(store, attempt, step_id)` is the module's own `context_block` over
-  the upstream its ticket binds (`cp2_upstream`, `cp4_legal.upstream_of`, `cp3_upstream`); the
-  resulting Mapping is merged into the prepared-pack CONTEXT. `build` refuses a module step without
-  it, a step that does not declare it, and a key that would replace a pack fact.
+  the upstream its ticket binds (`cp2_upstream`, `cp4_legal.upstream_of`, `cp3_upstream`,
+  `cp6_upstream`); the resulting Mapping is merged into the prepared-pack CONTEXT. `build` refuses
+  a module step without it, a step that does not declare it, and a key that would replace a pack
+  fact.
 - **Sources.** `declared_sources` sends CP-4 only `upstream_of(...).legal_sources` and CP-3 only
   the ready CP-0 `third_party` sources (the market evidence); a CP-3 pack without one sends no
   SOURCE block and an empty catalogue, which is not an error. Any other declared source is refused
-  in `_plan`, before anything is spent. CP-2 and CP-5 receive no SOURCE block.
+  in `_plan`, before anything is spent. CP-2, CP-5 and CP-6 receive no SOURCE block.
 - **CP-5 route.** CP-5 requires only CP-0, so its route is `source_readiness` then
   `integrity_review`: it reviews the settled analyst heads the journal already holds and runs no
   analyst itself. A `cp5` cell (module or regression) must therefore run after the analysts in the
@@ -97,6 +99,15 @@ CP-5's `minItems: 2` is sent).
   fixture: 88,412 bytes full, 16,660 projected; on czr-fy2025-v2 (journal `e1-cp1-7`): 234,940 and
   13,451; over a promoted synthetic CP-1 of 44,913 facts: 20,707,313 and 6,554. The CP-1A CONTEXT
   is 7,172 bytes on the fixture.
+- **CP-6 (task 8.7).** Its route (registry `module_route`) is CP-0, the CP-1 chain, CP-1A
+  (CP-2's required producer), `credit_synthesis`, `relative_value`, `integrity_review`, then
+  `committee_challenge`; CP-4 is no CP-6 edge, so a `cp6` cell runs no CP-4 step. The step rules
+  are challenge discipline, the recommendation boundary, the CP-5 rule (caps and flagged claims),
+  run text and the prohibited conclusions. Its CONTEXT is `cp6_committee.context_block` over
+  `cp6_upstream`: on the CP-6 test's SYNTHETIC journal (CP-0 to CP-5 settled by their own step
+  functions) the module part is 18,093 bytes of compact JSON and the whole CONTEXT block 22,898
+  bytes as sent (19,106 compact). Not measured on czr-fy2025-v2: no journal of it holds settled
+  CP-2, CP-3 and CP-5 heads (journal `e1-cp1-7` has CP-0, CP-1A and a blocked CP-1).
 - **CP-2 is not projected.** Its CONTEXT (24,978 bytes on the fixture, 108,950 on czr-fy2025-v2)
   exceeds CP-1A's by the CP-1A row catalogue, which is the only evidence it may cite.
 - **Replay and regression.** A regression case whose settling step has no corpus entry (the corpus
@@ -432,8 +443,9 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   `canary`: one cell per eligible model over CP-0 and the five CP-1 steps. `module --module`: one
   seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the five
   steps (`CP1_CHAIN`, ending in `quality`, task 7.4; the `regression` `cp1` case too), CP-1A (alias CP-2C; task 7.2) runs CP-0 first then its one step `business_context`;
-  CP-2, CP-4, CP-3 and CP-5 (task 8.6) run their route (registry `module_route`) then their one
-  step ([per-module context](#per-module-context-task-86)); other modules have no live step
+  CP-2, CP-4, CP-3, CP-5 (task 8.6) and CP-6 (task 8.7) run their route (registry
+  `module_route`) then their one step ([per-module context](#per-module-context-task-86)); other
+  modules have no live step
   contract and are refused before spending. A CP-0 that does not
   write `Run CP-1A` for CP-1A ends the cell `not-authorized` before the step is sent.
 - **`business_context` (CP-1A, task 7.2).** One step; the model returns judgments and verbatim
@@ -448,9 +460,12 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   and `cp1_facts_note` says no figure may be referenced. A valid step settles CP-1A at once
   (`submit_cp1a_step`), with the four statuses in its head as 6.4 does.
   `regression`: cases `cp0`, `cp1`, (task 7.0h) `cp1a` (`CP1A_CHAIN`) and (task 8.6) `cp2`,
-  `cp4`, `cp3`, `cp5`, every candidate once per case in an order shuffled by the seed; a case
-  whose settling step has no recorded corpus entry is not planned and is named in the report's
-  skipped line (today cp1a to cp5); it refuses a pool with an ineligible arm.
+  `cp4`, `cp3`, `cp5` and (task 8.7) `cp6`, every candidate once per case in an order shuffled by
+  the seed; a case whose settling step has no recorded corpus entry is not planned and is named in
+  the report's skipped line (today cp1a to cp6). The corpus is read once, at planning, and the
+  report names the cases that plan skipped (task 8.7). Each case draws its shuffle whether or not
+  it is skipped, so a skip moves no other case's model order; seeds are drawn over the planned
+  cells, so a skip shifts the seeds after it. It refuses a pool with an ineligible arm.
 - The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
   with `default_effort`/`complex_effort`. Since the decision 0005 amendment (user decision,
   22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at `medium` since the 24 Oct 2026

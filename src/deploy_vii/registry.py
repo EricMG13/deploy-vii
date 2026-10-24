@@ -315,6 +315,9 @@ STEP_CHAINS = checked_chains(
             pack_sources=frozenset({"relative_value"}),
         ),
         StepChain(module_id="CP-5", cell="cp5", steps=("integrity_review",)),
+        # Task 8.7: CP-6's one settling step after CP-5; it quotes no pack source (no SOURCE
+        # block) and reads the settled CP-1, CP-2, CP-3 and CP-5 heads.
+        StepChain(module_id="CP-6", cell="cp6", steps=("committee_challenge",)),
     )
 )
 

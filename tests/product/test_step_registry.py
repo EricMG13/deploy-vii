@@ -17,6 +17,7 @@ from deploy_vii.cp2_synthesis import CreditSynthesisSubmission
 from deploy_vii.cp3_relative_value import RelativeValueSubmission
 from deploy_vii.cp4_legal import CovenantInterpretationSubmission
 from deploy_vii.cp5_integrity import IntegritySubmission
+from deploy_vii.cp6_committee import CommitteeSubmission
 from deploy_vii.downstream_readiness import DownstreamReview
 from deploy_vii.execution import WITHIN_ATTEMPT_REPAIR, Attempt, StepSubmission
 from deploy_vii.live import cli, context, runner, submission
@@ -91,14 +92,16 @@ BASE_REGRESSION_CASES = (
     ("cp1a", BASE_CP1A_CHAIN),
 )
 BASE_MODULE_ROUTES = {"CP-0": BASE_CP0_STEPS, "CP-1": BASE_FULL_CHAIN, "CP-1A": BASE_CP1A_CHAIN}
-# The registry's first three records are the base's; task 8.6 appends four one-step modules
-# (each settles its module, none prefills, repairs within the attempt or projects a step).
+# The registry's first three records are the base's; task 8.6 appends four one-step modules and
+# task 8.7 a fifth, CP-6 (each settles its module, none prefills, repairs within the attempt or
+# projects a step).
 BASE_CHAINS = registry.STEP_CHAINS[:3]
 TASK_8_6_STEPS = (
     ("credit_synthesis", "CP-2", CreditSynthesisSubmission),
     ("legal_covenants", "CP-4", CovenantInterpretationSubmission),
     ("relative_value", "CP-3", RelativeValueSubmission),
     ("integrity_review", "CP-5", IntegritySubmission),
+    ("committee_challenge", "CP-6", CommitteeSubmission),
 )
 REGISTERED_STEPS = (*BASE_STEPS, *TASK_8_6_STEPS)
 REGISTERED_PACK_SOURCE_STEPS = BASE_PACK_SOURCE_STEPS | {"legal_covenants", "relative_value"}
@@ -108,6 +111,7 @@ TASK_8_6_ROUTES = {
     "CP-4": (*BASE_FULL_CHAIN, "legal_covenants"),
     "CP-3": (*CP2_ROUTE, "relative_value"),
     "CP-5": (*BASE_CP0_STEPS, "integrity_review"),
+    "CP-6": (*CP2_ROUTE, "relative_value", "integrity_review", "committee_challenge"),
 }
 REGISTERED_REGRESSION_CASES = (
     *BASE_REGRESSION_CASES,
@@ -158,7 +162,7 @@ def test_a_module_without_a_live_step_contract_is_refused_with_the_base_wording(
     with pytest.raises(cli.CliError, match=r"CP-1B has no live step contract; supported: "):
         cli._module_cells("CP-1B", 7)
     with pytest.raises(
-        cli.CliError, match=r"supported: CP-0, CP-1, CP-1A, CP-2, CP-3, CP-4, CP-5$"
+        cli.CliError, match=r"supported: CP-0, CP-1, CP-1A, CP-2, CP-3, CP-4, CP-5, CP-6$"
     ):
         cli._module_cells("CP-1B", 7)
 

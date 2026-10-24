@@ -38,6 +38,7 @@ shard-a tests/product/test_cp2_synthesis.py
 shard-c tests/product/test_cp3_relative_value.py
 shard-c tests/product/test_cp4_legal.py
 shard-a tests/product/test_cp5_integrity.py
+shard-a tests/product/test_cp6_committee.py
 shard-a tests/product/test_cp_model_workflow.py
 shard-b tests/product/test_credit_snapshot.py
 shard-b tests/product/test_delivery.py

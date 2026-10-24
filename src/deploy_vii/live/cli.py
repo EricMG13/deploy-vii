@@ -492,7 +492,10 @@ def _regression_cells(
     plan: list[tuple[str, tuple[str, ...], str]] = []
     for case, steps in REGRESSION_CASES:
         order = list(slugs)
-        shuffler.shuffle(order)  # every case draws its order, so a skip moves no other case's
+        # Every case draws its shuffle, so a skip moves no other case's model order. Seeds are
+        # then drawn over the planned cells only: a skip shifts the seeds of the cases after it,
+        # each seed still drawing its cell's model (task 8.7).
+        shuffler.shuffle(order)
         if case not in skipped:
             plan += [(case, steps, slug) for slug in order]
     seeds = seeds_for(pool, [slug for _, _, slug in plan], seed)
@@ -504,7 +507,9 @@ def _regression_cells(
     return cells
 
 
-def _cells(args: argparse.Namespace, pool: PinnedPool, seed: int) -> list[Cell]:
+def _cells(
+    args: argparse.Namespace, pool: PinnedPool, seed: int, recorded: frozenset[str] | None = None
+) -> list[Cell]:
     slugs = [item.slug for item in pool.eligible]
     if not slugs:
         raise NoEligibleModel("no eligible model in the pinned pool; the batch stays blocked")
@@ -512,7 +517,7 @@ def _cells(args: argparse.Namespace, pool: PinnedPool, seed: int) -> list[Cell]:
     if command == "module":
         return _module_cells(args.module, seed)
     if command == "regression":
-        return _regression_cells(pool, slugs, seed)
+        return _regression_cells(pool, slugs, seed, recorded)
     if command == "probe":
         if args.draws_per_model < 1:
             raise CliError("--draws-per-model must be at least 1")
@@ -1124,7 +1129,11 @@ def run_live(
         else catalog.pin(batch_id, settings.candidates)
     )
     default_effort = args.effort or settings.default_effort
-    cells = _cells(args, pool, seed)
+    # Task 8.7: the corpus is read once, at planning; the report names the cases this plan
+    # skipped, even if an entry lands while the batch runs.
+    recorded = recorded_steps()
+    skipped = unrecorded_cases(recorded) if args.live_command == "regression" else ()
+    cells = _cells(args, pool, seed, recorded)
     efforts = _tool_efforts(settings, args.effort, cells)  # bad effort raises before spend
     tool_loop = (
         None if efforts is None else ToolLoop(efforts, ToolRules(floor=settings.completeness_floor))
@@ -1180,7 +1189,7 @@ def run_live(
                 args.max_tokens,
                 args.timeout,
                 tool_loop,
-                unrecorded_cases() if args.live_command == "regression" else (),
+                skipped,
             ),
             sys.exception(),
         )
