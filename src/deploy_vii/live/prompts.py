@@ -159,6 +159,14 @@ BOUND_SCOPE_RULE = (
     "only periods whose scopes carry the same four strings: a period with no such scope, or a "
     "book whose periods' scopes differ, is a rejection."
 )
+# Task 7.19 (Sol medium, 24 Oct 2026: four of four first `financials` submits cited a table's page
+# for a heading printed at the foot of the preceding page): the quote matcher is exact on the
+# cited span and Python never moves a citation (provenance), so the prompt states the fact.
+QUOTE_PAGE_RULE = (
+    "The quoted words must appear on the cited page. A statement or reconciliation heading "
+    "printed at the foot of the preceding page is not on the table's page: quote a row label or "
+    "a figure from the table's own page, or cite the heading's own page."
+)
 # Task 7.14 (batches e1-cp1-13 and -14: three of four source contexts left `currency` null on every
 # scope and worded the current year's perimeter unlike the comparative years'):
 # `source_context.validate_source_context` rejects a null dimension on a financial source's
@@ -506,7 +514,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"f. {STATEMENT_ITEMS_RULE}\n"
         f"g. {CONFLICT_RULE}\n"
         f"h. {SEGMENT_ALLOCATION_RULE}\n"
-        f"i. {BOUND_SCOPE_RULE}"
+        f"i. {BOUND_SCOPE_RULE}\n"
+        f"j. {QUOTE_PAGE_RULE}"
     ),
     # Task 7.0i: the model supplies no hash. Every CP-1 hash binding is pre-filled by Python
     # (`live.submission.prefill`) and left out of the sent schema, so no rule asks for one.

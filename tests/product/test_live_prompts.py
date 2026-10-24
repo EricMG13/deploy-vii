@@ -564,7 +564,7 @@ REGISTER_RULES = (
 def test_the_financials_step_letters_the_register_rules_e_to_h_once_each() -> None:
     contract = prompts.STEP_CONTRACTS["financials"]
     rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
-    assert rules == ["a. ", "b. ", "c. ", "d. ", "e. ", "f. ", "g. ", "h. ", "i. "]  # 7.11: i
+    assert rules == [f"{letter}. " for letter in "abcdefghij"]  # 7.11: i; 7.19: j
     for letter, rule in zip("efgh", REGISTER_RULES, strict=True):
         assert f"{letter}. {rule}" in contract
         assert composed("financials").count(rule) == 1, rule
@@ -1746,3 +1746,24 @@ def test_the_hyphen_guidance_is_a_quote_the_matcher_accepts_from_a_wrapped_span(
     span = "and\nfuture first-\npriority lien obligations"
     assert quoted("future first-priority lien obligations", span)
     assert not quoted("future first priority lien obligations", span)  # the hyphen is kept
+
+
+def test_the_financials_step_states_the_quote_page_rule_once_as_rule_j() -> None:
+    """Task 7.19: the quoted words must be on the cited page. Four of four Sol-medium first
+    submits cited a table's page for a heading printed on the preceding page; the validator is
+    right and Python never moves a citation, so the prompt states the fact."""
+    rule = prompts.QUOTE_PAGE_RULE
+    contract = prompts.STEP_CONTRACTS["financials"]
+    assert contract.endswith(f"i. {prompts.BOUND_SCOPE_RULE}\nj. {rule}")
+    assert composed("financials").count(rule) == 1
+    for step_id in set(ALL_STEPS) - {"financials"}:
+        assert rule not in composed(step_id), step_id
+    for phrase in (
+        "The quoted words must appear on the cited page",
+        "foot of the preceding page is not on the table's page",
+        "quote a row label or a figure from the table's own page, or cite the heading's own page",
+    ):
+        assert phrase in rule, phrase
+    # The fact is generic: no filing text, issuer name or source id in the prompt module.
+    source = Path(prompts.__file__).read_text(encoding="utf-8").lower()
+    assert "caesars" not in source and "czr" not in source

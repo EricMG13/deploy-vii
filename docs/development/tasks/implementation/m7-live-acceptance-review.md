@@ -544,3 +544,7 @@ Reading:
 - Cited pages were read in every step (`cited_not_read` = 0 throughout), and narrative and readiness passed first time in every draw.
 
 Not verified: n = 3 model outcomes on one issuer; no completeness floor yet; the harness's acceptance includes declared-partial transcriptions; downstream effect of the single-year `financials` on narrative/readiness content not compared across draws; the 502's billing (US$0.31) taken from the provider's usage.cost; these runs did not go through the product runner.
+
+## 7.19 Prompt fact for the page-off citation (24 Oct 2026)
+
+In all four Sol-medium `financials` first submits of §7.17 the model quoted a statement heading ("Reconciliation") but cited the page of the table the heading introduces, and the validator rejected it as a quote/locator mismatch; the heading is the last text of the preceding page. The user decided (24 Oct 2026): a prompt fact only, no locator correction, because Python must not change what the model cited (provenance). `financials` rule j (`prompts.QUOTE_PAGE_RULE`, generic, no filing text) says the quoted words must appear on the cited page and that a heading at the foot of the preceding page is not on the table's page; decision 0005 records the row. Untested expectation: one `financials` submit per run disappears; to be checked at the next live run. Not verified: any live effect.

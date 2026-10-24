@@ -914,6 +914,12 @@ period whose dates match no scope is still left unfilled and still gets the shap
 `Field required` (or `context_binding`'s wording where it cites a source). `source_context`
 rule d (`SCOPE_DIMENSION_RULE`) states both rules once; no other step carries it.
 
+Task 7.19 (decision 0005, user-approved 24 Oct 2026): `financials` rule j (`QUOTE_PAGE_RULE`)
+adds the quote/locator fact the page rule above leaves implicit: the quoted words must appear on
+the cited page, and a heading printed at the foot of the preceding page is not on the table's
+page (quote a row label or figure from the table's own page, or cite the heading's own page).
+Prompt text only; the validator is unchanged and no citation is ever corrected by Python.
+
 Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
 supplies no hash. Python fills these bindings:
 - `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;
