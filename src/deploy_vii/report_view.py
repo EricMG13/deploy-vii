@@ -1542,14 +1542,46 @@ def _block(
     )
 
 
-def _call(statuses: Mapping[str, Status]) -> tuple[tuple[CallItem, ...], CallWithheld | None]:
-    """The call band: no module produces a judgement yet, so it says so; a call that cannot be
-    made says why (CP-2 outside the Pathway or blocked)."""
+def _call(modules: Mapping[str, ModuleView]) -> tuple[tuple[CallItem, ...], CallWithheld | None]:
+    """The call band (task 8.7): CP-6 makes the call. A settled (accepted or restricted) CP-6
+    head shows its ``T6A.4`` action bias as the "Action bias" fact and its confidence as the
+    "Confidence" scale, metered by ``cp6_committee.call_scale`` (user decision, 24 Oct 2026);
+    both texts are the head's facts, never recomputed. CP-6 outside the Pathway withholds the
+    call as not in this Pathway; CP-6 blocked, or unable to run because a required producer is
+    blocked, withholds it as blocked; otherwise no judgement is recorded and the band says so. A
+    settled head without its action bias and confidence fails closed (ValueError)."""
+    # Function-local: ``cp6_committee`` imports this module (``figure_unit``) at import time.
+    from deploy_vii import cp6_committee
+
     pending = (CallItem(kind="na", label="Assessment", value_text="Assessment pending"),)
-    status = statuses.get("CP-2")
+    cp6 = modules.get(cp6_committee.MODULE_ID)
+    status = cp6.status if cp6 is not None else None
     if status == "not_in_pathway":
         return pending, "outside_pathway"
-    if status == "blocked":
+    if cp6 is not None and status in cp6_committee.SETTLED:
+        facts = {fact.fact_id: fact for fact in cp6.facts}
+        bias, confidence = (
+            facts.get(cp6_committee.ACTION_BIAS_FACT),
+            facts.get(cp6_committee.CONFIDENCE_FACT),
+        )
+        if (
+            bias is None
+            or confidence is None
+            or bias.text not in cp6_committee.ACTION_BIASES
+            or confidence.text not in cp6_committee.CONFIDENCES
+        ):
+            raise ValueError("The settled CP-6 head carries no settled action bias and confidence")
+        return (
+            CallItem(kind="fact", label="Action bias", value_text=bias.text),
+            CallItem(
+                kind="scale",
+                label="Confidence",
+                value_text=confidence.text,
+                meter=cp6_committee.CALL_SCALE[confidence.text],
+            ),
+        ), None
+    required = (cp6_committee.MODULE_ID, *cp6_committee.REQUIRED)
+    if any(m.status == "blocked" for code in required if (m := modules.get(code)) is not None):
         return pending, "blocked"
     return pending, None
 
@@ -1643,7 +1675,7 @@ def build(view: View, pathway: Pathway, maps: Iterable["BindingMap"]) -> ReportV
         _block(block_id, pathway, view, placed[block_id], refs, reasons)
         for block_id in pathway.blocks
     )
-    call, withheld = _call({module.module_id: module.status for module in view.modules})
+    call, withheld = _call({module.module_id: module for module in view.modules})
     return ReportView(
         pathway=pathway,
         call=call,

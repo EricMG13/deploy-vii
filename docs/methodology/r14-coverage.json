@@ -590,7 +590,7 @@
           "T6A.7"
         ]
       },
-      "implementation": "partial (task 8.5: contract, Python checks, composer and bindings for T6A.4, T6E.4, T6E.6, T6E.7 and T6E.11 of the 8 required tables, the table mapping an assumption recorded in methods/cp6.md; T6A.6, T6A.7 and T6A.11 are not composed; registered in the live runner in task 8.7; live acceptance (E1) pending)",
+      "implementation": "partial (task 8.5: contract, Python checks, composer and bindings for T6A.4, T6E.4, T6E.6, T6E.7 and T6E.11 of the 8 required tables, the table mapping an assumption recorded in methods/cp6.md; T6A.6, T6A.7 and T6A.11 are not composed; registered in the live runner and the Front Page call band wired to the settled T6A.4 action bias and confidence in task 8.7; live acceptance (E1) pending)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"

@@ -164,10 +164,24 @@ Out of scope here, by design:
 
 - The navigator lists in-Pathway rows only (decision 0009).
 - FP 01's "Primary · ..." pill and the "Watch" rail dot need fields no module supplies yet.
-- A populated call band on real data arrives with CP-2 and CP-3 (M8); real runs show the honest
-  no-judgement state. The populated state is exercised once, labelled SYNTHETIC, by the fixture.
+- A populated call band on real data needs a settled CP-6 head (M8, below); until CP-6 is
+  accepted live, real runs show the honest no-judgement state.
 - The chart strip on real data shows four n/a frames over the KPI table until a producer
   supplies S.1 to S.4 series.
+
+The populated call band arrives with CP-6 (M8, task 8.7): `report_view._call` reads the
+settled CP-6 head and shows two items, the "Action bias" fact (the `T6A.4` action bias:
+Overweight, Neutral, Underweight or Insufficient Information) and the "Confidence" scale, whose
+meter Python maps (`cp6_committee.call_scale`: Insufficient Information 1, Low 2, Medium 3,
+High 5; user decision, 24 Oct 2026, held by a differential test). Both texts are the head's
+facts, never recomputed. The three states: populated from an accepted or restricted CP-6 head;
+honest no-judgement when there is none (unrun, candidate, stale or rejected); withheld as not in
+this Pathway when CP-6 is outside it, or as blocked when CP-6 or one of its required producers
+(CP-0, CP-1, CP-2, CP-3, CP-5) is blocked. In decision 0004 terms (items 3 and 5) the
+design-system spelling of the action-bias fact is still open for M10, as are the prototype's
+five-step scale, the side-by-side CP-6 and CP-2 rendering, and lines from the recommendation's
+conditions and limitation as the design allows. Until CP-6's live acceptance the populated band
+is exercised only on SYNTHETIC data (`tests/product/test_report_view_call.py`).
 
 Why CP-0 `rendering_acceptance` is `partial`: CP-0 reaches the page only through rail
 destinations (header, Evidence, Limitations); no Front Page block shows its facts, and its
