@@ -35,7 +35,7 @@ No CI timing distribution was collected, so this review claims no measured savin
 
 ## Current environment checks
 
-The workflow defines two named jobs:
+The workflow defines these named jobs (the product job is described under Product checks shards):
 
 1. **Repository hygiene:** YAML/JSON/TOML syntax, merge markers, file endings,
    trailing whitespace, private-key patterns and unexpected large files. Ruff
@@ -43,7 +43,7 @@ The workflow defines two named jobs:
 2. **Secrets:** checksum-pinned Gitleaks scans all fetched reachable history,
    redacts output and refuses scan errors. A shallow/empty scan is not accepted.
 
-The product job runs the browser tests on ubuntu, where the Front Page pixel
+The product test shards run the browser tests on ubuntu, where the Front Page pixel
 comparison skips with the stated reason "no reviewed baseline for linux": glyph
 rasterisation differs between operating systems, so baselines
 (`tests/product/baselines/<platform>/`) exist only for darwin, where they were reviewed.
@@ -76,7 +76,7 @@ one worker. The 90% floor applies to the single combined TOTAL report. Debug ser
 is short (the heaviest tests peak near 2.3 GiB per worker).
 
 **Product checks shards.** The single hosted job outgrew its budget (55 to 63 min of 75 on
-the 4-vCPU runner), so `Product checks` is now a gate job over five jobs: `changes` (the
+the 4-vCPU runner), so `Product checks` is now a gate job over six jobs: `changes` (the
 docs-only detection above), `Product static checks` (ruff, format, mypy, `node --check`:
 `make product-static`), three `Product tests (shard-a|b|c)` matrix jobs and `Product coverage
 (combined)`. Each shard runs `make coverage-shard SHARD=<name>`, the same pytest command as
@@ -136,9 +136,9 @@ Missing private inputs or live access leave the relevant acceptance pending.
 
 ## Docs-only pull requests and superseded runs
 
-On `pull_request` events the `Product checks` job (name and status unchanged) runs
-`.github/scripts/code_changed.sh` over the changed paths and skips its install and
-test steps only when every path matches the allow-list: anything under `docs/`, top-level
+On `pull_request` events the `changes` job runs
+`.github/scripts/code_changed.sh` over the changed paths and the static, shard and combine
+jobs are skipped (the `Product checks` gate, name and status unchanged, still reports success) only when every path matches the allow-list: anything under `docs/`, top-level
 `*.md` (no slash), `LICENSE`, `LICENSE.*`, `LICENSE-*`, `.gitignore`, `.gitattributes`,
 `CODEOWNERS`. The default is fail-closed: an empty diff, a fetch or diff error, a non-PR
 event, any path with a slash outside `docs/` (so `src/.../x.md` counts as code) or any

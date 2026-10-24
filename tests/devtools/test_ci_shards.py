@@ -6,6 +6,8 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SHARD_LIST = ROOT / ".github" / "shards" / "product.txt"
 SCRIPT = ROOT / ".github" / "scripts" / "shard_files.sh"
@@ -56,3 +58,33 @@ def test_workflow_matrix_lists_every_shard() -> None:
     line = next(ln for ln in text.splitlines() if ln.strip().startswith("shard: ["))
     in_workflow = {s.strip() for s in line.split("[", 1)[1].rstrip("] ").split(",")}
     assert in_workflow == {shard for shard, _ in listed()}
+
+
+def test_combine_step_globs_every_shard_file() -> None:
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    line = next(ln for ln in text.splitlines() if "coverage combine" in ln)
+    assert line.split("coverage combine", 1)[1].split() == ["cov-shard-*"]
+    # the data file name each shard writes matches the glob
+    assert "COVERAGE_FILE: cov-${{ matrix.shard }}" in text
+    assert all(shard.startswith("shard-") for shard, _ in listed())
+
+
+@pytest.mark.parametrize("shard", ["", "shard-none"])
+def test_coverage_shard_fails_closed(shard: str) -> None:
+    result = subprocess.run(
+        ["make", "-n", "coverage-shard", f"SHARD={shard}"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0  # dry run prints the recipe
+    recipe = result.stdout
+    assert 'test -n "' in recipe and "&& files=$(bash" in recipe and "&& uv run" in recipe
+    run = subprocess.run(
+        ["bash", "-c", recipe.replace("uv run --locked pytest", "echo PYTEST-RAN")],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert run.returncode != 0
+    assert "PYTEST-RAN" not in run.stdout

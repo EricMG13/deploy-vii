@@ -44,7 +44,7 @@ coverage:
 # COVERAGE_FILE the data file. The per-shard floor is off; CI enforces the existing floor
 # on the combined data (docs/ci-gates.md).
 coverage-shard:
-	uv run --locked pytest $$(bash .github/scripts/shard_files.sh $(SHARD)) -m 'not live and not private' -n auto --dist loadfile --cov=deploy_vii --cov-branch --cov-report= --cov-fail-under=0
+	test -n "$(SHARD)" && files=$$(bash .github/scripts/shard_files.sh $(SHARD)) && uv run --locked pytest $$files -m 'not live and not private' -n auto --dist loadfile --cov=deploy_vii --cov-branch --cov-report= --cov-fail-under=0
 
 audit:
 	mkdir -p artifacts/dependency-audit

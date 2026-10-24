@@ -127,7 +127,7 @@ jobs:
           merge-multiple: true
       - name: Combine shard data and enforce the coverage floor
         run: |
-          uv run --locked coverage combine cov-shard-a cov-shard-b cov-shard-c
+          uv run --locked coverage combine cov-shard-*
           uv run --locked coverage report
   product:
     name: Product checks
