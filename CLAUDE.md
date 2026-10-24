@@ -43,7 +43,8 @@ defaults apply only where this file is silent.
 ## User requirements for product increments
 
 - Model-assisted tests use the pool named in decision 0005, currently GPT-6.1 Sol
-  at high effort; retain outputs, metrics and
+  at medium effort (high for the probe and E1 batches 1–14; medium from 24 Oct
+  2026); retain outputs, metrics and
   telemetry under docs/testing-and-telemetry.md. Run the regular internal and
   external module tests (tiers I1–I3, E1–E3) of decision 0005.
 - Preserve Direction C Workbench and test each completed Module's output in its
