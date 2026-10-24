@@ -1791,6 +1791,10 @@ def main(
     stream_transport: StreamTransport = urllib_stream,
 ) -> int:
     args = parser().parse_args(argv)
+    # Attempt ids take the batch directory's name and the batch's ledgers sit beside the others
+    # only for a single component (`_refuse_traces` checks the id itself).
+    if args.batch_id in ("", ".", "..") or Path(args.batch_id).name != args.batch_id:
+        return _refuse(f"--batch-id {args.batch_id!r} must be one path component")
     settings = load_settings(args.settings)
     cells: tuple[Cell, ...] = args.cells
     used = sorted({cell.provider for cell in cells})

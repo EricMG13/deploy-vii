@@ -1469,3 +1469,24 @@ def test_a_shared_ledger_outside_the_counted_ledgers_is_refused(
     respelled = inside.parent / ".." / ".ledgers" / inside.name
     args = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", respelled, "--dry-run")
     assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 0
+
+
+@pytest.mark.parametrize("batch", ["a/hybrid-cp1-3", "hybrid-cp1-3/", "../hybrid-cp1-3", ".", ""])
+def test_a_batch_id_that_is_not_one_path_component_is_refused(
+    case: Case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    batch: str,
+) -> None:
+    # Attempt ids take the batch directory's name ("a/hybrid-cp1-3" -> "hybrid-cp1-3:..."), so
+    # `_refuse_traces`, which checks the batch id itself, missed them and "b/hybrid-cp1-3" would
+    # reuse them; a batch's own ledger would sit where `cp0.prior_committed` never looks.
+    fake_keys(monkeypatch)
+    shared = earlier_batch_ledger(tmp_path)
+    before = shared.read_bytes()
+    transport = FakeTransport(*[Model(case, tmp_path / "model", LUNA)] * 4)
+    args = luna_args(tmp_path, case.frozen, batch, shared)
+    assert cp1.main(args, transport=transport, stream_transport=unexpected_stream) == 2
+    assert "one path component" in capsys.readouterr().err
+    assert shared.read_bytes() == before and not transport.requests
