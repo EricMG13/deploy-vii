@@ -1490,3 +1490,42 @@ def test_a_batch_id_that_is_not_one_path_component_is_refused(
     assert cp1.main(args, transport=transport, stream_transport=unexpected_stream) == 2
     assert "one path component" in capsys.readouterr().err
     assert shared.read_bytes() == before and not transport.requests
+
+
+def test_an_unexpected_send_error_settles_the_reservation_held_exactly_once(
+    case: Case, tmp_path: Path
+) -> None:
+    def broken(request: Request) -> Response:
+        raise RuntimeError("not a TransportError")
+
+    harness = make_harness(tmp_path, broken, case.frozen)
+    cells = runs(harness, "opus-medium")
+    with pytest.raises(RuntimeError, match="not a TransportError"):
+        cp1.run_batch(harness, cells, seed=1)
+    state = harness.ledgers["anthropic"].state()
+    (attempt,) = state.attempts
+    assert state.reserved == 0 and attempt.status == "settled" and attempt.actual_usd is None
+    assert attempt.charged_usd == attempt.reserved_usd  # held as spent, never released
+    step = cells[0].steps[0]
+    assert (step.directory / "call-01-request.json").exists()
+    assert (cells[0].directory / "metrics.json").exists()
+
+
+def test_a_settle_that_fails_leaves_the_reservation_open_and_stops_the_provider(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = make_harness(tmp_path, lambda _: ant_stream(), case.frozen)
+    ledger = harness.ledgers["anthropic"]
+
+    def refused(*_: object) -> object:
+        raise cp1.LedgerError("settle refused")
+
+    monkeypatch.setattr(ledger, "settle", refused)
+    cells = runs(harness, "opus-medium", "sonnet-max")
+    summary = cp1.run_batch(harness, cells, seed=1)
+    stopped = summary["stopped_providers"]["anthropic"]
+    assert "not settled, reservation held: settle refused" in stopped
+    (attempt,) = ledger.state().attempts
+    assert attempt.status == "reserved" and ledger.state().reserved == attempt.reserved_usd
+    assert (cells[0].steps[0].directory / "call-01-response.sse").exists()  # reply retained
+    assert cells[1].verdict == "not run: anthropic stopped"
