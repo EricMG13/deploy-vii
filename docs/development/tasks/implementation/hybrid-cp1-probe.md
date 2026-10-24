@@ -203,9 +203,9 @@ Comparison where the records allow it:
 - **Financials acceptance.** One-shot Sol at high: 0 of 8 attempts (4 attempts and 4 repairs).
   Hybrid Sol at high and at medium: accepted on the second submit inside one step.
 - **Financials time.** The hybrid financials step (sol-high 1,246.7 s; sol-medium 730.6 s) is
-  about the length of one one-shot financials attempt plus its repair (about 1,250–1,500 s).
+  about the length of one one-shot financials attempt plus its repair (1,299.8–1,497.0 s).
 - **Financials cost.** The hybrid step cost US$1.28 (high) and US$0.76 (medium). A one-shot
-  attempt plus repair cost US$1.75–1.95.
+  attempt plus repair cost US$1.84–1.95 (corrected from US$1.75–1.95 after review).
 - **Source_context.** Hybrid source_context used fewer prompt tokens: 108,165 over 6 calls
   (sol-high) and 40,482 over 4 (sol-medium), against 154,170 in one one-shot call. The one-shot
   runs at high cost US$0.07–0.46. The lower figures appear to reflect provider caching; this was
@@ -309,7 +309,8 @@ Both batches ran before submits recorded completeness, so this section is back-f
 - **Source.** Each judged `submit_financials` in the cells' retained
   `financials/tool-calls.jsonl`, read only, with nothing re-run.
 - **Computation.** `devtools.hybrid_cp1.completeness_from_log` and `completeness_drop`
-  (commit 1d8c2d7).
+  (commit 1d8c2d7, revised in 5f29460). The figures below are the same under either commit.
+  No payload recorded an unreadable id.
 - **Fields.** Counts are summed over the payload's books:
   - statement lines, split by `statement` and by the fiscal year of their period;
   - accounts;
@@ -317,8 +318,8 @@ Both batches ran before submits recorded completeness, so this section is back-f
   - statement identities;
   - definition assessments and the distinct observation ids they name.
 - **`completeness_drop`.** Set when a later submit has fewer statement lines or balance
-  movements than the first. It sits beside the shrink flag, which counts citations,
-  limitations, claims and objects.
+  movements than the most any earlier submit held, so 5 → 200 → 50 is a drop. It sits beside
+  the shrink flag, which counts citations, limitations, claims and objects.
 
 | Batch | Cell | Submit | Call | Outcome | Lines | By statement | By fiscal year | Accounts | Bal. movements | Bridges | Identities | Def. assessments | Obs. ids |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -355,16 +356,40 @@ Reading:
 - **Comparing cells.** Section 3's acceptance and evidence figures should be read with this
   table. An accepted financials step is not evidence of comparable coverage.
 
-## 10. Harness rules added after these batches (commit 1d8c2d7)
+## 10. Harness rules added after these batches (commits 1d8c2d7 and 5f29460)
 
 These rules were not in effect for hybrid-cp1-1 or hybrid-cp1-2. They are recorded in
-`plan.json` for later batches:
-- **Per-step Anthropic caching.** Top-level `cache_control` is sent only for `source_context`
-  and `financials`, the multi-call steps. It is not sent for `narrative` or `readiness`
-  (`anthropic.cache_control_by_step`).
+`plan.json` for later batches.
+
+- **Anthropic caching (unchanged from these batches).** Top-level
+  `cache_control: {"type": "ephemeral"}` is sent on every step, with the default 5-minute TTL
+  (`anthropic.cache_control`).
+  - 1d8c2d7 dropped caching for narrative and readiness. 5f29460 reverted that, because those
+    steps were multi-call in most cells:
+    - sonnet-xhigh 4 and 2 calls;
+    - sol-high and sol-medium 3 and 2;
+    - luna-xhigh 2 and 3.
+    Without the cache, sonnet-xhigh readiness would have cost US$2.022846 instead of
+    US$1.5143905 (+33.6%), every cached token priced as input at list prices.
+  - **Observed.** Every within-step cache miss in hybrid-cp1-1 followed a call longer than
+    300 s, the TTL: opus-medium financials call 8 (after 633.4 s), sonnet-xhigh narrative calls 3
+    and 4 (after 557.3 s and 329.0 s). No cache read followed such a call.
+  - **Unmeasured option.** A top-level `ttl` of "1h" is documented (values "5m" and "1h") and
+    left unchanged.
 - **Call-limit nudge.** Once a step has 3 calls left, each turn's last tool result ends with one
   line: "Harness: N of 30 calls remain in this step; the step must end with submit_<step>."
   - It is first sent with the step's third-last call (`harness_rules.call_limit_nudge`).
-  - The line appears in the retained request JSON, not in `tool-calls.jsonl`.
+  - Since 5f29460, `tool-calls.jsonl` records it as an entry with `nudge` and `appended_to` on
+    the turn that carried it.
+  - **Port note (review C6).** The nudge shares a string with untrusted pack text, which could
+    spoof a "Harness:" line. A product port must put harness notes in a separate content block.
 - **Completeness recording.** Financials submits and the accepted payload record completeness,
-  and step metrics carry `completeness_drop` beside `submit_shrinkage`.
+  and step metrics carry `completeness_drop` beside `submit_shrinkage`. Ids that are neither a
+  string nor an integer count as unknown, with the reason recorded; they never raise.
+- **Ledger safety.**
+  - Attempt ids are `<batch>:<cell>-<step>-call-NN`. The earlier unprefixed ids of these two
+    batches still read.
+  - A run refuses at preflight when its ledger already holds attempts for the same batch and
+    cell, and any ledger error while sending stops that provider.
+  - `--skipped-by-user` refuses a cell that left step calls or ledger attempts.
+  - A `--cap-*` given for an existing ledger must equal that ledger's opening cap.
