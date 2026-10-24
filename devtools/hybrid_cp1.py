@@ -1705,9 +1705,9 @@ def _ledger_plans(
 ) -> dict[str, LedgerPlan]:
     """A new `<batch>-<provider>.jsonl` per provider (it must not exist), or an existing ledger
     with the cap its first line records: --openrouter-ledger's for OpenRouter, the batch's own
-    under --resume. An existing ledger must be in `directory`, whose ledgers the cumulative
-    ceiling counts (`cp0.prior_committed`). A --cap-* given for an existing ledger must equal
-    that cap. Raises ValueError to refuse."""
+    under --resume. An existing ledger must be one the cumulative ceiling counts: a match of
+    `directory.glob("*.jsonl")`, as `cp0.prior_committed` sums them. A --cap-* given for an
+    existing ledger must equal that cap. Raises ValueError to refuse."""
     plans = {}
     for name in providers:
         path = _ledger_path(args, name, directory)
@@ -1715,7 +1715,7 @@ def _ledger_plans(
         if args.resume or (name == "openrouter" and args.openrouter_ledger is not None):
             if not path.is_file():
                 raise ValueError(f"ledger {path.name} does not exist")
-            if path.parent.resolve() != directory.resolve():
+            if path.resolve() not in {p.resolve() for p in directory.glob("*.jsonl")}:
                 raise ValueError(
                     f"ledger {path} is not in {directory}, the ledgers the ceiling counts"
                 )

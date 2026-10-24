@@ -1471,6 +1471,27 @@ def test_a_shared_ledger_outside_the_counted_ledgers_is_refused(
     assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 0
 
 
+@pytest.mark.parametrize("name", ["hybrid-cp1-1-openrouter.json", "HYBRID-CP1-1-OPENROUTER.JSONL"])
+def test_a_shared_ledger_the_ceiling_glob_does_not_match_is_refused(
+    case: Case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    # Review of D1: in `.ledgers` is not enough; `cp0.prior_committed` counts only what
+    # `directory.glob("*.jsonl")` yields, so a `.json` or `.JSONL` file stayed uncounted.
+    fake_keys(monkeypatch)
+    inside = earlier_batch_ledger(tmp_path)
+    renamed = inside.with_name(name)
+    inside.rename(renamed)
+    assert renamed.resolve() not in {p.resolve() for p in inside.parent.glob("*.jsonl")}
+    args = luna_args(tmp_path, case.frozen, "hybrid-cp1-2", renamed, "--dry-run")
+    assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
+    assert f"is not in {inside.parent}" in capsys.readouterr().err
+    assert not (tmp_path / "root" / "hybrid-cp1-2").exists()
+
+
 @pytest.mark.parametrize("batch", ["a/hybrid-cp1-3", "hybrid-cp1-3/", "../hybrid-cp1-3", ".", ""])
 def test_a_batch_id_that_is_not_one_path_component_is_refused(
     case: Case,
