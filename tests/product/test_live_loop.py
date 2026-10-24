@@ -14,6 +14,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from deploy_vii.contracts import Span
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
@@ -46,7 +47,14 @@ from deploy_vii.live.runner import (
 )
 from deploy_vii.live.settings import StepEffort, load_settings
 from deploy_vii.live.submission import STEPS
-from deploy_vii.live.tools import UNBACKED_ABSENCE, PackTools, ToolRules, applicable_rules
+from deploy_vii.live.tools import (
+    UNBACKED_ABSENCE,
+    PackTools,
+    ToolError,
+    ToolRules,
+    applicable_rules,
+)
+from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, tool_set, tool_sets
 from tests.product import test_live_modules as module_tests
 from tests.product.live_support import catalog_of, catalog_row, make_rtf_key
@@ -980,3 +988,253 @@ def test_a_rejected_new_step_finishes_its_attempt_after_its_submits(tmp_path: Pa
     assert not result.attempt_pending and result.issues
     attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
     assert attempt.status == "finished" and attempt.issues == result.issues
+
+
+# --- task 8.9 properties (decision 0012) -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Frozen89:
+    journal: Path
+    ticket: str
+    payload: str
+
+
+@pytest.fixture(scope="module")
+def frozen_starts(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Frozen89]:
+    """Each new step's starting journal, built once; every example copies it."""
+    root = tmp_path_factory.mktemp("starts")
+    found = {}
+    for step_id, start in STARTS.items():
+        store, ticket, payload = start(root / step_id)
+        found[step_id] = Frozen89(store.directory, ticket, payload)
+    return found
+
+
+def copied_rig(root: Path, start: Frozen89) -> Rig:
+    shutil.copytree(start.journal, root / "journal")
+    keys = root / "keys"
+    keys.mkdir()
+    return Rig(
+        Execution(root / "journal"),
+        start.ticket,
+        Ledger(root / "artifacts" / ".ledgers" / "loop.jsonl", Decimal(5), provider="openrouter"),
+        tool_pool(),
+        AttemptWriter(root / "artifacts"),
+        make_rtf_key(keys),
+        start.payload,
+        root,
+    )
+
+
+def tool_messages(script: Script) -> list[str]:
+    return [
+        str(m["content"]) for b in script.bodies() for m in b["messages"] if m["role"] == "tool"
+    ]
+
+
+TOOL_NAMES = st.sampled_from(["search_pack", "read_pages", "other", "wrapped", "malformed"])
+SOURCE_IDS = st.sampled_from(["filing", "indenture", "deck", "market-sheet", "nowhere", None])
+
+
+def tool_call(n: int, name: str, source: str | None) -> dict[str, Any]:
+    """One tool call as a provider sends it: a pack tool on `source`, an unknown tool, a pack
+    tool whose arguments are wrapped in an extra `arguments` object (the MiMo shape in
+    `hybrid-cp0-candidates.md`), or one without a function (malformed)."""
+    search = {"query": "the", "source_id": source, "max_hits": 15}
+    read = {"source_id": source, "first_page": 1, "last_page": 2}
+    raw: dict[str, Any] = {
+        "search_pack": search,
+        "read_pages": read,
+        "other": {"x": 1},
+        "wrapped": {"arguments": search},
+    }.get(name, {})
+    called = "search_pack" if name == "wrapped" else name
+    if name == "malformed":
+        return {"id": f"m{n}", "type": "function"}
+    return {
+        "id": f"t{n}",
+        "type": "function",
+        "function": {"name": called, "arguments": json.dumps(raw)},
+    }
+
+
+def turn(calls: list[dict[str, Any]]) -> Response:
+    body = json.loads(tool_reply(("x", "search_pack", "{}")).body)
+    body["choices"][0]["message"]["tool_calls"] = calls
+    return Response(200, json.dumps(body).encode())
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(
+    step_id=st.sampled_from(sorted(STARTS)),
+    turns=st.lists(st.lists(st.tuples(TOOL_NAMES, SOURCE_IDS), min_size=1, max_size=4), max_size=3),
+)
+def test_a_step_never_runs_a_tool_outside_its_tool_set_or_reads_outside_its_sources(
+    frozen_starts: dict[str, Frozen89],
+    step_id: str,
+    turns: list[list[tuple[str, str | None]]],
+) -> None:
+    """Property (8.9 item 5b): a submit-only step never runs a pack tool (every such call is a
+    refused tool result); a pack-tool step's results show only its readable sources; any call
+    shape, a malformed one included, is a journaled result or verdict, never a crash."""
+    with tempfile.TemporaryDirectory() as directory:
+        rig = copied_rig(Path(directory), frozen_starts[step_id])
+        attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+        before = rig.store.read().content_hash()
+        replies = [
+            turn([tool_call(n, name, source) for n, (name, source) in enumerate(calls)])
+            for calls in turns
+        ]
+        script = Script(replies, rig.clock, fallback=tool_reply(content="no", finish="stop"))
+        result = rig.run(script, step_id=step_id)
+        texts = tool_messages(script)
+        if tool_set(step_id) == SUBMIT_ONLY:
+            assert all(t.startswith("error: unknown tool ") for t in texts), texts
+            assert not [t for t in texts if "<<<SOURCE" in t]
+        else:
+            readable = set(readable_sources(rig.store, attempt, step_id))
+            shown = {
+                line.split("<<<SOURCE id=", 1)[1].split(" ", 1)[0]
+                for t in texts
+                for line in t.splitlines()
+                if line.startswith("<<<SOURCE id=")
+            }
+            assert shown <= readable, (shown, readable)
+        malformed = any(name == "malformed" for calls in turns for name, _ in calls)
+        assert result.status == NO_SUBMIT and not result.submits
+        assert result.verdict in {"rejected: no-submit", "rejected: malformed tool call"}
+        assert (result.verdict == "rejected: malformed tool call") <= malformed
+        assert rig.store.read().content_hash() == before  # nothing judged: journal untouched
+
+
+PAGED_SOURCES = ("a", "b", "c")
+
+
+def paged_pack() -> PreparedPack:
+    pack, _ = readiness_fixture()
+    (source,) = pack.sources
+    sources = tuple(
+        source.model_copy(
+            update={
+                "source_id": name,
+                "spans": tuple(
+                    Span(locator=f"page:{n}", text=f"{name} page {n} revenue") for n in range(1, 6)
+                ),
+            }
+        )
+        for name in PAGED_SOURCES
+    )
+    return pack.model_copy(update={"sources": sources})
+
+
+@settings(max_examples=150, deadline=None)
+@given(
+    scope=st.lists(st.sampled_from(PAGED_SOURCES), unique=True),
+    calls=st.lists(
+        st.tuples(
+            st.sampled_from(["search", "read"]),
+            st.sampled_from([*PAGED_SOURCES, None, "zz"]),
+            st.integers(1, 6),
+        ),
+        max_size=8,
+    ),
+)
+def test_the_pack_tools_never_read_or_search_outside_their_scope(
+    scope: list[str], calls: list[tuple[str, str | None, int]]
+) -> None:
+    """Property (8.9 item 5b): over any scope and any calls, what the tools showed, recorded as
+    read and searched stays inside the scope; a call outside it is refused (`ToolError`)."""
+    tools = PackTools(paged_pack(), sources=scope)
+    for kind, source, page in calls:
+        raw: dict[str, Any] = (
+            {"query": "revenue", "source_id": source}
+            if kind == "search"
+            else {"source_id": source, "first_page": page, "last_page": page}
+        )
+        try:
+            text = (tools.search_pack if kind == "search" else tools.read_pages)(raw)
+        except ToolError:
+            assert source not in scope or (kind == "read" and source is None)
+            continue
+        assert source in scope or (kind == "search" and source is None)
+        ids = {
+            line.split(" ", 2)[1].removeprefix("id=")
+            for line in text.splitlines()
+            if line.startswith("<<<SOURCE")
+        }
+        assert ids <= set(scope)
+    seen = tools.seen()
+    assert {source for source, _ in seen.read} <= set(scope)
+    assert {s for s in seen.searched if s is not None} <= set(scope)
+
+
+ACTIONS_89 = st.sampled_from(["search", "bad", "good", "502", "text", "read"])
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(
+    step_id=st.sampled_from(sorted(STARTS)),
+    actions=st.lists(ACTIONS_89, min_size=1, max_size=8),
+    max_calls=st.integers(1, 5),
+    max_submits=st.integers(1, 3),
+    step_s=st.sampled_from([1.0, 1900.0]),
+)
+def test_the_limits_hold_and_the_ledger_sums_the_settled_calls_on_every_new_step(
+    frozen_starts: dict[str, Frozen89],
+    step_id: str,
+    actions: list[str],
+    max_calls: int,
+    max_submits: int,
+    step_s: float,
+) -> None:
+    """Property (8.9 item 5c): 8.0d's limits and ledger property, over the eight new steps."""
+    limits = ToolLimits(max_calls=max_calls, max_submits=max_submits)
+    with tempfile.TemporaryDirectory() as directory:
+        rig = copied_rig(Path(directory), frozen_starts[step_id])
+        replies: dict[str, Callable[[int], Response]] = {
+            "search": lambda n: search(f"s{n}"),
+            "bad": lambda n: submit_to(step_id, REJECTED_89, f"b{n}"),
+            "good": lambda n: submit_to(step_id, rig.context, f"g{n}"),
+            "502": lambda n: Response(502, b"{}"),
+            "text": lambda n: tool_reply(content="no", finish="stop"),
+            "read": lambda n: tool_reply((f"r{n}", "read_pages", '{"source_id": "filing"}')),
+        }
+        script = Script(
+            [replies[a](n) for n, a in enumerate(actions)],
+            rig.clock,
+            step_s,
+            fallback=tool_reply(content="no", finish="stop"),
+        )
+        result = rig.run(script, limits=limits, step_id=step_id)
+        bodies = script.bodies()
+        assert len(bodies) <= limits.max_calls and len(result.submits) <= limits.max_submits
+        assert all(b["max_tokens"] == limits.max_tokens for b in bodies)
+        records = rig.ledger.state().attempts
+        assert [r.attempt_id for r in records] == list(result.attempt_ids)
+        assert all(r.status == "settled" for r in records)
+        spent = sum((r.charged_usd or Decimal(0) for r in records), Decimal(0))
+        assert rig.ledger.state().spent == spent == result.cost_usd
+        accepted = [s for s in result.submits if s["outcome"] == "accepted"]
+        assert len(accepted) <= 1 and (result.status == "accepted") == bool(accepted)
+        # A one-step module (or the QA review) settles on its one try: never sent again.
+        assert not result.attempt_pending or result.status != "rejected"
+        again = Script([], rig.clock, step_s, fallback=tool_reply(content="no", finish="stop"))
+        if result.attempt_pending:
+            with pytest.raises(ValueError, match="never re-run"):
+                rig.run(again, limits=limits, step_id=step_id)
+        else:
+            with pytest.raises(ValueError, match=r"never re-run|not the next step|finished"):
+                rig.run(again, limits=limits, step_id=step_id)
+        assert not again.requests
+
+
+REJECTED_89 = json.dumps({"unexpected": 1})
