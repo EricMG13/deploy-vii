@@ -8,6 +8,8 @@ while IFS= read -r path || [ -n "$path" ]; do
   [ -z "$path" ] && continue
   count=$((count + 1))
   case "$path" in
+    # docs/templates/ is code: product tests pin its generated XLSX and README (task RV-1).
+    docs/templates/*) echo true; exit 0 ;;
     docs/*) ;;
     */*) echo true; exit 0 ;;
     *.md | LICENSE | LICENSE.* | LICENSE-* | .gitignore | .gitattributes | CODEOWNERS) ;;

@@ -5,6 +5,7 @@ from pathlib import Path
 from deploy_vii.contracts import Run
 from deploy_vii.delivery import deliver_cp0
 from deploy_vii.execution_cli import configure, execute
+from deploy_vii.inputs import KINDS
 from deploy_vii.live.cli import configure as configure_live
 from deploy_vii.live.cli import execute as execute_live
 from deploy_vii.preparation import PreparationRequest, load_pack, prepare
@@ -31,6 +32,10 @@ def main() -> None:
     readiness.add_argument("--output", type=Path, required=True)
     configure(commands.add_parser("execution", help="retain and resume staged reviews locally"))
     configure_live(commands.add_parser("live", help="capped OpenRouter model tests"))
+    checking = commands.add_parser("validate-input", help="check a user-supplied input file")
+    checking.add_argument("kind", choices=tuple(KINDS))
+    checking.add_argument("file", type=Path)
+    checking.add_argument("--json", action="store_true", help="print the report as JSON")
     args = parser.parse_args()
     if args.command == "plan":
         print("\n".join(plan(tuple(args.modules))))
@@ -46,6 +51,10 @@ def main() -> None:
         print(deliver_cp0(pack, review, args.output))
     elif args.command == "live":
         sys.exit(execute_live(args))
+    elif args.command == "validate-input":
+        report = KINDS[args.kind](args.file)
+        print(report.model_dump_json(indent=2) if args.json else "\n".join(report.lines()))
+        sys.exit(0 if report.ok else 1)
     else:
         print(execute(args))
 

@@ -32,7 +32,7 @@ product-static:
 	node --check src/deploy_vii/assets/app.js
 
 types:
-	uv run --locked mypy src
+	uv run --locked mypy src scripts
 
 test:
 	uv run --locked pytest tests/product -m 'not live and not private'

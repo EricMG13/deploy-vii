@@ -52,6 +52,7 @@ shard-b tests/product/test_fake_textutil.py
 shard-b tests/product/test_financial_model.py
 shard-b tests/product/test_financial_periods.py
 shard-b tests/product/test_financials.py
+shard-b tests/product/test_inputs_rv_quotes.py
 shard-b tests/product/test_interface_view.py
 shard-b tests/product/test_live_catalog.py
 shard-b tests/product/test_live_cli_batches.py
