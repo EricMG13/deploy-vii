@@ -79,18 +79,14 @@ def scope_matches_period(
     fills from. A historical-duration or period-end scope with the period's end date; unless
     the period is `PERIOD_END`, a historical-duration scope with its start date too. Dates
     only: the entity and the four strings are each caller's own."""
+    if scope.end_date is None or scope.end_date != end_date:
+        return False
+    if period_type == "PERIOD_END":
+        return scope.period_kind in STATED_KINDS
     return (
-        scope.end_date is not None
-        and scope.end_date == end_date
-        and scope.period_kind in STATED_KINDS
-        and (
-            period_type == "PERIOD_END"
-            or (
-                scope.period_kind == "historical_duration"
-                and scope.start_date is not None
-                and scope.start_date == start_date
-            )
-        )
+        scope.period_kind == "historical_duration"
+        and scope.start_date is not None
+        and scope.start_date == start_date
     )
 
 
