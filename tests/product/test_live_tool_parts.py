@@ -23,6 +23,7 @@ from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, l
 from deploy_vii.live.submission import STEPS, submit_model_payload
 from deploy_vii.live.tools import (
     ABSENCE,
+    ABSENCE_MARKERS,
     INCOMPLETE,
     UNBACKED_ABSENCE,
     UNREAD,
@@ -32,6 +33,7 @@ from deploy_vii.live.tools import (
     ToolError,
     ToolRules,
     absence_issues,
+    absence_markers,
     applicable_rules,
     completeness_issues,
     expected_cells,
@@ -378,8 +380,9 @@ def test_the_rules_validate_their_settings_and_need_the_context_for_the_floor() 
 # reads, so it is omitted. Submit-only steps read nothing and check no rule.
 RULES_BY_STEP = {
     **dict.fromkeys(CP1_STAGES, (ABSENCE, UNREAD)),
-    **dict.fromkeys(("source_readiness", "business_context", "relative_value"), (UNREAD,)),
-    "legal_covenants": (UNREAD,),
+    **dict.fromkeys(("source_readiness", "relative_value"), (UNREAD,)),
+    # Fix round 1 (user decision, 24 Oct 2026): strict absence for CP-1A and CP-4.
+    **dict.fromkeys(("business_context", "legal_covenants"), (ABSENCE, UNREAD)),
     **dict.fromkeys(("quality", "credit_synthesis", "integrity_review"), ()),
     "committee_challenge": (),
 }
@@ -405,8 +408,44 @@ def test_each_tool_step_checks_only_the_rules_its_contract_can_fail() -> None:
         assert not ToolRules(floor=1).active(step)
         with pytest.raises(ValueError, match=f"{step} is submit-only: it checks no tool-loop"):
             rules.issues(step, cited, seen=Seen(), context=None)
-    assert rules.to_record("legal_covenants")["applied"] == [UNREAD]
+    assert rules.to_record("legal_covenants")["applied"] == [ABSENCE, UNREAD]
     assert rules.to_record("credit_synthesis")["applied"] == []
+
+
+def test_the_absence_markers_come_from_each_steps_sent_schema() -> None:
+    """Fix round 1: a CP-1A or CP-4 row that says the sources do not disclose something (its
+    schema's enum carries the marker) needs a recorded search; CP-3's `kind: none` is not a
+    marker (user decision), and CP-1's stages keep 8.0d's own absence fields."""
+    assert {step: absence_markers(step) for step in RULES_BY_STEP if absence_markers(step)} == {
+        "business_context": (("available", "No"), ("status", "Not disclosed")),
+        "legal_covenants": (("threshold_unit", "not stated"),),
+    }
+    assert ("kind", "none") not in ABSENCE_MARKERS
+    payload = json.dumps(
+        {
+            "disclosure_items": [{"available": "Yes"}, {"available": "No"}],
+            "operating_drivers": [{"status": "Not disclosed"}],
+            "covenants": [{"threshold_unit": "not stated"}],
+            "market_evidence": [{"kind": "none"}],
+        }
+    )
+    assert absence_issues("business_context", payload, Seen()) == (
+        f"{UNBACKED_ABSENCE}: disclosure_items.1.available No; search_pack before claiming it is "
+        "not disclosed",
+        f"{UNBACKED_ABSENCE}: operating_drivers.0.status Not disclosed; search_pack before "
+        "claiming it is not disclosed",
+    )
+    assert absence_issues("legal_covenants", payload, Seen()) == (
+        f"{UNBACKED_ABSENCE}: covenants.0.threshold_unit not stated; search_pack before claiming "
+        "it is not disclosed",
+    )
+    for searched in (Seen(searched=(None,)), Seen(searched=("indenture",))):
+        assert absence_issues("business_context", payload, searched) == ()
+        assert absence_issues("legal_covenants", payload, searched) == ()
+    for step in ("relative_value", "source_readiness", "narrative", "readiness"):
+        assert absence_issues(step, payload, Seen()) == (), step
+    assert ToolRules().issues("relative_value", payload, seen=Seen(), context=None) == ()
+    assert absence_issues("legal_covenants", "[1]", Seen()) == ()
 
 
 def test_a_submit_only_step_is_offered_its_submit_tool_only() -> None:

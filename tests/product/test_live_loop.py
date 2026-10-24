@@ -18,6 +18,7 @@ from deploy_vii.contracts import Span
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
+from deploy_vii.cp3_relative_value import MarketEvidence
 from deploy_vii.execution import Execution
 from deploy_vii.live import loop
 from deploy_vii.live.catalog import ModelSelection, PinnedPool
@@ -50,6 +51,7 @@ from deploy_vii.live.runner import (
 from deploy_vii.live.settings import StepEffort, load_settings
 from deploy_vii.live.submission import STEPS
 from deploy_vii.live.tools import (
+    ABSENCE,
     UNBACKED_ABSENCE,
     PackTools,
     ToolError,
@@ -58,6 +60,7 @@ from deploy_vii.live.tools import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, tool_set, tool_sets
+from tests.product import test_cp3_relative_value as cp3_tests
 from tests.product import test_live_modules as module_tests
 from tests.product.live_support import catalog_of, catalog_row, make_rtf_key
 from tests.product.test_business_context import submission_fixture as cp1a_submission
@@ -990,6 +993,51 @@ def test_a_rejected_new_step_finishes_its_attempt_after_its_submits(tmp_path: Pa
     assert not result.attempt_pending and result.issues
     attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
     assert attempt.status == "finished" and attempt.issues == result.issues
+
+
+ABSENT_ROWS = {
+    "business_context": (
+        "operating_drivers.0.status Not disclosed",
+        "disclosure_items.0.available No",
+    ),
+    "legal_covenants": ("covenants.2.threshold_unit not stated",),
+}
+
+
+@pytest.mark.parametrize("step_id", sorted(ABSENT_ROWS))
+def test_a_cp1a_or_cp4_absence_marker_needs_a_search_in_the_loop(
+    step_id: str, tmp_path: Path
+) -> None:
+    """Fix round 1 (user decision, 24 Oct 2026): an absence marker in a CP-1A or CP-4 submit
+    needs a prior search_pack, as 8.0d's absence rule treats CP-1's absence claims."""
+    rig = step_rig(tmp_path / "bare", step_id)
+    stop = tool_reply(content="done", finish="stop")
+    result = rig.run(rig.script(submit_to(step_id, rig.context), stop), step_id=step_id)
+    assert (result.status, result.verdict) == ("rejected", "rejected: no-submit")
+    absent = [i for i in result.issues if i.startswith(UNBACKED_ABSENCE)]
+    assert absent == [
+        f"{UNBACKED_ABSENCE}: {row}; search_pack before claiming it is not disclosed"
+        for row in ABSENT_ROWS[step_id]
+    ]
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    assert attempt.status == "finished" and set(absent) <= set(attempt.issues)
+    searched = step_rig(tmp_path / "searched", step_id)
+    script = searched.script(search(), submit_to(step_id, searched.context))
+    result = searched.run(script, step_id=step_id)
+    assert (result.status, result.verdict) == ("accepted", "accepted"), result.issues
+
+
+def test_a_cp3_none_market_row_needs_no_search(tmp_path: Path) -> None:
+    """CP-3's `kind: none` is a legitimate "no market evidence" row (user decision, 24 Oct
+    2026): the loop checks no absence rule on it; its validator judges it."""
+    rig = step_rig(tmp_path, "relative_value")
+    row = MarketEvidence(
+        source_id="none", kind="none", quote=None, as_of="none", limitation="No dealer sheet"
+    )
+    payload = cp3_tests.unquoted(market_evidence=(row,)).model_dump_json()
+    assert ABSENCE not in applicable_rules("relative_value")
+    result = rig.run(rig.script(submit_to("relative_value", payload)), step_id="relative_value")
+    assert (result.status, result.verdict) == ("accepted", "accepted"), result.issues
 
 
 def test_the_call_limit_is_the_tool_sets_six_or_thirty_from_the_registry() -> None:

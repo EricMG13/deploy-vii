@@ -25,7 +25,8 @@ added to the journal's own issues for the submit (`live.submission.submit_model_
   earlier in the step. A `source_context` source's `event_scan: no_events_identified` needs a
   `search_pack` over that source (or over every source). A `financials` `missing` observation
   or `not_disclosed` disclosure needs only some `search_pack` in the step, over any source: the
-  payload does not name the source the absent value belongs to.
+  payload does not name the source the absent value belongs to. A CP-1A or CP-4 row carrying an
+  `ABSENCE_MARKERS` value needs the same (task 8.9 fix round 1).
 - `unread_citation_issues`: every `page:N` the payload cites was returned by `read_pages`
   earlier in the step. Other locators are not pages and are not checked by this rule.
 
@@ -34,7 +35,8 @@ registry's (`registry.tool_sets`). A `pack` step is offered `search_pack`, `read
 its declared sources only: `PackTools(sources=...)`) and its submit; a `submit-only` step is
 offered its submit alone. Each step applies the rules its contract can fail
 (`applicable_rules`): CP-1's four stages both, as 8.0d set them; CP-0, CP-1A, CP-3 and CP-4 the
-cited-page rule only; submit-only steps none.
+cited-page rule, and CP-1A and CP-4 the absence rule over their `ABSENCE_MARKERS` (fix round 1);
+submit-only steps none.
 """
 
 import json
@@ -77,6 +79,16 @@ UNREAD_PAGE = "Cited page not read through read_pages"
 RULE_PREFIXES = (INCOMPLETE, UNBACKED_ABSENCE, UNREAD_PAGE)
 ABSENCE, UNREAD = "absence", "unread-citations"
 RULES = (ABSENCE, UNREAD)  # the floor is configured apart (`ToolRules.floor`)
+# Task 8.9 fix round 1 (user decision, 24 Oct 2026): the (field, value) pairs by which a row
+# says the sources do not disclose something: CP-1A's `DisclosureItem.available` "No" and
+# `OperatingDriver.status` "Not disclosed", CP-4's `Covenant.threshold_unit` "not stated". A
+# step outside CP-1 checks those its sent schema can carry (`absence_markers`). CP-3's
+# `MarketEvidence.kind` "none" is a legitimate "no market evidence" row (user decision): not one.
+ABSENCE_MARKERS = (
+    ("available", "No"),
+    ("status", "Not disclosed"),
+    ("threshold_unit", "not stated"),
+)
 
 
 class ToolError(Exception):
@@ -559,14 +571,56 @@ def _walk(node: object, path: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
             yield from _walk(value, f"{path}.{index}" if path else str(index))
 
 
+def _enums(node: object) -> Iterator[tuple[str, str]]:
+    """Every (property, enum value) a JSON schema allows, however nested."""
+    if isinstance(node, dict):
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for name, spec in properties.items():
+                yield from ((name, value) for value in _enum_values(spec))
+        for value in node.values():
+            yield from _enums(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _enums(value)
+
+
+def _enum_values(spec: object) -> Iterator[str]:
+    if isinstance(spec, dict):
+        if isinstance(spec.get("enum"), list):
+            yield from (v for v in spec["enum"] if isinstance(v, str))
+        for option in spec.get("anyOf", ()):
+            yield from _enum_values(option)
+
+
+def absence_markers(step_id: str) -> tuple[tuple[str, str], ...]:
+    """The `ABSENCE_MARKERS` a pack-tool step outside CP-1 can submit: those its sent schema's
+    enums carry. None for CP-1's stages (8.0d's own fields) or a submit-only step."""
+    if tool_set(step_id) == SUBMIT_ONLY or step_id in step_chain("CP-1").tool_steps:
+        return ()
+    allowed = set(_enums(strict_schema(STEPS[step_id].schema)))
+    return tuple(marker for marker in ABSENCE_MARKERS if marker in allowed)
+
+
 def absence_issues(step_id: str, payload: str, seen: Seen) -> tuple[str, ...]:
     """Absence claims made without a recorded search (none for a payload that is not an
     object). `source_context`: each source whose `event_scan` is `no_events_identified` needs a
     search over it. `financials`: a `missing` observation or a `not_disclosed` disclosure needs
-    a search over some source. Other steps make no pack absence claim here."""
+    a search over some source. CP-1A and CP-4 (task 8.9 fix round 1): a row carrying one of the
+    step's `absence_markers` needs a search over some source, as `financials` (the row does not
+    name the source the undisclosed item belongs to). Other steps make no absence claim here."""
     document = _document(payload)
     if document is None:
         return ()
+    markers = absence_markers(step_id)
+    if markers and not seen.searched:
+        return tuple(
+            f"{UNBACKED_ABSENCE}: {path}.{name} {value}; search_pack before claiming it is not "
+            "disclosed"
+            for path, node in _walk(document)
+            for name, value in markers
+            if node.get(name) == value
+        )
     issues: list[str] = []
     if step_id == "source_context":
         for path, node in _walk(document.get("sources")):
@@ -619,16 +673,16 @@ def applicable_rules(step_id: str) -> tuple[str, ...]:
 
     - CP-1's tool steps: both, as task 8.0d set them (for `narrative` and `readiness`, which
       cite evidence ids only and make no absence claim these rules read, both find nothing).
-    - Every other pack-tool step (CP-0, CP-1A, CP-3, CP-4): the cited-page rule when its sent
-      schema has a `locator` (each does); the absence rule is omitted, because none of their
-      contracts carries the fields `absence_issues` reads (`event_scan`, a `missing`
-      observation, a `not_disclosed` disclosure).
+    - Every other pack-tool step (CP-0, CP-1A, CP-3, CP-4): the absence rule when its sent
+      schema carries an `ABSENCE_MARKERS` value (CP-1A and CP-4, task 8.9 fix round 1; CP-0's
+      and CP-3's do not), and the cited-page rule when it has a `locator` (each does).
     - A submit-only step: none (it reads nothing, so "read" and "searched" mean nothing)."""
     if tool_set(step_id) == SUBMIT_ONLY:
         return ()
     if step_id in step_chain("CP-1").tool_steps:
         return RULES
-    return (UNREAD,) if _cites_locators(step_id) else ()
+    applied = ((ABSENCE, bool(absence_markers(step_id))), (UNREAD, _cites_locators(step_id)))
+    return tuple(rule for rule, applies in applied if applies)
 
 
 @dataclass(frozen=True)
