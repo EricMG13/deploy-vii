@@ -10,6 +10,7 @@ call-band mapping, reference existence, staleness and the prohibited-phrase boun
 Hypothesis properties, four of them differentials against naive references.
 """
 
+import hashlib
 import json
 import random
 import re
@@ -28,7 +29,7 @@ from deploy_vii.bindings import BindingMap, validate_bindings
 from deploy_vii.bindings.cp2 import CP2 as CP2_MAP
 from deploy_vii.bindings.cp6 import CP6
 from deploy_vii.business_context import CP1_REFERENCES, PROHIBITED, Confidence, Gap, spelled
-from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, View
+from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, Status, View
 from deploy_vii.cp2_synthesis import STRENGTHS, THESIS, WEAKNESSES
 from deploy_vii.cp3_relative_value import cp3_module, relative_value, submit_cp3_step
 from deploy_vii.cp5_integrity import (
@@ -56,6 +57,7 @@ from deploy_vii.cp6_committee import (
     TRADE_TERMS,
     WEAKNESS_CHALLENGES,
     Basis,
+    CallValues,
     CommitteeReport,
     CommitteeSubmission,
     Recommendation,
@@ -80,7 +82,7 @@ from deploy_vii.live.schema import relax, schema_relaxations, strict_copy, stric
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
 from deploy_vii.registry import STEP_CHAINS, StepChain, pack_source_steps
-from deploy_vii.report_view import CallItem, build, pathways
+from deploy_vii.report_view import CallItem, build, call_state, pathways
 from tests.product.cp3_market import FACILITIES, TLB_SPREAD, market_pack
 from tests.product.credit_snapshot import CREDIT_SNAPSHOT_MAPS, credit_snapshot_view
 from tests.product.oracle import expected_text, gap_ids, parity_record
@@ -1679,3 +1681,215 @@ def test_the_required_tables_are_r14_cp6_ids() -> None:
     coverage = json.loads(Path("docs/methodology/r14-coverage.json").read_text(encoding="utf-8"))
     entry_ = next(m for m in coverage["modules"] if m["module_id"] == MODULE_ID)
     assert set(REQUIRED_TABLES) <= set(entry_["artifact_contract"]["required_table_ids"])
+
+
+# --- task CP6-R: the r14 id remap keeps every composed row and the call band --------------------
+# The differential oracle: every composed row's content (claims, texts, refs, limitations,
+# statuses, order) and the call band's rendered state, keyed by content, not by id. Ids are what
+# the remap moves (register table ids, their row ids, fact and claim ids) and titles follow r14's
+# names, so neither is content here; the Front Page tables keep their `cp6.*` ids and their row
+# ids (each the CP-2 row a challenge sits beside), so those stay in. The hash below was computed
+# on the base (d9071aa) before the remap and is the oracle after it.
+
+REMAP_ORACLE_SHA256 = "5991b26c135b302ce247ca827f51e77cb993bf34e8a896d94bfd36df5ee6a795"
+FRONT_TABLES = frozenset(
+    {
+        COMMITTEE_CHALLENGE,
+        THESIS_CHALLENGE,
+        STRENGTH_CHALLENGES,
+        WEAKNESS_CHALLENGES,
+        CP1_REFERENCES,
+    }
+)
+_IDS = {"fact_id", "table_id", "row_id"}
+INSUFFICIENT_INFO = "Insufficient Information"
+
+
+def _cell(fact: Fact) -> dict[str, Any]:
+    exclude = None if fact.table_id in FRONT_TABLES else _IDS
+    return fact.model_dump(mode="json", exclude=exclude)
+
+
+def composed_content(module: Module) -> dict[str, Any]:
+    """`module`'s composed content in composition order, register ids and titles left out."""
+    facts = {f.fact_id: f for f in module.facts}
+    tables = []
+    for table in module.tables:
+        front = table.table_id in FRONT_TABLES
+        tables.append(
+            {
+                "front": table.model_dump(mode="json", include={"table_id", "title"})
+                if front
+                else None,
+                "columns": [c.model_dump(mode="json") for c in table.columns],
+                "row_header": table.row_header,
+                "rows": [
+                    {
+                        "row_id": row.row_id if front else None,
+                        "label": row.label,
+                        "cells": [_cell(facts[i]) for i in row.fact_ids],
+                    }
+                    for row in table.rows
+                ],
+            }
+        )
+    return {
+        "inputs": [i.model_dump(mode="json") for i in module.inputs],
+        "tables": tables,
+        "facts_in_order": [_cell(f) for f in module.facts],
+        "claims": [c.model_dump(mode="json", exclude={"claim_id"}) for c in module.claims],
+        "limitations": list(module.limitations),
+    }
+
+
+def front_page(module: Module, status: Status) -> dict[str, Any]:
+    """The call band and the CP-6 Front Page blocks over the SYNTHETIC Credit Snapshot view with
+    `module` as its CP-6 head in `status`."""
+    view = credit_snapshot_view()
+    by_id = {m.module_id: m for m in view.modules}
+    cp6 = shown(module, by_id[MODULE_ID]).model_dump()
+    replaced = {
+        "CP-2": shown(heads()["CP-2"], by_id["CP-2"]),
+        MODULE_ID: ModuleView.model_validate({**cp6, "status": status}),
+    }
+    modules = tuple(replaced.get(m.module_id, m) for m in view.modules)
+    pathway = next(p for p in pathways() if p.id == "credit_snapshot")
+    report = build(view.model_copy(update={"modules": modules}), pathway, maps_with_cp6())
+    blocks = ("committee-challenge", "strengths-weaknesses")
+    return {
+        "call": [item.model_dump(mode="json") for item in report.call],
+        "call_withheld": report.call_withheld,
+        "call_state": json.loads(json.dumps(call_state(report))),
+        "blocks": [b.model_dump(mode="json") for b in report.blocks if b.block_id in blocks],
+    }
+
+
+def remap_cases() -> dict[str, tuple[Upstream, CommitteeSubmission]]:
+    """The accepted payloads of this module the differential covers."""
+    up = upstream_of()
+    finding = cp5_review(up.cp5).findings[0]
+    carrying = upstream_of(cp5=evaluated_cp4_cp5())
+    cp4_finding = next(
+        f for f in cp5_review(carrying.cp5).findings if f.where == f"CP-4 claim {CP4_CLAIM}"
+    )
+    insufficient = recommendation(
+        action_bias=INSUFFICIENT_INFO,
+        confidence=INSUFFICIENT_INFO,
+        limitation="CP-3 records no market evidence",
+    )
+    high = recommendation(action_bias="Overweight", confidence="High", limitation=None)
+    cites_finding = recommendation(
+        basis=basis(cp2=(THESIS_ROW,), cp5=(finding.finding_id, finding.ref))
+    )
+    return {
+        "default": (up, committee()),
+        "empty": (up, committee(thesis_challenges=(), recovery_view=(), risks=(), gaps=())),
+        "finding-basis": (up, committee(recommendation=cites_finding)),
+        "clean-high": (upstream_of(cp5=clean_cp5()), committee(recommendation=high)),
+        "recovery-on-cp4": (
+            carrying,
+            committee(recovery_view=(recovery_on(cp4_finding.finding_id), recovery())),
+        ),
+        "insufficient": (upstream_of(cp3=blind_cp3()), committee(recommendation=insufficient)),
+    }
+
+
+def remap_snapshot() -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for name, (up, submission) in remap_cases().items():
+        assert issues_of(submission, up) == (), name
+        module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+        snapshot[name] = {
+            "content": composed_content(module),
+            "front_page": {s: front_page(module, s) for s in ("restricted", "accepted")},
+        }
+    return snapshot
+
+
+def test_the_r14_id_remap_keeps_every_composed_row_and_the_call_band() -> None:
+    snapshot = remap_snapshot()
+    for name, case in snapshot.items():
+        for status, page in case["front_page"].items():
+            assert page["call_state"] == ["populated", None], (name, status)
+            assert [i["label"] for i in page["call"]] == ["Action bias", "Confidence"], name
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    assert digest == REMAP_ORACLE_SHA256, canonical
+
+
+# The pre-remap reader (`cp6_committee.settled_call` at d9071aa), kept verbatim with its ids as
+# the independent reference.
+OLD_ACTION_BIAS_FACT = "T6A.4.recommendation.action_bias"
+OLD_CONFIDENCE_FACT = "T6A.4.recommendation.confidence"
+
+
+def old_settled_call(module: Module) -> CallValues:
+    if module.module_id != MODULE_ID:
+        raise ValueError(f"{module.module_id} is not a CP-6 head")
+    facts = {fact.fact_id: fact for fact in module.facts}
+    bias, confidence = facts.get(OLD_ACTION_BIAS_FACT), facts.get(OLD_CONFIDENCE_FACT)
+    if (
+        bias is None
+        or confidence is None
+        or bias.text not in ACTION_BIASES
+        or confidence.text not in CONFIDENCES
+    ):
+        raise ValueError("The CP-6 head carries no settled action bias and confidence")
+    return CallValues(bias.text, confidence.text)
+
+
+def under_old_ids(module: Module) -> Module:
+    """`module` with the call band's two facts under their pre-remap ids (the identity before
+    the remap)."""
+    old = {ACTION_BIAS_FACT: OLD_ACTION_BIAS_FACT, CONFIDENCE_FACT: OLD_CONFIDENCE_FACT}
+    facts = tuple(
+        f.model_copy(update={"fact_id": old.get(f.fact_id, f.fact_id)}) for f in module.facts
+    )
+    return module.model_copy(update={"facts": facts})
+
+
+def recommendation_cells(module: Module) -> dict[str, str | None]:
+    """The recommendation row's cells read by content (its row label and column fields), never
+    by id: the row labelled Recommendation in the one table with an action bias column."""
+    facts = {f.fact_id: f for f in module.facts}
+    (table,) = [t for t in module.tables if "action_bias" in {c.field for c in t.columns}]
+    (row,) = [r for r in table.rows if r.label == "Recommendation"]
+    return {c.field: facts[i].text for c, i in zip(table.columns, row.fact_ids, strict=True)}
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    st.sampled_from(ACTION_BIASES),
+    st.sampled_from(CONFIDENCES),
+    st.sampled_from(("clean", "restricted")),
+    st.lists(st.integers(0, 3), max_size=4, unique=True),
+    st.lists(st.sampled_from((*WORDS, *GOOD)), min_size=1, max_size=6),
+)
+def test_settled_call_is_identical_under_the_old_and_new_fact_ids(
+    bias: str, confidence: str, cp5: str, picked: list[int], words: list[str]
+) -> None:
+    up = upstream_of(cp5=clean_cp5()) if cp5 == "clean" else upstream_of()
+    rec = recommendation(
+        action_bias=bias,
+        confidence=confidence,
+        rationale=" ".join(words),
+        limitation="Stated limitation",
+        basis=basis(cp2=(THESIS_ROW,), cp3=(PREFERENCE,)),
+    )
+    submission = committee(
+        recommendation=rec, thesis_challenges=tuple(challenges()[i] for i in picked)
+    )
+    refused = (bias == INSUFFICIENT_INFO) != (confidence == INSUFFICIENT_INFO) or (
+        cp5 == "restricted" and confidence == "High"
+    )
+    assert bool(issues_of(submission, up)) == refused
+    if refused:
+        return
+    module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+    call = settled_call(module)
+    assert (call.action_bias, call.confidence) == (bias, confidence)
+    assert old_settled_call(under_old_ids(module)) == call
+    cells = recommendation_cells(module)
+    assert (cells["action_bias"], cells["confidence"]) == (bias, confidence)
+    band = front_page(module, "restricted")["call"]
+    assert [(i["value_text"], i["meter"]) for i in band] == [(bias, None), (confidence, call.scale)]
