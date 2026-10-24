@@ -80,6 +80,7 @@ These are the fixes it can print:
 | Sheet `rv_quotes` empty | copy the header row from docs/templates/rv-quotes.template.xlsx and add one row per quote |
 | No sheet `rv_quotes` | name the quote sheet rv_quotes, as in docs/templates/rv-quotes.template.xlsx |
 | Not an OOXML workbook (for example CSV or legacy `.xls`), or too large to prepare | save the file as an Excel Workbook (.xlsx) and validate again |
+| A damaged ZIP member (corrupt compressed data, a truncated member or an encrypted member) | save the file again as an Excel Workbook (.xlsx) and validate again; prepare would also refuse this file |
 | File cannot be read | check the path and that the file is readable |
 
 If the header is wrong, the validator reports only the header: it does not check rows against

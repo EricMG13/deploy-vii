@@ -14,6 +14,7 @@ never floats.
 """
 
 import re
+import zlib
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -85,8 +86,14 @@ FIX: Mapping[str, str] = {
     "empty": f"copy the header row from {TEMPLATE} and add one row per quote",
     "sheet": f"name the quote sheet {SHEET}, as in {TEMPLATE}",
     "workbook": "save the file as an Excel Workbook (.xlsx) and validate again",
+    "damaged": (
+        "save the file again as an Excel Workbook (.xlsx) and validate again; prepare would "
+        "also refuse this file"
+    ),
     "read": "check the path and that the file is readable",
 }
+# What `zipfile` raises for damaged members beyond `prepare_source`'s own refusals.
+DAMAGED = (zlib.error, EOFError, RuntimeError)
 ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
 NUMBER = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -151,9 +158,20 @@ def validate_rv_bytes(file: str, raw: bytes) -> ValidationReport:
     def issue(cell: str, problem: str, fix: str) -> Issue:
         return Issue(file=file, sheet=SHEET, cell=cell, problem=problem, fix=fix)
 
-    source = prepare_source(
-        SourceRequest(source_id="rv-quotes", path=file, media_type=MEDIA_TYPE), raw
-    )
+    request = SourceRequest(source_id="rv-quotes", path=file, media_type=MEDIA_TYPE)
+    try:
+        source = prepare_source(request, raw)
+    except DAMAGED as error:
+        # CPython's zipfile raises these for a corrupt deflate stream, a truncated member and a
+        # ZipCrypto-encrypted member; `prepare_source` does not catch them (follow-up), so
+        # `prepare` would stop on the same file. Reported, never swallowed.
+        kind = type(error).__name__
+        kind = kind if type(error).__module__ == "builtins" else f"{type(error).__module__}.{kind}"
+        problem = (
+            "prepare cannot read this file as an OOXML workbook: damaged ZIP member "
+            f"({kind}: {error})"
+        )
+        return report(0, (issue("A1", problem, FIX["damaged"]),))
     if not source.coverage:
         # `prepare_source` failed to extract: the same refusal `prepare` would freeze.
         problem = f"prepare cannot read this file as an OOXML workbook: {source.limitation}"

@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import openpyxl
 import pytest
@@ -365,6 +366,71 @@ def test_a_file_that_is_not_a_workbook_is_one_issue(tmp_path: Path) -> None:
         " — fix: save the file as an Excel Workbook (.xlsx) and validate again"
     ]
     assert report.lines() == (*rendered(report), "FAILED: 1 issues")
+
+
+def zip_with_workbook_member(payload: bytes, *, deflated: bool, encrypted: bool) -> bytes:
+    """A one-member ZIP whose `xl/workbook.xml` header is patched to claim deflate
+    compression or ZipCrypto encryption that its bytes do not honour."""
+    stream = io.BytesIO()
+    with ZipFile(stream, "w", ZIP_STORED) as archive:
+        archive.writestr("xl/workbook.xml", payload)
+    raw = bytearray(stream.getvalue())
+    central = raw.index(b"PK\x01\x02")
+    if deflated:  # compression method: local header offset 8, central directory offset 10
+        raw[8:10] = raw[central + 10 : central + 12] = ZIP_DEFLATED.to_bytes(2, "little")
+    if encrypted:  # general-purpose flag bit 0: local offset 6, central offset 8
+        raw[6] |= 1
+        raw[central + 8] |= 1
+    return bytes(raw)
+
+
+DAMAGED_FIX = (
+    "save the file again as an Excel Workbook (.xlsx) and validate again; prepare would also "
+    "refuse this file"
+)
+
+
+@pytest.mark.parametrize(
+    "raw, detail",
+    [
+        (
+            zip_with_workbook_member(b"\xff" * 64, deflated=True, encrypted=False),
+            "zlib.error: Error -3 while decompressing data: invalid block type",
+        ),
+        (
+            zip_with_workbook_member(b"<workbook/>", deflated=False, encrypted=True),
+            "RuntimeError: File 'xl/workbook.xml' is encrypted, password required for extraction",
+        ),
+    ],
+    ids=["corrupt-deflate", "encrypted-member"],
+)
+def test_a_damaged_zip_member_is_one_issue_not_a_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw: bytes,
+    detail: str,
+) -> None:
+    path = tmp_path / FILE
+    path.write_bytes(raw)
+    expected = (
+        f"{FILE}:rv_quotes!A1: prepare cannot read this file as an OOXML workbook: damaged ZIP"
+        f" member ({detail}) — fix: {DAMAGED_FIX}"
+    )
+    assert rendered(validate_rv_quotes(path)) == [expected]
+    assert run_cli(["rv", str(path)], monkeypatch) == 1
+    assert capsys.readouterr().out.splitlines() == [expected, "FAILED: 1 issues"]
+
+
+def test_a_zip_that_is_not_ooxml_is_one_issue(tmp_path: Path) -> None:
+    path = tmp_path / FILE
+    with ZipFile(path, "w") as archive:
+        archive.writestr("notes.txt", "synthetic, not a workbook")
+    assert rendered(validate_rv_quotes(path)) == [
+        f"{FILE}:rv_quotes!A1: prepare cannot read this file as an OOXML workbook: Preparation"
+        " failed (KeyError): \"There is no item named 'xl/workbook.xml' in the archive\""
+        " — fix: save the file as an Excel Workbook (.xlsx) and validate again"
+    ]
 
 
 def test_an_unreadable_path_is_one_issue(tmp_path: Path) -> None:
