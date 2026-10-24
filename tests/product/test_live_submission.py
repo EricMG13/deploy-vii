@@ -896,6 +896,73 @@ def test_a_financial_review_that_does_not_parse_leaves_its_two_hashes_unset(
     assert any(issue.startswith("financial.books") for issue in rejected.issues), rejected.issues
 
 
+MISSING_DATES = (
+    "financial.books.0.periods.0: Value error, missing period dates require a limitation"
+)
+
+
+def test_a_shape_failure_never_asks_the_model_for_the_financial_review_hashes(
+    tmp_path: Path,
+) -> None:
+    """Task 7.16 (hybrid CP-1 probes, 23-24 Oct): a balance-sheet period with a null start date
+    and no limitation fails the financial object's own shape, so its review hash cannot be
+    computed and both `financial_review_sha256` fields stay unset with no unbound reference. The
+    model is told the shape issue, never "Field required" of a field its schema never offers;
+    the rejection, the retained payload and the recorded pre-fill are the plain path's."""
+    store, ticket_id, value = journal_at(tmp_path / "a", "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    period = document["financial"]["books"][0]["periods"][0]
+    assert (period["period_type"], period["limitation"]) == ("PERIOD_END", None)
+    period["start_date"] = None
+    payload = json.dumps(document)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    (rejected,) = submitted.journal.step_repairs
+    assert MISSING_DATES in rejected.issues, rejected.issues
+    assert not [i for i in rejected.issues if "financial_review_sha256" in i], rejected.issues
+    # The plain path on a fresh journal: same retained payload, same pre-fill, and the same
+    # issues but for the two stripped lines.
+    fresh, fresh_ticket, _ = journal_at(tmp_path / "b", "financials")
+    plain = submit_cp1_step(fresh, fresh_ticket, "financials", submitted.payload)
+    (expected,) = plain.step_repairs
+    stripped = (
+        "definition.financial_review_sha256: Field required",
+        "binding.financial_review_sha256: Field required",
+    )
+    assert set(stripped) <= set(expected.issues), expected.issues
+    assert rejected.issues == tuple(i for i in expected.issues if i not in stripped)
+    assert (rejected.status, rejected.payload_sha256) == ("invalid", expected.payload_sha256)
+    assert rejected.output_sha256 == expected.output_sha256
+    assert retained_repair(store, ticket_id) == submitted.payload
+    assert not [p for p in submitted.prefilled if "financial_review_sha256" in p]
+
+
+def test_stripping_the_unset_fields_lines_never_turns_a_rejection_into_an_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: were the stage's only issues the "Field required" of unset marked fields,
+    they stay, so a payload with an unset marked field is rejected exactly as before."""
+    from deploy_vii.live import submission
+
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    document["financial"]["books"][0]["periods"][0]["start_date"] = None
+    only = (
+        "definition.financial_review_sha256: Field required",
+        "binding.financial_review_sha256: Field required",
+    )
+    monkeypatch.setattr(submission, "validate_cp1_stage", lambda *_: StepValidation(issues=only))
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs
+    assert (rejected.status, rejected.issues) == ("invalid", only)
+
+
+def retained_repair(store: Execution, ticket_id: str) -> str:
+    attempt = next(a for a in store.read().attempts if a.ticket_id == ticket_id)
+    return store.payload(attempt.step_repairs[-1].payload_sha256)
+
+
 def test_a_rewritten_payload_keeps_every_number_and_text_exactly() -> None:
     digest = "a" * 64
     payload = '{"amount":3624.10,"tiny":1e-7,"n":-0,"text":"caf\\u00e9 \\u2013 \\"q\\"","x":[1,2]}'
@@ -1253,7 +1320,7 @@ def test_a_null_scope_currency_stays_named_beside_a_disagreement_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Confidence review: the batch-14 shape has both causes (a perimeter that differs by
-    period and a null currency). The disagreement routes the step through `_validate_unbound`,
+    period and a null currency). The disagreement routes the step through `_validate_prefilled`,
     which drops the "Field required" of unset marked fields; the null currency is a cause of
     its own, so its message stays."""
 

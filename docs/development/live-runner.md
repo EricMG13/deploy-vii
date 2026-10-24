@@ -940,8 +940,14 @@ value the reply carries. A reference Python cannot resolve is rejected with the 
 own message first. The cases are an unknown or not-ready source ("Unavailable or changed source:
 <id>"), an unknown facility or period ("FX conversion <id>: unknown facility/period") and an audit
 explanation's missing period or observation. The stage's remaining issues follow, without the
-"Field required" of a field the sent schema never offers (`_validate_unbound`, recomputed on
-resume; not on a manual `execution_cli` resume, which returns the plain stage issues). The journal retains the pre-filled payload, and output.md keeps the raw reply. A reply
+"Field required" of a field the sent schema never offers (`_validate_prefilled`, recomputed on
+resume; not on a manual `execution_cli` resume, which returns the plain stage issues). Task 7.16
+(hybrid CP-1 probes, 23-24 Oct: a balance-sheet period with a null `start_date` and no
+limitation also drew `definition.financial_review_sha256: Field required` and
+`binding.financial_review_sha256: Field required`) routes every payload the pre-fill leaves a
+marked field unset in through `_validate_prefilled`, unbound reference or not, so the model sees
+only the shape issue; the rejection is unchanged, and those lines stay when they are the stage's
+only issues. The journal retains the pre-filled payload, and output.md keeps the raw reply. A reply
 that already holds every value is kept byte for byte, and a reply that is not a JSON object is
 handed on as received. The changed paths are in `Submitted.prefilled` and in a
 `payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`). The
@@ -966,7 +972,7 @@ cites (`No matching entity/date/basis source scope: <book> <period> <source>`); 
 names no single entity, or an entity the context lacks, with that validator's binding wording.
 A scope's null dimension is never written, so the stored contract's `Field required` names it
 (E1 batch 14: every scope's `currency` was null). These issues reach the journal first through
-`_validate_unbound`, without the `Field required` of the strings left unset. A payload whose
+`_validate_prefilled`, without the `Field required` of the strings left unset. A payload whose
 strings already equal the scope's is unchanged (the recorded corpus, `test_replay.py`). The
 filled paths appear in `Submitted.prefilled` and the `payload_prefilled` event (`by_kind`
 `scope-dimension`); output.md keeps what the model sent. `context_binding` and `book_issues`

@@ -66,8 +66,9 @@ byte for byte and nothing is recorded; otherwise it is rewritten (`live.schema.e
 numbers keep their digits) and every changed JSON path is recorded in `Submitted.prefilled`. A
 reference Python cannot resolve (an unknown or not-ready source, an unknown facility or period,
 an audit explanation whose period or observation the book lacks) is rejected with the validator's
-own wording first (`_validate_unbound`, mirroring CP-0's uncomposable path); a binding whose
-sub-object does not parse is left as sent, so the shape rejection names the cause; a payload that
+own wording first (`_validate_prefilled`, mirroring CP-0's uncomposable path); a binding whose
+sub-object does not parse is left as sent, so the shape rejection names the cause and (task
+7.16) the model is never told "Field required" of the binding it was never offered; a payload that
 is not a JSON object or cannot be stored as UTF-8 is handed on as received. A missing retained
 step raises ValueError before anything is written. The validators' binding checks are unchanged.
 """
@@ -590,7 +591,7 @@ class _Resolver:
             value = None if strings is None else strings[SCOPE_DIMENSIONS.index(item.name)]
             if strings is not None and value is None:
                 # The bound scope states no such dimension: the contract's own message, kept
-                # visible (`_validate_unbound` drops "Field required" of other unset fields).
+                # visible (`_validate_prefilled` drops "Field required" of other unset fields).
                 self.unbound.append((item.path, f"{item.path}: Field required"))
             return value
         if kind == "facility":
@@ -823,23 +824,33 @@ def prefill(model: type[BaseModel], payload: str, known: Known, kinds: frozenset
     )
 
 
-def _validate_unbound(
+def _validate_prefilled(
     store: Execution, known: Known, step_id: str, pack: PreparedPack, attempt: Attempt
 ) -> StepValidation:
-    """The rejection of a step whose payload holds a reference Python could not resolve (as
-    `_validate_uncomposable` is CP-0's): the validator-worded unbound issues first, recomputed
-    from the retained payload and the bindings read before the write, then the stage's own
-    issues without the "Field required" of each marked field left unset (the sent schema never
-    offers it: an unbound reference's own field, or a hash that covers it, such as the financial
-    review's). Acceptance is unchanged: such a payload never validated."""
+    """The validation of a step whose pre-fill left a marked field unset, recomputed from the
+    retained payload and the bindings read before the write: the stage's own issues without the
+    "Field required" of each unset field (the sent schema never offers it: an unbound
+    reference's own field, or a hash that covers what did not parse, such as the financial
+    review's when the financial object fails its own shape; task 7.16).
+
+    With an unresolvable reference (as `_validate_uncomposable` is CP-0's) the validator-worded
+    unbound issues come first and the step is rejected. Otherwise the stage's outcome stands
+    with only those lines removed; when they are its only issues they stay, so stripping never
+    turns a rejection into an acceptance. Acceptance is unchanged: such a payload never
+    validated."""
     retained = store.payload(attempt.steps[-1].payload_sha256)
     result = prefill(STEPS[step_id].schema, retained, known, PREFILLED[step_id])
-    if not result.unbound:
+    if not (result.unbound or result.unset):
         raise ValueError("Retained payload binds cleanly; resubmit it through submit_cp1_step")
     unset = {f"{path}: Field required" for path in result.unset}
     stage = validate_cp1_stage(store, pack, attempt)
-    issues = (*(issue for _, issue in result.unbound), *(i for i in stage.issues if i not in unset))
-    return StepValidation(issues=tuple(dict.fromkeys(issues)))
+    kept = tuple(issue for issue in stage.issues if issue not in unset)
+    if result.unbound:
+        issues = (*(issue for _, issue in result.unbound), *kept)
+        return StepValidation(issues=tuple(dict.fromkeys(issues)))
+    if not kept:
+        return stage
+    return StepValidation(output=stage.output, issues=kept)
 
 
 @dataclass(frozen=True)
@@ -865,8 +876,9 @@ def submit_model_payload(
     Nulls standing for omitted defaults are resolved first (`live.schema.normalise`, against the
     model-facing schema). `on_normalised` sees the resolved paths before the journal does, so a
     caller can record them even if validation raises. Then every CP-1 step's hash bindings are
-    pre-filled (`prefill`; see the module docstring); a payload with an unresolvable reference is
-    rejected with the validator's wording first (`_validate_unbound`)."""
+    pre-filled (`prefill`; see the module docstring); a payload the pre-fill leaves a marked field
+    unset in is validated by `_validate_prefilled` (an unresolvable reference rejected with the
+    validator's wording first, and never "Field required" of a field the sent schema omits)."""
     step = STEPS[step_id]
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
@@ -885,14 +897,14 @@ def submit_model_payload(
     if step_id != "source_readiness":
         known = known_bindings(store, ticket_id, step_id)
         filled = prefill(step.schema, normalised, known, PREFILLED[step_id])
-        if filled.unbound:
+        if filled.unbound or filled.unset:
             journal = store.submit_step(
                 ticket_id,
                 "CP-1",
                 CP1_STEPS,
                 step_id,
                 filled.payload,
-                lambda pack, current: _validate_unbound(store, known, step_id, pack, current),
+                lambda pack, current: _validate_prefilled(store, known, step_id, pack, current),
             )
         else:
             journal = submit_cp1_step(store, ticket_id, step_id, filled.payload)
