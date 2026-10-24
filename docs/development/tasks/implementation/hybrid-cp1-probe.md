@@ -302,3 +302,69 @@ Spend for this batch: US$0.088024530 against hybrid-cp1-1's OpenRouter ledger. T
 shows spent US$5.145622330 over 54 attempts, nothing open, no overrun, and remaining
 US$9.854377670 of its US$15 cap. Prior committed across all ledgers after both batches is
 US$56.877314249830.
+
+## 9. Financials completeness (back-filled)
+
+Both batches ran before submits recorded completeness, so this section is back-filled.
+- **Source.** Each judged `submit_financials` in the cells' retained
+  `financials/tool-calls.jsonl`, read only, with nothing re-run.
+- **Computation.** `devtools.hybrid_cp1.completeness_from_log` and `completeness_drop`
+  (commit 1d8c2d7).
+- **Fields.** Counts are summed over the payload's books:
+  - statement lines, split by `statement` and by the fiscal year of their period;
+  - accounts;
+  - balance movements and balance-movement bridges;
+  - statement identities;
+  - definition assessments and the distinct observation ids they name.
+- **`completeness_drop`.** Set when a later submit has fewer statement lines or balance
+  movements than the first. It sits beside the shrink flag, which counts citations,
+  limitations, claims and objects.
+
+| Batch | Cell | Submit | Call | Outcome | Lines | By statement | By fiscal year | Accounts | Bal. movements | Bridges | Identities | Def. assessments | Obs. ids |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| hybrid-cp1-1 | sol-high | 1 | 6 | rejected | 284 | BS 74, CFS 126, IS 84 | 2023 72, 2024 104, 2025 108 | 60 | 5 | 1 | 8 | 5 | 26 |
+| hybrid-cp1-1 | sol-high | 2 | 7 | **accepted** | 143 | BS 51, CFS 59, IS 33 | 2023 11, 2024 26, 2025 106 | 60 | 0 | 0 | 7 | 5 | 23 |
+| hybrid-cp1-1 | sol-medium | 1 | 5 | rejected | 102 | BS 35, CFS 41, IS 26 | 2025 102 | 47 | 0 | 0 | 19 | 3 | 10 |
+| hybrid-cp1-1 | sol-medium | 2 | 6 | **accepted** | 102 | BS 35, CFS 41, IS 26 | 2025 102 | 47 | 0 | 0 | 19 | 3 | 10 |
+| hybrid-cp1-1 | opus-medium | 1 | 7 | rejected | 256 | BS 58, CFS 123, IS 75 | 2023 66, 2024 95, 2025 95 | 51 | 5 | 1 | 16 | 3 | 7 |
+| hybrid-cp1-1 | opus-medium | 2 | 8 | **accepted** | 256 | BS 58, CFS 123, IS 75 | 2023 66, 2024 95, 2025 95 | 51 | 5 | 1 | 16 | 3 | 7 |
+| hybrid-cp1-1 | sonnet-xhigh | 1 | 10 | **accepted** | 223 | BS 60, CFS 94, IS 69 | 2023 39, 2024 92, 2025 92 | 59 | 0 | 0 | 0 | 4 | 11 |
+| hybrid-cp1-2 | luna-xhigh | 1 | 5 | rejected | 96 | BS 36, CFS 33, IS 27 | 2023 20, 2024 38, 2025 38 | 37 | 0 | 0 | 0 | 1 | 3 |
+| hybrid-cp1-2 | luna-xhigh | 2 | 6 | **accepted** | 34 | BS 10, CFS 6, IS 18 | 2023 8, 2024 13, 2025 13 | 34 | 0 | 0 | 0 | 1 | 3 |
+
+| Cell | completeness_drop | Shrink flag (evidence counts) |
+| --- | --- | --- |
+| sol-high | **yes**: statement lines 284 → 143, balance movements 5 → 0 | yes |
+| sol-medium | no (both submits identical in these counts) | no |
+| opus-medium | no (both submits identical in these counts) | no |
+| sonnet-xhigh | no (one submit) | no |
+| luna-xhigh | **yes**: statement lines 96 → 34 (CFS 33 → 6) | yes |
+
+Reading:
+- **What the runner accepted.** It accepted payloads that cover very different amounts of
+  the statements:
+  - 223–256 lines over three fiscal years (opus-medium, sonnet-xhigh);
+  - 143 lines weighted to FY2025 (sol-high after its drop);
+  - 102 lines for FY2025 only (sol-medium);
+  - 34 lines (luna-xhigh).
+- **Shrinking after rejection.** sol-high and luna-xhigh answered their rejection by removing
+  content: sol-high dropped all balance movements and most FY2023–2024 lines, and luna-xhigh
+  dropped most CFS lines. The second submit then passed.
+- **Repair without loss.** opus-medium and sol-medium repaired without losing any counted
+  item.
+- **Comparing cells.** Section 3's acceptance and evidence figures should be read with this
+  table. An accepted financials step is not evidence of comparable coverage.
+
+## 10. Harness rules added after these batches (commit 1d8c2d7)
+
+These rules were not in effect for hybrid-cp1-1 or hybrid-cp1-2. They are recorded in
+`plan.json` for later batches:
+- **Per-step Anthropic caching.** Top-level `cache_control` is sent only for `source_context`
+  and `financials`, the multi-call steps. It is not sent for `narrative` or `readiness`
+  (`anthropic.cache_control_by_step`).
+- **Call-limit nudge.** Once a step has 3 calls left, each turn's last tool result ends with one
+  line: "Harness: N of 30 calls remain in this step; the step must end with submit_<step>."
+  - It is first sent with the step's third-last call (`harness_rules.call_limit_nudge`).
+  - The line appears in the retained request JSON, not in `tool-calls.jsonl`.
+- **Completeness recording.** Financials submits and the accepted payload record completeness,
+  and step metrics carry `completeness_drop` beside `submit_shrinkage`.
