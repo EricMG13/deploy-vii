@@ -18,6 +18,10 @@ module measures an extractor against those failure classes without any model cal
   any `module:function` load lazily, so a candidate runs without entering the lock:
   `uv run --locked --with docling python -m tests.product.extraction_bench --extractor docling`.
 
+`variant --base JOURNAL --out JOURNAL --pdf FILE --extractor NAME` writes a copy of an execution
+journal whose PDF source is re-extracted, so `make live-probe DIRECTORY=<out>` runs arm L1 of the
+live A/B probe against the unchanged base journal (arm L0).
+
 `--pdf FILE --gold FILE` scores a real filing instead (kept outside Git); the probe filing's
 gold quotes are in `tests/product/fixtures/extraction-gold-probe-filing.json`. Size is reported
 as rendered characters and an estimate of tokens (characters / 4, labelled as an estimate);
@@ -26,6 +30,7 @@ measures real tokens and latency.
 """
 
 import argparse
+import hashlib
 import importlib
 import io
 import json
@@ -48,7 +53,9 @@ from pypdf.generic import (
     StreamObject,
 )
 
-from deploy_vii.preparation import pdf_content
+from deploy_vii.contracts import Coverage, Span
+from deploy_vii.execution import Execution
+from deploy_vii.preparation import PreparedPack, pdf_content
 from deploy_vii.quotes import normalise, quoted
 
 Extractor = Callable[[bytes], Sequence[str]]
@@ -455,7 +462,68 @@ def table(results: Sequence[Result]) -> str:
     return "\n".join(lines)
 
 
+def variant_journal(base: Path, out: Path, pdf: Path, name: str, extractor: Extractor) -> str:
+    """A new execution journal: `base`'s pack with the source whose hash is `pdf`'s re-extracted
+    by `extractor`, for a live A/B probe arm. Locators stay `page:N`, so the validator holds the
+    arm to its own text. Returns the variant pack's content hash."""
+    raw = pdf.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    pack = Execution(base).pack()
+    if not any(source.sha256 == digest for source in pack.sources):
+        raise ValueError(f"{pdf} matches no source in {base}: hash {digest}")
+    texts = list(extractor(raw))
+    spans = tuple(Span(locator=f"page:{n}", text=text) for n, text in enumerate(texts, 1))
+    coverage = tuple(
+        Coverage(
+            locator=span.locator,
+            status="retained" if span.text.strip() else "empty",
+            limitation=None if span.text.strip() else "No extractable text",
+        )
+        for span in spans
+    )
+    sources = tuple(
+        source.model_copy(
+            update={
+                "spans": spans,
+                "coverage": coverage,
+                "extractor": f"benchmark:{name}",
+                "extraction_status": "degraded",
+                "limitation": f"Benchmark variant: page text from {name}, not the product "
+                "extractor; fidelity review still applies.",
+            }
+        )
+        if source.sha256 == digest
+        else source
+        for source in pack.sources
+    )
+    variant = PreparedPack.model_validate_json(
+        pack.model_copy(update={"sources": sources}).model_dump_json()
+    )
+    return Execution.create(out, variant).read().pack_sha256
+
+
+def variant_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="extraction_bench variant",
+        description="Write a probe journal whose PDF source is re-extracted (live A/B arm).",
+    )
+    parser.add_argument("--base", type=Path, required=True, help="existing execution journal")
+    parser.add_argument("--out", type=Path, required=True, help="new journal directory")
+    parser.add_argument("--pdf", type=Path, required=True, help="the source's original bytes")
+    parser.add_argument("--extractor", required=True, help="as for the benchmark")
+    args = parser.parse_args(argv)
+    base_hash = Execution(args.base).read().pack_sha256
+    variant_hash = variant_journal(
+        args.base, args.out, args.pdf, args.extractor, load_extractor(args.extractor)
+    )
+    print(f"base pack {base_hash}\nvariant pack {variant_hash} ({args.extractor}) at {args.out}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["variant"]:
+        return variant_main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--extractor",

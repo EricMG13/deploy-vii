@@ -6,8 +6,14 @@ before/after in the change's review record.
 """
 
 import json
+from datetime import date
 from pathlib import Path
 
+import pytest
+
+from deploy_vii.contracts import Run
+from deploy_vii.execution import Execution
+from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source
 from tests.product.extraction_bench import (
     continued,
     load_extractor,
@@ -16,6 +22,7 @@ from tests.product.extraction_bench import (
     pypdf_layout,
     score,
     synthetic_pdf,
+    variant_journal,
 )
 
 GOLD = Path(__file__).parent / "fixtures" / "extraction-gold-probe-filing.json"
@@ -79,3 +86,61 @@ def test_cli_writes_results(tmp_path: Path) -> None:
     assert main(["--extractor", "pypdf-layout", "--extractor", "truth", "--json", str(out)]) == 0
     rows = json.loads(out.read_text(encoding="utf-8"))
     assert [row["extractor"] for row in rows] == ["pypdf-layout", "truth"]
+
+
+def test_variant_journal_pack(tmp_path: Path) -> None:
+    corpus = synthetic_pdf()
+    pdf = tmp_path / "filing.pdf"
+    pdf.write_bytes(corpus.raw)
+    filing = prepare_source(
+        SourceRequest(source_id="filing", path="filing.pdf", media_type="application/pdf"),
+        corpus.raw,
+    )
+    other = prepare_source(
+        SourceRequest(source_id="notes", path="notes.txt", media_type="text/plain"), b"Cash 0\n"
+    )
+    run = Run(
+        run_id="bench",
+        issuer_id="synthetic",
+        issuer_name="Synthetic Issuer plc",
+        as_of=date(2025, 12, 31),
+        case_kind="synthetic",
+    )
+    base = Execution.create(tmp_path / "base", PreparedPack(run=run, sources=(filing, other)))
+    truth = load_extractor("truth", corpus)
+    digest = variant_journal(base.directory, tmp_path / "arm", pdf, "truth", truth)
+    pack = Execution(tmp_path / "arm").pack()
+    assert digest == Execution(tmp_path / "arm").read().pack_sha256 != base.read().pack_sha256
+    variant, kept = pack.sources
+    assert kept == other
+    assert variant.sha256 == filing.sha256 and variant.extractor == "benchmark:truth"
+    assert [span.text for span in variant.spans] == list(corpus.truth)
+    assert [item.status for item in variant.coverage][-1] == "empty"
+    stranger = tmp_path / "other.pdf"
+    stranger.write_bytes(corpus.raw + b"\n")
+    with pytest.raises(ValueError, match="matches no source"):
+        variant_journal(base.directory, tmp_path / "none", stranger, "truth", truth)
+    assert not (tmp_path / "none").exists()
+
+
+def test_variant_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    corpus = synthetic_pdf()
+    pdf = tmp_path / "filing.pdf"
+    pdf.write_bytes(corpus.raw)
+    filing = prepare_source(
+        SourceRequest(source_id="filing", path="filing.pdf", media_type="application/pdf"),
+        corpus.raw,
+    )
+    run = Run(
+        run_id="bench",
+        issuer_id="synthetic",
+        issuer_name="Synthetic Issuer plc",
+        as_of=date(2025, 12, 31),
+        case_kind="synthetic",
+    )
+    base = Execution.create(tmp_path / "base", PreparedPack(run=run, sources=(filing,)))
+    argv = ["variant", "--base", str(base.directory), "--out", str(tmp_path / "arm")]
+    assert main([*argv, "--pdf", str(pdf), "--extractor", "pypdf-layout"]) == 0
+    assert "variant pack" in capsys.readouterr().out
+    # The product extractor reproduces the base pack's spans exactly.
+    assert Execution(tmp_path / "arm").pack().sources[0].spans == filing.spans

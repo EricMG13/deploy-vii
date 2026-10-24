@@ -1,7 +1,7 @@
 # Extraction and page-location benchmark — measurement brief
 
-**Task ID:** `dvii-extraction-benchmark`. **Date:** 24 October 2026. **Status:** stage 1 built;
-stages 2–3 to run. **Question (user, 24 October 2026):** can a local converter/OCR or an
+**Task ID:** `dvii-extraction-benchmark`. **Date:** 24 October 2026. **Status:** stage 1 built; stage 2 and
+stage 3 arms L0/L1 ready to run locally; arms L2/L3 not built. **Question (user, 24 October 2026):** can a local converter/OCR or an
 OpenRouter model raise citation accuracy without adding time, either by (A) giving the models a
 cleaner Markdown pack or (B) pointing each module at the pages it needs?
 **Decisions:** 0005 (methodology changes need before/after evidence on the same frozen case;
@@ -67,12 +67,30 @@ counts once, not once per module.
 fixes the column class; it adds no artifact; estimated tokens are no higher; and a manual
 diff of 10 financial-statement rows shows no altered digit, sign or bracket.
 
-## Stage 3 — live A/B probe (paid; the runner change comes first)
+## Stage 3 — live A/B probe (paid)
 
-**Prerequisite (separate `dv-sensitive` brief):** the runner needs a way to prepare a pack with a
-named extractor, and for arm B a page locator for module steps. CP-0 `source_readiness` always
-gets the full pack. Every excluded page is recorded as a coverage limitation, and the
-locator's recall on the gold pages must be 100% offline before any paid run.
+**Arms L0 and L1 run now, with no runner change.** The probe runs from any execution journal.
+`extraction_bench variant` copies the existing probe journal with the filing re-extracted by
+the stage-2 winner. Locators stay `page:N`, and the validator holds each arm to its own text.
+Re-extracting with `pypdf-layout` reproduces the base pack's spans exactly (tested), so the two
+arms differ only in the extractor. Use the same seed for both arms.
+
+```
+uv run --locked --with docling python -m tests.product.extraction_bench variant \
+  --base <journal> --out <journal>-docling --pdf <filing.pdf> --extractor docling
+for arm in <journal> <journal>-docling; do
+  uv run --locked python -m deploy_vii live probe --directory "$arm" --cap 6 \
+    --models openai/gpt-6.1-sol@high --draws-per-model 3 --seed <same seed>
+done
+```
+
+**Arms L2 and L3 (page location) are not built.** They need a per-step view of the pack in the
+prompt builder, because CP-0 `source_readiness` keeps the full pack while module steps get
+located pages. That change touches execution and provenance, so it gets its own
+`dv-sensitive` brief and rewrite tournament. It also needs a decision on which pages each
+module needs. Every excluded page must be recorded as a coverage limitation, and the
+locator's recall on the gold pages must be 100% offline before any paid run. Build it after
+L0/L1 report.
 
 | Arm | Pack | Purpose |
 | --- | --- | --- |
@@ -88,7 +106,9 @@ locator's recall on the gold pages must be 100% offline before any paid run.
   separately, never pooled.
 - **Steps:** `source_readiness` in every arm. For B, `source_context` once its sent-schema
   fix lands (probe-5b HTTP 400).
-- **Cap:** about US$0.5 per attempt × 4 arms × 3 draws, so `CAP=8`.
+- **Cap:** each probe cell runs three steps (`source_readiness`, `source_context`,
+  `financials`), and the runner reserves up to about US$1.65 per call before sending it. So
+  allow US$6 per arm for 3 draws, and raise the cap rather than accept a stopped batch.
 
 **Metrics per attempt** (from `metrics.json` and the validator):
 - prompt tokens (provider-reported)
