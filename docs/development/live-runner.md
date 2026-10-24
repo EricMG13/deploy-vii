@@ -64,8 +64,8 @@ one more record plus its schemas, composer and prompt contract.
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
 | `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
-| `loop.py` | Task 8.0d: `run_tool_step` (one CP-1 stage as a tool loop, ported from `devtools/hybrid_cp1.py`; one attempt directory and ledger attempt per call; `tool-calls.jsonl` beside `output.md`), `ToolLimits`, `ToolStepResult`, `call_nudge`, `transient`. Schema-check rejections do not apply to tool-loop steps (their schema is sent as the submit tool's parameters); a runtime 400 that names the schema ends the step as `provider-schema-error`. |
-| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`), `tool_specs`, the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
+| `loop.py` | Task 8.0d; task 8.9: every live step ([every step a tool loop](#every-step-a-tool-loop-task-89)). `run_tool_step` (one step as a tool loop, ported from `devtools/hybrid_cp1.py`; one attempt directory and ledger attempt per call; `tool-calls.jsonl` beside `output.md`), `ToolLimits`, `ToolStepResult`, `call_nudge`, `transient`. Schema-check rejections do not apply to tool-loop steps (their schema is sent as the submit tool's parameters); a runtime 400 that names the schema ends the step as `provider-schema-error`. |
+| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`; task 8.9: bounded to a step's declared sources), `tool_specs` (task 8.9: by tool set; a submit-only step gets its submit alone), `applicable_rules` (task 8.9), the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
 
 ### Per-module context (task 8.6)
 
@@ -125,6 +125,45 @@ ordinary XLSX source. The CP-0 reviewer classes its authority, and Python sets n
 `third_party` classification puts it in CP-3's SOURCE block, where market-evidence rows quote
 its `sheet:rv_quotes!<cell>` spans. CP-3's rules, `declared_sources` and the runner are
 unchanged. The validator is the user's self-check: no runner or journal step calls it.
+
+### Every step a tool loop (task 8.9)
+
+User decision, 24 Oct 2026: every live step of every module runs as a tool loop on the 8.0d path
+(`loop.run_tool_step`, the per-step effort plan and ceiling, the completeness floor off). With
+`tool_loop = true` the CLI plans every step as a loop; the one-shot `runner.dispatch` stays in the
+code (it runs a chain's `one_shot` steps, none registered, and every step when `tool_loop` is
+off) and is the reference of the differential in `tests/devtools/test_loop_differential.py`.
+
+- **Two tool sets.** Registry `tool_sets()` derives each step's set; nothing is typed twice. A
+  step gets the **pack tools** (`search_pack`, `read_pages`, its `submit_<step>`) iff its
+  validator checks spans against the pack (`pack_sources`) or its chain lists it in `pack_reads`
+  (CP-1's `narrative` and `readiness`, which 8.0d ran with them). That gives CP-0
+  `source_readiness`, CP-1's four stages, CP-1A `business_context`, CP-3 `relative_value` and CP-4
+  `legal_covenants`. Every other step is **submit-only** (`quality`, `credit_synthesis`,
+  `integrity_review`, `committee_challenge`): its contract cites upstream rows and facts, never
+  pack text, so its one tool is its submit, rule 5 says so (`prompts.submit_only_rule`), and a
+  call naming any other tool is refused as a tool result (`error: unknown tool ...`) and never run.
+- **Same inputs.** The loop builds each prompt from the one-shot dispatch's own inputs
+  (`runner.prompt_inputs`: the upstream projections, CP-1A's CP-1 facts, the `MODULE_CONTEXTS`
+  CONTEXT, the QA or CP-5 review scope) without the pack SOURCE blocks. The `quality` loop's
+  manifest binds `quality_inputs_sha256` as the one-shot manifest does.
+- **Declared sources.** A pack-tool step's tools read every pack source, except where
+  `SOURCE_SCOPES` bounds it (`context.readable_sources`): CP-4 reads only `upstream_of(...).
+  legal_sources`, CP-3 only its ready market sources. A read or search of another pack source is
+  refused by name; rule 5 lists the readable sources (or says there are none).
+- **CP-4 and the whole 10-K.** CP-4 is no longer sent its legal sources as one SOURCE block (about
+  841 KB on czr-fy2025-v2). The whole legal source stays searchable and readable on demand, five
+  pages a call, and `cp4_legal`'s declared-source rule still bounds what the tools may read
+  (decision 0005 row of 24 Oct 2026).
+- **Rules.** `tools.applicable_rules`: CP-1's four stages keep both 8.0d rules; CP-0, CP-1A, CP-3
+  and CP-4 apply the cited-page rule (their schemas carry `locator`), not the absence rule (none
+  carries the fields it reads); submit-only steps apply none, and `submit_model_payload` refuses
+  rules for them. A CP-0, CP-1A, CP-3 or CP-4 submit a rule fails is retained through the module's
+  own validator with the rule issues appended, so it is rejected and the attempt finishes as the
+  module's entry would finish it; a submit no rule fails takes the rule-free path unchanged.
+- **Budget lines.** The batch report's tool-loop line names each step's plan and tool set. While
+  no planned step is one-shot the max-tokens and timeout header lines end `(unused: every planned
+  step is a tool loop; see Tool loop)`.
 
 ## Rules and where they are enforced
 
