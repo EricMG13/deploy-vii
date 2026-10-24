@@ -75,6 +75,25 @@ one worker. The 90% floor applies to the single combined TOTAL report. Debug ser
 `-n 0` (`PYTEST_XDIST_AUTO_NUM_WORKERS=1` still runs one worker subprocess); cap workers with `--maxprocesses N` where memory
 is short (the heaviest tests peak near 2.3 GiB per worker).
 
+**Product checks shards.** The single hosted job outgrew its budget (55 to 63 min of 75 on
+the 4-vCPU runner), so `Product checks` is now a gate job over five jobs: `changes` (the
+docs-only detection above), `Product static checks` (ruff, format, mypy, `node --check`:
+`make product-static`), three `Product tests (shard-a|b|c)` matrix jobs and `Product coverage
+(combined)`. Each shard runs `make coverage-shard SHARD=<name>`, the same pytest command as
+`make coverage` (`-m 'not live and not private'`, `-n auto --dist loadfile`, branch coverage) on
+the files that `.github/shards/product.txt` lists for it, writes its own data file
+(`COVERAGE_FILE=cov-<shard>`, uploaded with `actions/upload-artifact`) and has `--cov-fail-under=0`
+because a part of the suite cannot meet the floor alone. The combined job downloads the
+three files, runs `coverage combine` and `coverage report`, which enforces the unchanged
+`fail_under = 90` of `pyproject.toml` on the combined total. A missing shard file fails the upload.
+The static split by test file needs no dependency; `tests/devtools/test_ci_shards.py` fails if a
+`tests/product` test file is in no shard or in two, or if the workflow matrix differs from the
+list. A new test file must be added to `product.txt` (the guard says so). The `Product checks`
+gate (one status for branch rules) succeeds only if every job succeeded, or, for a docs-only
+diff, every test job was skipped; a failed, cancelled or unexpectedly skipped job fails it.
+Each shard keeps `timeout-minutes: 75`. `make product-check` is unchanged locally: one process,
+all tests, one coverage report.
+
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and
 provider credentials outside hosted CI. The old tool pins in decision 0001 are

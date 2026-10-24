@@ -1,4 +1,4 @@
-.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage audit secrets diff dev-check dev-test product-check
+.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage coverage-shard product-static audit secrets diff dev-check dev-test product-check
 
 setup:
 	uv sync --locked
@@ -22,12 +22,14 @@ dev-check:
 dev-test:
 	uv run --locked pytest tests/devtools
 
-product-check:
+product-check: product-static
+	$(MAKE) coverage
+
+product-static:
 	uv run --locked ruff check src tests/product
 	uv run --locked ruff format --check src tests/product
 	$(MAKE) types
 	node --check src/deploy_vii/assets/app.js
-	$(MAKE) coverage
 
 types:
 	uv run --locked mypy src
@@ -37,6 +39,12 @@ test:
 
 coverage:
 	uv run --locked pytest tests/product -m 'not live and not private' -n auto --dist loadfile --cov=deploy_vii --cov-branch --cov-report=term-missing
+
+# One hosted shard of `coverage`: SHARD names a group in .github/shards/product.txt and
+# COVERAGE_FILE the data file. The per-shard floor is off; CI enforces the existing floor
+# on the combined data (docs/ci-gates.md).
+coverage-shard:
+	uv run --locked pytest $$(bash .github/scripts/shard_files.sh $(SHARD)) -m 'not live and not private' -n auto --dist loadfile --cov=deploy_vii --cov-branch --cov-report= --cov-fail-under=0
 
 audit:
 	mkdir -p artifacts/dependency-audit
