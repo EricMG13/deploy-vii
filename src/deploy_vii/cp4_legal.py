@@ -90,6 +90,9 @@ LEGAL_AUTHORITIES = frozenset({"executed", "filed"})
 FIGURE_TABLES = ("T4.10", "T4.17")
 FACILITY_TABLE = "T4.18"
 NOT_CALCULABLE = "Not calculable"
+# The unit of a percentage test's headroom: percentage points, spelled "<amount> pp" (no
+# display class rounds it, so its exact decimal is shown).
+POINTS = "pp"
 _SETTLED: Mapping[str, InputStatus] = {
     "accepted": "accepted",
     "restricted": "restricted",
@@ -396,7 +399,8 @@ def _rows(submission: CovenantInterpretationSubmission) -> Iterator[tuple[str, B
 
 def _quotes(row: BaseModel) -> tuple[Quote, ...]:
     citations = getattr(row, "citations", ())
-    assert isinstance(citations, tuple)
+    if not isinstance(citations, tuple):
+        raise ValueError(f"{type(row).__name__}.citations is not a tuple of quotes")
     return citations
 
 
@@ -463,11 +467,13 @@ def _row_issues(path: str, row: BaseModel, upstream: Upstream) -> list[str]:
     """Evidence rules of one row: what each kind of row quotes, from which sources."""
     issues: list[str] = []
     legal = set(upstream.legal_sources)
+    # Fix round 1: fail closed. A source is citable only when CP-0 classes it executed or filed
+    # and the pack holds it ready; no T3 authority row is no authority, never a pass.
     for source_id in dict.fromkeys(quote.source_id for quote in _quotes(row)):
-        if source_id in upstream.authority and source_id not in legal:
+        if source_id not in legal:
             issues.append(
                 f"{path}: {source_id} is not an executed or filed source (CP-0 authority "
-                f"{upstream.authority[source_id]}, or the source is not ready)"
+                f"{upstream.authority.get(source_id, 'none')}, or the source is not ready)"
             )
     quotes = _quotes(row)
     if isinstance(row, LegalDocument):
@@ -489,6 +495,33 @@ def _row_issues(path: str, row: BaseModel, upstream: Upstream) -> list[str]:
     return issues
 
 
+# Fix round 1: the cheap directional check. Wording in the threshold's own quote that names a
+# floor or a cap; a comparison pointing the other way is rejected. A quote naming neither (the
+# common "shall not permit ... to exceed") or both leaves the direction to the model's judgement,
+# a residual risk recorded in `methods/cp4.md`.
+_FLOOR = re.compile(r"(?<![A-Za-z])(?:not less than|at least|minimum)(?![A-Za-z])", re.IGNORECASE)
+_CAP = re.compile(
+    r"(?<![A-Za-z])(?:not exceed|not to exceed|not more than|maximum|shall not be greater)"
+    r"(?![A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _direction_issues(path: str, row: Covenant) -> list[str]:
+    """A maximum comparison on a quote that names only a floor, or the reverse."""
+    if row.comparison == "none":
+        return []
+    wording = " ".join(
+        normalise(quote.quote) for quote in row.citations if quoted(row.threshold_text, quote.quote)
+    )
+    floor, cap = bool(_FLOOR.search(wording)), bool(_CAP.search(wording))
+    maximum = row.comparison in ("<=", "<")
+    if (maximum and floor and not cap) or (not maximum and cap and not floor):
+        named = "a minimum" if floor else "a maximum"
+        return [f"{path}: comparison {row.comparison} contradicts the quote, which states {named}"]
+    return []
+
+
 def _threshold_issues(path: str, row: Covenant) -> list[str]:
     """Ruling 2: the stated value is the number Python reads from the quoted threshold."""
     unit = row.threshold_unit
@@ -507,6 +540,7 @@ def _threshold_issues(path: str, row: Covenant) -> list[str]:
         return issues
     if row.comparison == "none":
         issues.append(f"{path}: a {unit} threshold states its comparison")
+    issues.extend(_direction_issues(path, row))
     if row.threshold_value is None:
         return [*issues, f"{path}: a {unit} threshold states the threshold_value"]
     try:
@@ -894,18 +928,18 @@ def _test(row: Covenant, upstream: Upstream) -> _Test:
     test = _Test(row, parsed, metric, None, reason, inapplicable=False)
     if reason is not None:
         return test
-    assert test.operand is not None and metric is not None and metric.amount is not None
+    if test.operand is None or metric is None or metric.amount is None:
+        # The validator rejects a ratio test with an unparsed threshold or an unoffered metric.
+        raise ValueError(f"Headroom of {row.name} has no threshold or metric operand")
     result = headroom(test.operand, row.comparison, metric.amount)
     return _Test(row, parsed, metric, result, None, inapplicable=False)
 
 
 def _computed(
-    test: _Test, cited: tuple[Citation, ...], label: str, amount: Decimal, unit: str, formula: str
+    metric: Fact, cited: tuple[Citation, ...], label: str, amount: Decimal, unit: str, formula: str
 ) -> Fact:
     """A Python-computed figure in the metric's period, citing the threshold quote and the
     metric's own evidence."""
-    metric = test.metric
-    assert metric is not None
     return Fact(
         fact_id="pending",
         label=label,
@@ -927,15 +961,20 @@ def _test_cells(test: _Test, out: _Composer) -> tuple[CellLike, CellLike, CellLi
             return _absent(str(test.reason)), _absent(str(test.reason)), Cell("Not applicable")
         return _gap(reason), _gap(reason), Cell(NOT_CALCULABLE)
     metric = test.metric
-    assert metric is not None and metric.unit is not None and test.operand is not None
+    if metric is None or metric.unit is None or test.operand is None:
+        raise ValueError(f"Headroom of {test.row.name} was computed without its operands")
     ref, operand = metric.fact_id, test.operand
     upper = test.row.comparison in ("<=", "<")
     formula = f"{operand} (threshold) - {ref}" if upper else f"{ref} - {operand} (threshold)"
+    amount, unit = test.result.amount, metric.unit
+    if test.row.threshold_unit == "percent":
+        # Fix round 1: room between two percentages is percentage points, not a percent.
+        amount, unit, formula = amount * 100, POINTS, f"({formula}) x 100, percentage points"
     cited = out.binding.of(test.row)
-    room = _computed(test, cited, "Headroom", test.result.amount, metric.unit, formula)
+    room = _computed(metric, cited, "Headroom", amount, unit, formula)
     share: CellLike = (
         _computed(
-            test, cited, "Headroom share", test.result.share, "PERCENT", "headroom / |threshold|"
+            metric, cited, "Headroom share", test.result.share, "PERCENT", "headroom / |threshold|"
         )
         if test.result.share is not None
         else _gap(f"{NOT_CALCULABLE}: {test.result.share_reason}")

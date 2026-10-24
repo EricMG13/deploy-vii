@@ -98,12 +98,21 @@ and are re-mapped when the SKILL.md is pinned.
   status and limitations (MC-1, MC-6). Single settling step, attempt-level repair only.
 - Thresholds: the model supplies the quoted threshold text, a stated value and a comparison;
   Python parses the number from the quote and rejects a mismatch (ruling 2). Only ratio and
-  percentage thresholds are parsed; any other limit is "not calculable".
+  percentage thresholds are parsed; any other limit is "not calculable". A ratio to anything
+  but one is not read (Python never asks the model to divide).
+- Direction (fix round 1): the comparison is checked against the threshold's own quote only
+  cheaply. A maximum (`<=`, `<`) is rejected when the quote names only a floor (not less than,
+  at least, minimum), a minimum (`>=`, `>`) when it names only a cap (not exceed, not to exceed,
+  not more than, maximum, shall not be greater). A quote naming neither (the common "shall not
+  permit ... to exceed") or both is accepted: there the direction is the model's judgement, a
+  residual risk a wrong sign would carry into the headroom.
 - Headroom: Python arithmetic over the parsed threshold and a CP-1 figure the model matched and
   judged the same definition; a definition the model judges different or not determinable is
-  not compared. A strict test does not hold at the threshold. Percentage headroom is in
-  percentage points of the metric; its share divides by the threshold's absolute value, and a
-  zero threshold has no share.
+  not compared. A strict test does not hold at the threshold. A percentage test's headroom is
+  stated in percentage points (unit `pp`, the room between two percentages times one hundred);
+  its share divides the room by the threshold's absolute value and is a percent; a zero
+  threshold has no share. The calculation trace (T4F.3) keeps the operands' own units (decimal
+  fractions for percentages).
 - Degradation: the `CP-1 -> CP-4` edge is `restricted` (decision 0007): a blocked CP-1 is bound
   with status blocked, formulas are still extracted, every headroom and capacity is "not
   calculable", and the journal settles CP-4 `restricted` with the inherited limitation.

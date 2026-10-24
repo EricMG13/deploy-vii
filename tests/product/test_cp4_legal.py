@@ -6,6 +6,7 @@ import json
 import random
 import re
 from decimal import Decimal
+from fractions import Fraction
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -55,7 +56,7 @@ from deploy_vii.readiness import (
     validate_review,
 )
 from deploy_vii.registry import modules, plan
-from deploy_vii.report_view import pathways
+from deploy_vii.report_view import fact_spelling, pathways
 from tests.product.test_render import synthetic_view
 
 # --- the SYNTHETIC pack: a filed report, an executed indenture and a management deck ------------
@@ -80,8 +81,10 @@ DECK = "Synthetic lender presentation: management expects ample covenant room."
 AUTHORITY = {"filing": "filed", "indenture": "executed", "deck": "management"}
 
 
-def legal_pack(deck: str = DECK) -> PreparedPack:
-    texts = {"filing": FILING, "indenture": "\n".join(INDENTURE), "deck": deck}
+def legal_pack(deck: str = DECK, extra: str | None = None) -> PreparedPack:
+    """The SYNTHETIC pack; `extra` is one more indenture line (line:8), for the wording cases."""
+    lines = (*INDENTURE, extra) if extra is not None else INDENTURE
+    texts = {"filing": FILING, "indenture": "\n".join(lines), "deck": deck}
     sources = tuple(
         prepare_source(
             SourceRequest(source_id=name, path=f"{name}.txt", media_type="text/plain"),
@@ -443,8 +446,12 @@ def test_a_percentage_threshold_is_compared_as_a_decimal_fraction() -> None:
     assert issues_of(submission) == ()
     found = cells(composed(submission))
     # CP-1 holds the margin as 0.25 (25%); the 10% floor is 0.10: 0.15 of room, 150% of it.
-    assert found["T4.9.r01.headroom"].amount == Decimal("0.15")
-    assert found["T4.9.r01.headroom"].unit == "PERCENT"
+    # Fix round 1: room between two percentages is percentage points, shown as such (15 pp),
+    # never as a percent of anything; the share stays a percent.
+    room = found["T4.9.r01.headroom"]
+    assert (room.amount, room.unit) == (Decimal("15.00"), "pp")
+    assert fact_spelling(room, None)[2] == "15.00 pp"
+    assert fact_spelling(found["T4.9.r01.headroom_share"], None)[2].endswith("%")
     assert found["T4.9.r01.headroom_share"].amount == Decimal("1.5")
     assert found["T4C.7.r01.parsed_value"].text == "10"
     assert found["T4F.3.r01.threshold_operand"].text == "0.1"
@@ -701,6 +708,93 @@ def test_only_executed_or_filed_sources_may_be_cited() -> None:
     missing = q(1, "anything", "absent")
     flag = base.red_flags[0].model_copy(update={"citations": (missing,)})
     assert "Unavailable or changed source: absent" in issues_of(changed(base, red_flags=(flag,)))
+
+
+def test_a_source_without_a_cp0_authority_is_not_citable() -> None:
+    """Fix round 1: a ready pack source with no CP-0 T3 authority row is not executed or filed,
+    so a red flag, basket or score quoting it is rejected (it used to pass)."""
+    pack = legal_pack()
+    cp0, cp1 = cp0_module(pack), cp1_module(pack)
+    unclassed = cp0.model_copy(
+        update={
+            "facts": tuple(
+                f for f in cp0.facts if not (f.table_id == "T3" and f.row_id == "filing")
+            ),
+            "tables": (),
+        }
+    )
+    upstream, inputs = cp4_upstream(pack, unclassed, cp1), inputs_for(pack, unclassed, cp1)
+    assert "filing" not in upstream.legal_sources and "filing" not in upstream.authority
+    base = submission_fixture()
+    filing = q(1, "net leverage is disclosed in the KPI table", "filing")
+    for name, rows in (
+        ("red_flags", (base.red_flags[0].model_copy(update={"citations": (filing,)}),)),
+        ("capacity", (base.capacity[0].model_copy(update={"citations": (filing,)}),)),
+    ):
+        found = validate_covenant_interpretation(
+            pack, changed(base, **{name: rows}), upstream, inputs
+        )
+        expected = f"{name}[0]: filing is not an executed or filed source (CP-0 authority none"
+        assert any(issue.startswith(expected) for issue in found), found
+    score = base.protection_score.model_copy(update={"citations": (filing,)})
+    found = validate_covenant_interpretation(
+        pack, changed(base, protection_score=score), upstream, inputs
+    )
+    expected = "protection_score: filing is not an executed or filed source (CP-0 authority none"
+    assert any(issue.startswith(expected) for issue in found), found
+
+
+@pytest.mark.parametrize(
+    ("comparison", "quote", "threshold"),
+    [
+        ("<=", "of not less than 2.50 to 1.00", "2.50 to 1.00"),
+        ("<", "a minimum ratio of 2.50 to 1.00", "2.50 to 1.00"),
+        ("<=", "of at least 2.50 to 1.00", "2.50 to 1.00"),
+        (">=", "shall not exceed 5.00 to 1.00", "5.00 to 1.00"),
+        (">", "not more than 5.00 to 1.00", "5.00 to 1.00"),
+        (">=", "a maximum ratio of 5.00 to 1.00", "5.00 to 1.00"),
+        (">=", "shall not be greater than 5.00 to 1.00", "5.00 to 1.00"),
+        (">=", "an amount not to exceed 5.00 to 1.00", "5.00 to 1.00"),
+    ],
+)
+def test_a_comparison_against_the_quote_wording_is_rejected(
+    comparison: str, quote: str, threshold: str
+) -> None:
+    """Fix round 1: the cheap directional check on the threshold's own quote."""
+    row = leverage_covenant(
+        threshold_text=threshold,
+        threshold_value=threshold.split()[0],
+        comparison=comparison,
+        citations=(Quote(source_id="indenture", locator="line:8", quote=quote),),
+    )
+    base = submission_fixture()
+    pack, upstream, inputs = _quote_fixture(quote)
+    submission = changed(base, covenants=(row, *base.covenants[1:]))
+    found = validate_covenant_interpretation(pack, submission, upstream, inputs)
+    assert any(f"comparison {comparison} contradicts the quote" in i for i in found), found
+
+
+def _quote_fixture(quote: str) -> tuple[PreparedPack, Upstream, tuple[Input, ...]]:
+    """`fixture()` with line:8 of the indenture holding `quote` (the directional cases)."""
+    pack = legal_pack(extra=quote)
+    cp0, cp1 = cp0_module(pack), cp1_module(pack)
+    return pack, cp4_upstream(pack, cp0, cp1), inputs_for(pack, cp0, cp1)
+
+
+def test_a_quote_without_direction_words_leaves_the_comparison_to_the_model() -> None:
+    # "shall not permit ... to exceed" names no listed phrase: accepted, model judgement.
+    assert issues_of(submission_fixture()) == ()
+    both = "a minimum of 2.50 to 1.00 and not to exceed 5.00 to 1.00"
+    row = leverage_covenant(
+        threshold_text="2.50 to 1.00",
+        threshold_value="2.50",
+        comparison=">=",
+        citations=(Quote(source_id="indenture", locator="line:8", quote=both),),
+    )
+    base = submission_fixture()
+    pack, upstream, inputs = _quote_fixture(both)
+    submission = changed(base, covenants=(row, *base.covenants[1:]))
+    assert validate_covenant_interpretation(pack, submission, upstream, inputs) == ()
 
 
 def test_run_text_carries_figures_only_as_offered_references() -> None:
@@ -1086,35 +1180,50 @@ COMPARISONS = st.sampled_from(("<=", "<", ">=", ">"))
 
 
 def naive(threshold: Decimal, comparison: str, metric: Decimal) -> tuple[Any, ...]:
-    """The reference formula, written apart from `headroom`: room is the signed distance to the
-    threshold on the permitted side; its share divides by the threshold's size."""
-    upper = comparison in ("<=", "<")
-    room = (threshold - metric) if upper else (metric - threshold)
+    """The reference, built apart from `headroom` (fix round 1): whether the test holds comes
+    from the comparison itself; the room is the distance between metric and threshold, positive
+    when the test holds and negative when it fails (zero at the threshold, strict or not); the
+    share is the metric's exact rational ratio to the threshold less one, turned to the
+    permitted side: a maximum test gains room as the ratio falls, and a negative threshold flips
+    which way the ratio moves."""
     holds = {
         "<=": metric <= threshold,
         "<": metric < threshold,
         ">=": metric >= threshold,
         ">": metric > threshold,
     }[comparison]
-    share = None if threshold == 0 else room / abs(threshold)
-    return room, share, holds
+    distance = abs(metric - threshold)
+    room = distance if holds else -distance
+    if threshold == 0:
+        return room, None, holds
+    ratio = Fraction(metric) / Fraction(threshold) - 1
+    maximum = comparison in ("<=", "<")
+    side = (-1 if maximum else 1) * (1 if threshold > 0 else -1)
+    return room, ratio * side, holds
 
 
 @settings(max_examples=300, deadline=None)
 @given(THRESHOLDS, COMPARISONS, THRESHOLDS)
 @example(Decimal("0"), "<=", Decimal("1.5"))
 @example(Decimal("2.50"), "<", Decimal("2.50"))
+@example(Decimal("2.50"), ">", Decimal("2.50"))
 @example(Decimal("-1.00"), ">=", Decimal("-2.00"))
+@example(Decimal("-1.00"), "<=", Decimal("-0.50"))
+@example(Decimal("3.00"), "<=", Decimal("1.00"))  # a share with a repeating decimal
 def test_python_headroom_matches_a_naive_reference(
     threshold: Decimal, comparison: str, metric: Decimal
 ) -> None:
     result = headroom(threshold, comparison, metric)  # type: ignore[arg-type]
     room, share, holds = naive(threshold, comparison, metric)
     assert result.amount == room
-    assert result.share == share
     assert result.within is holds
-    if threshold == 0:
-        assert result.share is None and result.share_reason
+    if share is None:
+        assert threshold == 0 and result.share is None and result.share_reason
+        return
+    assert result.share is not None
+    # Decimal division rounds at 28 significant digits; the reference is exact.
+    assert abs(Fraction(result.share) - share) <= Fraction(1, 10**25) * max(1, abs(share))
+    assert (result.share > 0) is (share > 0) and (result.share == 0) is (share == 0)
 
 
 # --- Property 3: the verdict does not depend on row order --------------------------------------
