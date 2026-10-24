@@ -207,6 +207,19 @@ def test_each_consumer_table_is_the_registry_derivation() -> None:
     )
 
 
+def test_the_step_names_still_kept_outside_the_registry_agree_with_it() -> None:
+    """Not yet derived (task 8.0a scope): the workflows' own journal sequences and step names.
+    A rename on either side fails here rather than in a live run."""
+    from deploy_vii import business_context
+    from deploy_vii.live import corpus, prompts
+
+    assert business_context.CP1A_STEPS == registry.step_chain("CP-1A").steps
+    assert business_context.STEP_ID == registry.step_chain("CP-1A").settling
+    assert prompts.QUALITY == registry.step_chain("CP-1").settling
+    assert corpus.SUPPORTED_STEPS == registry.module_route("CP-1")
+    assert registry.step_chain("CP-0").steps == ("source_readiness",)  # cp0_workflow's sequence
+
+
 def test_a_schema_table_that_misses_or_adds_a_step_is_refused() -> None:
     schemas = {step_id: schema for step_id, _, schema in BASE_STEPS}
     assert submission.step_definitions(schemas) == dict(STEPS)
