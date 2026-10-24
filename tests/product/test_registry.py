@@ -100,3 +100,17 @@ def test_coverage_map_cp1a_records_task_7_2() -> None:
         "partial (contract, validator, bindings; T2D.8/T2D.9 derived in Python; live E1 pending)"
     )
     assert entry["analytical_qualification"] == "unrun"
+
+
+@pytest.mark.parametrize("module_id", ["CP-2", "CP-4", "CP-3", "CP-5"])
+def test_coverage_map_records_task_8_6_registration_and_pending_live_acceptance(
+    module_id: str,
+) -> None:
+    path = Path(__file__).resolve().parents[2] / "docs/methodology/r14-coverage.json"
+    coverage = json.loads(path.read_text())
+    entry = next(m for m in coverage["modules"] if m["module_id"] == module_id)
+    assert entry["implementation"].startswith("partial (task 8.")
+    assert "registered in the live runner" in entry["implementation"]
+    assert "live acceptance" in entry["implementation"]
+    for status in ("analytical_qualification", "rendering_acceptance", "native_host_qualification"):
+        assert entry[status] == "unrun", status

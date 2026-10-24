@@ -38,6 +38,7 @@ from deploy_vii.live import prompts
 from deploy_vii.live.context import (
     FULL,
     KINDS,
+    MODULE_CONTEXTS,
     NARRATIVE_EVIDENCE,
     PROJECTIONS,
     evidence_table,
@@ -249,8 +250,14 @@ def composed(step_id: str) -> str:
     pack, _ = readiness_fixture()
     schema = STEPS[step_id].schema
     scope = prompts.quality_scope(staged_scope()[1]) if step_id == prompts.QUALITY else None
+    if step_id == prompts.INTEGRITY:  # task 8.6: the system prompt does not read the scope
+        scope = {}
     sources = step_sources(step_id, ("filing",))
-    return prompts.build(step_id, pack, sources, schema, scope=scope)[0].content
+    # Task 8.6: a step with a module context needs one; its content is user-message data only.
+    shown = {} if step_id in MODULE_CONTEXTS else None
+    return prompts.build(step_id, pack, sources, schema, module_context=shown, scope=scope)[
+        0
+    ].content
 
 
 def test_the_citation_rule_states_the_interleave_and_page_rules_once() -> None:
@@ -1625,7 +1632,16 @@ ALL_STEPS = (
     "readiness",
     "quality",
     "business_context",
+    # Task 8.6.
+    "credit_synthesis",
+    "legal_covenants",
+    "relative_value",
+    "integrity_review",
 )
+
+
+def test_every_registered_step_is_one_of_all_steps() -> None:
+    assert tuple(STEPS) == ALL_STEPS
 
 
 def test_the_financials_step_states_the_bound_scope_rule_once_as_rule_i() -> None:

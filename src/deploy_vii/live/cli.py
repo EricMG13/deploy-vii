@@ -44,7 +44,7 @@ from deploy_vii.live.client import (
     urllib_transport,
 )
 from deploy_vii.live.cohort import ProxyResult, credit_state
-from deploy_vii.live.context import step_sources
+from deploy_vii.live.context import declared_sources
 from deploy_vii.live.corpus import CORPUS_ROOT, REPOSITORY_ROOT, CorpusError, write_entry
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
@@ -132,6 +132,11 @@ CP1A_CHAIN = module_route("CP-1A")
 # so the cp0 and cp1 orders are those of the two-case plan): each registry module's cell and
 # route, in registry order, so a new module's case draws after these.
 REGRESSION_CASES: tuple[tuple[str, tuple[str, ...]], ...] = regression_cases()
+# Task 8.6: a case whose settling step (its route's last step) has no recorded corpus entry has
+# no offline baseline (tier I2), so `regression` does not run it: it is skipped and named in the
+# report (`skipped_line`), never counted as a pass. A case joins once `live corpus` records an
+# entry for its settling step; no fixture is ever recorded to make a case run.
+SKIPPED = "Cases skipped (no recorded corpus entry for the settling step; not run, not a pass)"
 PROBE_STEPS = ("source_readiness", "source_context", "financials")
 SEED_SEARCH_LIMIT = 100_000
 BATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -393,7 +398,8 @@ def configure(parser: argparse.ArgumentParser) -> None:
     actions.add_parser(
         "regression",
         parents=[common],
-        help="CP-0 and CP-1 cases, each pool model once (one model: a regression on it alone)",
+        help="every registry case with a recorded corpus entry, each pool model once (one "
+        "model: a regression on it alone); the other cases are named as skipped",
     )
     actions.add_parser(
         "canary", parents=[common], help="CP-0 and CP-1, one cell per eligible pool model"
@@ -458,16 +464,37 @@ def _module_cells(module_arg: str, seed: int) -> list[Cell]:
     return [Cell("module-00", module.lower(), module_route(module), seed)]
 
 
-def _regression_cells(pool: PinnedPool, slugs: list[str], seed: int) -> list[Cell]:
+def recorded_steps(root: Path = CORPUS_ROOT) -> frozenset[str]:
+    """The steps the replay corpus holds at least one entry for (`<root>/<step>/<case>.json`)."""
+    return frozenset(path.parent.name for path in root.glob("*/*.json"))
+
+
+def unrecorded_cases(recorded: frozenset[str] | None = None) -> tuple[tuple[str, str], ...]:
+    """(case, settling step) of every regression case the corpus holds no entry for."""
+    recorded = recorded_steps() if recorded is None else recorded
+    return tuple((case, steps[-1]) for case, steps in REGRESSION_CASES if steps[-1] not in recorded)
+
+
+def skipped_line(skipped: Sequence[tuple[str, str]]) -> str | None:
+    if not skipped:
+        return None
+    return f"- {SKIPPED}: " + ", ".join(f"{case} ({step_id})" for case, step_id in skipped)
+
+
+def _regression_cells(
+    pool: PinnedPool, slugs: list[str], seed: int, recorded: frozenset[str] | None = None
+) -> list[Cell]:
     excluded = [(item.slug, item.exclusion_reason) for item in pool.candidates if not item.eligible]
     if excluded:
         raise CliError(f"a matched comparison needs every candidate eligible; excluded: {excluded}")
+    skipped = {case for case, _ in unrecorded_cases(recorded)}
     shuffler = random.Random(seed)
     plan: list[tuple[str, tuple[str, ...], str]] = []
     for case, steps in REGRESSION_CASES:
         order = list(slugs)
-        shuffler.shuffle(order)
-        plan += [(case, steps, slug) for slug in order]
+        shuffler.shuffle(order)  # every case draws its order, so a skip moves no other case's
+        if case not in skipped:
+            plan += [(case, steps, slug) for slug in order]
     seeds = seeds_for(pool, [slug for _, _, slug in plan], seed)
     counts: dict[str, int] = {}
     cells: list[Cell] = []
@@ -578,7 +605,9 @@ def _run_cell(
             StepSpec(
                 step_id,
                 cell.case_id,
-                step_sources(step_id, sources),  # task 7.5: only where spans are checked
+                # Task 7.5: only where spans are checked; task 8.6: CP-4's legal and CP-3's
+                # market sources only.
+                declared_sources(store, attempt, step_id, sources),
                 max_tokens=max_tokens,
                 timeout_s=timeout_s,
             ),
@@ -841,8 +870,10 @@ def render_report(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
     tool_loop: ToolLoop | None = None,
+    skipped: Sequence[tuple[str, str]] = (),
 ) -> str:
-    """Summary tables only; counts come from the registry and the retained results."""
+    """Summary tables only; counts come from the registry and the retained results. `skipped`
+    names the regression cases not run for want of a corpus entry (`unrecorded_cases`)."""
     state = ledger.state()
     models = {name: row.model for row in batch.rows for name in (row.attempt_id, *row.calls)}
     reserved: dict[str, Decimal] = {}
@@ -891,6 +922,7 @@ def render_report(
         *_tool_loop_lines(tool_loop),
         f"- Cells planned: {len(cells)}; steps run: {len(batch.rows) - refused}; "
         f"not authorized by CP-0: {refused}",
+        *filter(None, (skipped_line(skipped),)),
         f"- Repairs dispatched: {_repairs_dispatched(batch.rows)}",
         f"- Truncated: {sum(row.classification == TRUNCATED for row in batch.rows)}",
         f"- Stopped: {batch.stopped or 'no'}",
@@ -1148,6 +1180,7 @@ def run_live(
                 args.max_tokens,
                 args.timeout,
                 tool_loop,
+                unrecorded_cases() if args.live_command == "regression" else (),
             ),
             sys.exception(),
         )

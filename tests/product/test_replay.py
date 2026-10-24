@@ -20,7 +20,7 @@ from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.envelope import Envelope
 from deploy_vii.execution import Execution, StepValidation
-from deploy_vii.live import corpus
+from deploy_vii.live import cli, corpus
 from deploy_vii.live.client import ChatClient
 from deploy_vii.live.cohort import accept_proxy_payload
 from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
@@ -208,6 +208,27 @@ def test_corpus_entry_replays_as_recorded(
 def test_the_corpus_replays_quality_entries() -> None:
     """The envelope hash identity above is exercised: the corpus holds `quality` entries."""
     assert [path for path in ENTRIES if path.parent.name == "quality"]
+
+
+@pytest.mark.parametrize(("case", "steps"), cli.REGRESSION_CASES, ids=lambda v: str(v))
+def test_each_regression_cell_settles_on_a_recorded_entry_or_is_a_named_skip(
+    case: str, steps: tuple[str, ...]
+) -> None:
+    """Task 8.6: a regression cell (`live regression`) whose settling step has no recorded
+    corpus entry has no I2 baseline. It is a named skip here, listed by `make replay`, and the
+    live regression skips it the same way (`cli.unrecorded_cases`); no fixture is recorded to
+    make it pass."""
+    settling = steps[-1]
+    entries = [path for path in ENTRIES if path.parent.name == settling]
+    if not entries:
+        why = (
+            "the corpus cannot record this step yet (live.corpus.SUPPORTED_STEPS)"
+            if settling not in corpus.SUPPORTED_STEPS
+            else "no live attempt has been recorded"
+        )
+        pytest.skip(f"cell {case}: no recorded corpus entry for {settling}: {why}")
+    assert (case, settling) not in cli.unrecorded_cases()
+    assert {load_entry(path)["step_id"] for path in entries} == {settling}
 
 
 def test_the_dimension_prefill_leaves_every_recorded_financials_payload_as_recorded(

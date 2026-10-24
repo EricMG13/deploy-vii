@@ -95,6 +95,10 @@ from deploy_vii.cp1_workflow import (
     submit_cp1_step,
     validate_cp1_stage,
 )
+from deploy_vii.cp2_synthesis import CreditSynthesisSubmission, submit_cp2_step
+from deploy_vii.cp3_relative_value import RelativeValueSubmission, submit_cp3_step
+from deploy_vii.cp4_legal import CovenantInterpretationSubmission, submit_cp4_step
+from deploy_vii.cp5_integrity import IntegritySubmission, submit_cp5_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
 from deploy_vii.financial_contracts import FacilityObservation, FinancialBook, FinancialReview
@@ -221,8 +225,23 @@ STEPS: Mapping[str, StepDef] = step_definitions(
         # Task 7.2: the stored shape is the submission itself; Python composes the registers as
         # the step output (`business_context.submit_cp1a_step`), so no composer is needed here.
         "business_context": BusinessContextSubmission,
+        # Task 8.6: each module's thin submission is its stored shape too; its step entry
+        # validates it and settles the module with the Python candidate (`MODULE_STEP_ENTRIES`).
+        "credit_synthesis": CreditSynthesisSubmission,
+        "legal_covenants": CovenantInterpretationSubmission,
+        "relative_value": RelativeValueSubmission,
+        "integrity_review": IntegritySubmission,
     }
 )
+# The one-step modules whose own entry retains, validates and settles the step (task 7.2 for
+# CP-1A, task 8.6 for the rest); the payload reaches it after null resolution only.
+MODULE_STEP_ENTRIES: Mapping[str, Callable[[Execution, str, str, str], Attempt]] = {
+    "CP-1A": submit_cp1a_step,
+    "CP-2": submit_cp2_step,
+    "CP-4": submit_cp4_step,
+    "CP-3": submit_cp3_step,
+    "CP-5": submit_cp5_step,
+}
 # Task 7.0i: the model supplies no hash. Each hash binding of a CP-1 step contract is marked
 # `PREFILLED_MARKER` with its kind (so the sent schema leaves it out), and Python fills it before
 # the journal validates. Per step: the kinds it carries, and the retained steps they come from
@@ -898,8 +917,9 @@ def submit_model_payload(
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
-    if step.module_id == "CP-1A":
-        journal = submit_cp1a_step(store, ticket_id, step_id, normalised)
+    entry = MODULE_STEP_ENTRIES.get(step.module_id)
+    if entry is not None:
+        journal = entry(store, ticket_id, step_id, normalised)
         return Submitted(journal, normalised, resolved, (), (), None)
     if step_id == "quality":
         # Task 7.4: the review enters the journal only through the promotion, so an accepted

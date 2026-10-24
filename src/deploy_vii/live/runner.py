@@ -5,7 +5,9 @@ reserving first; the raw response is retained before the journal sees it; the pa
 the journal only through `live.submission.submit_model_payload`: submit_cp0_review /
 submit_cp1_step (the same validators as any other input), or `store.submit_step` with the
 validator that rejects an uncomposable CP-0 submission or a CP-1 payload holding a reference
-Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4).
+Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4),
+or a one-step module's own entry (`MODULE_STEP_ENTRIES`: CP-1A, and CP-2/CP-4/CP-3/CP-5 since
+task 8.6, each sent its module context and only its bound sources).
 For source_readiness Python composes the stored review from the model's submission; for every
 CP-1 step it pre-fills the hash bindings. The ledger is settled
 and the manifest sealed even if validation raises. A response from a model other than the
@@ -43,7 +45,16 @@ from deploy_vii.live.client import (
     ChatResult,
     TransportError,
 )
-from deploy_vii.live.context import OMITTED, projection_name, upstream_text
+from deploy_vii.live.context import (
+    INTEGRITY,
+    OMITTED,
+    SOURCE_SCOPES,
+    declared_sources,
+    integrity_scope,
+    module_context,
+    projection_name,
+    upstream_text,
+)
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
@@ -424,6 +435,24 @@ def _plan(
     quality = step.step_id == QUALITY
     registers = cp1_registers(store, ticket_id) if quality else None
     inputs = cp1_quality_inputs(registers) if registers is not None else None
+    # Task 8.6: CP-4 and CP-3 are sent only the sources their bound upstream names (CP-0's
+    # legal, or third-party, sources); any other declared source is refused before spending.
+    if step.step_id in SOURCE_SCOPES:
+        allowed = declared_sources(
+            store, attempt, step.step_id, [s.source_id for s in store.pack(snapshot).sources]
+        )
+        if extra := [s for s in step.declared_sources if s not in allowed]:
+            raise ValueError(
+                f"{step.step_id} is sent {', '.join(extra)}, which is not one of the sources its "
+                f"bound upstream names ({', '.join(allowed) or 'none'})"
+            )
+    scope = (
+        quality_scope(registers, inputs)
+        if registers is not None
+        else integrity_scope(store, attempt)
+        if step.step_id == INTEGRITY
+        else None
+    )
     messages = build(
         step.step_id,
         store.pack(snapshot),
@@ -433,7 +462,9 @@ def _plan(
         repair_issues=repair.issues,
         # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
         cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
-        scope=quality_scope(registers, inputs) if registers is not None else None,
+        # Task 8.6: CP-2, CP-4 and CP-3 read their bound upstream through Python's view of it.
+        module_context=module_context(store, attempt, step.step_id),
+        scope=scope,
     )
     chat = ChatRequest(
         model=candidate.slug,

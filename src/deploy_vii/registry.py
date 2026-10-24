@@ -298,6 +298,23 @@ STEP_CHAINS = checked_chains(
             steps=("business_context",),
             pack_sources=frozenset({"business_context"}),
         ),
+        # Task 8.6: one settling step each; Python composes every table. CP-2 and CP-5 quote
+        # nothing (no SOURCE block); CP-4 is sent its legal sources and CP-3 its market sources
+        # only (`live.context.declared_sources`).
+        StepChain(module_id="CP-2", cell="cp2", steps=("credit_synthesis",)),
+        StepChain(
+            module_id="CP-4",
+            cell="cp4",
+            steps=("legal_covenants",),
+            pack_sources=frozenset({"legal_covenants"}),
+        ),
+        StepChain(
+            module_id="CP-3",
+            cell="cp3",
+            steps=("relative_value",),
+            pack_sources=frozenset({"relative_value"}),
+        ),
+        StepChain(module_id="CP-5", cell="cp5", steps=("integrity_review",)),
     )
 )
 

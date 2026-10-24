@@ -745,18 +745,18 @@ def test_build_fails_closed_for_a_fact_producer_without_a_shipped_map() -> None:
     view = synthetic_view()
     cp1 = next(m for m in view.modules if m.module_id == "CP-1")
     extra = ModuleView(
-        module_id="CP-2",
-        title="Credit analysis",
+        module_id="CP-2A",
+        title="Downside pathway",
         aliases=(),
         status="candidate",
         facts=cp1.facts,
         artifact_sha256="d" * 64,
     )
     swapped = view.model_copy(
-        update={"modules": tuple(extra if m.module_id == "CP-2" else m for m in view.modules)}
+        update={"modules": tuple(extra if m.module_id == "CP-2A" else m for m in view.modules)}
     )
-    assert "CP-2" not in {m.module_id for m in SHIPPED_MAPS}
-    with pytest.raises(ValueError, match=r"unbound fact CP-2/"):
+    assert "CP-2A" not in {m.module_id for m in SHIPPED_MAPS}
+    with pytest.raises(ValueError, match=r"unbound fact CP-2A/"):
         build(swapped, CREDIT, SHIPPED_MAPS)
-    with pytest.raises(ValueError, match=r"unbound fact CP-2/"):
+    with pytest.raises(ValueError, match=r"unbound fact CP-2A/"):
         render(swapped)

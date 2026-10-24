@@ -135,10 +135,19 @@ def test_prompt_schema_text_is_the_strict_response_schema(step_id: str) -> None:
         fmt["json_schema"]["schema"], sort_keys=True, separators=(",", ":")
     )
     untransformed = json.dumps(model.model_json_schema(), sort_keys=True, separators=(",", ":"))
-    # The 0008 submissions (CP-0's and, task 7.2, CP-1A's) have no defaults, so they are already
-    # strict as Pydantic writes them; the stored contracts the CP-1 steps still send are not.
+    # The 0008 submissions (CP-0's and, task 7.2, CP-1A's; task 8.6, CP-2's, CP-4's, CP-3's and
+    # CP-5's) have no defaults, so they are already strict as Pydantic writes them; the stored
+    # contracts the CP-1 steps still send are not.
     assert (schema_text(model) == untransformed) is (
-        step_id in {"source_readiness", "business_context"}
+        step_id
+        in {
+            "source_readiness",
+            "business_context",
+            "credit_synthesis",
+            "legal_covenants",
+            "relative_value",
+            "integrity_review",
+        }
     )
 
 

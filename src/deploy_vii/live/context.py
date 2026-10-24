@@ -23,14 +23,26 @@ be sent to any pool model.
 
 Pack SOURCE blocks go only to a step whose validator checks spans against the pack text
 (`PACK_SOURCE_STEPS`); `narrative`, `readiness` and `quality` reference evidence ids only.
+
+Task 8.6: the one-step modules after CP-1A read settled heads, not retained steps. Their CONTEXT
+is Python's view of the attempt's bound upstream (`module_context`), each module's own
+`context_block`: CP-2 over `cp2_upstream`, CP-4 over `cp4_legal.upstream_of`, CP-3 over
+`cp3_upstream`, merged into the prepared-pack block as CP-1A's `cp1_facts` are. CP-5's review
+scope is its own block (`integrity_scope`), projected to the facts the review can name
+(`integrity_projection`). `declared_sources` narrows the SOURCE blocks: CP-4 is sent the ready
+sources CP-0 classes executed or filed, CP-3 the ready sources it classes `third_party`; every
+other step gets `step_sources`.
 """
 
 import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from deploy_vii import cp2_synthesis, cp3_relative_value, cp4_legal, cp5_integrity, prose
+from deploy_vii.contracts import Fact, Module
 from deploy_vii.cp1_workflow import FinancialStage
 from deploy_vii.downstream_readiness import DownstreamInputs
+from deploy_vii.execution import Attempt, Execution
 from deploy_vii.narrative import EvidenceRecord
 from deploy_vii.registry import FULL as FULL
 from deploy_vii.registry import NARRATIVE_EVIDENCE as NARRATIVE_EVIDENCE
@@ -66,6 +78,89 @@ def projection_name(consumer_step_id: str, producer_step_id: str) -> str:
 def step_sources(step_id: str, source_ids: Sequence[str]) -> tuple[str, ...]:
     """The pack sources a step declares: all of them where its validator checks spans."""
     return tuple(source_ids) if step_id in PACK_SOURCE_STEPS else ()
+
+
+# --- the one-step modules after CP-1A (task 8.6) ----------------------------------------------
+
+INTEGRITY = cp5_integrity.STEP_ID
+# Per step, the CONTEXT entries Python adds to the prepared-pack block from the bound upstream.
+MODULE_CONTEXTS: Mapping[str, Callable[[Execution, Attempt], dict[str, object]]] = {
+    cp2_synthesis.STEP_ID: lambda store, attempt: cp2_synthesis.context_block(
+        store.pack(), cp2_synthesis.cp2_upstream(store, attempt)
+    ),
+    cp4_legal.STEP_ID: lambda store, attempt: cp4_legal.context_block(
+        store.pack(), cp4_legal.upstream_of(store, attempt)
+    ),
+    cp3_relative_value.STEP_ID: lambda store, attempt: cp3_relative_value.context_block(
+        store.pack(), cp3_relative_value.cp3_upstream(store, attempt)
+    ),
+}
+
+
+def module_context(store: Execution, attempt: Attempt, step_id: str) -> dict[str, object] | None:
+    """The module CONTEXT entries of `step_id` over `attempt`'s bound upstream; None for a step
+    that has none."""
+    build = MODULE_CONTEXTS.get(step_id)
+    return None if build is None else build(store, attempt)
+
+
+def _cp3_market_sources(store: Execution, attempt: Attempt) -> tuple[str, ...]:
+    market = cp3_relative_value.cp3_upstream(store, attempt).market_sources
+    return tuple(
+        s.source_id for s in store.pack().sources if s.source_id in market and s.status == "ready"
+    )
+
+
+# The steps whose SOURCE blocks are the bound upstream's choice, not every pack source: CP-4's
+# legal sources (task 8.2 ruling 1) and CP-3's market sources (task 8.3 ruling 1), pack order.
+SOURCE_SCOPES: Mapping[str, Callable[[Execution, Attempt], tuple[str, ...]]] = {
+    cp4_legal.STEP_ID: lambda store, attempt: cp4_legal.upstream_of(store, attempt).legal_sources,
+    cp3_relative_value.STEP_ID: _cp3_market_sources,
+}
+
+
+def declared_sources(
+    store: Execution, attempt: Attempt, step_id: str, source_ids: Sequence[str]
+) -> tuple[str, ...]:
+    """The pack sources `step_id` is sent on `attempt`: its source scope's, in pack order and
+    within `source_ids`, else `step_sources`."""
+    scope = SOURCE_SCOPES.get(step_id)
+    if scope is None:
+        return step_sources(step_id, source_ids)
+    return tuple(source_id for source_id in scope(store, attempt) if source_id in source_ids)
+
+
+def integrity_projection(scope: cp5_integrity.ReviewScope) -> cp5_integrity.FactProjection:
+    """The facts of each head the CP-5 CONTEXT lists (`cp5_integrity.context_block`'s seam): the
+    facts a claim names as `{ref|unit}`, every member of a cross-module identity group and
+    every reference a Python check flags, in head order. The checks and the validator still read
+    every fact; a promoted CP-1 holds tens of thousands, nearly all named by nothing."""
+    checks = cp5_integrity.python_checks(scope)
+    kept: dict[str, set[str]] = {}
+    for _, head in scope.heads:
+        bound = prose.bind(head.facts)
+        named = {
+            bound[run.text].fact_id
+            for claim in head.claims
+            for run in prose.tokenize(claim.text)
+            if run.kind != "text" and run.text in bound
+        }
+        kept[head.module_id] = named | set(checks.ref_marks.get(head.module_id, ()))
+    for group in checks.groups:
+        for module_id, fact_id in group.members:
+            kept.setdefault(module_id, set()).add(fact_id)
+
+    def project(head: Module) -> Sequence[Fact]:
+        wanted = kept.get(head.module_id, set())
+        return tuple(fact for fact in head.facts if fact.fact_id in wanted)
+
+    return project
+
+
+def integrity_scope(store: Execution, attempt: Attempt) -> dict[str, object]:
+    """The CP-5 review scope block of `attempt`: its review scope, facts projected."""
+    scope = cp5_integrity.review_scope(store, attempt)
+    return cp5_integrity.context_block(scope, facts=integrity_projection(scope))
 
 
 def upstream_text(consumer_step_id: str, producer_step_id: str, output_json: str) -> str:

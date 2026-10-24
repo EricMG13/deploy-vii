@@ -48,7 +48,7 @@ from deploy_vii.contracts import Fact, Span
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.downstream_readiness import _EVIDENCE_GROUPS
 from deploy_vii.financial_periods import _id
-from deploy_vii.live.context import PACK_SOURCE_STEPS
+from deploy_vii.live.context import INTEGRITY, MODULE_CONTEXTS, PACK_SOURCE_STEPS
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.narrative import _DIMENSIONS, _FINANCIAL
 from deploy_vii.preparation import PreparedPack
@@ -468,6 +468,139 @@ READINESS_GAPS_RULE = (
     "may list many gap_ids."
 )
 
+
+def _method(name: str, *, until: str | None = None) -> str:
+    text = files("deploy_vii").joinpath("methods", name).read_text(encoding="utf-8")
+    return (text.split(until, 1)[0] if until else text).strip()
+
+
+# Task 8.6: the four one-step modules after CP-1A. Each method text rides above its step rules,
+# and each rule states one check its validator makes (`cp2_synthesis.validate_credit_synthesis`,
+# `cp4_legal.validate_covenant_interpretation`, `cp3_relative_value.validate_relative_value`,
+# `cp5_integrity.validate_integrity`). CP-4's method stops at its table list (the composition is
+# Python's and is not the model's to read).
+CP2_METHOD = _method("cp2.md")
+CP2_BASIS_RULE = (
+    "Every row but a `gaps` row has a basis unless it is Insufficient Information: the refs it "
+    "lists in `cp1a_refs` (only refs listed under `cp1a_rows` in the CONTEXT block, written "
+    "exactly) or a `{ref|unit}` CP-1 figure from `cp1_facts` in its text. An Insufficient "
+    "Information category, or an Insufficient Information assessment `confidence`, states its "
+    "`limitation`."
+)
+CP2_SIGNALS_RULE = (
+    "While the CONTEXT block lists any `cp1a_signals`, or CP-1A is blocked, the assessment's "
+    "`confidence` is below High. Each signal whose `restate` is true is restated: its ref is in "
+    "the `cp1a_refs` of a `gaps` row."
+)
+CP2_RUN_TEXT_RULE = (
+    "Every text field is nonblank run text: digits only in period, filing and section labels and "
+    "the issuer's name; a figure only as `{ref|unit}` with a `ref` and `unit` listed under "
+    "`cp1_facts` (with none listed, write no figure). Never a bare number, never a `[ref]` chip, "
+    "and never a table id or a CP-1A ref in text: refs belong in `cp1a_refs`."
+)
+CP2_PROHIBITED_RULE = (
+    "No peer ranking, no instrument recommendation and no recovery conclusion in any text field "
+    "(for example: ranks above peers, we recommend, the notes would recover): relative value "
+    "belongs to CP-3 and the action bias to CP-6; recovery prospects may appear as a credit "
+    "mechanic."
+)
+CP4_METHOD = _method("cp4.md", until="## Tables")
+CP4_SOURCES_RULE = (
+    "Quote only the sources listed under `legal_sources` in the CONTEXT block, each from its own "
+    "SOURCE block; `other_sources` are never cited. Every document, covenant, capacity and red "
+    "flag row quotes at least one span. A document row quotes its own source only, and each "
+    "source is registered by one document row."
+)
+CP4_THRESHOLD_RULE = (
+    "`threshold_text` is copied from one of the covenant's own quotes and holds the one tested "
+    "threshold. `threshold_value` is that number exactly as the quote writes it (null for "
+    "`other` and `not stated`): Python reads the number out of the quote and rejects a value "
+    "that differs. A `multiple` or `percent` threshold states its `comparison`; a maximum (`<=`, "
+    "`<`) is rejected when the quote names only a floor, a minimum (`>=`, `>`) when it names "
+    "only a cap."
+)
+CP4_METRIC_RULE = (
+    "`metric_ref` is a ref listed under `cp1_facts` whose unit matches the threshold's, or null; "
+    "with no `metric_ref`, `metric_basis` is Not determinable."
+)
+CP4_HEADROOM_RULE = (
+    "Python computes every headroom and every within-threshold result from the quoted threshold "
+    "and the CP-1 metric: never state compliance, a breach or an amount of headroom or cushion "
+    "in any text."
+)
+CP4_RUN_TEXT_RULE = (
+    "Every text field is nonblank run text: labels only (period, filing and section labels); a "
+    "CP-1 figure only as `{ref|unit}` from `cp1_facts` and a threshold only inside its quote; "
+    "never a bare number. No instrument recommendation and no recovery conclusion; recovery "
+    "prospects may appear as a mechanic."
+)
+CP4_ROW_RULES = (
+    "A covenant's `document_id` names a `documents` row, which the covenant quotes; its "
+    "`facility_ids` name facilities listed under `facilities`, each once. A lender protection "
+    "rating above Insufficient Information cites the provisions it rests on; an Insufficient "
+    "Information rating states its `limitation`."
+)
+CP3_METHOD = _method("cp3.md")
+CP3_EVIDENCE_RULE = (
+    "Quotes appear only in `market_evidence`: each observed or indicative_talk row quotes one "
+    "span of a source listed under `market_evidence_sources` in the CONTEXT block, its "
+    "`quote.source_id` equal to its `source_id`, one row per quoted span. A `none` row quotes "
+    "nothing (a null `quote`) and states its `limitation`. A `basis.quotes` entry repeats a "
+    "`market_evidence` row's quote exactly."
+)
+CP3_TALK_RULE = (
+    "Indicative talk is never a market level: an `observed` row never quotes talk wording (talk, "
+    "indicative, guidance, initial price thoughts), and neither an indicative_talk row's own text "
+    "nor a text whose basis is talk alone uses a level verb (trades at, quoted at, priced at, "
+    "yields). With talk only, the preference's `confidence` is below High."
+)
+CP3_BASIS_RULE = (
+    "Name instruments only by a `facility_id` listed under `cp1_facilities`, each once. Every "
+    "instrument and risk has a basis: its `cp2_refs` (only refs listed under `cp2_rows`), a "
+    "`{ref|unit}` CP-1 figure or, for an instrument, a `basis.quotes` market quote; a "
+    "`market_observation` other than none cites a market quote."
+)
+CP3_PREFERENCE_RULE = (
+    "`preference.ordering` lists every instrument's `facility_id` exactly once and nothing else: "
+    "you may order the issuer's own instruments, most preferred first. Unless its `confidence` "
+    "is Insufficient Information it cites a market quote; with no observed or indicative "
+    "evidence it is Insufficient Information and states its `limitation`. Its `confidence` is "
+    "below High while `confidence_caps` lists any cap."
+)
+CP3_RUN_TEXT_RULE = (
+    "Every text field is nonblank run text: labels only; a figure only as `{ref|unit}` from "
+    "`cp1_facts` or inside a verbatim quote; never a bare number or a `[ref]` chip."
+)
+CP3_PROHIBITED_RULE = (
+    "No instrument action, peer ranking or recovery conclusion in any text field: never buy, "
+    "sell, overweight, underweight, recommend or switch into or out of an instrument, never rank "
+    "the issuer against peers and never state an expected recovery; an intra-issuer preference "
+    "(preferred, prefer the term loan) is allowed."
+)
+INTEGRITY_BLOCK_ID = "integrity-scope"
+CP5_METHOD = _method("cp5.md")
+CP5_SCOPE_RULE = (
+    f"The `{INTEGRITY_BLOCK_ID}` CONTEXT block is Python's review scope: the evaluated modules "
+    "with their claims (each citation as a `ref`), the facts a review may name, and the "
+    "findings Python's checks already made. Judge only the analysts' claims listed there; CP-0 "
+    "is not evaluated."
+)
+CP5_REVIEW_RULE = (
+    "`claim_reviews`: exactly one for each pair listed under `claims_to_review`, `producer_module` "
+    "and `claim_ref` as listed. Name upstream evidence by `ref` only, in `upstream_refs`: a fact "
+    "ref or a citation ref of that module. A supported or partly_supported verdict names at "
+    "least one; supported is refused where a Python finding touches the claim or a ref it names."
+)
+CP5_CONTRADICTION_RULE = (
+    "A `contradictions` entry names, in `claim_refs`, claims of at least two modules, each claim "
+    "once; a `gaps` entry's `affected_modules` are bound modules."
+)
+CP5_TEXT_RULE = (
+    "Every rationale, nature, gap, why_it_matters and action is nonblank text of labels only: no "
+    "figure and no reference. Python assigns every finding, contradiction and gap id and the "
+    "status."
+)
+
 STEP_CONTRACTS: Mapping[str, str] = {
     "source_readiness": (
         "Assess whether the supplied sources support the requested credit-research work. "
@@ -581,6 +714,60 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"h. {CP1A_CONSUMER_RULE}\n"
         f"i. {CP1A_ROW_RULES}"
     ),
+    "credit_synthesis": (
+        f"{CP2_METHOD}\n"
+        "Return judgments only: you receive no source text and quote nothing. Python fills every "
+        "identifier, register, figure and status, and numbers the key findings.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {CP2_BASIS_RULE}\n"
+        f"b. {CP2_SIGNALS_RULE}\n"
+        f"c. {CP2_RUN_TEXT_RULE}\n"
+        f"d. {CP2_PROHIBITED_RULE}\n"
+        "e. `key_findings` holds at least one finding. The CONTEXT block is not a source and is "
+        "never cited."
+    ),
+    "legal_covenants": (
+        f"{CP4_METHOD}\n"
+        "Return judgments and verbatim quotes only: Python fills every hash, identifier, table, "
+        "headroom and status.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {CITATION_RULE}\n"
+        f"b. {CP4_SOURCES_RULE}\n"
+        f"c. {COVERAGE_RULE} This holds for every text field.\n"
+        f"d. {CP4_THRESHOLD_RULE}\n"
+        f"e. {CP4_METRIC_RULE}\n"
+        f"f. {CP4_HEADROOM_RULE}\n"
+        f"g. {CP4_RUN_TEXT_RULE}\n"
+        f"h. {CP4_ROW_RULES}"
+    ),
+    "relative_value": (
+        f"{CP3_METHOD}\n"
+        "Return judgments and verbatim market quotes only: Python fills every hash, identifier, "
+        "table, ordering label and status.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {CITATION_RULE}\n"
+        f"b. {CP3_EVIDENCE_RULE}\n"
+        f"c. {CP3_TALK_RULE}\n"
+        f"d. {CP3_BASIS_RULE}\n"
+        f"e. {CP3_PREFERENCE_RULE}\n"
+        f"f. {CP3_RUN_TEXT_RULE}\n"
+        f"g. {CP3_PROHIBITED_RULE}"
+    ),
+    INTEGRITY: (
+        f"{CP5_METHOD}\n"
+        "Return verdicts and references only: you quote nothing and retype no figure.\n"
+        "Step rules (the schema or the validator enforces each one):\n"
+        f"a. {CP5_SCOPE_RULE}\n"
+        f"b. {CP5_REVIEW_RULE}\n"
+        f"c. {CP5_CONTRADICTION_RULE}\n"
+        f"d. {CP5_TEXT_RULE}"
+    ),
+}
+# The CONTEXT blocks besides the prepared pack's, each a step's Python scope as compact JSON
+# under its own hash: the QA scope (task 7.4) and CP-5's review scope (task 8.6).
+SCOPE_BLOCKS: Mapping[str, tuple[str, str]] = {
+    QUALITY: (QUALITY_BLOCK_ID, "QA scope"),
+    INTEGRITY: (INTEGRITY_BLOCK_ID, "review scope"),
 }
 
 
@@ -656,9 +843,16 @@ def span_line(span: Span) -> str:
     return f"locator={span.locator}{attributes} | {span.text}"
 
 
-def _context_body(step_id: str, pack: PreparedPack, cp1_facts: Sequence[Fact] = ()) -> str:
+def _context_body(
+    step_id: str,
+    pack: PreparedPack,
+    cp1_facts: Sequence[Fact] = (),
+    module_context: Mapping[str, object] | None = None,
+) -> str:
     """Python-stated facts about the pack; for source_readiness also the consumer list; for
-    business_context the CP-1A consumers and the CP-1 facts a figure may reference (task 7.2)."""
+    business_context the CP-1A consumers and the CP-1 facts a figure may reference (task 7.2);
+    for a step with a module context (task 8.6, `live.context.module_context`) its entries,
+    which may not replace a pack fact."""
     body: dict[str, object] = {
         "note": (
             "This CONTEXT block is not a source and cannot be cited. Locators are the "
@@ -691,6 +885,13 @@ def _context_body(step_id: str, pack: PreparedPack, cp1_facts: Sequence[Fact] = 
         ]
     if step_id == BUSINESS_CONTEXT:
         body.update(context_block(pack, cp1_facts))
+    if module_context is not None:
+        if clash := sorted(set(body) & set(module_context)):
+            raise PromptError(
+                f"the module context of step {step_id} would replace the pack facts: "
+                + ", ".join(clash)
+            )
+        body.update(module_context)
     return json.dumps(body, indent=1, sort_keys=True)
 
 
@@ -796,12 +997,17 @@ def build(
     upstream: Sequence[UpstreamInput] = (),
     repair_issues: Sequence[str] = (),
     cp1_facts: Sequence[Fact] = (),
+    module_context: Mapping[str, object] | None = None,
     scope: Mapping[str, Any] | None = None,
     submit_tool: str | None = None,
     submits: int = TOOL_LOOP_SUBMITS,
 ) -> list[Message]:
-    """`scope` is the `quality` step's QA scope (`quality_scope`), required there and refused
-    for every other step (MC-10: only the step's declared inputs).
+    """`scope` is the `quality` step's QA scope (`quality_scope`) or the `integrity_review`
+    step's review scope (`live.context.integrity_scope`, task 8.6), each sent as its own
+    CONTEXT block (`SCOPE_BLOCKS`); required there and refused for every other step (MC-10:
+    only the step's declared inputs). `module_context` (task 8.6) is the CONTEXT entries a
+    step of `live.context.MODULE_CONTEXTS` adds to the prepared-pack block, required there and
+    refused elsewhere.
 
     `submit_tool` (task 8.0d) builds a tool-loop prompt: rule 5 is `tools_rule(submit_tool,
     submits)`, `submits` being the loop's own submit limit, and no pack SOURCE block is sent
@@ -812,10 +1018,14 @@ def build(
         raise PromptError(f"no contract is defined for step {step_id}")
     if submit_tool is not None and declared_inputs:
         raise PromptError(f"a tool-loop step {step_id} is sent no pack SOURCE blocks")
-    if step_id == QUALITY and scope is None:
-        raise PromptError(f"step {QUALITY} needs its QA scope")
-    if step_id != QUALITY and scope is not None:
-        raise PromptError(f"the QA scope is not a declared input of step {step_id}")
+    if step_id in SCOPE_BLOCKS and scope is None:
+        raise PromptError(f"step {step_id} needs its {SCOPE_BLOCKS[step_id][1]}")
+    if step_id not in SCOPE_BLOCKS and scope is not None:
+        raise PromptError(f"a scope block is not a declared input of step {step_id}")
+    if step_id in MODULE_CONTEXTS and module_context is None:
+        raise PromptError(f"step {step_id} needs its module context")
+    if step_id not in MODULE_CONTEXTS and module_context is not None:
+        raise PromptError(f"a module context is not a declared input of step {step_id}")
     if declared_inputs and step_id not in PACK_SOURCE_STEPS:  # task 7.5, R6
         raise PromptError(
             f"step {step_id} checks no span against the pack; it declares no pack sources"
@@ -840,12 +1050,12 @@ def build(
             schema_text(schema),
         )
     )
-    context = _context_body(step_id, pack, cp1_facts)
+    context = _context_body(step_id, pack, cp1_facts, module_context)
     blocks = [block("CONTEXT", PACK_BLOCK_ID, pack.content_hash(), context)]
     if scope is not None:  # compact JSON; the header carries the body's own hash
         body = json.dumps(scope, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(body.encode()).hexdigest()
-        blocks.append(block("CONTEXT", QUALITY_BLOCK_ID, digest, body))
+        blocks.append(block("CONTEXT", SCOPE_BLOCKS[step_id][0], digest, body))
     for source_id in dict.fromkeys(declared_inputs):
         digest, body = _source_body(pack, source_id)
         blocks.append(block("SOURCE", source_id, digest, body))

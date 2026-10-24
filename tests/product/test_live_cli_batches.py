@@ -279,7 +279,7 @@ def test_cli_refuses_an_index_beyond_the_file_without_sending_or_echoing_a_token
 
 def test_unsupported_module_fails_before_spending(rig: Rig) -> None:
     responder = Responder(rig.review)
-    assert rig.run(rig.argv("module", "--module", "CP-2"), responder) == cli.EXIT_FAILED
+    assert rig.run(rig.argv("module", "--module", "CP-1B"), responder) == cli.EXIT_FAILED
     assert responder.requests == [] and not (rig.reports / "live-b1.md").exists()
 
 
@@ -363,19 +363,24 @@ def test_regression_order_is_seeded_and_matched(rig: Rig) -> None:
             r[3] for r in step_lines(rig.report(batch), f"{case}-") if r[2] == "source_readiness"
         ]
 
-    for case in ("cp0", "cp1", "cp1a"):  # task 7.0h: cp1a follows cp1, drawing after them
+    for case in ("cp0", "cp1"):
         assert sorted(order("r1", case)) == sorted([LUNA, GLM, DEEPSEEK])  # matched arms
         assert order("r1", case) == order("r2", case)  # same seed, same order
     cells = [r[1] for r in step_lines(rig.report("r1"), "cp") if r[2] == "source_readiness"]
-    assert cells == ["cp0"] * 3 + ["cp1"] * 3 + ["cp1a"] * 3
+    # Task 8.6: cp1a and the four new cases have no recorded corpus entry for their settling
+    # step, so they are named as skipped, never run and never counted as a pass.
+    assert cells == ["cp0"] * 3 + ["cp1"] * 3
+    assert cli.skipped_line(cli.unrecorded_cases()) in rig.report("r1").splitlines()
 
 
 def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
-    assert cli.REGRESSION_CASES == (
+    assert cli.REGRESSION_CASES[:3] == (
         ("cp0", cli.CP0_STEPS),
         ("cp1", cli.FULL_CHAIN),
         ("cp1a", cli.CP1A_CHAIN),
     )
+    # Task 8.6: then each new module's cell, in registry order.
+    assert [case for case, _ in cli.REGRESSION_CASES[3:]] == ["cp2", "cp4", "cp3", "cp5"]
     assert cli.CP1A_CHAIN[-1] == "business_context" and cli.CP1A_CHAIN[:-1] == cli.CP0_STEPS
     # Task 7.4: the CP-1 chain ends in the QA review whose acceptance promotes CP-1.
     assert cli.CP1_CHAIN == ("source_context", "financials", "narrative", "readiness", "quality")
@@ -390,7 +395,7 @@ def test_the_cp1_module_and_regression_cells_plan_five_cp1_steps() -> None:
     planned = {cell.case_id: cell.steps for cell in cells}
     assert planned["cp1"] == ("source_readiness", *cli.CP1_CHAIN)
     assert planned["cp1"][-1] == "quality" and len(planned["cp1"]) == 6
-    assert planned["cp0"] == cli.CP0_STEPS and planned["cp1a"] == cli.CP1A_CHAIN
+    assert planned["cp0"] == cli.CP0_STEPS and "cp1a" not in planned  # no corpus entry (8.6)
 
 
 def test_cap_exhaustion_stops_the_batch_and_sends_nothing(rig: Rig) -> None:
@@ -1912,7 +1917,8 @@ def test_a_cut_cell_does_not_stop_the_batch(rig: Rig) -> None:
 
     assert rig.run(rig.argv("regression", batch="r1"), cut) == 0
     text = rig.report("r1")
-    assert "- Truncated: 9" in text and "- Cells planned: 9;" in text
+    # Task 8.6: the cases with no recorded corpus entry are skipped (cp0 and cp1 run).
+    assert "- Truncated: 6" in text and "- Cells planned: 6;" in text
 
 
 def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
