@@ -71,6 +71,25 @@ external_tiers = ["E1-module-completion", "E2-milestone-matched-comparison", "E3
 recurring_caps_usd = { e1_per_case = 3, e2_per_milestone = 15, e3_per_week = 3 }
 cumulative_ceiling_usd = 200
 no_credit_fallback = "native-luna-else-labelled-claude-agent-proxy-cohort"
+# Task 8.0d (user decision, 24 Oct 2026): E1 runs the CP-1 stages as tool loops, the hybrid
+# harness's design ported into the live runner (`live.loop`; decision 0005 row of 24 Oct 2026).
+tool_loop = true
+
+# Task 8.0d: each tool-loop step's effort, and the highest level its one escalation (after two
+# rejected submits or a completeness-floor rejection) may reach. User-owned; `--effort` given on
+# the command line applies to every step instead.
+[model_tests.step_effort]
+source_context = { effort = "medium", ceiling = "high" }
+financials = { effort = "medium", ceiling = "high" }
+narrative = { effort = "medium", ceiling = "high" }
+readiness = { effort = "medium", ceiling = "high" }
+
+# Task 8.0d: the `financials` completeness floor (statement lines per expected statement and
+# source scope) is off until the user confirms its threshold. Measured on the recorded Sol medium
+# transcript hybrid-cp1-6 (accepted there): any floor of 1 or more rejects it, which holds IS and
+# CFS lines for FY2025 only and BS lines for 2025-12-31 only. To turn it on:
+# [model_tests.completeness_floor]
+# min_statement_lines = 1
 
 # The catalog-rule pool (used when `--models` is absent) is the user-named set of decision 0005
 # (amendment, 22 Oct 2026): currently GPT-6.1 Sol alone, so the draw is trivial. The earlier

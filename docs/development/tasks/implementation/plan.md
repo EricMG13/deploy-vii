@@ -188,6 +188,13 @@ undefined. I1 passes. Tournament: `_canonical_frame` (financial calculation).
   - retries on the same model as new attempts.
 
   Source text enters prompts only as delimited data, and the model gets no tools.
+  *Amended by M8 task 8.0d (user decision, 24 Oct 2026; decision 0005 row 8.0d):* the CP-1
+  stages may run as tool loops. These offer read-only `search_pack` and `read_pages` over the
+  prepared pack, plus the step's own validating submit tool. Tool results are delimited
+  SOURCE data and never instructions. The model gets no other tool: no write, network or host
+  tool. The Copilot enterprise runtime (M11) is where this holds in production. There the
+  backend blocks prompt injection and the sources are trusted-ish, so injection through tool text
+  is a residual risk, not a blocker.
   Prompts carry only the module's declared inputs (MC-10). Tests:
   `test_reservation_refuses_dispatch_beyond_cap`,
   `test_fallback_model_is_classified_not_hidden`,
