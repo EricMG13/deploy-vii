@@ -571,6 +571,13 @@ def _interrupt_if_exhausted(plan: _Plan, store: Execution, run: _Run, why: str) 
     plan.event("ticket_interrupted", reason=reason)
 
 
+def _re_sent(run: _Run) -> bool:
+    """Whether `dispatch` re-sends this attempt: an in-flight 402 not yet treated as exhaustion
+    (task 7.8). The second in-flight refusal still reads transient but is exhaustion
+    (`_refusal`), so it is neither re-sent nor settled as "not a model try" (task 8.0a)."""
+    return run.credit is not None and run.credit.transient and run.credit.exhausted is None
+
+
 def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
     consequence = None
     if run.ticket_interrupted:
@@ -583,7 +590,7 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
         )
     # An in-flight 402 `dispatch` re-sends (task 7.8) is no model try: on the last allowed try
     # the re-send follows, so the refused attempt exhausts nothing (task 7.10 item 7).
-    resent = run.credit is not None and run.credit.transient and run.credit.exhausted is None
+    resent = _re_sent(run)
     return {
         "attempt_number": plan.attempt_number,
         "step_try": plan.step_try,
@@ -878,7 +885,7 @@ def _close(plan: _Plan, ledger: Ledger, writer: AttemptWriter, run: _Run, key: s
     cost = _cost(plan.candidate, run.result)
     try:
         reason = f"{cost.reason}; status={run.status}"
-        if run.credit is not None and run.credit.transient:
+        if _re_sent(run):
             reason += IN_FLIGHT_SETTLE_MARK  # `_plan` counts no try for it
         run.settlement = ledger.settle(plan.attempt_id, cost.amount, reason)
         plan.event("ledger_settled", charged=run.settlement.charged, basis=cost.basis)
