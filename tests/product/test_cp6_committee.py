@@ -28,6 +28,7 @@ from hypothesis import strategies as st
 from deploy_vii.bindings import BindingMap, validate_bindings
 from deploy_vii.bindings.cp2 import CP2 as CP2_MAP
 from deploy_vii.bindings.cp6 import CP6
+from deploy_vii.bindings.shipped import SHIPPED_MAPS
 from deploy_vii.business_context import CP1_REFERENCES, PROHIBITED, Confidence, Gap, spelled
 from deploy_vii.contracts import Claim, Fact, Input, Module, ModuleView, Status, View
 from deploy_vii.cp2_synthesis import STRENGTHS, THESIS, WEAKNESSES
@@ -1931,3 +1932,52 @@ def test_settled_call_is_identical_under_the_old_and_new_fact_ids(
     assert (cells["action_bias"], cells["confidence"]) == (bias, confidence)
     band = front_page(module, "restricted")["call"]
     assert [(i["value_text"], i["meter"]) for i in band] == [(bias, None), (confidence, call.scale)]
+
+
+def test_cp6_neither_writes_nor_binds_a_portfolio_debate_table() -> None:
+    """Task CP6-R: the `T6E.*` ids are CP-6A Portfolio Debate's (M10). The shipped CP-6 map
+    names none, and no composed CP-6 table, fact or claim carries one."""
+    (shipped,) = [m for m in SHIPPED_MAPS if m.module_id == MODULE_ID]
+    assert shipped == CP6
+    coords = [
+        part
+        for e in shipped.entries
+        for part in (e.fact_coord.table_id, e.fact_coord.row_id, e.fact_coord.fact_id)
+        if part is not None
+    ]
+    reserved = portfolio_debate_ids()
+    assert not any(part.startswith("T6E.") or part in reserved for part in coords), coords
+    bound = {e.fact_coord.table_id for e in shipped.entries}
+    for name, (up, submission) in remap_cases().items():
+        module = cp6_module(committee_challenge(market_pack(), submission, up), up.bound, 0)
+        ids = [
+            *(t.table_id for t in module.tables),
+            *(i for f in module.facts for i in (f.fact_id, f.table_id)),
+            *(c.claim_id for c in module.claims),
+        ]
+        assert not any(i.startswith("T6E.") for i in ids), name
+        assert {t.table_id for t in module.tables} <= bound, name
+
+
+def test_the_call_band_reads_the_final_bias_constants_and_no_literal_id() -> None:
+    """The call band's only source is `ACTION_BIAS_FACT` and `CONFIDENCE_FACT`: report_view
+    names no CP-6 table or fact id of its own."""
+    source = files("deploy_vii").joinpath("report_view.py").read_text(encoding="utf-8")
+    assert re.search(r"T6[AE]?\.", source) is None
+    assert "cp6_committee.ACTION_BIAS_FACT" in source
+    assert "cp6_committee.CONFIDENCE_FACT" in source
+
+
+def test_the_coverage_map_records_the_verified_mapping() -> None:
+    text = r14_cp6()["implementation"]
+    assert "assumption" not in text
+    for anchor in (
+        "task CP6-R",
+        "verified against the pinned r14 source",
+        "T6A.4, T6A.6, T6A.7 and T6A.11",
+        "nine-dimension",
+        "T6.final_bias",
+        "T6E.4, T6E.6, T6E.7 and T6E.11",
+        "Portfolio Debate",
+    ):
+        assert anchor in text, anchor
