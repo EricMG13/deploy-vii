@@ -96,17 +96,17 @@ BASE_MODULE_ROUTES = {"CP-0": BASE_CP0_STEPS, "CP-1": BASE_FULL_CHAIN, "CP-1A": 
 # task 8.7 a fifth, CP-6 (each settles its module, none prefills, repairs within the attempt or
 # projects a step).
 BASE_CHAINS = registry.STEP_CHAINS[:3]
-TASK_8_6_STEPS = (
+M8_STEPS = (
     ("credit_synthesis", "CP-2", CreditSynthesisSubmission),
     ("legal_covenants", "CP-4", CovenantInterpretationSubmission),
     ("relative_value", "CP-3", RelativeValueSubmission),
     ("integrity_review", "CP-5", IntegritySubmission),
     ("committee_challenge", "CP-6", CommitteeSubmission),
 )
-REGISTERED_STEPS = (*BASE_STEPS, *TASK_8_6_STEPS)
+REGISTERED_STEPS = (*BASE_STEPS, *M8_STEPS)
 REGISTERED_PACK_SOURCE_STEPS = BASE_PACK_SOURCE_STEPS | {"legal_covenants", "relative_value"}
 CP2_ROUTE = (*BASE_FULL_CHAIN, "business_context", "credit_synthesis")
-TASK_8_6_ROUTES = {
+M8_ROUTES = {
     "CP-2": CP2_ROUTE,
     "CP-4": (*BASE_FULL_CHAIN, "legal_covenants"),
     "CP-3": (*CP2_ROUTE, "relative_value"),
@@ -115,9 +115,9 @@ TASK_8_6_ROUTES = {
 }
 REGISTERED_REGRESSION_CASES = (
     *BASE_REGRESSION_CASES,
-    *((module_id.lower().replace("-", ""), route) for module_id, route in TASK_8_6_ROUTES.items()),
+    *((module_id.lower().replace("-", ""), route) for module_id, route in M8_ROUTES.items()),
 )
-MODULE_ROUTES = {**BASE_MODULE_ROUTES, **TASK_8_6_ROUTES}
+MODULE_ROUTES = {**BASE_MODULE_ROUTES, **M8_ROUTES}
 
 
 def attempt(module_id: str, *steps: tuple[str, Literal["valid", "invalid"]]) -> Attempt:
@@ -173,7 +173,7 @@ def test_a_module_without_a_live_step_contract_is_refused_with_the_base_wording(
         ("CP-0", BASE_CP0_STEPS),
         ("CP-1", BASE_CP1_PROMOTION),
         ("CP-1A", ("business_context",)),
-        *((module_id, (step_id,)) for step_id, module_id, _ in TASK_8_6_STEPS),
+        *((module_id, (step_id,)) for step_id, module_id, _ in M8_STEPS),
     ],
 )
 def test_the_next_step_walks_each_base_chain(module_id: str, chain: tuple[str, ...]) -> None:
@@ -193,7 +193,7 @@ def test_the_next_step_walks_each_base_chain(module_id: str, chain: tuple[str, .
         ("CP-1A", ("business_context",), "CP-1A already retains its one step; resume it"),
         *(
             (module_id, (step_id,), f"{module_id} already retains its one step; resume it")
-            for step_id, module_id, _ in TASK_8_6_STEPS
+            for step_id, module_id, _ in M8_STEPS
         ),
     ],
 )
@@ -230,7 +230,7 @@ def test_the_registry_derives_every_base_table() -> None:
         "source_readiness",
         "quality",
         "business_context",
-        *(step_id for step_id, _, _ in TASK_8_6_STEPS),
+        *(step_id for step_id, _, _ in M8_STEPS),
     }
     assert registry.step_chain("CP-1").steps == BASE_CP1_PROMOTION
     assert registry.step_chain("CP-1").settling == "quality"

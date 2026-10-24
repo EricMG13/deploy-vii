@@ -9,6 +9,7 @@ whole Literal. SYNTHETIC data only: the CP-6 head is composed by Python from the
 submission over the SYNTHETIC Credit Snapshot fixture.
 """
 
+import itertools
 from datetime import date
 from typing import get_args
 
@@ -250,6 +251,35 @@ def test_the_band_reads_any_settled_pair_and_its_meter_is_the_reference_and_mono
         meters[confidence] = scale.meter
     if [c for c in CONFIDENCES if c in (low, high)] == [low, high] and low != high:
         assert (meters[low] or 0) < (meters[high] or 0)
+
+
+def test_the_band_reads_every_action_bias_and_confidence_pair_exhaustively() -> None:
+    for bias, confidence in itertools.product(ACTION_BIASES, CONFIDENCES):
+        view, _ = head_view(bias, confidence)
+        action, scale = build(view, preset("credit_snapshot"), SHIPPED_MAPS).call
+        assert (action.label, action.value_text) == ("Action bias", bias), (bias, confidence)
+        assert (scale.label, scale.value_text) == ("Confidence", confidence), (bias, confidence)
+        assert scale.meter == REFERENCE_METER[confidence], (bias, confidence)
+
+
+def test_a_settled_head_without_its_confidence_fact_fails_closed() -> None:
+    view, _ = head_view(ACTION_BIASES[0], CONFIDENCES[0])
+    modules = tuple(
+        m.model_copy(update={"facts": tuple(f for f in m.facts if f.fact_id != CONFIDENCE_FACT)})
+        if m.module_id == MODULE_ID
+        else m
+        for m in view.modules
+    )
+    broken = view.model_copy(update={"modules": modules})
+    with pytest.raises(ValueError, match="no settled action bias and confidence"):
+        build(broken, preset("credit_snapshot"), SHIPPED_MAPS)
+
+
+def test_a_settled_head_with_a_confidence_outside_the_literal_fails_closed() -> None:
+    view, _ = head_view(ACTION_BIASES[0], "Very High")
+    assert "Very High" not in CONFIDENCES
+    with pytest.raises(ValueError, match="no settled action bias and confidence"):
+        build(view, preset("credit_snapshot"), SHIPPED_MAPS)
 
 
 def test_the_reference_covers_the_whole_literal() -> None:

@@ -9,8 +9,8 @@ CP-6") gets CP-6's side: each challenge of a CP-2 thesis, strength or weakness r
 challenge has no line (nothing is invented). The registers and the referenced CP-1 facts go to
 Evidence and the gaps ledger to Limitations, as ``bindings/cp3.py`` does. The call band reads the
 settled ``T6A.4`` cells (``cp6_committee.settled_call``); its wiring is a separate change. Slots
-carry a ``cp6-`` prefix: a slot is unique across all shipped maps. Not yet in ``SHIPPED_MAPS``
-(registration is separate).
+carry a ``cp6-`` prefix: a slot is unique across all shipped maps. In ``SHIPPED_MAPS`` since
+task 8.7.
 """
 
 from deploy_vii.bindings import Binding, BindingMap

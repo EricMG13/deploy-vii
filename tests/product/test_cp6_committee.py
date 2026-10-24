@@ -79,7 +79,7 @@ from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot, head_of,
 from deploy_vii.live.schema import relax, schema_relaxations, strict_copy, strict_schema
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import bare_figures
-from deploy_vii.registry import StepChain, pack_source_steps
+from deploy_vii.registry import STEP_CHAINS, StepChain, pack_source_steps
 from deploy_vii.report_view import CallItem, build, pathways
 from tests.product.cp3_market import FACILITIES, TLB_SPREAD, market_pack
 from tests.product.credit_snapshot import CREDIT_SNAPSHOT_MAPS, credit_snapshot_view
@@ -111,7 +111,7 @@ CP2_RISK = "T2.11.r01"
 PREFERENCE = "T3.4.preference"
 CP3_RISK = "T3.9.r01"
 ORDER = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-3", "CP-5")
-# The step chain the registration commit adds: one settling step, no pack sources (no quotes).
+# The step chain, registered in `STEP_CHAINS` since task 8.7: one settling step, no pack sources.
 CHAIN = StepChain(module_id=MODULE_ID, cell="cp6", steps=(STEP_ID,), pack_sources=frozenset())
 
 
@@ -1099,6 +1099,7 @@ def test_the_context_block_prefills_heads_catalogues_findings_and_statuses() -> 
 
 
 def test_the_step_chain_sends_no_pack_sources() -> None:
+    assert CHAIN in STEP_CHAINS
     assert CHAIN.settling == STEP_ID and pack_source_steps((CHAIN,)) == frozenset()
 
 
