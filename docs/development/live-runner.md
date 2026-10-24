@@ -1436,6 +1436,25 @@ rules are not printed (`{}` with a stderr note for a step with no entries).
 function `live.submission.MODULE_STEP_ENTRIES` also names, and `report` renders the journal through
 `report_view.build` and `render.render`. The runner is unchanged.
 
+## Statement extraction
+
+24 Oct 2026 (task 8.10, phase 1; user decision "A"): `deploy_vii.statement_extract` reads the
+printed statement lines out of a page's text so `financials` stops hand-transcribing them; the
+model will map, correct and cite the lines instead of retyping them. `extract_statement_lines`
+takes one span's text and locator and returns its data lines (a label followed by two or more
+numeric cells split on runs of two or more spaces; `$` folded in, parentheses negative, a lone
+dash nil with the raw token kept, single-cell continuation lines joined, colon sub-headings
+not joined), each with its 1-based line number, indent, raw cells, exact `Decimal` values and
+the last all-caps caption above it, plus the raw year/month header lines above the first data
+line; `extract_pack_statements` does that for every span of a pack's sources (or the given
+locators) and refuses a locator two sources share or one no span has. It is pure Python and
+stdlib only. It does not round, compute, or assign a statement, period, item, unit, line kind
+or sign convention; it does not tell a statement page from a note table; and a line it cannot
+parse (trailing text, one value, numbers on their own line, a label with no letter) is left
+out, never stubbed. On the CZR pack it yields 33 lines on `page:56` (BS), 29 on `page:57` (IS),
+38 on `page:60` (CFS) and none on prose. Phase 1 changes no step, prompt, tool or contract;
+phase 2 (task 8.10b) wires it into the `financials` tool loop.
+
 ## Not covered here
 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep

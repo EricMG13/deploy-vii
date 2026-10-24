@@ -500,3 +500,15 @@ The ratio is model-specific: schema-check runs of models outside the pool measur
 any batch.
 
 Not verified: bodies of other modules' steps under Sol (no recording yet); a new pool model's ratio.
+
+## Amendment, 24 Oct 2026 (task 8.10)
+
+User decision "A" (24 Oct 2026): the candidate-model screen showed `financials` failing on hand
+transcription of about 800 statement objects, so Python extracts the printed statement lines
+and the model maps, corrects and cites them instead of retyping them. Phase 1 adds the pure
+extractor `deploy_vii.statement_extract` (docs/development/live-runner.md, "Statement
+extraction"). The model-facing contract is unchanged in phase 1: `FinancialSubmission`,
+`StatementLine` and the sent `financials` schema, prompt and tools are as before; wiring the
+extractor into the tool loop is phase 2 (task 8.10b).
+
+Not verified: other issuers' layouts; the extractor in the tool loop; live use.
