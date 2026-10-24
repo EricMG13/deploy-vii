@@ -115,6 +115,27 @@ Use the [testing and telemetry policy](testing-and-telemetry.md) and
 deterministic checks and never proves arithmetic.
 Missing private inputs or live access leave the relevant acceptance pending.
 
+## Docs-only pull requests and superseded runs
+
+On `pull_request` events the `Product checks` job (name and status unchanged) runs
+`.github/scripts/code_changed.sh` over the changed paths and skips its install and
+test steps only when every path matches the allow-list `docs/**`, `**/*.md`,
+`LICENSE*`, `.gitignore`, `.gitattributes`, `CODEOWNERS`. The default is fail-closed:
+an empty diff, a fetch or diff error, a non-PR event or any other path (including
+`src/`, `tests/`, `pyproject.toml`, `uv.lock`, `Makefile`, `.github/`, `settings/`,
+scripts and unknown files) runs the full suite. Hygiene, Secrets and the dependency
+audit always run. Concurrency groups by PR number and cancels superseded runs for
+pull requests only; other events group by `run_id`, so a push to `main` is never
+cancelled.
+
+| Changed paths | Product test run |
+| :--- | :--- |
+| `docs/x.md`; `README.md`; `docs/my notes.md` | skipped |
+| `docs/ci-gates.md` + `src/deploy_vii/x.py` | full |
+| `settings/project.toml`; `uv.lock`; `.github/workflows/ci.yml` | full |
+| `scripts/anything`; `tests/devtools/t.py`; `foo.txt` | full |
+| (empty) | full |
+
 ## Branch settings
 
 The [desired ruleset](../settings/github-ruleset.json) requires PRs, resolved
