@@ -96,9 +96,9 @@ from deploy_vii.live.runner import (  # type: ignore[import-untyped]
     journal_outcome,
     prompt_token_bound,
     reservation_usd,
-    schema_shaped,
 )
 from deploy_vii.live.schema import exact_json, strict_schema  # type: ignore[import-untyped]
+from deploy_vii.live.schema_check import schema_shaped  # type: ignore[import-untyped]
 from deploy_vii.live.settings import DEFAULT_SETTINGS, load_settings  # type: ignore[import-untyped]
 from deploy_vii.live.submission import STEPS, submit_model_payload  # type: ignore[import-untyped]
 from deploy_vii.preparation import PreparedPack  # type: ignore[import-untyped]
