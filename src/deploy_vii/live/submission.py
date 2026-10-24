@@ -114,7 +114,12 @@ from deploy_vii.readiness import (
     validate_review,
 )
 from deploy_vii.registry import bound_steps, prefilled_kinds, step_modules
-from deploy_vii.source_context import ReportingScope, SourceContextReview
+from deploy_vii.source_context import (
+    DIMENSIONS,
+    ReportingScope,
+    SourceContextReview,
+    scope_matches_period,
+)
 from deploy_vii.statement_validation import effective_accounts
 
 SUPERSEDED_SHAPE = "schema: pre-0008 submission shape"
@@ -483,9 +488,9 @@ class _Book:
     observations: Mapping[tuple[str, str], str]
 
 
-# Task 7.13: the four strings `context_binding` and `book_issues` compare exactly, in one order.
-SCOPE_DIMENSIONS = ("currency", "unit", "accounting_basis", "entity_perimeter")
-type Dimensions = tuple[str | None, str | None, str | None, str | None]
+# Task 7.13: the four strings `context_binding` and `book_issues` compare exactly, in
+# `source_context.DIMENSIONS` order (task 8.0b).
+type Dimensions = tuple[str | None, ...]
 # Parsed as the stored contract parses a period's dates (`Contract`: strict, from JSON).
 _DAY: TypeAdapter[date | None] = TypeAdapter(date | None, config=ConfigDict(strict=True))
 
@@ -500,16 +505,16 @@ def _book_path(item: Marked) -> str:
 
 
 def _scope_strings(scope: ReportingScope) -> Dimensions:
-    return scope.currency, scope.unit, scope.accounting_basis, scope.entity_perimeter
+    return tuple(getattr(scope, name) for name in DIMENSIONS)
 
 
 def _period_scopes(
     period: dict[str, Any], scopes: Sequence[ReportingScope]
 ) -> frozenset[Dimensions] | None:
-    """The distinct strings of the scopes a period binds to, by `context_binding`'s own date
-    and kind rule (a `PERIOD_END` period: a duration or period-end scope with its end date;
-    any other: a duration scope with its start and end dates). None when the period's type or
-    dates (or its id) do not parse as the contract parses them: the shape rejection names them."""
+    """The distinct strings of the scopes a period binds to, by the date and kind rule
+    `context_binding` binds by (`source_context.scope_matches_period`). None when the period's
+    type or dates (or its id) do not parse as the contract parses them: the shape rejection
+    names them."""
     kind = period.get("period_type")
     if (
         not isinstance(kind, str)
@@ -523,19 +528,7 @@ def _period_scopes(
     except ValidationError:
         return None
     return frozenset(
-        _scope_strings(scope)
-        for scope in scopes
-        if end is not None
-        and scope.end_date == end
-        and scope.period_kind in {"historical_duration", "period_end"}
-        and (
-            kind == "PERIOD_END"
-            or (
-                scope.period_kind == "historical_duration"
-                and scope.start_date is not None
-                and scope.start_date == start
-            )
-        )
+        _scope_strings(scope) for scope in scopes if scope_matches_period(scope, kind, start, end)
     )
 
 
@@ -580,7 +573,7 @@ class _Resolver:
             if id(book) not in self.dimensions:
                 self.dimensions[id(book)] = self._dimensions(item, book)
             strings = self.dimensions[id(book)].get(id(item.holder))
-            value = None if strings is None else strings[SCOPE_DIMENSIONS.index(item.name)]
+            value = None if strings is None else strings[DIMENSIONS.index(item.name)]
             if strings is not None and value is None:
                 # The bound scope states no such dimension: the contract's own message, kept
                 # visible (`_validate_prefilled` drops "Field required" of other unset fields).
@@ -640,7 +633,7 @@ class _Resolver:
             return {**{id(period): strings for _, _, period in bound}, id(book): strings}
         differing = [
             name
-            for index, name in enumerate(SCOPE_DIMENSIONS)
+            for index, name in enumerate(DIMENSIONS)
             if len({strings[index] for _, found, _ in bound for strings in found}) > 1
         ]
         issue = (
@@ -770,7 +763,9 @@ class _Resolver:
 class Prefill:
     """`prefill`'s result: the payload to retain, the JSON paths Python set with each one's kind,
     the (path, validator-worded issue) of each reference Python could not resolve, and the marked
-    paths still unset (an unbound reference's field and the bindings that depend on it)."""
+    paths still unset: every marked path absent after the pre-fill, such as an unbound
+    reference's field and the bindings that depend on it, and also a hash whose sub-object did
+    not parse."""
 
     payload: str
     paths: tuple[str, ...] = ()

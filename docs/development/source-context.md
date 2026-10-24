@@ -69,6 +69,10 @@ observation, including conflict alternatives, against that source's financial
 classification and matching entity, dates, currency, unit, perimeter and basis.
 A similar name or another source's valid citation cannot substitute for a mapping.
 All inputs are reconstructed from their serialized contracts before traversal.
+The date and kind part of that match is `source_context.scope_matches_period`, the one
+predicate the financials prefill (`live.submission._period_scopes`) also selects scopes by;
+both take the kind set `STATED_KINDS` and the order of the four strings, `DIMENSIONS`, from
+`source_context` (task 8.0b).
 
 Pro-forma observations are checked separately against the corresponding located
 subsequent event: entity, reporting end, dimensions, effective date, event status,

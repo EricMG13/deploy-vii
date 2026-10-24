@@ -979,7 +979,8 @@ binding kind `scope-dimension`, so the sent `financials` schema leaves them out.
 phase, after the hashes that read only sent fields and before the facility and observation
 hashes (which parse the book), `prefill` takes the retained `SourceContextReview`
 (`Known.context`) and, for each book, the one entity `binding.books[]` names for it. A period
-binds to the scopes of that entity in the financial sources by `context_binding`'s rule: a
+binds to the scopes of that entity in the financial sources by `context_binding`'s rule (one
+predicate both call, `source_context.scope_matches_period`, task 8.0b): a
 `historical_duration` or `period_end` scope with the period's `end_date`, and unless
 `period_type` is `PERIOD_END` a `historical_duration` scope with its `start_date` too. The book
 and each bound period take the one four-string tuple every bound period shares. Where they

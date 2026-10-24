@@ -40,8 +40,10 @@ _TIERS: dict[EvidenceClass, EvidenceTier] = {
 # Task 7.14: a financial source's historical and period-end scopes state these four strings
 # (rule 1), the same for every such scope of one entity (rule 2, `_disagreements`): the book's
 # and its periods' strings are copied from them. Forecast and unspecified scopes are not bound.
-_STATED_KINDS = frozenset({"historical_duration", "period_end"})
-_DIMENSIONS = ("currency", "unit", "entity_perimeter", "accounting_basis")
+# Task 8.0b: the one kind set and the one order of the four strings, shared with
+# `context_binding` and `live.submission` (the order names the fields in their issues).
+STATED_KINDS = frozenset({"historical_duration", "period_end"})
+DIMENSIONS = ("currency", "unit", "entity_perimeter", "accounting_basis")
 
 
 class EntityContext(Contract):
@@ -80,7 +82,7 @@ def scope_matches_period(
     return (
         scope.end_date is not None
         and scope.end_date == end_date
-        and scope.period_kind in _STATED_KINDS
+        and scope.period_kind in STATED_KINDS
         and (
             period_type == "PERIOD_END"
             or (
@@ -267,7 +269,7 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
             ):
                 issues.append(f"Historical reporting scope ends after as-of date: {scope.scope_id}")
             if (
-                scope.period_kind in {"historical_duration", "period_end"}
+                scope.period_kind in STATED_KINDS
                 and scope.end_date
                 and assessment.published_on
                 and scope.end_date > assessment.published_on
@@ -300,7 +302,7 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
         if (
             event_scope is None
             or event_scope.end_date is None
-            or event_scope.period_kind not in {"historical_duration", "period_end"}
+            or event_scope.period_kind not in STATED_KINDS
         ):
             issues.append(f"Subsequent event requires a dated historical scope: {event.event_id}")
         elif event.event_date <= event_scope.end_date:
@@ -337,8 +339,8 @@ def _lacks(assessment: SourceContext, scope: ReportingScope) -> Iterator[str]:
     """Task 7.14, rule 1: a historical or period-end scope of a financial source states all
     four dimensions; one issue per missing field. Forecast and unspecified scopes, and a
     non-financial source's scopes, are not held to it."""
-    if assessment.classification == "financial" and scope.period_kind in _STATED_KINDS:
-        for name in _DIMENSIONS:
+    if assessment.classification == "financial" and scope.period_kind in STATED_KINDS:
+        for name in DIMENSIONS:
             if getattr(scope, name) is None:
                 yield f"Financial scope lacks {name}: {scope.scope_id}"
 
@@ -354,10 +356,10 @@ def _disagreements(review: SourceContextReview) -> Iterator[str]:
     for source in review.sources:
         if source.classification == "financial":
             for scope in source.scopes:
-                if scope.period_kind in _STATED_KINDS:
+                if scope.period_kind in STATED_KINDS:
                     by_entity.setdefault(scope.entity_id, []).append(scope)
     for entity_id, scopes in by_entity.items():
-        for name in _DIMENSIONS:
+        for name in DIMENSIONS:
             stated: dict[str, list[str]] = {}
             for scope in scopes:
                 value = getattr(scope, name)
