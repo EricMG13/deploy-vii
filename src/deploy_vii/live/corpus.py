@@ -38,6 +38,7 @@ from typing import Any
 from deploy_vii.cp1_workflow import CP1_PROMOTION
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, submit_model_payload
+from deploy_vii.live.tools import RULE_PREFIXES
 from deploy_vii.preparation import PreparedPack, load_pack
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -201,6 +202,12 @@ def entry_from_attempt(
         raise CorpusError("manifest status and validator issues disagree")
     if "output.md" in manifest.get("scrubbed_files", []):
         raise CorpusError("output.md was altered by credential scrubbing; it is not the payload")
+    # Task 8.0d: a tool-loop rule judges what the model was shown (`live.tools.ToolRules`), which
+    # one payload does not carry, so a verdict holding one is not replayable from the payload.
+    if any(str(issue).startswith(RULE_PREFIXES) for issue in live["issues"]):
+        raise CorpusError(
+            "the verdict holds a tool-loop evidence rule; one payload cannot replay it"
+        )
     entry: dict[str, Any] = {
         "step_id": step_id,
         "payload": (directory / "output.md").read_text(encoding="utf-8"),

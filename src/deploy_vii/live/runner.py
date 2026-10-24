@@ -5,7 +5,9 @@ reserving first; the raw response is retained before the journal sees it; the pa
 the journal only through `live.submission.submit_model_payload`: submit_cp0_review /
 submit_cp1_step (the same validators as any other input), or `store.submit_step` with the
 validator that rejects an uncomposable CP-0 submission or a CP-1 payload holding a reference
-Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4).
+Python cannot bind (task 7.0i), or `promote_cp1` for CP-1's fifth step, `quality` (task 7.4),
+or a one-step module's own entry (`MODULE_STEP_ENTRIES`: CP-1A, CP-2/CP-4/CP-3/CP-5 since
+task 8.6 and CP-6 since task 8.7, each sent its module context and only its bound sources).
 For source_readiness Python composes the stored review from the model's submission; for every
 CP-1 step it pre-fills the hash bindings. The ledger is settled
 and the manifest sealed even if validation raises. A response from a model other than the
@@ -30,22 +32,29 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from deploy_vii.business_context import STEP_ID as BUSINESS_CONTEXT
 from deploy_vii.business_context import cp1_context_facts
 from deploy_vii.cp1_quality import cp1_quality_inputs
-from deploy_vii.cp1_workflow import CP1_PROMOTION, cp1_registers
+from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
 from deploy_vii.live.catalog import PinnedCandidate, PinnedPool
 from deploy_vii.live.client import (
     CHAT_URL,
     DEFAULT_TIMEOUT_SECONDS,
-    SCHEMA_WORDS,
     ChatClient,
     ChatRequest,
     ChatResult,
     TransportError,
 )
-from deploy_vii.live.context import OMITTED, projection_name, upstream_text
+from deploy_vii.live.context import (
+    INTEGRITY,
+    OMITTED,
+    SOURCE_SCOPES,
+    declared_sources,
+    integrity_scope,
+    module_context,
+    projection_name,
+    upstream_text,
+)
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
@@ -61,12 +70,11 @@ from deploy_vii.live.prompts import (
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter, response_envelope
 from deploy_vii.live.schema import (
     RELAXATIONS_BASIS,
-    schema_keywords,
     schema_relaxations,
-    schema_shape,
     unverified_keywords,
 )
 from deploy_vii.live.submission import STEPS, StepDef, Submitted, submit_model_payload
+from deploy_vii.registry import settling_steps, step_chain
 
 COHORT = "openrouter-pool"
 DEFAULT_MAX_RETRIES = 2
@@ -77,19 +85,21 @@ IN_FLIGHT_DEFAULT_WAIT_S = 120  # when the refusal states no Retry-After
 IN_FLIGHT_MAX_WAIT_S = 300
 # Ends the ledger settle reason of an in-flight 402 (`in_flight_refused`).
 IN_FLIGHT_SETTLE_MARK = "; in-flight 402: not a model try"
+# Ends it for the second in-flight 402 of one try, which is exhaustion (task 8.0a); it is no
+# model try either (`in_flight_refused`).
+IN_FLIGHT_EXHAUSTED_MARK = "; in-flight 402 again: treated as exhaustion"
 SUBMITTED = frozenset({"ok", "truncated"})
+# Each module's last step, whose acceptance is the module's (`journal_outcome`, task 8.0a).
+SETTLING_STEPS = settling_steps()
 POOLABLE_STATUSES = frozenset({"accepted", "rejected"})
 
 
 __all__ = [
     "STEPS",
     "DispatchResult",
-    "SchemaCheck",
     "StepDef",
     "StepSpec",
-    "check_schema",
     "dispatch",
-    "schema_rejections",
 ]
 
 
@@ -159,6 +169,11 @@ class DispatchResult:
     step_try: int = 1  # 2 for the step's repair within its attempt (task 7.0g)
     in_flight: CreditState | None = None  # an in-flight 402 that `dispatch` retries (7.8)
     retried: "DispatchResult | None" = None  # the in-flight refused attempt this one re-sent
+
+    @property
+    def held(self) -> bool:
+        """Whether the charge is the held reservation, not a measured cost."""
+        return bool(self.settlement and self.settlement.unreconciled)
 
 
 @cache
@@ -305,19 +320,19 @@ def expected_step(attempt: Attempt, module_id: str) -> str:
         raise ValueError("ticket is finished or already retains a module response")
     if any(item.status == "pending" for item in attempt.steps):
         raise ValueError("a step response is pending; resume it before dispatching another")
-    if module_id == "CP-0":
-        if attempt.steps:
-            raise ValueError("CP-0 already retains its review step; resume it through the journal")
-        return "source_readiness"
-    if module_id == "CP-1A":
-        if attempt.steps:
-            raise ValueError("CP-1A already retains its one step; resume it through the journal")
-        return BUSINESS_CONTEXT
-    # Task 7.4: the four stages, then the `quality` review whose acceptance is the promotion.
+    # Task 8.0a: the module's registry chain (CP-1: the four stages, then the `quality` review
+    # whose acceptance is the promotion). On a pending ticket the journal keeps valid steps
+    # only, so `done` is its position: every module (CP-0's `submit_cp0_review` and CP-1A's
+    # `submit_cp1a_step` included) retains steps through `Execution.submit_step`, which settles
+    # an invalid response that is not repaired within the attempt in the write that retains it
+    # (`_save_finished`), and keeps a repaired first try in `step_repairs`, not `steps`.
+    steps = step_chain(module_id).steps
     done = sum(1 for item in attempt.steps if item.status == "valid")
-    if done >= len(CP1_PROMOTION):
-        raise ValueError("every CP-1 step is already retained")
-    return CP1_PROMOTION[done]
+    if done < len(steps):
+        return steps[done]
+    if len(steps) == 1:
+        raise ValueError(f"{module_id} already retains its one step; resume it through the journal")
+    raise ValueError(f"every {module_id} step is already retained")
 
 
 def _upstream(store: Execution, attempt: Attempt, step_id: str) -> tuple[UpstreamInput, ...]:
@@ -367,8 +382,13 @@ def in_flight_refused(record: AttemptRecord) -> bool:
     """Whether the ledger settled this attempt as an in-flight 402 (task 7.8, fix round 1):
     credit is not a model failure, so such an attempt uses up no `max_retries` try. The mark is
     the end of the settle reason `_close` writes; the charge is known zero, so no `adjust`
-    (held charges only) can replace it."""
-    return record.status == "settled" and (record.basis or "").endswith(IN_FLIGHT_SETTLE_MARK)
+    (held charges only) can replace it. Task 8.0a: the second in-flight refusal, exhaustion, ends
+    with `IN_FLIGHT_EXHAUSTED_MARK` instead and counts the same; ledgers written before 8.0a
+    carry `IN_FLIGHT_SETTLE_MARK` on both refusals."""
+    basis = record.basis or ""
+    return record.status == "settled" and basis.endswith(
+        (IN_FLIGHT_SETTLE_MARK, IN_FLIGHT_EXHAUSTED_MARK)
+    )
 
 
 def next_attempt_id(
@@ -415,6 +435,24 @@ def _plan(
     quality = step.step_id == QUALITY
     registers = cp1_registers(store, ticket_id) if quality else None
     inputs = cp1_quality_inputs(registers) if registers is not None else None
+    # Task 8.6: CP-4 and CP-3 are sent only the sources their bound upstream names (CP-0's
+    # legal, or third-party, sources); any other declared source is refused before spending.
+    if step.step_id in SOURCE_SCOPES:
+        allowed = declared_sources(
+            store, attempt, step.step_id, [s.source_id for s in store.pack(snapshot).sources]
+        )
+        if extra := [s for s in step.declared_sources if s not in allowed]:
+            raise ValueError(
+                f"{step.step_id} is sent {', '.join(extra)}, which is not one of the sources its "
+                f"bound upstream names ({', '.join(allowed) or 'none'})"
+            )
+    scope = (
+        quality_scope(registers, inputs)
+        if registers is not None
+        else integrity_scope(store, attempt)
+        if step.step_id == INTEGRITY
+        else None
+    )
     messages = build(
         step.step_id,
         store.pack(snapshot),
@@ -424,7 +462,10 @@ def _plan(
         repair_issues=repair.issues,
         # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
         cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
-        scope=quality_scope(registers, inputs) if registers is not None else None,
+        # Task 8.6: CP-2, CP-4 and CP-3 (task 8.7: and CP-6) read their bound upstream through
+        # Python's view of it.
+        module_context=module_context(store, attempt, step.step_id),
+        scope=scope,
     )
     chat = ChatRequest(
         model=candidate.slug,
@@ -536,7 +577,7 @@ def journal_outcome(
     # A step that settles its module (CP-0's review, CP-1A's one step, CP-1's `quality`
     # promotion) is accepted only when the settled module is: a valid step whose candidate
     # fails the journal's check is rejected.
-    if step_id in {"source_readiness", BUSINESS_CONTEXT, QUALITY}:
+    if step_id in SETTLING_STEPS:
         accepted = journal.result_sha256 is not None and store.result(
             journal.result_sha256
         ).status in {"accepted", "restricted"}
@@ -570,6 +611,14 @@ def _interrupt_if_exhausted(plan: _Plan, store: Execution, run: _Run, why: str) 
     plan.event("ticket_interrupted", reason=reason)
 
 
+def _re_sent(run: _Run) -> bool:
+    """Whether `dispatch` re-sends this attempt: an in-flight 402 not yet treated as exhaustion
+    (task 7.8). The second in-flight refusal still reads transient but is exhaustion
+    (`_refusal`): it is not re-sent, and its settle reason says so (`IN_FLIGHT_EXHAUSTED_MARK`,
+    task 8.0a) while it still counts as no model try."""
+    return run.credit is not None and run.credit.transient and run.credit.exhausted is None
+
+
 def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
     consequence = None
     if run.ticket_interrupted:
@@ -582,7 +631,7 @@ def _retries_record(plan: _Plan, run: _Run) -> dict[str, Any]:
         )
     # An in-flight 402 `dispatch` re-sends (task 7.8) is no model try: on the last allowed try
     # the re-send follows, so the refused attempt exhausts nothing (task 7.10 item 7).
-    resent = run.credit is not None and run.credit.transient and run.credit.exhausted is None
+    resent = _re_sent(run)
     return {
         "attempt_number": plan.attempt_number,
         "step_try": plan.step_try,
@@ -877,8 +926,11 @@ def _close(plan: _Plan, ledger: Ledger, writer: AttemptWriter, run: _Run, key: s
     cost = _cost(plan.candidate, run.result)
     try:
         reason = f"{cost.reason}; status={run.status}"
-        if run.credit is not None and run.credit.transient:
-            reason += IN_FLIGHT_SETTLE_MARK  # `_plan` counts no try for it
+        # `_plan` counts no try for either (`in_flight_refused`); only the wording differs.
+        if _re_sent(run):
+            reason += IN_FLIGHT_SETTLE_MARK
+        elif run.credit is not None and run.credit.transient:
+            reason += IN_FLIGHT_EXHAUSTED_MARK
         run.settlement = ledger.settle(plan.attempt_id, cost.amount, reason)
         plan.event("ledger_settled", charged=run.settlement.charged, basis=cost.basis)
     finally:
@@ -1082,401 +1134,3 @@ def _dispatch_once(
         step_try=plan.step_try,
         in_flight=run.credit,
     )
-
-
-# --- `live schema-check` (task 2.11) ------------------------------------------------------------
-#
-# One strict `response_format` call per (model, step schema) with the smallest legal prompt, so a
-# provider's verdict on a schema costs cents, not a CP-0 call. Reserved, retained and settled like
-# any attempt (same client, key path and classification); nothing reaches an execution journal.
-
-SCHEMA_CHECK_CASE = "schema-check"
-SCHEMA_CHECK_RECORD = "schema-check-attempt/1"
-# `schema-check --bisect` variants: evidence apart from the plain checks, so a variant's verdict
-# can never block or lift a real run (`schema_rejections` reads `schema-check` only).
-SCHEMA_BISECT_CASE = "schema-bisect"
-SCHEMA_BISECT_RECORD = "schema-bisect-attempt/1"
-SCHEMA_CHECK_MAX_TOKENS = 16  # the brief's floor; a provider minimum above it answers a 400
-SCHEMA_CHECK_TIMEOUT_SECONDS = 120.0
-SCHEMA_CHECK_PROMPT = "Reply with one JSON object that conforms to the response format."
-
-
-def schema_shaped(result: ChatResult) -> bool:
-    """True for an HTTP 400 whose provider code is `invalid_json_schema` or whose detail says
-    "invalid schema" or names `response_format` (`client.SCHEMA_WORDS`). Google's "Request
-    contains an invalid argument" does not. A detail withheld for its account id keeps the
-    verdict it had: the client read the words before withholding it (`detail_names_schema`,
-    task 7.15 fix round 1)."""
-    if result.classification != "http_error" or result.http_status != 400:
-        return False
-    if result.provider_error_code == "invalid_json_schema":
-        return True
-    return result.detail_names_schema or bool(SCHEMA_WORDS.search(result.error_detail or ""))
-
-
-@dataclass(frozen=True)
-class SchemaCheck:
-    """One (model, step) result. `outcome`: accepted (ok or truncated: the provider took the
-    schema), http_error (with the provider's `detail`), other (timeout, fallback, credit),
-    ineligible or refused (nothing sent)."""
-
-    model: str
-    step_id: str
-    outcome: str
-    classification: str
-    http_status: int | None
-    detail: str | None
-    schema_sha256: str
-    relaxations: tuple[str, ...]
-    attempt_id: str
-    charged_usd: Decimal | None
-    held: bool
-    schema_rejection: bool = False  # a schema-shaped 400: blocks later runs (`schema_shaped`)
-    keywords: tuple[str, ...] = ()  # JSON-Schema keywords of the schema sent (`schema_keywords`)
-    variant: str | None = None  # the bisect variant sent; None for the plain check
-
-
-@dataclass
-class _Check:
-    candidate: PinnedCandidate
-    step_id: str
-    batch_id: str
-    chat: ChatRequest
-    locator: AttemptLocator
-    reserve_usd: Decimal
-    prompt_tokens: int
-    cap_usd: Decimal
-    clock: Callable[[], str]
-    started_at: str
-    variant: str | None = None
-    status: str = "interrupted"
-    result: ChatResult | None = None
-    error: str | None = None
-    settlement: Settlement | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
-    key_note: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def schema(self) -> type[BaseModel]:
-        return STEPS[self.step_id].schema
-
-    @property
-    def sent(self) -> dict[str, Any]:
-        sent: dict[str, Any] = self.chat.response_format["json_schema"]["schema"]
-        return sent
-
-    @property
-    def sent_sha256(self) -> str:
-        """The hash `schema_text` gives the plain sent schema (same serialisation)."""
-        text = json.dumps(self.sent, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(text.encode()).hexdigest()
-
-    def event(self, name: str, **fields: object) -> None:
-        self.events.append(
-            {"seq": len(self.events) + 1, "at": self.clock(), "event": name, **fields}
-        )
-
-
-def schema_check_request(
-    candidate: PinnedCandidate, step_id: str, schema: dict[str, Any] | None = None
-) -> ChatRequest:
-    """The minimal strict request: one short user message, 16 tokens, no reasoning parameter.
-
-    `schema` replaces the step's sent schema (a bisect variant); the format is otherwise the
-    one a probe sends (`name` = step id, `strict: true`)."""
-    fmt = response_format(step_id, STEPS[step_id].schema)
-    if schema is not None:
-        fmt = {**fmt, "json_schema": {**fmt["json_schema"], "schema": schema}}
-    return ChatRequest(
-        model=candidate.slug,
-        messages=({"role": "user", "content": SCHEMA_CHECK_PROMPT},),
-        max_tokens=SCHEMA_CHECK_MAX_TOKENS,
-        response_format=fmt,
-        reasoning_effort=None,
-        accepted_model_ids=(candidate.slug, candidate.canonical_slug),
-        timeout_s=SCHEMA_CHECK_TIMEOUT_SECONDS,
-        reasoning=False,
-    )
-
-
-def _check_manifest(check: _Check, cost: _Cost) -> dict[str, Any]:
-    result, sent = check.result, check.sent
-    return {
-        "schema": SCHEMA_CHECK_RECORD if check.variant is None else SCHEMA_BISECT_RECORD,
-        "experiment_id": check.batch_id,
-        "case_id": check.locator.case,
-        "variant": check.variant,
-        "attempt_id": check.locator.attempt,
-        "model": check.candidate.slug,
-        "module_id": STEPS[check.step_id].module_id,
-        "step_id": check.step_id,
-        "started_at": check.started_at,
-        "finished_at": check.clock(),
-        "cohort": COHORT,
-        "status": check.status,
-        "classification": result.classification if result else None,
-        "http_status": result.http_status if result else None,
-        "error": check.error,
-        "error_detail": result.error_detail if result else None,
-        "provider_error_code": result.provider_error_code if result else None,
-        # Only a schema-shaped 400 blocks later runs (`schema_rejections`).
-        "schema_rejection": bool(result and schema_shaped(result)),
-        "journal": "none: schema-check submits nothing",
-        "code": {"live_package_sha256": code_sha256()},
-        "hashes": {
-            "schema_sha256": check.sent_sha256,
-            "request_sha256": hashlib.sha256(
-                json.dumps(check.chat.body(), sort_keys=True).encode()
-            ).hexdigest(),
-        },
-        "schema_keywords": schema_keywords(sent),
-        "schema_shape": schema_shape(sent),
-        "schema_keywords_unverified": unverified_keywords(sent),
-        # A variant is derived from the step's sent schema; its relaxations are that schema's.
-        "variant_base_schema_sha256": (
-            None
-            if check.variant is None
-            else hashlib.sha256(schema_text(check.schema).encode()).hexdigest()
-        ),
-        "schema_relaxations": schema_relaxations(check.schema),
-        "schema_relaxations_of": (
-            "hashes.schema_sha256" if check.variant is None else "variant_base_schema_sha256"
-        ),
-        "schema_relaxations_basis": RELAXATIONS_BASIS,
-        "endpoint": CHAT_URL,
-        "routing": {"allow_fallbacks": False, "require_parameters": True, "models": None},
-        "reasoning": "not sent: the provider default applies",
-        "served": {
-            "model": result.served_model if result else None,
-            "provider": result.served_provider if result else None,
-            "provider_request_id": result.provider_request_id if result else None,
-            "identity_verified": bool(result and result.identity_verified),
-        },
-        "budgets": {
-            "cap_usd": check.cap_usd,
-            "max_tokens": check.chat.max_tokens,
-            "reserved_usd": check.reserve_usd if check.status not in _UNSENT else None,
-            "timeout_s": check.chat.timeout_s,
-        },
-        "pinned_candidate": check.candidate.to_record(),
-        "credential": {
-            "recorded": False,
-            "response_scrubbed": bool(result and result.redacted),
-            **check.key_note,
-        },
-        "cost": {"basis": cost.basis, "reason": cost.reason},
-    }
-
-
-def _seal_check(check: _Check, writer: AttemptWriter, cost: _Cost) -> None:
-    result = check.result
-    checks: dict[str, Any] = {"verdict": {"outcome": check.status, "error": check.error}}
-    if result is not None:
-        checks["classification"] = {
-            "classification": result.classification,
-            "finish_reason": result.finish_reason,
-            "identity_verified": result.identity_verified,
-            "error_detail": result.error_detail,
-        }
-    metrics = {
-        "provider": _provider_usage(result),
-        "local": _nullable("latency_s", result.latency_s if result else None, _NOT_RECEIVED),
-        "estimate": {"prompt_tokens_upper_bound": check.prompt_tokens},
-        "ledger": _ledger_block(cost, check.settlement),
-    }
-    upstream = ["response.json", "output.md"] if result and result.redacted else []
-    writer.seal(
-        check.locator,
-        _check_manifest(check, cost),
-        check.events,
-        metrics,
-        checks,
-        scrubbed_upstream=upstream,
-    )
-
-
-def _unsent_check(check: _Check, writer: AttemptWriter, status: str, reason: str) -> None:
-    check.status, check.error = status, reason
-    check.event(status, reason=reason)
-    writer.record_response(check.locator, response_envelope(None, reason), None)
-    _seal_check(check, writer, _Cost(None, "not-dispatched", f"{status}; nothing was sent"))
-
-
-def _result(check: _Check) -> SchemaCheck:
-    result = check.result
-    unsent = check.status in _UNSENT
-    return SchemaCheck(
-        model=check.candidate.slug,
-        step_id=check.step_id,
-        outcome=check.status,
-        classification="not sent" if unsent or result is None else result.classification,
-        http_status=result.http_status if result else None,
-        detail=check.error if unsent or result is None else result.error_detail,
-        schema_sha256=check.sent_sha256,
-        relaxations=tuple(schema_relaxations(check.schema)),
-        attempt_id=check.locator.attempt,
-        charged_usd=check.settlement.charged if check.settlement else None,
-        held=bool(check.settlement and check.settlement.unreconciled),
-        schema_rejection=bool(result and schema_shaped(result)),
-        keywords=tuple(schema_keywords(check.sent)),
-        variant=check.variant,
-    )
-
-
-def check_schema(
-    candidate: PinnedCandidate,
-    step_id: str,
-    *,
-    batch_id: str,
-    ledger: Ledger,
-    client: ChatClient,
-    writer: AttemptWriter,
-    key_path: Path,
-    key_index: int,
-    bytes_per_token: Decimal,
-    clock: Callable[[], str] = utc_stamp,
-    variant: tuple[str, dict[str, Any]] | None = None,
-) -> SchemaCheck:
-    """Send `step_id`'s sent schema to `candidate` once and record the provider's verdict.
-
-    Evidence goes to `<root>/<batch_id>/schema-check/<model>/<attempt>/`; with `variant` (a
-    bisect variant's name and schema, which is sent instead) to `.../schema-bisect/...`, which
-    no real run reads. A reservation the cap refuses is sealed and returned as outcome
-    `refused` (nothing sent; the caller stops); a connection failure propagates after the
-    reservation is settled as held; a 402 raises CreditExhausted after the attempt is sealed
-    (DC-8), with the reason its body states. A check is not retried, so an in-flight 402 stops
-    it too (task 7.8; only `dispatch` waits and re-sends)."""
-    name, schema = variant if variant is not None else (None, None)
-    chat = schema_check_request(candidate, step_id, schema)
-    tokens = prompt_token_bound(chat.body(), bytes_per_token)
-    # As in `dispatch`: a key that cannot be read stops the check before anything is written
-    # or reserved, so no reservation is left open.
-    loaded = load_key_with_note(key_path, key_index)
-    prefix = f"{candidate.slug.replace('/', '__')}-{step_id}" + (f"-{name}" if name else "")
-    case = SCHEMA_CHECK_CASE if name is None else SCHEMA_BISECT_CASE
-    base = AttemptLocator(batch_id, case, candidate.slug, prefix)
-    attempt_id, _ = next_attempt_id(ledger, writer, base, prefix)
-    check = _Check(
-        candidate=candidate,
-        step_id=step_id,
-        batch_id=batch_id,
-        chat=chat,
-        locator=replace(base, attempt=attempt_id),
-        reserve_usd=reservation_usd(candidate, tokens, chat.max_tokens),
-        prompt_tokens=tokens,
-        cap_usd=ledger.cap,
-        clock=clock,
-        started_at=clock(),
-        variant=name,
-    )
-    writer.begin(
-        check.locator,
-        {
-            "endpoint": CHAT_URL,
-            "method": "POST",
-            "body": chat.body(),
-            "non_secret_parameters": {
-                "timeout_s": chat.timeout_s,
-                "accepted_model_ids": list(chat.accepted_model_ids),
-                "prompt_tokens_upper_bound": tokens,
-            },
-            "authentication": "Authorization header omitted; the credential is never recorded",
-        },
-    )
-    misfit = candidate.misfit(tokens, chat.max_tokens)
-    if misfit is not None:
-        _unsent_check(check, writer, "ineligible", f"ineligible: {misfit}")
-        return _result(check)
-    try:
-        ledger.reserve(attempt_id, check.reserve_usd)
-    except CapExceeded as error:
-        _unsent_check(check, writer, "refused", str(error))
-        return _result(check)  # the caller stops the batch: nothing further fits the cap
-    check.event("reserved", usd=check.reserve_usd, prompt_tokens_upper_bound=tokens)
-    if loaded.tokens_found > 1:
-        check.key_note = loaded.note()
-    try:
-        check.event("request_sent", model=candidate.slug)
-        answer = check.result = client.complete(chat, key=loaded.key)
-        check.status = (
-            "accepted"
-            if answer.classification in SUBMITTED
-            else "http_error"
-            if answer.classification == "http_error"
-            else "other"
-        )
-        check.event(
-            "response_received",
-            classification=answer.classification,
-            http_status=answer.http_status,
-        )
-    except BaseException as failure:
-        check.error = redact(f"{type(failure).__name__}: {failure}", loaded.key)
-        check.event("interrupted", error=check.error)
-        raise
-    finally:
-        result = check.result
-        writer.record_response(
-            check.locator,
-            response_envelope(result, check.error or "no response received"),
-            result.content if result else None,
-        )
-        cost = _cost(candidate, result)
-        try:
-            check.settlement = ledger.settle(
-                attempt_id, cost.amount, f"{cost.reason}; schema-check status={check.status}"
-            )
-            check.event("ledger_settled", charged=check.settlement.charged, basis=cost.basis)
-        finally:
-            _seal_check(check, writer, cost)
-    if answer.classification == "insufficient_credit":
-        state = from_dispatch_402(clock(), answer.http_status, answer.raw, answer.retry_after)
-        if state.exhausted is not True:
-            detail = f"{state.detail} in flight; schema-check does not retry: treated as exhaustion"
-            state = replace(state, exhausted=True, detail=detail)
-        raise CreditExhausted(state)
-    return _result(check)
-
-
-def _check_record(path: Path) -> dict[str, Any]:
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:  # a JSONDecodeError or undecodable bytes: the record is corrupt
-        raise ValueError(f"{path} is not a schema-check record (not JSON)") from None
-    fields = {"experiment_id", "model", "step_id", "status", "finished_at", "hashes"}
-    if (
-        not isinstance(record, dict)
-        or record.get("schema") != SCHEMA_CHECK_RECORD
-        or not fields <= set(record)
-        or not isinstance(record["hashes"], dict)
-        or "schema_sha256" not in record["hashes"]
-    ):
-        raise ValueError(f"{path} is not a {SCHEMA_CHECK_RECORD} schema-check record")
-    return record
-
-
-def schema_rejections(artifact_root: Path) -> dict[tuple[str, str, str], str]:
-    """(model, step, sent schema sha256) -> the batch whose schema-check saw it refused.
-
-    Only verdicts on the schema count: an accepted call, or an HTTP 400 the record marks
-    `schema_rejection: true` (`schema_shaped`). Other errors, refusals, interruptions, a 400
-    that does not name the schema and a record written before that field existed say nothing
-    about the schema and neither block nor lift. The latest verdict per key wins (finished_at,
-    then batch id), so a later accepted check lifts an earlier rejection, and a changed schema
-    has a new hash and is never blocked by a verdict on the old one. An unreadable record fails
-    closed (ValueError) before anything is spent."""
-    latest: dict[tuple[str, str, str], tuple[str, str, bool]] = {}
-    for path in sorted(artifact_root.glob(f"*/{SCHEMA_CHECK_CASE}/*/*/manifest.json")):
-        record = _check_record(path)
-        rejected = (
-            record["status"] == "http_error"
-            and record.get("http_status") == 400
-            and record.get("schema_rejection") is True
-        )
-        if record["status"] != "accepted" and not rejected:
-            continue
-        key = (str(record["model"]), str(record["step_id"]), str(record["hashes"]["schema_sha256"]))
-        verdict = (str(record["finished_at"]), str(record["experiment_id"]), rejected)
-        if key not in latest or verdict[:2] > latest[key][:2]:
-            latest[key] = verdict
-    return {key: batch for key, (_, batch, rejected) in latest.items() if rejected}

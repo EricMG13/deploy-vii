@@ -53,6 +53,14 @@ CP-1 narrative: [prior evidence, analytical chains and story coverage](narrative
 CP-1 narrative delivery: [finding, evidence-trace and coverage projection](narrative-projection.md).
 CP-1 readiness: [consumer sufficiency and historical Model gate](downstream-readiness.md).
 CP-1 QA: [hash-bound judgments, r14 numeric confidence and pre-handoff scope](quality.md).
+Analyst modules, one live step each (registry `STEP_CHAINS`, task 8.6): CP-1A
+[business and transaction context](business-context.md); CP-2
+[credit synthesis](../../src/deploy_vii/methods/cp2.md); CP-4
+[legal covenants](../../src/deploy_vii/methods/cp4.md); CP-3
+[relative value](../../src/deploy_vii/methods/cp3.md); CP-5
+[integrity review](../../src/deploy_vii/methods/cp5.md); CP-6 (task 8.7)
+[committee challenge](../../src/deploy_vii/methods/cp6.md). What each is sent:
+[live runner, per-module context](live-runner.md#per-module-context-task-86).
 Development CLI: [usage](workflow.md). Product CLI: [usage](product-cli.md). M1 (FFO
 interest coverage, DCF and DCF/debt) is implemented; next, in parallel, M2 runner and probe,
 M3 design re-baseline and M4 degradation semantics, then M5–M11 in the plan's order.

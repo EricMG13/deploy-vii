@@ -37,6 +37,17 @@ from a pinned pool:
 
 ## Modules
 
+Every per-step table below is derived from one record per live module, a `StepChain` in
+`deploy_vii.registry.STEP_CHAINS` (task 8.0a; the lowest layer, so the journal's
+`WITHIN_ATTEMPT_REPAIR` reads it too): the module's ordered steps (the last one settles the
+module), its regression cell, the steps repaired within the attempt, the prefilled kinds per
+step (each such step binds every earlier step), the projection each later step receives of each
+earlier one, and the steps sent pack SOURCE blocks. `submission.STEPS` adds only each step's
+model-facing schema (a registry step without one, or a schema for no registry step, fails at
+import). A module's route (`module_route`: its required producers' chains, then its own, in
+`plan` order) gives the CLI's `module` cells and `regression` cases. Adding a live module is
+one more record plus its schemas, composer and prompt contract.
+
 | Module | Role |
 | --- | --- |
 | `settings.py` | Reads `[model_tests]` from `settings/project.toml` with `tomllib` (candidates, caps, artifact root, `credential_file`, `credential_token_index`: an integer >= 1, default 1 when absent; 0, negatives, booleans, floats and strings are refused; `prompt_bytes_per_token_lower_bound`: required, a positive finite number, no default). |
@@ -47,11 +58,63 @@ from a pinned pool:
 | `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block; an interrupted attempt's manifest and usage-delta settlement (task 7.11). |
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
-| `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4). |
-| `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5). |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
+| `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4), `SCOPE_BLOCKS` (the QA scope and, task 8.6, CP-5's review scope as their own CONTEXT blocks). |
+| `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5); task 8.6: `module_context`, `declared_sources`, `integrity_scope` and `integrity_projection` ([per-module context](#per-module-context-task-86)). |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `MODULE_STEP_ENTRIES` (the one-step modules' journal entries: CP-1A, since task 8.6 CP-2, CP-4, CP-3 and CP-5, and since task 8.7 CP-6), `submit_model_payload` (decision 0008). |
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
-| `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
+| `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
+| `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
+| `loop.py` | Task 8.0d: `run_tool_step` (one CP-1 stage as a tool loop, ported from `devtools/hybrid_cp1.py`; one attempt directory and ledger attempt per call; `tool-calls.jsonl` beside `output.md`), `ToolLimits`, `ToolStepResult`, `call_nudge`, `transient`. Schema-check rejections do not apply to tool-loop steps (their schema is sent as the submit tool's parameters); a runtime 400 that names the schema ends the step as `provider-schema-error`. |
+| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`), `tool_specs`, the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
+
+### Per-module context (task 8.6)
+
+CP-2 (`credit_synthesis`), CP-4 (`legal_covenants`), CP-3 (`relative_value`), CP-5
+(`integrity_review`) and, since task 8.7, CP-6 (`committee_challenge`) are one-step chains in
+registry `STEP_CHAINS`, after CP-1A. Each step's system prompt is its `methods/cp*.md` (CP-4's
+up to `## Tables`; the row rules state the table terms) plus a step contract that states its
+validator's checks. A valid payload settles the module at once through `MODULE_STEP_ENTRIES`
+(`submit_cp2_step`, `submit_cp4_step`, `submit_cp3_step`, `submit_cp5_step`, `submit_cp6_step`);
+the sent schemas are the modules' own, strict as written (no relaxation, so CP-5's `minItems: 2`
+and CP-6's `thesis_challenges` `minItems: 1` are sent).
+
+- **Context.** `module_context(store, attempt, step_id)` is the module's own `context_block` over
+  the upstream its ticket binds (`cp2_upstream`, `cp4_legal.upstream_of`, `cp3_upstream`,
+  `cp6_upstream`); the resulting Mapping is merged into the prepared-pack CONTEXT. `build` refuses
+  a module step without it, a step that does not declare it, and a key that would replace a pack
+  fact.
+- **Sources.** `declared_sources` sends CP-4 only `upstream_of(...).legal_sources` and CP-3 only
+  the ready CP-0 `third_party` sources (the market evidence); a CP-3 pack without one sends no
+  SOURCE block and an empty catalogue, which is not an error. Any other declared source is refused
+  in `_plan`, before anything is spent. CP-2, CP-5 and CP-6 receive no SOURCE block.
+- **CP-5 route.** CP-5 requires only CP-0, so its route is `source_readiness` then
+  `integrity_review`: it reviews the settled analyst heads the journal already holds and runs no
+  analyst itself. A `cp5` cell (module or regression) must therefore run after the analysts in the
+  same journal; over a journal without them it reviews nothing analyst-side (coordinator ruling,
+  task 8.6).
+- **CP-5.** The review scope is its own CONTEXT block, `integrity-scope`, with a hash header, as
+  the QA scope is (`SCOPE_BLOCKS`). `integrity_projection` keeps of each fact module only the facts
+  a claim names (`prose` refs), the facts Python flagged, and every member of an identity group;
+  the claims, notes and the rest of the block are unchanged. Measured on the Credit Snapshot
+  fixture: 88,412 bytes full, 16,660 projected; on czr-fy2025-v2 (journal `e1-cp1-7`): 234,940 and
+  13,451; over a promoted synthetic CP-1 of 44,913 facts: 20,707,313 and 6,554. The CP-1A CONTEXT
+  is 7,172 bytes on the fixture.
+- **CP-6 (task 8.7).** Its route (registry `module_route`) is CP-0, the CP-1 chain, CP-1A
+  (CP-2's required producer), `credit_synthesis`, `relative_value`, `integrity_review`, then
+  `committee_challenge`; CP-4 is no CP-6 edge, so a `cp6` cell runs no CP-4 step. The step rules
+  are challenge discipline, the recommendation boundary, the CP-5 rule (caps and flagged claims),
+  run text and the prohibited conclusions. Its CONTEXT is `cp6_committee.context_block` over
+  `cp6_upstream`: on the CP-6 test's SYNTHETIC journal (CP-0 to CP-5 settled by their own step
+  functions) the module part is 18,093 bytes of compact JSON and the whole CONTEXT block 22,898
+  bytes as sent (19,106 compact). Not measured on czr-fy2025-v2: no journal of it holds settled
+  CP-2, CP-3 and CP-5 heads (journal `e1-cp1-7` has CP-0, CP-1A and a blocked CP-1).
+- **CP-2 is not projected.** Its CONTEXT (24,978 bytes on the fixture, 108,950 on czr-fy2025-v2)
+  exceeds CP-1A's by the CP-1A row catalogue, which is the only evidence it may cite.
+- **Replay and regression.** A regression case whose settling step has no corpus entry (the corpus
+  records only CP-0 and CP-1 steps, `corpus.SUPPORTED_STEPS`) is a named skip: `make replay`
+  reports `cell <case>: no recorded corpus entry for <step>` as a pytest skip, and `live
+  regression` plans no cell for it and names it under `Cases skipped (no recorded corpus entry for
+  the settling step; not run, not a pass)`. No fixture is recorded to make a case pass.
 
 ## Rules and where they are enforced
 
@@ -353,13 +416,16 @@ section). Common options of the four batch commands:
 (saved models JSON; without it the catalog is fetched), `--report-directory`, `--max-tokens N`
 (task 2.10: the completion budget of every call in the batch, every model alike, default 16000,
 `runner.DEFAULT_MAX_TOKENS`; a positive integer, no per-model syntax; it goes through the context
-fit below, into each manifest's `budgets.max_tokens` and into the report header),
+fit below, into each manifest's `budgets.max_tokens` and into the report header; one-shot
+steps only: a tool-loop step (task 8.0d) uses `loop.ToolLimits`, and with the tool loop on the
+header says so),
 `--timeout SECONDS` (task 7.0c: the request deadline of every call, every model alike, default 600,
 `client.DEFAULT_TIMEOUT_SECONDS`; a positive finite number in Python float syntax, so `1e3` is
 1000 s; into each manifest's `budgets.timeout_s` and `budgets.deadline_s` and into the report
 header as `- Timeout:`, shown as a float, `1800.0`; Sol at about 70 completion tokens a second
 needs up to 15 minutes for 64,000 tokens, so raise it with the budget; `make live-module` takes
-`TIMEOUT=`). There is no key
+`TIMEOUT=`; one-shot steps only, as for `--max-tokens`: a tool-loop call gets the rest of
+its step's `ToolLimits.deadline_s`). There is no key
 option: the runner reads the DC-7 file from settings at dispatch, taking the token at
 `credential_token_index`.
 
@@ -377,7 +443,10 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   `canary`: one cell per eligible model over CP-0 and the five CP-1 steps. `module --module`: one
   seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the five
   steps (`CP1_CHAIN`, ending in `quality`, task 7.4; the `regression` `cp1` case too), CP-1A (alias CP-2C; task 7.2) runs CP-0 first then its one step `business_context`;
-  other modules have no live step contract and are refused before spending. A CP-0 that does not
+  CP-2, CP-4, CP-3, CP-5 (task 8.6) and CP-6 (task 8.7) run their route (registry
+  `module_route`) then their one step ([per-module context](#per-module-context-task-86)); other
+  modules have no live step
+  contract and are refused before spending. A CP-0 that does not
   write `Run CP-1A` for CP-1A ends the cell `not-authorized` before the step is sent.
 - **`business_context` (CP-1A, task 7.2).** One step; the model returns judgments and verbatim
   quotes only (`BusinessContextSubmission`, decision 0008 MC-1) and Python composes the 22 r14
@@ -390,8 +459,13 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   (accepted or restricted) CP-1 head as an input of the ticket; otherwise `cp1_facts` is empty
   and `cp1_facts_note` says no figure may be referenced. A valid step settles CP-1A at once
   (`submit_cp1a_step`), with the four statuses in its head as 6.4 does.
-  `regression`: cases `cp0`, `cp1` and (task 7.0h) `cp1a` (`CP1A_CHAIN`), every candidate once
-  per case in an order shuffled by the seed; it refuses a pool with an ineligible arm.
+  `regression`: cases `cp0`, `cp1`, (task 7.0h) `cp1a` (`CP1A_CHAIN`) and (task 8.6) `cp2`,
+  `cp4`, `cp3`, `cp5` and (task 8.7) `cp6`, every candidate once per case in an order shuffled by
+  the seed; a case whose settling step has no recorded corpus entry is not planned and is named in
+  the report's skipped line (today cp1a to cp6). The corpus is read once, at planning, and the
+  report names the cases that plan skipped (task 8.7). Each case draws its shuffle whether or not
+  it is skipped, so a skip moves no other case's model order; seeds are drawn over the planned
+  cells, so a skip shifts the seeds after it. It refuses a pool with an ineligible arm.
 - The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
   with `default_effort`/`complex_effort`. Since the decision 0005 amendment (user decision,
   22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at `medium` since the 24 Oct 2026
@@ -523,7 +597,7 @@ round 1), so such a 400 is a schema rejection exactly when it was before 7.15 (O
 Runner use. `probe`, `module`, `regression` and `canary` read every `schema-check-attempt/1`
 manifest under their artifact root before the first cell (an unreadable one fails the batch
 before any spend). Only verdicts on the schema count: an `accepted` row, or an HTTP 400 that is
-schema-shaped (`runner.schema_shaped`: provider error code `invalid_json_schema`, or a detail
+schema-shaped (`schema_check.schema_shaped`: provider error code `invalid_json_schema`, or a detail
 saying "invalid schema" (or `invalid_json_schema`) or naming `response_format`; a bare
 `json_schema` can name the request feature and does not count), recorded as `schema_rejection: true` with
 `provider_error_code` in the manifest. The latest such verdict per (model, step, sent schema
@@ -759,7 +833,9 @@ leaves it unchanged.
   holds the refused attempt; `dispatch(..., on_in_flight=)` hands it over before the wait, which
   the CLI uses to give it its own report row even when the re-send raises (cap refusal,
   connection failure, a second refusal). A second in-flight 402 is exhaustion: its credit block
-  says `exhausted: true` and the detail names both attempts. `live schema-check` does not retry: an in-flight 402 there stops the check
+  says `exhausted: true` and the detail names both attempts; it is still no model try, and
+  (task 8.0a) its settle reason ends with `; in-flight 402 again: treated as exhaustion`
+  instead of the "not a model try" mark (`in_flight_refused` accepts either). `live schema-check` does not retry: an in-flight 402 there stops the check
   as exhaustion, named as in flight. The CLI abort line and the report's `Stopped:` line carry
   `CreditState.summary()`, e.g. `Stopped: aborted: CreditExhausted (reason openrouter_credits;
   requested max_tokens 128000, affordable 91075; HTTP 402)`; `EXIT_CREDIT` stays 4.
@@ -969,7 +1045,8 @@ binding kind `scope-dimension`, so the sent `financials` schema leaves them out.
 phase, after the hashes that read only sent fields and before the facility and observation
 hashes (which parse the book), `prefill` takes the retained `SourceContextReview`
 (`Known.context`) and, for each book, the one entity `binding.books[]` names for it. A period
-binds to the scopes of that entity in the financial sources by `context_binding`'s rule: a
+binds to the scopes of that entity in the financial sources by `context_binding`'s rule (one
+predicate both call, `source_context.scope_matches_period`, task 8.0b): a
 `historical_duration` or `period_end` scope with the period's `end_date`, and unless
 `period_type` is `PERIOD_END` a `historical_duration` scope with its `start_date` too. The book
 and each bound period take the one four-string tuple every bound period shares. Where they

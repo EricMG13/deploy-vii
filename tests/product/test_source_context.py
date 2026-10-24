@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from hypothesis import find, given, settings
+from hypothesis import example, find, given, settings
 from hypothesis import strategies as st
 
 import deploy_vii.source_context as source_context_module
@@ -31,6 +31,7 @@ from deploy_vii.source_context import (
     SourceContext,
     SourceContextReview,
     SubsequentEvent,
+    scope_matches_period,
     source_context,
     validate_source_context,
     validate_source_context_report,
@@ -1016,3 +1017,92 @@ def test_the_batch_shape_is_rejected_with_each_cause_once() -> None:
         f"Financial scopes of one entity disagree on entity_perimeter: issuer "
         f"{vs(scopes[:1], scopes[1:])}",
     )
+
+
+# --- task 8.0b: one scope-matching predicate for `context_binding` and the prefill ----------
+# Pinned before either caller used it: the predicate equals the date and kind conjuncts of
+# `context_binding.validate_financial_context` and of `live.submission._period_scopes` as they
+# stood at 50e0707, copied verbatim below, over every period type (and any string the prefill
+# may read), every scope kind and a small date pool that makes equal and absent dates common.
+
+_DAYS = st.sampled_from((None, date(2024, 1, 1), date(2024, 12, 31), date(2025, 12, 31)))
+_PERIOD_TYPES = st.sampled_from(("QUARTER", "YTD", "FY", "LTM", "PERIOD_END")) | st.text(
+    max_size=12
+)
+_SCOPE_KINDS = st.sampled_from(("historical_duration", "period_end", "forecast", "unspecified"))
+
+
+def _binding_at_base(
+    scope: ReportingScope, period_type: str, start_date: date | None, end_date: date | None
+) -> bool:
+    return (
+        scope.end_date is not None
+        and scope.end_date == end_date
+        and scope.period_kind in {"historical_duration", "period_end"}
+        and (
+            period_type == "PERIOD_END"
+            or (
+                scope.period_kind == "historical_duration"
+                and scope.start_date is not None
+                and scope.start_date == start_date
+            )
+        )
+    )
+
+
+def _prefill_at_base(
+    scope: ReportingScope, kind: str, start: date | None, end: date | None
+) -> bool:
+    return (
+        end is not None
+        and scope.end_date == end
+        and scope.period_kind in {"historical_duration", "period_end"}
+        and (
+            kind == "PERIOD_END"
+            or (
+                scope.period_kind == "historical_duration"
+                and scope.start_date is not None
+                and scope.start_date == start
+            )
+        )
+    )
+
+
+@settings(max_examples=1000, deadline=None)
+@given(_PERIOD_TYPES, _SCOPE_KINDS, _DAYS, _DAYS, _DAYS, _DAYS)
+@example(
+    "FY", "historical_duration", None, date(2024, 12, 31), None, date(2024, 12, 31)
+)  # scope start None, period start None
+@example(
+    "PERIOD_END", "period_end", date(2024, 1, 1), date(2024, 12, 31), None, date(2024, 12, 31)
+)  # PERIOD_END scope with a start date
+@example(
+    "FY",
+    "historical_duration",
+    date(2024, 1, 1),
+    date(2024, 12, 31),
+    date(2024, 1, 1),
+    date(2025, 12, 31),
+)  # unequal end dates
+@example(
+    "FY", "historical_duration", date(2024, 1, 1), None, date(2024, 1, 1), date(2024, 12, 31)
+)  # scope end None
+@example(
+    "FY", "historical_duration", date(2024, 1, 1), date(2024, 12, 31), date(2024, 1, 1), None
+)  # period end None
+def test_the_scope_predicate_equals_both_callers_rule_at_base(
+    period_type: str,
+    period_kind: str,
+    scope_start: date | None,
+    scope_end: date | None,
+    start_date: date | None,
+    end_date: date | None,
+) -> None:
+    """`scope_matches_period` is `context_binding`'s and the prefill's date and kind rule."""
+    template = case()[1].sources[0].scopes[0]
+    scope = template.model_copy(
+        update={"period_kind": period_kind, "start_date": scope_start, "end_date": scope_end}
+    )
+    expected = _binding_at_base(scope, period_type, start_date, end_date)
+    assert _prefill_at_base(scope, period_type, start_date, end_date) == expected
+    assert scope_matches_period(scope, period_type, start_date, end_date) == expected

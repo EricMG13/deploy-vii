@@ -20,7 +20,7 @@ from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.envelope import Envelope
 from deploy_vii.execution import Execution, StepValidation
-from deploy_vii.live import corpus
+from deploy_vii.live import cli, corpus
 from deploy_vii.live.client import ChatClient
 from deploy_vii.live.cohort import accept_proxy_payload
 from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
@@ -36,7 +36,7 @@ from deploy_vii.live.submission import (
     quality_inputs,
 )
 from deploy_vii.preparation import PreparedPack, load_pack
-from tests.product import replay_support
+from tests.product import replay_support, transcript_support
 from tests.product.live_support import FakeTransport, fixture_pool, make_rtf_key, ok
 from tests.product.replay_support import OK, corpus_entries, replay_entry
 from tests.product.test_cp1_workflow import at_ceiling
@@ -208,6 +208,27 @@ def test_corpus_entry_replays_as_recorded(
 def test_the_corpus_replays_quality_entries() -> None:
     """The envelope hash identity above is exercised: the corpus holds `quality` entries."""
     assert [path for path in ENTRIES if path.parent.name == "quality"]
+
+
+@pytest.mark.parametrize(("case", "steps"), cli.REGRESSION_CASES, ids=lambda v: str(v))
+def test_each_regression_cell_settles_on_a_recorded_entry_or_is_a_named_skip(
+    case: str, steps: tuple[str, ...]
+) -> None:
+    """Task 8.6: a regression cell (`live regression`) whose settling step has no recorded
+    corpus entry has no I2 baseline. It is a named skip here, listed by `make replay`, and the
+    live regression skips it the same way (`cli.unrecorded_cases`); no fixture is recorded to
+    make it pass."""
+    settling = steps[-1]
+    entries = [path for path in ENTRIES if path.parent.name == settling]
+    if not entries:
+        why = (
+            "the corpus cannot record this step yet (live.corpus.SUPPORTED_STEPS)"
+            if settling not in corpus.SUPPORTED_STEPS
+            else "no live attempt has been recorded"
+        )
+        pytest.skip(f"cell {case}: no recorded corpus entry for {settling}: {why}")
+    assert (case, settling) not in cli.unrecorded_cases()
+    assert {load_entry(path)["step_id"] for path in entries} == {settling}
 
 
 def test_the_dimension_prefill_leaves_every_recorded_financials_payload_as_recorded(
@@ -921,3 +942,65 @@ def test_revalidation_runs_the_current_validator_over_the_real_pack(tmp_path: Pa
 def test_default_corpus_root_is_the_repository_corpus() -> None:
     assert corpus.CORPUS_ROOT == Path(replay_support.__file__).parent / "replay"
     assert CP0.step_id in corpus.SUPPORTED_STEPS
+
+
+# --- task 8.0d: tool transcripts ------------------------------------------------------------------
+
+TRANSCRIPTS = transcript_support.transcript_entries()
+
+
+def test_the_transcripts_hold_synthetic_and_harness_entries_of_every_tool_step() -> None:
+    entries = [load_entry(path) for path in TRANSCRIPTS]
+    assert {e["schema"] for e in entries} == {transcript_support.SCHEMA}
+    assert {e["kind"] for e in entries} == {"synthetic", "harness"}
+    harness = {e["step_id"] for e in entries if e["kind"] == "harness"}
+    assert harness == {"source_context", "financials", "narrative", "readiness"}
+    # Raw artifacts stay out of Git: a harness entry names its files and their hashes only.
+    assert all("replies" not in e for e in entries if e["kind"] == "harness")
+
+
+@pytest.mark.parametrize("path", TRANSCRIPTS, ids=lambda p: f"{p.parent.name}/{p.stem}")
+def test_a_tool_transcript_replays_as_recorded(path: Path, tmp_path: Path) -> None:
+    status, reason = transcript_support.check(load_entry(path), tmp_path)
+    if status == transcript_support.SKIPPED:
+        pytest.skip(f"{path.parent.name}/{path.stem}: {status}: {reason}")  # never a pass
+    assert status == transcript_support.OK, f"{status}: {reason}"
+
+
+SYNTHETIC_TRANSCRIPT = transcript_support.TRANSCRIPT_ROOT / "source_context"
+
+
+def test_a_transcript_replay_detects_a_changed_reply_and_an_unnamed_prompt_change(
+    tmp_path: Path,
+) -> None:
+    entry = load_entry(SYNTHETIC_TRANSCRIPT / "synthetic-search-reject-accept.json")
+    changed = json.loads(json.dumps(entry))
+    calls = changed["replies"][0]["choices"][0]["message"]["tool_calls"]
+    calls[0]["function"]["arguments"] = json.dumps({"query": "debt"})
+    status, reason = transcript_support.check(changed, tmp_path / "a")
+    assert (status, reason) == ("request-changed", "call 2: the conversation, tools or parameters")
+    prompt = json.loads(json.dumps(entry))
+    prompt["expected"]["requests"][0]["system_sha256"] = "0" * 64
+    status, reason = transcript_support.check(prompt, tmp_path / "b")
+    assert (status, reason) == ("request-changed", "call 1: the system prompt (unnamed change)")
+    verdict = json.loads(json.dumps(entry))
+    verdict["expected"]["submits"][0]["outcome"] = "accepted"
+    assert transcript_support.check(verdict, tmp_path / "c")[0] == "outcome-changed"
+    ruled = json.loads(json.dumps(entry))
+    ruled["rules"]["submits"] = []
+    assert transcript_support.check(ruled, tmp_path / "d")[0] == "rules-changed"
+
+
+def test_a_harness_transcript_whose_reply_file_changed_is_a_failure(tmp_path: Path) -> None:
+    entry = load_entry(
+        transcript_support.TRANSCRIPT_ROOT / "readiness" / "hybrid-cp1-6-sol-medium.json"
+    )
+    start = tmp_path / "repo" / entry["start_journal"]
+    synthetic = transcript_support.synthetic_start(tmp_path / "s", {})
+    shutil.copytree(synthetic, start)
+    transcript = tmp_path / "repo" / entry["transcript"]
+    transcript.mkdir(parents=True)
+    for name in entry["evidence_sha256"]:
+        (transcript / name).write_bytes(b"{}")
+    status, reason = transcript_support.check(entry, tmp_path / "w", repository=tmp_path / "repo")
+    assert status == "evidence-changed" and reason.endswith("does not hash as recorded")

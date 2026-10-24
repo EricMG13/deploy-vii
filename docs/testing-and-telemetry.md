@@ -92,6 +92,26 @@ with an availability reason, not zero. Do not double-count overlapping spans or
 token categories. Store only telemetry the host actually exposes; unavailable
 internal reasoning or native-host metrics remain unavailable.
 
+**Tool loops (task 8.0d).** With `tool_loop` on in settings, the four CP-1 stages run as one
+conversation each (`deploy_vii/live/loop.py`). Every call of that conversation is its own
+attempt directory, named `<ticket>-<step>-<n>` (`-repair-<n>` in the step's repair). Its
+evidence is the seven entries above plus `tool-calls.jsonl`, which holds each tool call with its
+arguments, status and full result, each submit's verdict and any call-limit nudge. The call's
+`metrics.json` adds a `tool_loop` block:
+
+- for the call: its tool calls by name, the effort level and the effort sent, whether the effort
+  was escalated and why, the cost basis, the tool time, whether a nudge followed, and the call it
+  retries;
+- for the step so far: calls, tool calls by name, pages read, searches run, every submit (outcome,
+  issues by class, evidence counts and a completeness-floor flag), the shrink-to-pass flag, the
+  `financials` completeness and completeness-drop flag, the final payload's cited-but-unread
+  locators, the verdict, the settled and held USD, the evidence rules and the limits.
+
+The last call's block is the step's. `manifest.json` records the tools offered, `tool_choice`,
+the previous call and the retried call, and its `hashes` include `tool-calls.jsonl`
+(`tool_transcript_sha256`). In the batch report a tool-loop step's USD cell is the step's total
+over its calls, with any held part named: `<total> (reservation held <held>)`.
+
 Each attempt is immutable after completion. Repairs create a new attempt linked
 to its predecessor. Store hashes and publish the completed manifest after its
 artifacts are written. An interrupted attempt retains its partial evidence and
@@ -135,8 +155,10 @@ replay corpus. Beyond the first US$50 batch, the recurring caps and the US$200
 cumulative ceiling of [decision 0006](decisions/0006-delegated-choices-and-orchestration.md) DC-6 apply. The key is read
 from the DC-7 credential file at dispatch time and never recorded. Without credit, the
 DC-8 proxy cohort applies and is never pooled with pool results.
-The runner disables tools: Luna's Chat Completions tool-calling limit above does not
-apply until a tool-using module is admitted.
+One-shot steps are sent no tools. Since task 8.0d the CP-1 stages can run as tool loops: the
+read-only pack tools and the step's own submit tool, with `tool_choice: required` (user decision,
+24 Oct 2026; decision 0005 row 8.0d). Luna's Chat Completions tool-calling limit above therefore
+applies before any Luna tool-loop test is admitted. The pool is currently Sol alone.
 
 Not verified: account entitlement, per-provider effort mapping, adapter/tool
 behavior, live quality, cost or performance. These require working tests and inputs.

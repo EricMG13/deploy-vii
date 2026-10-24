@@ -38,7 +38,6 @@ from deploy_vii.live.schema import (
 from deploy_vii.live.submission import (
     NOT_ASSESSED,
     PREFILLED,
-    SCOPE_DIMENSIONS,
     STEPS,
     SUPERSEDED_SHAPE,
     ConsumerJudgment,
@@ -1017,7 +1016,7 @@ def test_a_duration_without_a_start_date_or_its_own_citations_never_asks_for_a_h
     )
     assert rejected.status == "invalid" and rejected.output_sha256 is None
     where = f"financial.books.0.periods.{index}"
-    assert rejected.issues == tuple(f"{where}.{name}: Field required" for name in SCOPE_DIMENSIONS)
+    assert rejected.issues == tuple(f"{where}.{name}: Field required" for name in DIMENSIONS)
 
 
 def test_a_balance_sheet_period_without_a_start_date_binds_and_settles_with_its_limitation(
@@ -1456,6 +1455,32 @@ def test_a_book_whose_periods_scopes_disagree_is_rejected_with_one_issue_and_no_
     perimeters = {p["period_id"]: p["entity_perimeter"] for p in book["periods"]}
     assert perimeters.pop("Q1") == PARAPHRASE
     assert set(perimeters.values()) == {SCOPE_PERIMETER}
+
+
+def test_a_disagreement_on_two_fields_names_them_in_the_validators_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 8.0b: the prefill names differing fields in `source_context.DIMENSIONS` order
+    (perimeter before basis), the order `_disagreements` names them in; before 8.0b it used its
+    own (basis first). Unreachable after a passing source context (the 7.14 property test)."""
+
+    def q1_differs(scope: ReportingScope) -> ReportingScope:
+        if scope.scope_id != "Q1":
+            return scope
+        return scope.model_copy(
+            update={"entity_perimeter": PARAPHRASE, "accounting_basis": "Local GAAP"}
+        )
+
+    store, ticket_id, value = refused_context_journal(
+        tmp_path, monkeypatch, q1_differs, "Financial scopes of one entity disagree on "
+    )
+    payload, _ = without_bindings(FinancialSubmission, value)
+    submitted = submit_model_payload(store, ticket_id, "financials", payload)
+    (rejected,) = submitted.journal.step_repairs
+    assert rejected.issues[0] == (
+        "Bound source scopes disagree on entity_perimeter, accounting_basis: "
+        "consolidated OPEN, Q1, Q2, Q3, Q4, FY"
+    )
 
 
 def test_a_period_without_a_matching_scope_is_left_unfilled_and_rejected_by_the_existing_issue(

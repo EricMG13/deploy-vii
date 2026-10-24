@@ -35,7 +35,9 @@ from deploy_vii.live.schema import (
     strict_copy,
     strict_schema,
 )
+from deploy_vii.live.settings import StepEffort
 from deploy_vii.live.submission import quality_inputs
+from deploy_vii.live.tools import ToolRules
 from deploy_vii.readiness import ReadinessReview
 from deploy_vii.registry import modules
 from tests.product.live_support import (
@@ -52,6 +54,7 @@ from tests.product.test_cp1_workflow import at_ceiling
 from tests.product.test_execution import fixture_store, step_text
 from tests.product.test_live_client import choice_error_body
 from tests.product.test_live_credit import ACCOUNT, CREDIT_402, IN_FLIGHT_402
+from tests.product.test_live_loop import tool_reply
 from tests.product.test_live_runner import no_wait
 from tests.product.test_narrative import populated
 from tests.product.test_readiness import as_submission, readiness_fixture
@@ -276,7 +279,7 @@ def test_cli_refuses_an_index_beyond_the_file_without_sending_or_echoing_a_token
 
 def test_unsupported_module_fails_before_spending(rig: Rig) -> None:
     responder = Responder(rig.review)
-    assert rig.run(rig.argv("module", "--module", "CP-2"), responder) == cli.EXIT_FAILED
+    assert rig.run(rig.argv("module", "--module", "CP-1B"), responder) == cli.EXIT_FAILED
     assert responder.requests == [] and not (rig.reports / "live-b1.md").exists()
 
 
@@ -360,19 +363,72 @@ def test_regression_order_is_seeded_and_matched(rig: Rig) -> None:
             r[3] for r in step_lines(rig.report(batch), f"{case}-") if r[2] == "source_readiness"
         ]
 
-    for case in ("cp0", "cp1", "cp1a"):  # task 7.0h: cp1a follows cp1, drawing after them
+    for case in ("cp0", "cp1"):
         assert sorted(order("r1", case)) == sorted([LUNA, GLM, DEEPSEEK])  # matched arms
         assert order("r1", case) == order("r2", case)  # same seed, same order
     cells = [r[1] for r in step_lines(rig.report("r1"), "cp") if r[2] == "source_readiness"]
-    assert cells == ["cp0"] * 3 + ["cp1"] * 3 + ["cp1a"] * 3
+    # Task 8.6: cp1a and the four new cases have no recorded corpus entry for their settling
+    # step, so they are named as skipped, never run and never counted as a pass.
+    assert cells == ["cp0"] * 3 + ["cp1"] * 3
+    assert cli.skipped_line(cli.unrecorded_cases()) in rig.report("r1").splitlines()
+
+
+def test_a_skipped_case_moves_no_other_cases_model_order_but_does_move_its_seeds() -> None:
+    """Task 8.7 (8.6 review): every case draws its shuffle, so skipping one leaves every other
+    case's model order as it is with nothing skipped; seeds are drawn over the planned cells
+    only, so a later case's seeds shift, while each seed still draws its cell's model."""
+    pool = fixture_pool()
+    slugs = [item.slug for item in pool.eligible]
+    every = frozenset(steps[-1] for _, steps in cli.REGRESSION_CASES)
+    whole = cli._regression_cells(pool, slugs, 7, every)
+    some = cli._regression_cells(pool, slugs, 7, every - {"business_context"})  # cp1a skipped
+
+    def models(cells: list[cli.Cell]) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        for cell in cells:
+            assert cell.seed is not None
+            found.setdefault(cell.case_id, []).append(draw(pool, cell.seed).slug)
+        return found
+
+    assert "cp1a" in models(whole) and "cp1a" not in models(some)
+    assert models(some) == {k: v for k, v in models(whole).items() if k != "cp1a"}
+    seeds = {c.cell_id: c.seed for c in whole}
+    assert [c.seed for c in some if c.case_id == "cp1"] == [
+        seeds[c.cell_id] for c in some if c.case_id == "cp1"
+    ]
+    assert [c.seed for c in some if c.case_id == "cp2"] != [
+        seeds[c.cell_id] for c in some if c.case_id == "cp2"
+    ]
+
+
+def test_the_report_names_the_cases_skipped_at_planning_time(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 8.7 (8.6 review): a corpus entry written while the batch runs (another process)
+    does not drop a case from the skipped line: the report names what was planned."""
+    real = cli.recorded_steps()
+    calls: list[int] = []
+
+    def recorded(*_: object) -> frozenset[str]:
+        calls.append(1)
+        return real if len(calls) == 1 else real | {"credit_synthesis"}
+
+    monkeypatch.setattr(cli, "recorded_steps", recorded)
+    assert rig.run(rig.argv("regression", batch="r1"), Responder(rig.review)) == 0
+    planned = cli.unrecorded_cases(real)
+    assert ("cp2", "credit_synthesis") in planned
+    assert cli.skipped_line(planned) in rig.report("r1").splitlines()
+    assert not step_lines(rig.report("r1"), "cp2-")
 
 
 def test_the_regression_cases_are_cp0_cp1_then_the_cp1a_chain() -> None:
-    assert cli.REGRESSION_CASES == (
+    assert cli.REGRESSION_CASES[:3] == (
         ("cp0", cli.CP0_STEPS),
         ("cp1", cli.FULL_CHAIN),
         ("cp1a", cli.CP1A_CHAIN),
     )
+    # Task 8.6: then each new module's cell, in registry order.
+    assert [case for case, _ in cli.REGRESSION_CASES[3:]] == ["cp2", "cp4", "cp3", "cp5", "cp6"]
     assert cli.CP1A_CHAIN[-1] == "business_context" and cli.CP1A_CHAIN[:-1] == cli.CP0_STEPS
     # Task 7.4: the CP-1 chain ends in the QA review whose acceptance promotes CP-1.
     assert cli.CP1_CHAIN == ("source_context", "financials", "narrative", "readiness", "quality")
@@ -387,7 +443,7 @@ def test_the_cp1_module_and_regression_cells_plan_five_cp1_steps() -> None:
     planned = {cell.case_id: cell.steps for cell in cells}
     assert planned["cp1"] == ("source_readiness", *cli.CP1_CHAIN)
     assert planned["cp1"][-1] == "quality" and len(planned["cp1"]) == 6
-    assert planned["cp0"] == cli.CP0_STEPS and planned["cp1a"] == cli.CP1A_CHAIN
+    assert planned["cp0"] == cli.CP0_STEPS and "cp1a" not in planned  # no corpus entry (8.6)
 
 
 def test_cap_exhaustion_stops_the_batch_and_sends_nothing(rig: Rig) -> None:
@@ -1909,7 +1965,8 @@ def test_a_cut_cell_does_not_stop_the_batch(rig: Rig) -> None:
 
     assert rig.run(rig.argv("regression", batch="r1"), cut) == 0
     text = rig.report("r1")
-    assert "- Truncated: 9" in text and "- Cells planned: 9;" in text
+    # Task 8.6: the cases with no recorded corpus entry are skipped (cp0 and cp1 run).
+    assert "- Truncated: 6" in text and "- Cells planned: 6;" in text
 
 
 def test_a_cell_with_no_model_output_is_not_repaired(tmp_path: Path) -> None:
@@ -2123,3 +2180,88 @@ def test_a_probe_cp1_rejection_leaves_the_attempt_pending_with_its_step_repair(
     assert journal.module_id == "CP-1" and journal.status == "pending"
     assert [s.step_id for s in journal.step_repairs] == ["financials"]
     assert [s.step_id for s in journal.steps] == ["source_context"]
+
+
+# --- 8.0d: the CP-1 stages as tool loops --------------------------------------------------------
+
+
+class ToolChain(Chain):
+    """The CP-1 cell with `tool_loop` on: each tool-loop step searches the pack once, then
+    submits its valid payload through `submit_<step>`; CP-0 and `quality` stay one-shot."""
+
+    def __call__(self, request: Request) -> Response:
+        if request.url == KEY_URL:
+            return key_status(format(self.usage, "f"))
+        self.requests.append(request)
+        self.usage += Decimal("0.01")
+        body = json.loads(request.body or b"{}")
+        if "tools" not in body:
+            step = body["response_format"]["json_schema"]["name"]
+            return ok(self.payload(step), model=body["model"])
+        step = body["tools"][-1]["function"]["name"].removeprefix("submit_")
+        if body["messages"][-1]["role"] != "tool":
+            found = tool_reply(("s", "search_pack", '{"query": "revenue"}'), model=body["model"])
+            if step != "narrative":
+                return found
+            unmeasured = json.loads(found.body)  # no usage at all: the reservation is held
+            del unmeasured["usage"]
+            return Response(200, json.dumps(unmeasured).encode())
+        return tool_reply(("c", f"submit_{step}", self.payload(step)), model=body["model"])
+
+
+def test_the_module_driver_runs_the_four_stages_as_tool_loops(tmp_path: Path) -> None:
+    rig, extraction = chain_rig(tmp_path)
+    text = rig.settings.read_text(encoding="utf-8")
+    rig.settings.write_text(
+        text.replace(
+            "[[model_tests.candidates]]",
+            'tool_loop = true\n\n[model_tests.step_effort]\nfinancials = { effort = "low" }\n\n'
+            "[[model_tests.candidates]]",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    chain = ToolChain(rig, extraction, [])
+    assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], chain) == 0
+    rows = module_rows(rig)
+    assert [(r[2], r[6]) for r in rows] == [(step, "accepted") for step in CHAIN]
+    assert [r[5].endswith("(2 calls)") for r in rows] == [False, True, True, True, True, False]
+    assert rows[1][8] == "0.02"  # the step's two settled calls
+    assert len(chain.requests) == 10
+    bodies = chat_bodies(chain)
+    assert [b.get("tool_choice") for b in bodies] == [None, *["required"] * 8, None]
+    efforts = [b["reasoning"] for b in bodies[1:9]]
+    assert efforts[:2] == [{"effort": "high"}] * 2  # default_effort: no row for the step
+    assert efforts[2:4] == [{"effort": "low"}] * 2  # financials' own row
+    report = rig.report()
+    assert (
+        "- Tool loop: source_context high (ceiling high), financials low (ceiling high)" in report
+    )
+    path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b1.jsonl"
+    assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["provider"] == "openrouter"
+    assert len(Ledger(path, Decimal("5.00")).state().attempts) == 10
+    # Fix round 1 (review B items 8 to 10): the report says what each line covers.
+    assert "completeness floor: off (user decision 24 Oct 2026)" in report
+    scope = "per call (one-shot steps; tool-loop steps: see Tool loop)"
+    assert f"- Max tokens: 16000 {scope}" in report and f"- Timeout: 600.0 s {scope}" in report
+    assert "completeness floor: off" in report.split("- Tool loop:")[1].splitlines()[0]
+    held = next(
+        r for r in Ledger(path, Decimal("5.00")).state().attempts if r.basis and "held" in r.basis
+    )
+    total, kept = held.charged_usd + Decimal("0.01"), held.charged_usd
+    assert rows[3][8] == f"{format(total, 'f')} ({cli.HELD} {format(kept, 'f')})"
+    assert cli.HELD_FOOTNOTE in report
+
+
+def test_the_one_shot_budget_options_say_tool_loops_have_their_own() -> None:
+    parser = argparse.ArgumentParser()
+    cli.configure(parser)
+    text = " ".join(parser._subparsers._group_actions[0].choices["module"].format_help().split())
+    assert text.count("one-shot steps only; tool-loop steps use their own limits") == 2
+
+
+def test_the_tool_loop_line_states_a_set_completeness_floor() -> None:
+    plan = cli.ToolLoop({"financials": StepEffort.of("high")}, ToolRules(floor=3))
+    (line,) = cli._tool_loop_lines(plan)
+    assert line.endswith("; completeness floor: 3 statement lines per expected cell")
+    assert cli._tool_loop_lines(None) == []

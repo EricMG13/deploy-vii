@@ -34,6 +34,11 @@ shard-b tests/product/test_cp1_bindings.py
 shard-a tests/product/test_cp1_quality.py
 shard-c tests/product/test_cp1_render.py
 shard-c tests/product/test_cp1_workflow.py
+shard-a tests/product/test_cp2_synthesis.py
+shard-c tests/product/test_cp3_relative_value.py
+shard-c tests/product/test_cp4_legal.py
+shard-a tests/product/test_cp5_integrity.py
+shard-a tests/product/test_cp6_committee.py
 shard-a tests/product/test_cp_model_workflow.py
 shard-b tests/product/test_credit_snapshot.py
 shard-b tests/product/test_delivery.py
@@ -58,11 +63,14 @@ shard-b tests/product/test_live_credential.py
 shard-b tests/product/test_live_credit.py
 shard-b tests/product/test_live_draw.py
 shard-b tests/product/test_live_ledger.py
+shard-c tests/product/test_live_loop.py
+shard-c tests/product/test_live_modules.py
 shard-a tests/product/test_live_prompts.py
 shard-b tests/product/test_live_reconcile.py
 shard-b tests/product/test_live_runner.py
 shard-b tests/product/test_live_schema.py
 shard-c tests/product/test_live_submission.py
+shard-a tests/product/test_live_tool_parts.py
 shard-b tests/product/test_model_interface.py
 shard-b tests/product/test_model_readiness.py
 shard-b tests/product/test_narrative.py
@@ -81,7 +89,9 @@ shard-b tests/product/test_render.py
 shard-b tests/product/test_replay.py
 shard-b tests/product/test_report_tables.py
 shard-b tests/product/test_report_view.py
+shard-b tests/product/test_report_view_call.py
 shard-b tests/product/test_source_context.py
 shard-b tests/product/test_statement_history.py
 shard-b tests/product/test_statements.py
+shard-b tests/product/test_step_registry.py
 shard-b tests/product/test_workflow.py

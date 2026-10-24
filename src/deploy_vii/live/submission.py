@@ -77,7 +77,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -95,6 +95,11 @@ from deploy_vii.cp1_workflow import (
     submit_cp1_step,
     validate_cp1_stage,
 )
+from deploy_vii.cp2_synthesis import CreditSynthesisSubmission, submit_cp2_step
+from deploy_vii.cp3_relative_value import RelativeValueSubmission, submit_cp3_step
+from deploy_vii.cp4_legal import CovenantInterpretationSubmission, submit_cp4_step
+from deploy_vii.cp5_integrity import IntegritySubmission, submit_cp5_step
+from deploy_vii.cp6_committee import CommitteeSubmission, submit_cp6_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
 from deploy_vii.financial_contracts import FacilityObservation, FinancialBook, FinancialReview
@@ -113,7 +118,13 @@ from deploy_vii.readiness import (
     shape_issues,
     validate_review,
 )
-from deploy_vii.source_context import ReportingScope, SourceContextReview
+from deploy_vii.registry import bound_steps, prefilled_kinds, step_modules
+from deploy_vii.source_context import (
+    DIMENSIONS,
+    ReportingScope,
+    SourceContextReview,
+    scope_matches_period,
+)
 from deploy_vii.statement_validation import effective_accounts
 
 SUPERSEDED_SHAPE = "schema: pre-0008 submission shape"
@@ -190,48 +201,58 @@ class StepDef:
     schema: type[BaseModel]  # the model-facing shape: prompt schema, response_format, parse
 
 
-STEPS: Mapping[str, StepDef] = {
-    "source_readiness": StepDef("CP-0", ReadinessSubmission),
-    "source_context": StepDef("CP-1", SourceContextReview),
-    "financials": StepDef("CP-1", FinancialSubmission),
-    "narrative": StepDef("CP-1", NarrativeReview),
-    "readiness": StepDef("CP-1", DownstreamReview),
-    # Task 7.4: the analyst's QA review over the retained registers; its accepted submission
-    # is the CP-1 promotion (`cp1_workflow.promote_cp1`).
-    "quality": StepDef("CP-1", QualityReview),
-    # Task 7.2: the stored shape is the submission itself; Python composes the registers as the
-    # step output (`business_context.submit_cp1a_step`), so no composer is needed here.
-    "business_context": StepDef("CP-1A", BusinessContextSubmission),
+def step_definitions(schemas: Mapping[str, type[BaseModel]]) -> dict[str, StepDef]:
+    """Every registry step (`registry.step_modules`, its order and module) with its schema from
+    `schemas`; a registry step without a schema, or a schema for no registry step, raises
+    ValueError (task 8.0a)."""
+    modules = step_modules()
+    if extra := sorted(set(schemas) - set(modules)):
+        raise ValueError(f"a schema for {', '.join(extra)}, which is no live step")
+    if missing := [step_id for step_id in modules if step_id not in schemas]:
+        raise ValueError(f"no model-facing schema for {', '.join(missing)}")
+    return {step_id: StepDef(module_id, schemas[step_id]) for step_id, module_id in modules.items()}
+
+
+STEPS: Mapping[str, StepDef] = step_definitions(
+    {
+        "source_readiness": ReadinessSubmission,
+        "source_context": SourceContextReview,
+        "financials": FinancialSubmission,
+        "narrative": NarrativeReview,
+        "readiness": DownstreamReview,
+        # Task 7.4: the analyst's QA review over the retained registers; its accepted submission
+        # is the CP-1 promotion (`cp1_workflow.promote_cp1`).
+        "quality": QualityReview,
+        # Task 7.2: the stored shape is the submission itself; Python composes the registers as
+        # the step output (`business_context.submit_cp1a_step`), so no composer is needed here.
+        "business_context": BusinessContextSubmission,
+        # Task 8.6: each module's thin submission is its stored shape too; its step entry
+        # validates it and settles the module with the Python candidate (`MODULE_STEP_ENTRIES`).
+        "credit_synthesis": CreditSynthesisSubmission,
+        "legal_covenants": CovenantInterpretationSubmission,
+        "relative_value": RelativeValueSubmission,
+        "integrity_review": IntegritySubmission,
+        # Task 8.7: CP-6's committee challenge, settled by `submit_cp6_step` as the four above.
+        "committee_challenge": CommitteeSubmission,
+    }
+)
+# The one-step modules whose own entry retains, validates and settles the step (task 7.2 for
+# CP-1A, task 8.6 for CP-2 to CP-5, task 8.7 for CP-6); the payload reaches it after null
+# resolution only.
+MODULE_STEP_ENTRIES: Mapping[str, Callable[[Execution, str, str, str], Attempt]] = {
+    "CP-1A": submit_cp1a_step,
+    "CP-2": submit_cp2_step,
+    "CP-4": submit_cp4_step,
+    "CP-3": submit_cp3_step,
+    "CP-5": submit_cp5_step,
+    "CP-6": submit_cp6_step,
 }
 # Task 7.0i: the model supplies no hash. Each hash binding of a CP-1 step contract is marked
 # `PREFILLED_MARKER` with its kind (so the sent schema leaves it out), and Python fills it before
-# the journal validates. Per step: the kinds it carries, and the retained steps they come from.
-PREFILLED: Mapping[str, frozenset[str]] = {
-    "source_context": frozenset({"pack", "source"}),
-    "financials": frozenset(
-        {
-            "context-step",
-            "pack",
-            "source",
-            "source-context-review",
-            "facility",
-            "annual-observation",
-            "quarter-observations",
-            "financial-review",
-            "scope-dimension",
-        }
-    ),
-    "narrative": frozenset({"step-inputs"}),
-    "readiness": frozenset({"step-inputs"}),
-    "quality": frozenset({"quality-inputs"}),
-}
-BOUND_STEPS: Mapping[str, tuple[str, ...]] = {
-    "source_context": (),
-    "financials": ("source_context",),
-    "narrative": ("source_context", "financials"),
-    "readiness": ("source_context", "financials", "narrative"),
-    "quality": CP1_STEPS,
-}
+# the journal validates. Per step: the kinds it carries, and the retained steps they come from
+# (every earlier step of its chain). Both are the registry's (task 8.0a).
+PREFILLED: Mapping[str, frozenset[str]] = prefilled_kinds()
+BOUND_STEPS: Mapping[str, tuple[str, ...]] = bound_steps()
 # Fill order: a phase reads only values that are sent or that earlier phases wrote (a facility
 # row and an observation hash cover their citations; the financial review hash covers them all).
 # The dimension strings (task 7.13) read only sent fields, and the observation hashes parse the
@@ -491,9 +512,9 @@ class _Book:
     observations: Mapping[tuple[str, str], str]
 
 
-# Task 7.13: the four strings `context_binding` and `book_issues` compare exactly, in one order.
-SCOPE_DIMENSIONS = ("currency", "unit", "accounting_basis", "entity_perimeter")
-type Dimensions = tuple[str | None, str | None, str | None, str | None]
+# Task 7.13: the four strings `context_binding` and `book_issues` compare exactly, in
+# `source_context.DIMENSIONS` order (task 8.0b).
+type Dimensions = tuple[str | None, ...]
 # Parsed as the stored contract parses a period's dates (`Contract`: strict, from JSON).
 _DAY: TypeAdapter[date | None] = TypeAdapter(date | None, config=ConfigDict(strict=True))
 
@@ -508,16 +529,16 @@ def _book_path(item: Marked) -> str:
 
 
 def _scope_strings(scope: ReportingScope) -> Dimensions:
-    return scope.currency, scope.unit, scope.accounting_basis, scope.entity_perimeter
+    return tuple(getattr(scope, name) for name in DIMENSIONS)
 
 
 def _period_scopes(
     period: dict[str, Any], scopes: Sequence[ReportingScope]
 ) -> frozenset[Dimensions] | None:
-    """The distinct strings of the scopes a period binds to, by `context_binding`'s own date
-    and kind rule (a `PERIOD_END` period: a duration or period-end scope with its end date;
-    any other: a duration scope with its start and end dates). None when the period's type or
-    dates (or its id) do not parse as the contract parses them: the shape rejection names them."""
+    """The distinct strings of the scopes a period binds to, by the date and kind rule
+    `context_binding` binds by (`source_context.scope_matches_period`). None when the period's
+    type or dates (or its id) do not parse as the contract parses them: the shape rejection
+    names them."""
     kind = period.get("period_type")
     if (
         not isinstance(kind, str)
@@ -531,19 +552,7 @@ def _period_scopes(
     except ValidationError:
         return None
     return frozenset(
-        _scope_strings(scope)
-        for scope in scopes
-        if end is not None
-        and scope.end_date == end
-        and scope.period_kind in {"historical_duration", "period_end"}
-        and (
-            kind == "PERIOD_END"
-            or (
-                scope.period_kind == "historical_duration"
-                and scope.start_date is not None
-                and scope.start_date == start
-            )
-        )
+        _scope_strings(scope) for scope in scopes if scope_matches_period(scope, kind, start, end)
     )
 
 
@@ -588,7 +597,7 @@ class _Resolver:
             if id(book) not in self.dimensions:
                 self.dimensions[id(book)] = self._dimensions(item, book)
             strings = self.dimensions[id(book)].get(id(item.holder))
-            value = None if strings is None else strings[SCOPE_DIMENSIONS.index(item.name)]
+            value = None if strings is None else strings[DIMENSIONS.index(item.name)]
             if strings is not None and value is None:
                 # The bound scope states no such dimension: the contract's own message, kept
                 # visible (`_validate_prefilled` drops "Field required" of other unset fields).
@@ -648,7 +657,7 @@ class _Resolver:
             return {**{id(period): strings for _, _, period in bound}, id(book): strings}
         differing = [
             name
-            for index, name in enumerate(SCOPE_DIMENSIONS)
+            for index, name in enumerate(DIMENSIONS)
             if len({strings[index] for _, found, _ in bound for strings in found}) > 1
         ]
         issue = (
@@ -778,7 +787,9 @@ class _Resolver:
 class Prefill:
     """`prefill`'s result: the payload to retain, the JSON paths Python set with each one's kind,
     the (path, validator-worded issue) of each reference Python could not resolve, and the marked
-    paths still unset (an unbound reference's field and the bindings that depend on it)."""
+    paths still unset: every marked path absent after the pre-fill, such as an unbound
+    reference's field and the bindings that depend on it, and also a hash whose sub-object did
+    not parse."""
 
     payload: str
     paths: tuple[str, ...] = ()
@@ -854,7 +865,7 @@ def _validate_prefilled(
         hashes = {
             f"{path}: Field required"
             for path in result.unset
-            if path.rsplit(".", 1)[-1] not in SCOPE_DIMENSIONS
+            if path.rsplit(".", 1)[-1] not in DIMENSIONS
         }
         named = tuple(issue for issue in stage.issues if issue not in hashes)
         return StepValidation(output=stage.output, issues=named) if named else stage
@@ -871,6 +882,26 @@ class Submitted:
     composition: Composition | None  # source_readiness only
 
 
+def _with_rules(
+    validate: Callable[[PreparedPack, Attempt], StepValidation],
+    rules: Callable[[str], tuple[str, ...]],
+    payload: str,
+) -> Callable[[PreparedPack, Attempt], StepValidation]:
+    """`validate`, then the tool-loop rule issues of the retained payload appended (task 8.0d).
+    They only add issues: a payload the stage rejects stays rejected, one it accepts is rejected
+    when a rule fails, and the stage's output is kept as `_validate_prefilled` keeps it."""
+
+    def run(pack: PreparedPack, attempt: Attempt) -> StepValidation:
+        outcome = validate(pack, attempt)
+        found = rules(payload)
+        if not found:
+            return outcome
+        issues = tuple(dict.fromkeys((*outcome.issues, *found)))
+        return StepValidation(output=outcome.output, issues=issues)
+
+    return run
+
+
 def submit_model_payload(
     store: Execution,
     ticket_id: str,
@@ -878,6 +909,7 @@ def submit_model_payload(
     payload: str,
     *,
     on_normalised: Callable[[tuple[str, ...]], None] | None = None,
+    rules: Callable[[str], tuple[str, ...]] | None = None,
 ) -> Submitted:
     """Enter one model payload (pool or proxy cohort) into the journal for `step_id`.
 
@@ -887,13 +919,20 @@ def submit_model_payload(
     pre-filled (`prefill`; see the module docstring); a payload the pre-fill leaves a marked field
     unset in is validated by `_validate_prefilled` (an unresolvable reference rejected with the
     validator's wording first; the "Field required" of a field the sent schema omits is dropped,
-    unless, with no unbound reference, those lines are the stage's only issues)."""
+    unless, with no unbound reference, those lines are the stage's only issues).
+
+    `rules` (task 8.0d, a tool-loop step's evidence rules, `live.tools.ToolRules`) receives the
+    retained payload and returns issues the journal adds to the step's own (`_with_rules`). It
+    applies to the four CP-1 stages only; for any other step it is refused."""
     step = STEPS[step_id]
+    if rules is not None and (step.module_id != "CP-1" or step_id == "quality"):
+        raise ValueError(f"tool-loop rules apply to the CP-1 stages, not to {step_id}")
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)
-    if step.module_id == "CP-1A":
-        journal = submit_cp1a_step(store, ticket_id, step_id, normalised)
+    entry = MODULE_STEP_ENTRIES.get(step.module_id)
+    if entry is not None:
+        journal = entry(store, ticket_id, step_id, normalised)
         return Submitted(journal, normalised, resolved, (), (), None)
     if step_id == "quality":
         # Task 7.4: the review enters the journal only through the promotion, so an accepted
@@ -906,17 +945,17 @@ def submit_model_payload(
     if step_id != "source_readiness":
         known = known_bindings(store, ticket_id, step_id)
         filled = prefill(step.schema, normalised, known, PREFILLED[step_id])
-        if filled.unbound or filled.unset:
-            journal = store.submit_step(
-                ticket_id,
-                "CP-1",
-                CP1_STEPS,
-                step_id,
-                filled.payload,
-                lambda pack, current: _validate_prefilled(store, known, step_id, pack, current),
-            )
-        else:
+        if not (filled.unbound or filled.unset or rules):
             journal = submit_cp1_step(store, ticket_id, step_id, filled.payload)
+            return Submitted(journal, filled.payload, resolved, filled.paths, filled.kinds, None)
+        validate: Callable[[PreparedPack, Attempt], StepValidation] = (
+            partial(_validate_prefilled, store, known, step_id)
+            if filled.unbound or filled.unset
+            else partial(validate_cp1_stage, store)
+        )
+        if rules is not None:
+            validate = _with_rules(validate, rules, filled.payload)
+        journal = store.submit_step(ticket_id, "CP-1", CP1_STEPS, step_id, filled.payload, validate)
         return Submitted(journal, filled.payload, resolved, filled.paths, filled.kinds, None)
     composition = compose_payload(store.pack(), normalised)
     if composition.review is not None and not composition.issues:

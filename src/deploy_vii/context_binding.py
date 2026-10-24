@@ -9,7 +9,12 @@ from deploy_vii.contracts import PREFILLED_MARKER, Citation, Contract, Hash, Ide
 from deploy_vii.financial_contracts import FinancialReview
 from deploy_vii.financial_validation import records, validate_financial_review
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.source_context import SourceContextReview, validate_source_context
+from deploy_vii.source_context import (
+    DIMENSIONS,
+    SourceContextReview,
+    scope_matches_period,
+    validate_source_context,
+)
 
 
 class BookEntityBinding(Contract):
@@ -87,20 +92,9 @@ def validate_financial_context(
             # canonical dimensions must all agree before extraction is bound.
             has_matching_scope = any(
                 scope.entity_id == bound.entity_id
-                and scope.currency == book.currency
-                and scope.unit == book.unit
-                and scope.entity_perimeter == book.entity_perimeter
-                and scope.accounting_basis == book.accounting_basis
-                and scope.end_date is not None
-                and scope.end_date == period.end_date
-                and scope.period_kind in {"historical_duration", "period_end"}
-                and (
-                    period.period_type == "PERIOD_END"
-                    or (
-                        scope.period_kind == "historical_duration"
-                        and scope.start_date is not None
-                        and scope.start_date == period.start_date
-                    )
+                and all(getattr(scope, name) == getattr(book, name) for name in DIMENSIONS)
+                and scope_matches_period(
+                    scope, period.period_type, period.start_date, period.end_date
                 )
                 for scope in source.scopes
             )
@@ -119,8 +113,7 @@ def validate_financial_context(
                 and scope is not None
                 and scope.entity_id == bound.entity_id
                 and scope.end_date == periods[adjustment.period_id].end_date
-                and (scope.currency, scope.unit, scope.entity_perimeter, scope.accounting_basis)
-                == (book.currency, book.unit, book.entity_perimeter, book.accounting_basis)
+                and all(getattr(scope, name) == getattr(book, name) for name in DIMENSIONS)
                 and event.event_date == adjustment.effective_date
                 and event.status == adjustment.event_status
                 and event.known_on >= adjustment.announced_on

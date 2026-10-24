@@ -1,0 +1,196 @@
+{
+ "bytes_per_token": "3.0",
+ "effort": "medium",
+ "expected": {
+  "cost_settled_usd": "0.03",
+  "requests": [
+   {
+    "rest_sha256": "449942303c5ae26d75a7ab558bf7d8aee840d0a4457e88784f390595a52be43a",
+    "system_sha256": "28b6eef8c0d8cc712acabc18fccdbbe5eb1b32f3c1b4efc8289a2454c2504e0a"
+   },
+   {
+    "rest_sha256": "bfa5dedf06875b8a750be922096b86fab09cf22df21d0fede692fc1a435c2f35",
+    "system_sha256": "28b6eef8c0d8cc712acabc18fccdbbe5eb1b32f3c1b4efc8289a2454c2504e0a"
+   },
+   {
+    "rest_sha256": "b3693d847d742ad772c410e77a73f8677fa1debf62b982937a1742f25db5a8c4",
+    "system_sha256": "28b6eef8c0d8cc712acabc18fccdbbe5eb1b32f3c1b4efc8289a2454c2504e0a"
+   }
+  ],
+  "submits": [
+   {
+    "issues": [
+     "entities: Field required",
+     "sources: Field required"
+    ],
+    "outcome": "rejected"
+   },
+   {
+    "issues": [],
+    "outcome": "accepted"
+   }
+  ],
+  "tool_results_sha256": [
+   "c2a045ba53cd468a45523177e0a64ea737a4bb913f6b82eafec0cf27ef056f96",
+   "227148dde1739bf8141455b749c027e75d0adafb8dd79993a8a4592d155c637b",
+   "ca275a7bdb7fe983de619312e13a2abac0f3c448279ad3ea37bc45c2095ba87e",
+   "070c160a6299c5438070b1aa737b14fc2992ed49579c14264884886a5876f971"
+  ],
+  "verdict": "accepted"
+ },
+ "kind": "synthetic",
+ "model": {
+  "canonical_slug": "openai/gpt-6.1-sol",
+  "context_length": 1048576,
+  "id": "openai/gpt-6.1-sol",
+  "max_completion_tokens": 131072,
+  "pricing": {
+   "completion": "0.000002",
+   "prompt": "0.000001"
+  }
+ },
+ "provenance": {
+  "cohort": "openrouter-pool",
+  "source": "task 8.0d synthetic transcript"
+ },
+ "replies": [
+  {
+   "choices": [
+    {
+     "finish_reason": "tool_calls",
+     "message": {
+      "content": null,
+      "reasoning_details": [
+       {
+        "data": "opaque-1",
+        "type": "reasoning.encrypted"
+       }
+      ],
+      "role": "assistant",
+      "tool_calls": [
+       {
+        "function": {
+         "arguments": "{\"query\": \"revenue\", \"source_id\": \"S1\", \"max_hits\": 3}",
+         "name": "search_pack"
+        },
+        "id": "s1",
+        "type": "function"
+       },
+       {
+        "function": {
+         "arguments": "{\"source_id\": \"S1\", \"first_page\": 1, \"last_page\": 1}",
+         "name": "read_pages"
+        },
+        "id": "x1",
+        "type": "function"
+       }
+      ]
+     }
+    }
+   ],
+   "id": "gen-synthetic-1",
+   "model": "openai/gpt-6.1-sol",
+   "provider": "OpenAI",
+   "usage": {
+    "completion_tokens": 200,
+    "cost": 0.01,
+    "prompt_tokens": 1000,
+    "total_tokens": 1200
+   }
+  },
+  {
+   "choices": [
+    {
+     "finish_reason": "tool_calls",
+     "message": {
+      "content": null,
+      "reasoning_details": [
+       {
+        "data": "opaque-2",
+        "type": "reasoning.encrypted"
+       }
+      ],
+      "role": "assistant",
+      "tool_calls": [
+       {
+        "function": {
+         "arguments": "{}",
+         "name": "submit_source_context"
+        },
+        "id": "b1",
+        "type": "function"
+       }
+      ]
+     }
+    }
+   ],
+   "id": "gen-synthetic-2",
+   "model": "openai/gpt-6.1-sol",
+   "provider": "OpenAI",
+   "usage": {
+    "completion_tokens": 200,
+    "cost": 0.01,
+    "prompt_tokens": 1000,
+    "total_tokens": 1200
+   }
+  },
+  {
+   "choices": [
+    {
+     "finish_reason": "tool_calls",
+     "message": {
+      "content": null,
+      "reasoning_details": [
+       {
+        "data": "opaque-3",
+        "type": "reasoning.encrypted"
+       }
+      ],
+      "role": "assistant",
+      "tool_calls": [
+       {
+        "function": {
+         "arguments": "{\"schema_version\":\"source-context-review/1\",\"pack_sha256\":\"4e9b00f5c670fedcd5c22bfc34190ff9df351bbdeab26c3c3eb93dae7bb311b0\",\"entities\":[{\"entity_id\":\"issuer\",\"name\":\"Synthetic borrower group\",\"entity_type\":\"group\",\"roles\":[\"issuer\",\"borrower\",\"guarantor_group\",\"restricted_group\"],\"fiscal_year_end\":\"31 December\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]}],\"sources\":[{\"source_id\":\"S1\",\"classification\":\"financial\",\"document_type\":\"Interim statements\",\"published_on\":\"2026-01-31\",\"evidence_class\":\"unaudited_without_auditor\",\"evidence_rationale\":\"Synthetic class supplied explicitly\",\"analytical_use\":\"Historical credit analysis\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"scopes\":[{\"scope_id\":\"OPEN\",\"entity_id\":\"issuer\",\"period_label\":\"OPEN\",\"period_kind\":\"historical_duration\",\"start_date\":\"2024-12-31\",\"end_date\":\"2024-12-31\",\"currency\":\"USD\",\"unit\":\"MILLIONS\",\"entity_perimeter\":\"Consolidated\",\"accounting_basis\":\"US GAAP\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]},{\"scope_id\":\"Q1\",\"entity_id\":\"issuer\",\"period_label\":\"Q1\",\"period_kind\":\"historical_duration\",\"start_date\":\"2025-01-01\",\"end_date\":\"2025-03-31\",\"currency\":\"USD\",\"unit\":\"MILLIONS\",\"entity_perimeter\":\"Consolidated\",\"accounting_basis\":\"US GAAP\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]},{\"scope_id\":\"Q2\",\"entity_id\":\"issuer\",\"period_label\":\"Q2\",\"period_kind\":\"historical_duration\",\"start_date\":\"2025-04-01\",\"end_date\":\"2025-06-30\",\"currency\":\"USD\",\"unit\":\"MILLIONS\",\"entity_perimeter\":\"Consolidated\",\"accounting_basis\":\"US GAAP\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]},{\"scope_id\":\"Q3\",\"entity_id\":\"issuer\",\"period_label\":\"Q3\",\"period_kind\":\"historical_duration\",\"start_date\":\"2025-07-01\",\"end_date\":\"2025-09-30\",\"currency\":\"USD\",\"unit\":\"MILLIONS\",\"entity_perimeter\":\"Consolidated\",\"accounting_basis\":\"US GAAP\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]},{\"scope_id\":\"Q4\",\"entity_id\":\"issuer\",\"period_label\":\"Q4\",\"period_kind\":\"historical_duration\",\"start_date\":\"2025-10-01\",\"end_date\":\"2025-12-31\",\"currency\":\"USD\",\"unit\":\"MILLIONS\",\"entity_perimeter\":\"Consolidated\",\"accounting_basis\":\"US GAAP\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]},{\"scope_id\":\"FY\",\"entity_id\":\"issuer\",\"period_label\":\"FY\",\"period_kind\":\"historical_duration\",\"start_date\":\"2025-01-01\",\"end_date\":\"2025-12-31\",\"currency\":\"USD\",\"unit\":\"MILLIONS\",\"entity_perimeter\":\"Consolidated\",\"accounting_basis\":\"US GAAP\",\"citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"limitations\":[]}],\"event_scan\":\"no_events_identified\",\"event_ids\":[],\"event_scan_citations\":[{\"source_id\":\"S1\",\"source_sha256\":\"27ad3ef43c78b188f3355bf894d74575e3220183a29303742d0fcbafab1a3f7e\",\"locator\":\"metadata\",\"quote\":\"Synthetic issuer, USD millions, US GAAP, consolidated; classifications are test inputs.\"}],\"event_scan_explanation\":\"No event identified in this synthetic reviewed scope\",\"limitations\":[]}],\"events\":[],\"limitations\":[]}",
+         "name": "submit_source_context"
+        },
+        "id": "g1",
+        "type": "function"
+       }
+      ]
+     }
+    }
+   ],
+   "id": "gen-synthetic-3",
+   "model": "openai/gpt-6.1-sol",
+   "provider": "OpenAI",
+   "usage": {
+    "completion_tokens": 200,
+    "cost": 0.01,
+    "prompt_tokens": 1000,
+    "total_tokens": 1200
+   }
+  }
+ ],
+ "rules": {
+  "checked": [
+   "absence",
+   "unread-citations"
+  ],
+  "submits": [
+   {
+    "issues": [
+     "entities: Field required",
+     "sources: Field required"
+    ],
+    "outcome": "rejected"
+   },
+   {
+    "issues": [],
+    "outcome": "accepted"
+   }
+  ]
+ },
+ "schema": "tool-transcript/1",
+ "step_id": "source_context",
+ "upstream": {}
+}

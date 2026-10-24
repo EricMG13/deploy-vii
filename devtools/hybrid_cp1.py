@@ -96,9 +96,9 @@ from deploy_vii.live.runner import (  # type: ignore[import-untyped]
     journal_outcome,
     prompt_token_bound,
     reservation_usd,
-    schema_shaped,
 )
 from deploy_vii.live.schema import exact_json, strict_schema  # type: ignore[import-untyped]
+from deploy_vii.live.schema_check import schema_shaped  # type: ignore[import-untyped]
 from deploy_vii.live.settings import DEFAULT_SETTINGS, load_settings  # type: ignore[import-untyped]
 from deploy_vii.live.submission import STEPS, submit_model_payload  # type: ignore[import-untyped]
 from deploy_vii.preparation import PreparedPack  # type: ignore[import-untyped]
@@ -1963,7 +1963,12 @@ def main(
     harness = Harness(
         cp0_journal=args.cp0_journal,
         providers=providers,
-        ledgers={name: Ledger(plan.path, plan.cap) for name, plan in plans.items()},
+        # Task 8.0d: a new ledger records its provider, so the 7.14 spend cross-check counts
+        # only OpenRouter's; a shared or resumed one keeps whatever its first line records.
+        ledgers={
+            name: Ledger(plan.path, plan.cap, provider=None if plan.shared else name)
+            for name, plan in plans.items()
+        },
         keys={name: key.key for name, key in keys.items()},
         batch_directory=batch_directory,
         deadline_s=args.step_seconds,

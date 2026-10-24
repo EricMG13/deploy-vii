@@ -29,6 +29,11 @@ before-check with no other batch's reservation between the two checks; the same 
 The first line records the cap the file was opened with; it is written together with the first
 reservation, so a file that exists is always bound. Opening the same file with another
 cap raises LedgerError; a different cap needs a different ledger file.
+
+Task 8.0d: the first line also records the provider whose calls the ledger holds, when the
+opener names one (the live runner: `openrouter`; the hybrid harness: each provider's own). A
+ledger written before that records none and is an OpenRouter ledger (`opening_provider`).
+Opening a file with a named provider that differs from the recorded one raises LedgerError.
 """
 
 import fcntl
@@ -52,6 +57,20 @@ _USAGE_SOURCES = frozenset({ADJUST_USAGE_SOURCE, ADJUST_NEXT_BEFORE_SOURCE})
 ADJUST_SOURCES = frozenset({ADJUST_SOURCE, ADJUST_404_SOURCE, *_USAGE_SOURCES})
 # Sources whose line must carry `evidence` (the facts behind the figure).
 _EVIDENCED = frozenset({ADJUST_404_SOURCE, *_USAGE_SOURCES})
+# Task 8.0d: the provider a ledger without a recorded one belongs to (every ledger before 8.0d
+# that the runner wrote; the hybrid harness's Anthropic ledgers of 23-24 Oct 2026 record none
+# either, so this rule counts them as OpenRouter's until the user decides otherwise).
+OPENROUTER = "openrouter"
+
+
+def opening_provider(entry: dict[str, Any]) -> str:
+    """The provider an opening line records, `openrouter` when it records none (task 8.0d)."""
+    provider = entry.get("provider")
+    if provider is None:
+        return OPENROUTER
+    if not isinstance(provider, str) or not provider.strip():
+        raise LedgerError("the opening line's provider is not a name")
+    return provider
 
 
 class LedgerError(Exception):
@@ -147,12 +166,20 @@ def _text(value: Decimal) -> str:
 
 class Ledger:
     def __init__(
-        self, path: Path, cap_usd: Decimal, *, clock: Callable[[], str] = utc_stamp
+        self,
+        path: Path,
+        cap_usd: Decimal,
+        *,
+        clock: Callable[[], str] = utc_stamp,
+        provider: str | None = None,
     ) -> None:
         if not cap_usd.is_finite() or cap_usd <= 0:
             raise LedgerError("the cap must be a positive amount")
+        if provider is not None and not provider.strip():
+            raise LedgerError("a named provider cannot be blank")
         self.path = path
         self.cap = cap_usd
+        self.provider = provider  # None: not asserted on open, not recorded on a new file
         self._clock = clock
 
     # -- reading -----------------------------------------------------------------------------
@@ -205,6 +232,11 @@ class Ledger:
             raise LedgerError(
                 f"ledger was opened with a cap of {_text(opened)}, not {_text(self.cap)}; "
                 "use a new ledger file for a new cap"
+            )
+        recorded = opening_provider(entry)
+        if self.provider is not None and recorded != self.provider:
+            raise LedgerError(
+                f"ledger holds {recorded} calls, not {self.provider}; use a new ledger file"
             )
 
     @staticmethod
@@ -322,7 +354,10 @@ class Ledger:
     def _commit(self, raw: bytes, entry: dict[str, Any]) -> int:
         """Append one entry (after the opening line, written with the first one); return its seq."""
         if not raw:
-            raw = self._line(raw, {"event": "open", "cap_usd": _text(self.cap)})
+            opening: dict[str, Any] = {"event": "open", "cap_usd": _text(self.cap)}
+            if self.provider is not None:
+                opening["provider"] = self.provider
+            raw = self._line(raw, opening)
         content = self._line(raw, entry)
         state = self._replay(content)  # never persist a ledger that would not replay
         self._replace(self.path, content)

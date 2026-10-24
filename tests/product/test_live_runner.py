@@ -36,16 +36,18 @@ from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import CapExceeded, Ledger
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import (
-    SCHEMA_BISECT_RECORD,
-    SCHEMA_CHECK_RECORD,
     DispatchResult,
-    SchemaCheck,
     StepSpec,
-    check_schema,
     dispatch,
-    schema_rejections,
 )
 from deploy_vii.live.schema import strict_schema
+from deploy_vii.live.schema_check import (
+    SCHEMA_BISECT_RECORD,
+    SCHEMA_CHECK_RECORD,
+    SchemaCheck,
+    check_schema,
+    schema_rejections,
+)
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
 from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source
@@ -1228,12 +1230,48 @@ def test_dispatch_refuses_tickets_the_journal_would_refuse(tmp_path: Path) -> No
         rig.ticket_id, "CP-0", ("a", "b"), "a", "raw", lambda p, a: StepValidation(output="x")
     )
     assert ok_step.steps[0].status == "valid"
-    with pytest.raises(ValueError, match="already retains its review step"):
+    with pytest.raises(ValueError, match="CP-0 already retains its one step"):  # task 8.0a
         rig.run(ChatClient(idle))
     rig.store.interrupt(rig.ticket_id, "resolve the fixture ticket")
     with pytest.raises(ValueError, match="finished or already retains"):
         rig.run(ChatClient(idle))
     assert idle.requests == [] and rig.ledger.state().attempts == ()
+
+
+@pytest.mark.parametrize("module_id", ["CP-0", "CP-1A"])
+def test_an_invalid_one_step_response_finishes_the_ticket_in_the_same_write(
+    tmp_path: Path, module_id: str
+) -> None:
+    """Task 8.0a fix round 1: `submit_cp0_review` and `submit_cp1a_step` retain their step only
+    through `Execution.submit_step`; a one-step module repairs nothing within the attempt, so an
+    invalid response is settled in the write that retains it (`_save_finished`). No pending
+    ticket ever holds an invalid step, which is why `expected_step` may count valid steps."""
+    from deploy_vii.execution import (
+        WITHIN_ATTEMPT_REPAIR,
+        Execution,
+        ExecutionSnapshot,
+        StepValidation,
+    )
+
+    assert module_id not in WITHIN_ATTEMPT_REPAIR
+    rig = make_rig(tmp_path) if module_id == "CP-0" else cp1a_rig(tmp_path)
+    store, ticket = rig.store, rig.ticket_id
+    writes: list[int] = []
+    original = Execution._write
+
+    def counted(self: Execution, snapshot: ExecutionSnapshot) -> None:
+        writes.append(len(writes))
+        original(self, snapshot)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Execution, "_write", counted)
+        attempt = store.submit_step(
+            ticket, module_id, ("only",), "only", "raw", lambda p, a: StepValidation(issues=("x",))
+        )
+    assert attempt.status == "finished" and [s.status for s in attempt.steps] == ["invalid"]
+    held = next(a for a in store.read().attempts if a.ticket_id == ticket)
+    assert held.status == "finished" and held.steps[-1].status == "invalid"
+    assert len(writes) == 2  # the pending submission, then the invalid step with its settlement
 
 
 @pytest.mark.parametrize(
@@ -2265,6 +2303,46 @@ def test_a_second_in_flight_402_is_exhaustion_and_both_attempts_are_sealed(
     assert raised.value.state.exhausted is True
     assert all(record.charged_usd == Decimal(0) for record in rig.ledger.state().attempts)
     assert [a.status for a in rig.store.read().attempts] == ["pending"]  # repair kept
+
+
+def test_the_second_in_flight_402_is_settled_as_exhaustion_and_still_no_model_try(
+    tmp_path: Path,
+) -> None:
+    """Task 8.0a (M7 whole-lane review A.3; fix round 1): the settle wording follows the outcome
+    and the try count does not move. The first in-flight 402 is re-sent and settled "not a model
+    try"; the second is exhaustion (DC-8) and says so, without that mark, but it is still no
+    model try: the next dispatch on the still-pending ticket is try 1, as at base."""
+    rig = make_rig(tmp_path)
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402))
+    with pytest.raises(CreditExhausted):
+        rig.run(ChatClient(transport), sleep=Waits())
+    first, second = sorted(rig.ledger.state().attempts, key=lambda record: record.attempt_id)
+    assert runner.in_flight_refused(first)
+    assert (first.basis or "").endswith(runner.IN_FLIGHT_SETTLE_MARK)
+    assert runner.in_flight_refused(second) and second.status == "settled"
+    assert runner.IN_FLIGHT_SETTLE_MARK not in (second.basis or "")
+    assert (second.basis or "").endswith(runner.IN_FLIGHT_EXHAUSTED_MARK)
+    (sealed,) = [
+        load(path)
+        for path in (rig.root / "artifacts").rglob("manifest.json")
+        if load(path)["attempt_id"] == second.attempt_id
+    ]
+    assert sealed["credit"]["transient"] is True and sealed["credit"]["exhausted"] is True
+    third = rig.run(ChatClient(FakeTransport(reply(rig))))
+    assert third.status == "accepted"
+    assert load(attempt_dir(third) / "manifest.json")["retries"]["attempt_number"] == 1
+
+
+def test_a_third_dispatch_after_two_in_flight_402s_is_still_the_first_model_try(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1 pin, independent of the mark names: base ceba3dc counted neither refusal."""
+    rig = make_rig(tmp_path)
+    transport = FakeTransport(Response(402, IN_FLIGHT_402), Response(402, IN_FLIGHT_402))
+    with pytest.raises(CreditExhausted):
+        rig.run(ChatClient(transport), sleep=Waits())
+    third = rig.run(ChatClient(FakeTransport(reply(rig))))
+    assert load(attempt_dir(third) / "manifest.json")["retries"]["attempt_number"] == 1
 
 
 def test_a_credit_402_does_not_wait_and_reports_the_affordable_budget(tmp_path: Path) -> None:

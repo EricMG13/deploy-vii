@@ -604,8 +604,9 @@ def _spec(
 def synthetic_call() -> tuple[CallItem, ...]:
     """A populated call band: six scale and direction items, then the three line items.
 
-    Invented judgements for the SYNTHETIC case; no module produces a call yet (CP-2 and CP-3 are
-    M8), so real data shows the honest no-judgement state instead.
+    The call band is now built from a settled CP-6 head (task 8.7); this fixture is the SYNTHETIC
+    populated case, with invented judgements, and real data without a settled head shows the
+    honest no-judgement state instead.
     """
     scales = (
         ("Credit view", "Neutral", 3),

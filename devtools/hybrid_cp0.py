@@ -133,11 +133,11 @@ class ToolChatRequest(ChatRequest):
     tool_choice: str = TOOL_CHOICE
 
     def body(self) -> dict[str, Any]:
+        # Task 8.0d: `ChatRequest.body` itself drops `response_format` and sends `tools` and
+        # `tool_choice` when tools are offered (`tools` is sent again on every request); only
+        # the conversation comes from this request's own field.
         body: dict[str, Any] = super().body()
-        del body["response_format"]
         body["messages"] = json.loads(json.dumps(list(self.conversation)))
-        body["tools"] = json.loads(json.dumps(list(self.tools)))
-        body["tool_choice"] = self.tool_choice  # `tools` is sent again on every request
         return body
 
 
