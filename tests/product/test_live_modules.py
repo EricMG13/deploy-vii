@@ -267,7 +267,7 @@ def test_tool_loop_rules_are_refused_for_the_submit_only_steps(
 ) -> None:
     store, payload = CASES[step_id](tmp_path)
     ticket = store.begin(SCHEMAS[step_id][0])
-    with pytest.raises(ValueError, match=f"not to {step_id} "):
+    with pytest.raises(ValueError, match=rf"not to {step_id}$"):
         submission.submit_model_payload(
             store, ticket.ticket_id, step_id, payload, rules=lambda _: ()
         )

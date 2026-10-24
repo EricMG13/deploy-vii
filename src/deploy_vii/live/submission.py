@@ -949,7 +949,7 @@ def submit_model_payload(
     they find nothing in takes the path it takes without rules, byte for byte."""
     step = STEPS[step_id]
     if rules is not None and step_id not in RULED_STEPS:
-        raise ValueError(f"tool-loop rules apply to the pack-tool steps, not to {step_id} ")
+        raise ValueError(f"tool-loop rules apply to the pack-tool steps, not to {step_id}")
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
         on_normalised(resolved)

@@ -487,7 +487,7 @@ def test_the_pack_tools_read_only_the_steps_declared_sources(tmp_path: Path) -> 
 def test_a_rule_issue_rejects_a_payload_the_stage_accepts(tmp_path: Path, case: Case) -> None:
     shutil.copytree(case.store.directory, tmp_path / "journal")
     journal = Execution(tmp_path / "journal")
-    with pytest.raises(ValueError, match="pack-tool steps, not to quality "):
+    with pytest.raises(ValueError, match=r"pack-tool steps, not to quality$"):
         submit_model_payload(journal, case.ticket, "quality", "{}", rules=lambda _: ())
     found = submit_model_payload(
         journal, case.ticket, "financials", case.payload, rules=lambda _: ("Rule: broken",)
