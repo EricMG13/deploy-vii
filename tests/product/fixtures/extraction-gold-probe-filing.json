@@ -1,0 +1,17 @@
+{
+  "_note": "Gold quotes for the live-probe filing (probes 4-5), for `python -m tests.product.extraction_bench --pdf <filing> --gold <this file>`. The filing stays outside Git. Quotes and pages come from live-probe-4-analysis.md and live-probe-5-analysis.md (page checks there were windowed greps, not exact page reads), so confirm each against the PDF before relying on a result. Page-straddle cases (p43/44, p76/77) and the p104 exhibit are omitted: the analyses record only elided fragments of them.",
+  "gold": [
+    {"id": "exhibit-8k", "category": "column_table", "pages": [102], "quote": "Previously filed on Form 8-K filed on September 27, 2021."},
+    {"id": "put-call", "category": "hyphen_wrap", "pages": [135], "quote": "PUT-CALL RIGHT AGREEMENT"},
+    {"id": "net-revenues", "category": "prose", "pages": [38], "quote": "Consolidated net revenues increased"},
+    {"id": "unaudited-figures", "category": "prose", "pages": [44], "quote": "Such figures are based on unaudited internal financial statements"},
+    {"id": "covenant-compliance", "category": "prose", "pages": [46], "quote": "we were in compliance with all of the applicable financial covenants"},
+    {"id": "loss-range", "category": "prose", "pages": [73], "quote": "It is not possible at this time to estimate the amount of loss or range of loss"},
+    {"id": "fair-value-debt", "category": "prose", "pages": [75], "quote": "The fair value of debt has been calculated primarily based on the borrowing rates"},
+    {"id": "borrowing-capacity", "category": "prose", "pages": [76], "quote": "$1.9 billion of available borrowing capacity"},
+    {"id": "repurchase-limit", "category": "prose", "pages": [84], "quote": "During the year ended December 31, 2024, the Company reached the limit of authorized repurchases"},
+    {"id": "auditor-opinion", "category": "prose", "pages": [97], "quote": "our report dated February 17, 2026, expressed an unqualified opinion on those financial statements."},
+    {"id": "security-interest", "category": "prose", "pages": [193], "quote": "Because of regulatory restrictions, our ability to grant a security interest"}
+  ],
+  "artifacts": ["futureremaining"]
+}
