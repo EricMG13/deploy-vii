@@ -784,9 +784,10 @@ def _after(step: _Step, call: Call, ctx: _Context) -> None:
         step.retry_pending = False
         step.verdict = LIMIT  # the call's bound was the step's deadline
         step.verdict_reason = f"deadline of {deadline} s reached during call {call.number}"
-    elif step.verdict == NOT_RUN and step.wait_s is None:
-        if call.number >= step.limits.max_calls or elapsed >= deadline:
-            step.retry_pending = False
+    elif step.verdict == NOT_RUN:
+        if call.number >= step.limits.max_calls or elapsed + (step.wait_s or 0) >= deadline:
+            # No call can follow: neither a retry nor an in-flight re-send (not waited out).
+            step.retry_pending, step.wait_s = False, None
             step.verdict, step.verdict_reason = LIMIT, f"{call.number} calls, {elapsed:.1f} s"
     if step.verdict == NOT_RUN or not step.submits or step.journal is not None:
         return

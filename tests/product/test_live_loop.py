@@ -466,6 +466,16 @@ def test_an_in_flight_402_is_waited_out_and_re_sent_once(rig: Rig) -> None:
     assert refused.charged_usd == 0 and (refused.basis or "").endswith(IN_FLIGHT_SETTLE_MARK)
 
 
+def test_an_in_flight_402_on_the_last_call_ends_the_step_with_its_last_submit(rig: Rig) -> None:
+    """Confidence review: no call can follow the step's last one, so its in-flight refusal is not
+    waited out, and the step's last judged submit still enters the live journal."""
+    script = rig.script(submit("{}", "a"), Response(402, IN_FLIGHT_402))
+    result = rig.run(script, limits=ToolLimits(max_calls=2), rules=NO_RULES)
+    assert result.verdict == LIMIT and result.status == "rejected"
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    assert [s.step_id for s in attempt.step_repairs] == ["source_context"]
+
+
 def test_exhausted_credit_raises_after_the_call_is_sealed(rig: Rig) -> None:
     stopped: list[ToolStepResult] = []
     with pytest.raises(CreditExhausted):
