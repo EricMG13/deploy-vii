@@ -860,7 +860,7 @@ def _validate_prefilled(
         hashes = {
             f"{path}: Field required"
             for path in result.unset
-            if path.rsplit(".", 1)[-1] not in SCOPE_DIMENSIONS
+            if path.rsplit(".", 1)[-1] not in DIMENSIONS
         }
         named = tuple(issue for issue in stage.issues if issue not in hashes)
         return StepValidation(output=stage.output, issues=named) if named else stage

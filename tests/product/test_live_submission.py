@@ -38,7 +38,6 @@ from deploy_vii.live.schema import (
 from deploy_vii.live.submission import (
     NOT_ASSESSED,
     PREFILLED,
-    SCOPE_DIMENSIONS,
     STEPS,
     SUPERSEDED_SHAPE,
     ConsumerJudgment,
@@ -1017,7 +1016,7 @@ def test_a_duration_without_a_start_date_or_its_own_citations_never_asks_for_a_h
     )
     assert rejected.status == "invalid" and rejected.output_sha256 is None
     where = f"financial.books.0.periods.{index}"
-    assert rejected.issues == tuple(f"{where}.{name}: Field required" for name in SCOPE_DIMENSIONS)
+    assert rejected.issues == tuple(f"{where}.{name}: Field required" for name in DIMENSIONS)
 
 
 def test_a_balance_sheet_period_without_a_start_date_binds_and_settles_with_its_limitation(
