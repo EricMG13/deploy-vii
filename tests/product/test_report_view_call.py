@@ -3,7 +3,8 @@
 Three states (docs/frontend-direction-c.md): populated from a settled (accepted or restricted)
 CP-6 head, the honest no-judgement item when there is no settled head, and the call withheld
 when CP-6 is outside the Pathway or cannot run (CP-6 or a required producer of it blocked).
-Every value is the head's own `T6A.4` fact text; the meter is `cp6_committee.call_scale`, held
+Every value is the head's own final-bias fact text (`T6.final_bias.action_bias` and
+`T6.final_bias.confidence`, task CP6-R); the meter is `cp6_committee.call_scale`, held
 here to a hand-written reference table (decision 0012 differential) and to a property over the
 whole Literal. SYNTHETIC data only: the CP-6 head is composed by Python from the CP-6 test's
 submission over the SYNTHETIC Credit Snapshot fixture.
@@ -197,7 +198,7 @@ def test_a_settled_head_without_its_pair_fails_closed() -> None:
 
 def head_view(bias: str, confidence: str) -> tuple[View, Module]:
     """An idle Credit Snapshot view whose CP-6 is a restricted head composed by Python, its two
-    `T6A.4` cells set to `bias` and `confidence`; and that head."""
+    final-bias cells set to `bias` and `confidence`; and that head."""
     up = cp6_tests.upstream_of()
     module = cp6_module(
         committee_challenge(market_pack(), cp6_tests.committee(), up),

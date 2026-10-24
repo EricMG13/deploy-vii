@@ -6,13 +6,23 @@ judgments over the settled upstream heads; Python composes every table, assigns 
 identifier, spells every figure, maps the call band and sets the status. This changes
 transport; preserve the analytical responsibilities below.
 
-Adaptation record (decision 0005): the r14 CP-6 SKILL.md is not in this repository, so neither
-its table definitions nor its columns are available. Python composes five minimal tables from
-the contract rows below under r14 CP-6 ids: `T6A.4` (action bias), `T6E.4` (committee
-challenges), `T6E.6` (recovery view), `T6E.7` (committee risks) and `T6E.11` (gaps ledger).
-Which r14 table each id names is an assumption recorded here, not taken from r14. The other
-required CP-6 tables are not composed; the call band wiring and the final integrity check at
-report assembly are separate changes.
+Adaptation record (decision 0005; table mapping verified 24 October 2026 against the r14 CP-6
+SKILL.md pinned at sha256
+`73e73646c969ca32949d0074d3e9876fe7bc79d87a8e946b0e1a228b79f31389`, the hash in
+docs/methodology/r14-coverage.json). Python composes four r14 tables from the contract rows
+below, under the ids they denote and titled by r14's names, with only the columns the contract
+rows supply: `T6A.4` Bear cross-examination (the `thesis_challenges` rows; no fragility-vector
+or legal-exploit column), `T6A.6` Chair evidence weighting (the `recovery_view` rows only),
+`T6A.7` Debate resolution matrix (the `risks` rows; no bull, bear or resolution column) and
+`T6A.11` Gaps ledger (the `gaps` rows). r14's `T6A.6` scores nine dimensions; CP-6 composes no
+dimension, no score and no bull, bear or chair column there: its rows are the recovery views
+(subject, view, confidence, basis, limitation) and nothing else. The action bias and its
+confidence are r14's Final Bias step, which has no table: Python composes them, with the
+rationale, conditions, basis and limitation, under CP-6's own `T6` id, outside r14's A and E
+phase ids, and the call band reads `T6.final_bias.action_bias` and
+`T6.final_bias.confidence` only. `T6E.4`, `T6E.6`, `T6E.7` and `T6E.11` are the CP-6A
+Portfolio Debate tables, reserved for its owner (M10): CP-6 writes none of them. The final
+integrity check at report assembly is a separate change.
 
 Role: investment committee chair, creditor perspective. Test CP-2's fundamental view against
 CP-3's relative value and CP-5's integrity review, then state the committee's action bias.
