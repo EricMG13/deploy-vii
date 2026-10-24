@@ -38,6 +38,7 @@ from deploy_vii.live.tools import (
 from deploy_vii.registry import STEP_CHAINS, StepChain, tool_loop_steps
 from deploy_vii.source_context import SourceContextReview
 from tests.product.live_support import FAKE_KEY
+from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
 from tests.product.test_workflow import cp1_case
 
 CP1_STAGES = {"source_context", "financials", "narrative", "readiness"}
@@ -281,7 +282,9 @@ def test_a_rule_issue_rejects_a_payload_the_stage_accepts(tmp_path: Path, case: 
 
 
 def settings_file(tmp_path: Path, extra: str) -> Path:
-    text = (Path("settings/project.toml")).read_text(encoding="utf-8")
+    """The CLI tests' settings (no 8.0d entries; the project file has its own table) plus
+    `extra` ahead of the candidates."""
+    text = CLI_SETTINGS.format(key=tmp_path / "key.rtf")
     path = tmp_path / "settings" / "project.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
