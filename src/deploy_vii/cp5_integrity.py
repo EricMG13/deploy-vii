@@ -7,9 +7,11 @@ re-implemented here (plan M8, MC-6):
 - citation existence and quote match: `readiness.citation_issues` over every bound claim's and
   fact's citations against the prepared pack;
 - claim figure resolution: `prose.issues` of each claim against its own module's facts;
-- cross-module figure identity (new, ruling 5): facts sharing a `fact_id`, and figures sharing
-  `(table_id, row_id, field, period)`, must agree in amount, unit, currency, scale and period.
-  A disagreement is a finding; CP-5 writes no replacement value and repeats no amount;
+- cross-module figure identity (new, ruling 5, fix round 1): facts sharing a `fact_id`, and
+  figures sharing `(table_id, row_id, field, period)`, must agree in exact value (amount times
+  scale), unit, currency and period, and under one fact id in table, row and field (CP-1A's
+  reference copies excepted); a scale that disagrees with its unit is its own finding. A
+  disagreement is a finding; CP-5 writes no replacement value and repeats no amount;
 - stale inputs: `execution.current_inputs` and each bound hash against its current head;
 - gap propagation: `execution.blocked_ancestors` and `execution.inherited_limitations`, and a
   claim that rests on an unsettled fact without stating a limitation.
@@ -33,15 +35,16 @@ step tables is a separate change; nothing here needs it.
 """
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal, get_args
 
 from pydantic import Field, ValidationError
 
 from deploy_vii import prose
-from deploy_vii.business_context import Cell, Register, spelled
+from deploy_vii.business_context import CP1_REFERENCES, Cell, Register, spelled
 from deploy_vii.contracts import (
     Claim,
     Contract,
@@ -79,9 +82,21 @@ PROMOTED = Qualification(implementation="implemented")
 # (ruling 1: analysts' facts and claims only). The prepared pack is not a module.
 NOT_EVALUATED = frozenset({"CP-0"})
 SUBMISSION_INPUT = "integrity-submission"
-# The attributes a figure must share wherever it appears (ruling 5; currency added, since the
-# same amount in another currency is another figure).
-FIGURE_FIELDS = ("amount", "unit", "currency", "scale", "period")
+# What a figure must share wherever it appears (ruling 5, fix round 1): its exact value (the
+# Decimal amount times its scale, so 1.1 at scale 1000 is 1100 at scale 1), unit, currency and
+# period; under one fact id also its table, row and field. A fact whose scale disagrees with
+# its unit (`UNIT_SCALE`) is its own finding; `currency` and unscaled units leave scale free.
+VALUE_FIELDS = ("value", "unit", "currency", "period")
+PLACEMENT_FIELDS = ("table_id", "row_id", "field")
+UNIT_SCALE: Mapping[str, Decimal] = {
+    "UNITS": Decimal(1),
+    "THOUSANDS": Decimal(1000),
+    "MILLIONS": Decimal(1000000),
+}
+# Tables holding verbatim copies of another module's facts at coordinates Python assigns by
+# rule (CP-1A's `cp1_references`, business_context.py): their placement is not compared, their
+# value is.
+REFERENCE_TABLES = frozenset({CP1_REFERENCES})
 
 # --- the model-facing contract ---------------------------------------------------------------
 # Plain `str` fields, as in `BusinessContextSubmission`: the validator holds references and
@@ -138,6 +153,7 @@ FindingKind = Literal[
     "empty_evaluated_set",
     "claim_citation",
     "fact_citation",
+    "scale_unit",
     "claim_figure",
     "unsettled_fact",
     "figure_identity",
@@ -151,6 +167,7 @@ KIND_LABEL: Mapping[str, str] = {
     "empty_evaluated_set": "Empty evaluated set",
     "claim_citation": "Failed upstream citation",
     "fact_citation": "Failed upstream citation",
+    "scale_unit": "Scale disagrees with unit",
     "claim_figure": "Unresolved claim figure",
     "unsettled_fact": "Claim rests on an unsettled fact",
     "figure_identity": "Figure mismatch",
@@ -341,10 +358,30 @@ class IdentityGroup:
     differing: tuple[str, ...]
 
 
+def exact_value(fact: Fact) -> Decimal | None:
+    """The figure's exact value: its Decimal amount times its scale (no rounding)."""
+    return None if fact.amount is None else fact.amount * fact.scale
+
+
+def _values(facts: Sequence[Fact], name: str) -> set[object]:
+    if name == "value":
+        return {exact_value(fact) for fact in facts}
+    return {getattr(fact, name) for fact in facts}
+
+
+def scale_disagrees(fact: Fact) -> bool:
+    """A figure whose unit fixes its scale (`UNIT_SCALE`) but carries another scale."""
+    expected = UNIT_SCALE.get(fact.unit or "")
+    return fact.amount is not None and expected is not None and fact.scale != expected
+
+
 def identity_groups(heads: Sequence[Module]) -> tuple[IdentityGroup, ...]:
     """Every key two modules share, where at least one member is a figure: by `fact_id` over
     all facts, and by `(table_id, row_id, field, period)` over figures. Both checks run on
-    every pair (ruling 5), so a disagreement may be found under both keys."""
+    every pair (ruling 5), so a disagreement may be found under both keys. Members are
+    compared on `VALUE_FIELDS`; under a fact id also on `PLACEMENT_FIELDS`, except a member
+    in a `REFERENCE_TABLES` copy. An unsettled fact under a figure's id is a value mismatch
+    (no value against a value); text-only facts never form a group."""
     pooled: dict[tuple[Literal["fact_id", "coordinate"], str], list[tuple[str, Fact]]] = {}
     for head in heads:
         for fact in head.facts:
@@ -361,9 +398,11 @@ def identity_groups(heads: Sequence[Module]) -> tuple[IdentityGroup, ...]:
         owners = {module_id for module_id, _ in members}
         if len(owners) < 2 or all(fact.amount is None for _, fact in members):
             continue
-        differing = tuple(
-            name for name in FIGURE_FIELDS if len({getattr(f, name) for _, f in members}) > 1
-        )
+        facts = [fact for _, fact in members]
+        differing = tuple(name for name in VALUE_FIELDS if len(_values(facts, name)) > 1)
+        if basis == "fact_id":
+            placed = [fact for fact in facts if fact.table_id not in REFERENCE_TABLES]
+            differing += tuple(name for name in PLACEMENT_FIELDS if len(_values(placed, name)) > 1)
         groups.append(
             IdentityGroup(
                 basis=basis,
@@ -448,8 +487,15 @@ class _Checker:
         self.flagged.setdefault(module_id, {}).setdefault(ref, set()).add(kind)
 
     def facts(self, head: Module) -> None:
-        """`citation_issues` over every fact's citations."""
+        """`citation_issues` over every fact's citations, and each figure's scale against
+        its unit (`scale_disagrees`)."""
         for fact in head.facts:
+            if scale_disagrees(fact):
+                detail = f"its scale disagrees with its unit {fact.unit}"
+                self.found.append(
+                    _finding("scale_unit", head.module_id, f"fact {fact.fact_id}", detail)
+                )
+                self.flag(head.module_id, fact.fact_id, "scale_unit")
             for issue in citation_issues(fact.citations, self.sources):
                 self.found.append(
                     _finding("fact_citation", head.module_id, f"fact {fact.fact_id}", issue)
@@ -916,7 +962,10 @@ def _claim_tables(c: _Composition) -> None:
 
 
 def _identity_tables(c: _Composition) -> None:
-    same = "Identical amount, unit, currency, scale and period"
+    same = {
+        "fact_id": "Identical value (amount times scale), unit, currency, period and placement",
+        "coordinate": "Identical value (amount times scale), unit, currency and period",
+    }
 
     def rows(basis: str) -> list[Row]:
         return _numbered(
@@ -928,7 +977,7 @@ def _identity_tables(c: _Composition) -> None:
                         f"Differs in {', '.join(group.differing)}: a finding; no replacement "
                         "value is written"
                         if group.differing
-                        else same
+                        else same[basis]
                     ),
                 ),
             )
@@ -1250,11 +1299,24 @@ def _fact_entry(fact: Fact) -> dict[str, object]:
     }
 
 
-def context_block(scope: ReviewScope) -> dict[str, object]:
+FactProjection = Callable[[Module], Sequence[Fact]]
+
+
+def all_facts(head: Module) -> Sequence[Fact]:
+    """The default projection: every fact of the head."""
+    return head.facts
+
+
+def context_block(scope: ReviewScope, facts: FactProjection = all_facts) -> dict[str, object]:
     """What the `integrity_review` CONTEXT block states, all Python's: per bound analyst head
-    its status, facts (Python's spelling), claims with their citation refs and the Python
-    findings that touch each, limitations and inherited limitations; the claims to review; the
-    Python findings; and the pack's source list. The model retypes no figure and no quote."""
+    its status, the facts `facts` projects (Python's spelling), claims with their citation refs
+    and the Python findings that touch each, limitations and inherited limitations; the claims
+    to review; the Python findings; and the pack's source list. The model retypes no figure and
+    no quote.
+
+    `facts` is the seam a live projection uses to trim the block (every fact of a promoted CP-1
+    is tens of megabytes of JSON): only the projected facts are spelled and listed. The checks
+    and the validator always run over every fact; the projection changes the prompt only."""
     checks = python_checks(scope)
     evaluated = {head.module_id for head in scope.evaluated}
     heads = sorted(scope.heads, key=lambda pair: _rank(pair[0].input_id))
@@ -1274,7 +1336,7 @@ def context_block(scope: ReviewScope) -> dict[str, object]:
                 "module_id": head.module_id,
                 "status": item.status,
                 "evaluated": head.module_id in evaluated,
-                "facts": [_fact_entry(fact) for fact in head.facts],
+                "facts": [_fact_entry(fact) for fact in facts(head)],
                 "claims": [
                     {
                         "claim_id": claim.claim_id,

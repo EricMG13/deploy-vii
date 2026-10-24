@@ -17,7 +17,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.bindings import validate_bindings
-from deploy_vii.business_context import BusinessContextReport, business_context, cp1a_module
+from deploy_vii.business_context import (
+    CP1_REFERENCES,
+    BusinessContextReport,
+    business_context,
+    cp1a_module,
+)
 from deploy_vii.contracts import (
     Citation,
     Claim,
@@ -93,7 +98,9 @@ def module(pack: PreparedPack, module_id: str, **fields: object) -> Module:
 
 
 def cp1_head(pack: PreparedPack) -> Module:
-    fact = cp1_fact(pack)
+    # The shared fixture states MILLIONS at scale 1; a promoted CP-1 writes the scale its unit
+    # implies (MILLIONS at 1e6), which CP-5 checks (fix round 1).
+    fact = Fact.model_validate({**dict(cp1_fact(pack)), "scale": Decimal(1000000)})
     claim = Claim(
         claim_id="liquidity",
         text=f"Liquidity was {{{FIGURE}|MILLIONS}} at FY2025.",
@@ -259,7 +266,7 @@ def test_an_altered_fact_and_an_unsupported_claim_restrict_with_both_findings() 
     scope = planted_scope()
     identity = [f for f in python_checks(scope).findings if f.kind == "figure_identity"]
     assert [(f.modules, f.subject) for f in identity] == [(("CP-1", "CP-1A"), f"fact_id {FIGURE}")]
-    assert "amount" in identity[0].detail and "1200" not in identity[0].detail
+    assert "value" in identity[0].detail and "1200" not in identity[0].detail
     submission = review_all(scope, {("CP-MODEL", "model-publication"): "unsupported"})
     assert validate_integrity(scope, submission) == ()
     report = integrity_review(scope, submission)
@@ -805,9 +812,11 @@ def figure(draw: st.DrawFn, fact_id: str) -> Fact:
         table_id="T",
         row_id=draw(st.sampled_from(("r1", "r2"))),
         field="v",
-        amount=Decimal(draw(st.sampled_from(("1", "2", "2.0")))),
-        unit=draw(st.sampled_from(("MILLIONS", "THOUSANDS"))),
-        currency="USD",
+        # 1000 at scale 1 is 1 at scale 1000: one value, two representations.
+        amount=Decimal(draw(st.sampled_from(("1", "2", "2.0", "1000")))),
+        unit=draw(st.sampled_from(("MILLIONS", "THOUSANDS", "currency"))),
+        scale=Decimal(draw(st.sampled_from((1, 1000)))),
+        currency=draw(st.sampled_from(("USD", "EUR"))),
         period=draw(st.sampled_from(("FY2024", "FY2025"))),
         citations=tuple(cited),
     )
@@ -961,13 +970,19 @@ def test_a_blocked_ancestor_is_restricted_never_accepted(
 
 
 def naive_identity(modules: tuple[Module, ...]) -> set[str]:
-    """Reference: a key held by two modules whose figure tuples, pooled as one set, differ."""
+    """Reference: a key held by two modules whose figure tuples, pooled as one set, differ.
+
+    A figure is its exact value (amount times scale), unit, currency and period; under a
+    fact id it is also its table, row and field. (The generator writes no reference-copy
+    table, so the copy exemption is exercised by a focused test, not here.)"""
     pooled: dict[str, dict[str, set[tuple[object, ...]]]] = defaultdict(lambda: defaultdict(set))
     figured: dict[str, bool] = defaultdict(bool)
     for item in modules:
         for fact in item.facts:
-            value = (fact.amount, fact.unit, fact.currency, fact.scale, fact.period)
-            pooled[f"fact_id {fact.fact_id}"][item.module_id].add(value)
+            exact = None if fact.amount is None else fact.amount * fact.scale
+            value = (exact, fact.unit, fact.currency, fact.period)
+            placed = (*value, fact.table_id, fact.row_id, fact.field)
+            pooled[f"fact_id {fact.fact_id}"][item.module_id].add(placed)
             figured[f"fact_id {fact.fact_id}"] |= fact.amount is not None
             if fact.amount is not None:
                 where = f"coordinate {fact.table_id}/{fact.row_id}/{fact.field}/{fact.period}"
@@ -1007,3 +1022,81 @@ def test_the_citation_pass_is_citation_issues_over_every_record(heads_: tuple[Mo
         for issue in citation_issues(citations, PACK.sources)
     }
     assert found == direct
+
+
+# --- fix round 1: placement, exact value and scale ---------------------------------------------
+
+
+def placed(
+    *,
+    row: str = "r1",
+    amount: str = "1100",
+    unit: str = "currency",
+    scale: str = "1",
+    currency: str = "USD",
+    table: str = "T",
+) -> Fact:
+    return Fact(
+        fact_id="f.x",
+        label="f.x",
+        table_id=table,
+        row_id=row,
+        field="v",
+        amount=Decimal(amount),
+        unit=unit,
+        scale=Decimal(scale),
+        currency=currency,
+        period="FY2025",
+        citations=(GOOD,),
+    )
+
+
+def pair_findings(first: Fact, second: Fact) -> list[tuple[str, str, str]]:
+    heads_ = (module(PACK, "CP-1", facts=(first,)), module(PACK, "CP-MODEL", facts=(second,)))
+    return [(f.kind, f.subject, f.detail) for f in python_checks(scope_of(PACK, heads_)).findings]
+
+
+def test_one_fact_id_at_another_row_is_a_mismatch_at_an_equal_amount() -> None:
+    found = pair_findings(placed(row="r1"), placed(row="r2"))
+    assert [(kind, subject) for kind, subject, _ in found] == [("figure_identity", "fact_id f.x")]
+    assert found[0][2].startswith("differs in row_id between CP-1, CP-MODEL;")
+
+
+def test_the_value_is_amount_times_scale_where_the_unit_leaves_scale_free() -> None:
+    assert pair_findings(placed(amount="1.1", scale="1000"), placed(amount="1100")) == []
+
+
+def test_a_scale_that_disagrees_with_its_unit_is_its_own_finding() -> None:
+    found = pair_findings(
+        placed(unit="THOUSANDS", amount="1100", scale="1"),
+        placed(unit="THOUSANDS", amount="1.1", scale="1000"),
+    )
+    assert [(kind, subject) for kind, subject, _ in found] == [("scale_unit", "fact f.x")]
+    assert "THOUSANDS" in found[0][2]
+    consistent = placed(unit="MILLIONS", amount="1.1", scale="1000000")
+    assert pair_findings(consistent, consistent) == []
+
+
+def test_equal_amounts_in_two_currencies_are_a_mismatch() -> None:
+    found = pair_findings(placed(currency="USD"), placed(currency="EUR"))
+    assert {subject for _, subject, _ in found} == {"fact_id f.x", "coordinate T/r1/v/FY2025"}
+    assert all("currency" in detail for _, _, detail in found)
+
+
+def test_only_the_cp1a_reference_copy_keeps_python_assigned_coordinates() -> None:
+    copy = placed(table=CP1_REFERENCES, row="ref01")
+    assert pair_findings(placed(), copy) == []
+    assert pair_findings(placed(), copy.model_copy(update={"amount": Decimal("1200")}))
+    moved = pair_findings(placed(), placed(table="T4.10"))
+    assert [(kind, subject) for kind, subject, _ in moved] == [("figure_identity", "fact_id f.x")]
+    assert "table_id" in moved[0][2]
+
+
+def test_the_context_block_takes_a_fact_projection() -> None:
+    scope = clean_scope()
+    whole = context_block(scope)
+    assert context_block(scope, facts=lambda head: head.facts) == whole
+    trimmed = context_block(scope, facts=lambda head: head.facts[:1])
+    assert [len(m["facts"]) for m in trimmed["modules"]] == [1, 1, 1]
+    assert [m["claims"] for m in trimmed["modules"]] == [m["claims"] for m in whole["modules"]]
+    assert trimmed["python_findings"] == whole["python_findings"]
