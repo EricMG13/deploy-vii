@@ -131,7 +131,7 @@ def test_only_the_quoting_steps_are_sent_pack_sources_and_each_step_settles() ->
     assert context.PACK_SOURCE_STEPS == steps
     assert set(SCHEMAS) <= registry.settling_steps() == runner.SETTLING_STEPS
     assert registry.projections() == registry.projections(registry.STEP_CHAINS[:3])
-    assert not set(SCHEMAS) & registry.tool_loop_steps()
+    assert set(SCHEMAS) <= registry.tool_loop_steps()  # task 8.9: every step is a tool loop
 
 
 # --- schemas and dispatch -------------------------------------------------------------------

@@ -3,7 +3,8 @@
 Task 8.0a: each module with live steps has one `StepChain` record in `STEP_CHAINS`, and every
 per-step table of the journal, the live runner and the CLI is derived from those records
 (`step_modules`, `settling_steps`, `within_attempt_repair`, `prefilled_kinds`, `bound_steps`,
-`projections`, `pack_source_steps`, `module_route`, `regression_cases`). It lives here, the
+`projections`, `pack_source_steps`, `tool_loop_steps`, `tool_sets`, `module_route`,
+`regression_cases`). It lives here, the
 lowest layer, because `execution` (imported by every workflow) and `live` both read it.
 """
 
@@ -131,6 +132,10 @@ OMITTED = "omitted"
 NARRATIVE_EVIDENCE = "narrative-evidence"
 READINESS_INPUTS = "readiness-inputs"
 PROJECTION_NAMES = frozenset({FULL, OMITTED, NARRATIVE_EVIDENCE, READINESS_INPUTS})
+# A tool-loop step's tools (task 8.9): the read-only pack tools and its submit, or its submit.
+ToolSet = Literal["pack", "submit-only"]
+PACK_TOOLS: ToolSet = "pack"
+SUBMIT_ONLY: ToolSet = "submit-only"
 
 
 @dataclass(frozen=True)
@@ -145,9 +150,14 @@ class StepChain:
     `projections`: (consumer, producer) -> what a later step is shown of an earlier one (task
     7.5), every such pair exactly once, so a dispatch never meets an unlisted pair.
     `pack_sources`: the steps whose validators check spans against the pack text, the only ones
-    sent SOURCE blocks (task 7.5, R6). `tool_steps` (task 8.0d): the steps the live runner may
-    run as a tool loop (`live.loop`): read-only pack tools and the step's own submit tool, no
-    SOURCE blocks. A record breaking any of these raises ValueError.
+    sent SOURCE blocks (task 7.5, R6). Tool loops (task 8.0d; task 8.9, user decision 24 Oct
+    2026: every live step of every module): `tool_steps`, every step except `one_shot` (none in
+    the registry; the one-shot path stays for the differential), run as a tool loop
+    (`live.loop`) with the step's own submit tool and no pre-sent pack SOURCE block.
+    `pack_reads`: the tool steps that read the pack by tool without quoting it (CP-1's narrative
+    and readiness, as 8.0d ran them). The tool set (`tool_sets`) is derived: the pack tools
+    (`search_pack`, `read_pages`) iff the step is in `pack_sources` or `pack_reads`, else
+    submit-only. A record breaking any of these raises ValueError.
     """
 
     module_id: str
@@ -157,11 +167,17 @@ class StepChain:
     prefilled: Mapping[str, frozenset[str]] = field(default_factory=dict)
     projections: Mapping[tuple[str, str], str] = field(default_factory=dict)
     pack_sources: frozenset[str] = frozenset()
-    tool_steps: frozenset[str] = frozenset()
+    one_shot: frozenset[str] = frozenset()
+    pack_reads: frozenset[str] = frozenset()
 
     @property
     def settling(self) -> str:
         return self.steps[-1]
+
+    @property
+    def tool_steps(self) -> frozenset[str]:
+        """The steps the live runner runs as a tool loop: all but `one_shot`."""
+        return frozenset(self.steps) - self.one_shot
 
     def pairs(self) -> tuple[tuple[str, str], ...]:
         """Every (later step, earlier step) pair of the chain, in chain order."""
@@ -189,8 +205,19 @@ class StepChain:
             raise ValueError(
                 f"{name} sends pack sources to {', '.join(extra)}, not one of its steps"
             )
-        if extra := sorted(self.tool_steps - steps):
-            raise ValueError(f"{name} runs {', '.join(extra)} as a tool loop, not one of its steps")
+        if extra := sorted(self.one_shot - steps):
+            raise ValueError(f"{name} runs {', '.join(extra)} one-shot, not one of its steps")
+        if extra := sorted(self.pack_reads - steps):
+            raise ValueError(f"{name} reads the pack in {', '.join(extra)}, not one of its steps")
+        if both := sorted(self.pack_reads & self.pack_sources):
+            raise ValueError(
+                f"{name} lists {', '.join(both)} in both pack_sources and pack_reads; a quoting "
+                "step already gets the pack tools"
+            )
+        if extra := sorted(self.pack_reads & self.one_shot):
+            raise ValueError(
+                f"{name} reads the pack in {', '.join(extra)} by tool, which runs one-shot"
+            )
         pairs = self.pairs()
         for pair in self.projections:
             if pair not in pairs:
@@ -287,9 +314,10 @@ STEP_CHAINS = checked_chains(
                 ("quality", "readiness"): OMITTED,
             },
             pack_sources=frozenset({"source_context", "financials"}),
-            # Task 8.0d (user decision, 24 Oct 2026): the four stages the hybrid harness ran
-            # with pack tools (`devtools/hybrid_cp1.py`); the QA review stays one-shot.
-            tool_steps=frozenset({"source_context", "financials", "narrative", "readiness"}),
+            # Task 8.0d (user decision, 24 Oct 2026): the hybrid harness ran these two stages
+            # with the pack tools too (`devtools/hybrid_cp1.py`), though they cite evidence ids
+            # only. Task 8.9: the QA review is a tool loop as well, submit-only.
+            pack_reads=frozenset({"narrative", "readiness"}),
         ),
         # Task 7.2: CP-1A's one step; Python composes the registers as its output.
         StepChain(
@@ -375,8 +403,34 @@ def pack_source_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[st
 
 
 def tool_loop_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]:
-    """The steps the live runner may run as a tool loop (task 8.0d)."""
+    """The steps the live runner runs as a tool loop (task 8.0d; task 8.9: every step)."""
     return frozenset(step_id for chain in chains for step_id in chain.tool_steps)
+
+
+def tool_sets(chains: Sequence[StepChain] = STEP_CHAINS) -> dict[str, ToolSet]:
+    """Per tool-loop step, in registry and chain order, its tool set (task 8.9): `pack`
+    (`search_pack`, `read_pages` and its submit) iff it quotes the pack (`pack_sources`) or
+    reads it (`pack_reads`), else `submit-only`."""
+    return {
+        step_id: PACK_TOOLS
+        if step_id in chain.pack_sources or step_id in chain.pack_reads
+        else SUBMIT_ONLY
+        for chain in chains
+        for step_id in chain.steps
+        if step_id in chain.tool_steps
+    }
+
+
+def tool_set(step_id: str, chains: Sequence[StepChain] = STEP_CHAINS) -> ToolSet:
+    found = tool_sets(chains).get(step_id)
+    if found is None:
+        raise ValueError(f"{step_id} is not a tool-loop step")
+    return found
+
+
+def pack_tool_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]:
+    """The tool-loop steps offered the pack tools (every other tool-loop step is submit-only)."""
+    return frozenset(step for step, kind in tool_sets(chains).items() if kind == PACK_TOOLS)
 
 
 def module_route(module_id: str, chains: Sequence[StepChain] = STEP_CHAINS) -> tuple[str, ...]:

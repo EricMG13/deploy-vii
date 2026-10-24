@@ -35,7 +35,17 @@ from deploy_vii.live.tools import (
     tool_specs,
     unread_citation_issues,
 )
-from deploy_vii.registry import STEP_CHAINS, StepChain, tool_loop_steps
+from deploy_vii.registry import (
+    PACK_TOOLS,
+    STEP_CHAINS,
+    SUBMIT_ONLY,
+    StepChain,
+    pack_tool_steps,
+    step_modules,
+    tool_loop_steps,
+    tool_set,
+    tool_sets,
+)
 from deploy_vii.source_context import SourceContextReview
 from tests.product.live_support import FAKE_KEY
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
@@ -68,11 +78,62 @@ def case(tmp_path_factory: pytest.TempPathFactory) -> Case:
 # --- registry, prompt, request -----------------------------------------------------------------
 
 
-def test_the_four_cp1_stages_are_the_tool_loop_steps() -> None:
-    assert tool_loop_steps() == CP1_STAGES
+# Task 8.9, user decisions 1-3 (24 Oct 2026): every live step is a tool loop; these are the
+# eight steps the decisions name, with the tool set each gets. CP-1's four 8.0d loops keep the
+# pack tools they had (decision 1: unchanged).
+DECISION_3 = {
+    "source_readiness": PACK_TOOLS,
+    "business_context": PACK_TOOLS,
+    "relative_value": PACK_TOOLS,
+    "legal_covenants": PACK_TOOLS,
+    "quality": SUBMIT_ONLY,
+    "credit_synthesis": SUBMIT_ONLY,
+    "integrity_review": SUBMIT_ONLY,
+    "committee_challenge": SUBMIT_ONLY,
+}
+EVERY_TOOL_SET = {**DECISION_3, **dict.fromkeys(CP1_STAGES, PACK_TOOLS)}
+
+
+def test_every_live_step_of_every_module_is_a_tool_loop_step() -> None:
+    assert tool_loop_steps() == set(step_modules())
+    for chain in STEP_CHAINS:
+        assert chain.tool_steps == frozenset(chain.steps) and chain.one_shot == frozenset()
     chain = next(c for c in STEP_CHAINS if c.module_id == "CP-1")
-    with pytest.raises(ValueError, match="as a tool loop, not one of its steps"):
-        StepChain(**{**chain.__dict__, "tool_steps": frozenset({"nowhere"})})
+    with pytest.raises(ValueError, match="runs nowhere one-shot, not one of its steps"):
+        StepChain(**{**chain.__dict__, "one_shot": frozenset({"nowhere"})})
+    # A chain may still name a one-shot step (the one-shot path stays for the differential).
+    some = StepChain(**{**chain.__dict__, "one_shot": frozenset({"quality"})})
+    assert "quality" not in some.tool_steps and "quality" not in tool_sets((some,))
+    assert tool_sets((some,))["financials"] == PACK_TOOLS
+
+
+def test_the_tool_set_rule_matches_decision_3_exactly() -> None:
+    assert {step: tool_set(step) for step in DECISION_3} == DECISION_3
+    assert tool_sets() == EVERY_TOOL_SET
+    assert pack_tool_steps() == {s for s, kind in EVERY_TOOL_SET.items() if kind == PACK_TOOLS}
+
+
+def test_the_tool_set_is_derived_pack_iff_the_step_quotes_or_reads_the_pack() -> None:
+    """The rule: a tool-loop step gets the pack tools iff its validator checks spans against the
+    pack (`pack_sources`: it must read what it quotes) or its chain lists it in `pack_reads`
+    (CP-1's narrative and readiness, which 8.0d ran with the pack tools; decision 1). Every
+    other tool-loop step is submit-only. Nothing is typed twice."""
+    for chain in STEP_CHAINS:
+        for step in chain.tool_steps:
+            pack = step in chain.pack_sources or step in chain.pack_reads
+            assert tool_set(step) == (PACK_TOOLS if pack else SUBMIT_ONLY), step
+    assert {s for c in STEP_CHAINS for s in c.pack_reads} == {"narrative", "readiness"}
+    cp1 = next(c for c in STEP_CHAINS if c.module_id == "CP-1")
+    with pytest.raises(ValueError, match="lists source_context in both pack_sources and"):
+        StepChain(**{**cp1.__dict__, "pack_reads": frozenset({"source_context"})})
+    with pytest.raises(ValueError, match="reads the pack in nowhere, not one of its steps"):
+        StepChain(**{**cp1.__dict__, "pack_reads": frozenset({"nowhere"})})
+    with pytest.raises(
+        ValueError, match="reads the pack in narrative by tool, which runs one-shot"
+    ):
+        StepChain(**{**cp1.__dict__, "one_shot": frozenset({"narrative"})})
+    with pytest.raises(ValueError, match="nowhere is not a tool-loop step"):
+        tool_set("nowhere")
 
 
 def test_a_tool_loop_prompt_names_the_tools_and_sends_no_source_block(case: Case) -> None:
