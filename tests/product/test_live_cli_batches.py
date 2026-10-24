@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import socket
 import stat
 import tomllib
@@ -542,6 +543,9 @@ def test_cumulative_ceiling_message_names_both_numbers(
 def test_report_write_failure_does_not_mask_the_original_error(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("chmod cannot deny root; the write-failure path needs an unprivileged user")
+
     def broken(request: Request) -> Response:
         if request.url == KEY_URL:
             return key_status("1.5")
