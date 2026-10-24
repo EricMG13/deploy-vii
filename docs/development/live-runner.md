@@ -1,8 +1,13 @@
 # Live model runner (M2, Task A: runner core)
 
-Status: implemented and tested offline on 21 October 2026. No model has been called; every
-HTTP exchange in the tests goes through an injected fake transport. Analytical qualification,
-account entitlement and provider behaviour are unrun. Contract: [testing and
+Status: implemented and tested offline on 21 October 2026; every HTTP exchange in the tests
+goes through an injected fake transport. Pool and proxy live calls for E1 to E3 run through
+this runner under DC-7 and DC-8; they are recorded under `artifacts/model-tests` and summarised
+in the [M7 live acceptance review](tasks/implementation/m7-live-acceptance-review.md), where
+CP-1's analytical qualification (E1, task 7.1) is still open. The 23–24 Oct 2026 hybrid probes
+(OpenRouter and the Anthropic API) ran through the devtools harness on branch `hybrid-cp1-m7`,
+which is not in this lane; their ledgers sit beside the runner's under
+`artifacts/model-tests/.ledgers`. Contract: [testing and
 telemetry](../testing-and-telemetry.md); decisions [0005](../decisions/0005-methodology-changes-and-regular-testing.md)
 and [0006](../decisions/0006-delegated-choices-and-orchestration.md) (DC-6 to DC-8). API facts used:
 [coordinator inputs](live-runner-inputs-2026-10-21.md). Task 2.7b applied
@@ -24,8 +29,9 @@ from a pinned pool:
    journal sees it.
 5. `ok` and `truncated` payloads go to `submission.submit_model_payload` only: a
    `source_readiness` submission is composed into a `ReadinessReview` and submitted through
-   `submit_cp0_review`, a CP-1 payload goes to `submit_cp1_step`, so the journal's validators
-   decide acceptance. Fallback, HTTP error, 402 and timeout payloads are not submitted.
+   `submit_cp0_review`, a CP-1 stage payload goes to `submit_cp1_step` and the CP-1 `quality`
+   review to `promote_cp1` (task 7.4), so the journal's validators decide acceptance. Fallback,
+   HTTP error, 402 and timeout payloads are not submitted.
 6. `ledger.settle`, then `manifest.json` last. Both run in a `finally`, so a crash in validation
    still settles money and seals evidence (status `interrupted`) and then propagates.
 
@@ -38,12 +44,13 @@ from a pinned pool:
 | `catalog.py` | `Catalog` (fetch or file), `pin` to a `PinnedPool`, DeepSeek resolution, `resolve_effort`. |
 | `draw.py` | `draw(pool, seed)`, algorithm `python-random-MT19937`; a one-model pool is not drawn from (algorithm `trivial-single-model-pool`, index 0, seed still recorded; decision 0005 amendment, 22 Oct 2026). |
 | `ledger.py` | `Ledger`: append-only JSON lines (`reserve`, `settle`, `adjust`), atomic replace, derived `.state.json`. |
-| `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block. |
+| `reconcile.py` | Generation-endpoint lookups for held charges, the account-usage corroboration of a 404; `adjust` lines and the `metrics.json` ledger block; an interrupted attempt's manifest and usage-delta settlement (task 7.11). |
 | `client.py` | `ChatClient` (`key_index` required with `key_path`), `ChatRequest`, `KeyStatus` (a key-status reply with the key note of that call), classification, usage parsing, default `urllib` transport. |
 | `retention.py` | `AttemptWriter`: `begin`, `record_response`, `seal` (manifest last), `write`. |
-| `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts. |
-| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `submit_model_payload` (decision 0008). |
-| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `unverified_keywords`. |
+| `prompts.py` | `build`, `response_format`, delimited data blocks (CONTEXT, SOURCE, REPAIR), step contracts, `quality_scope` (the `quality` step's QA scope, task 7.4). |
+| `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5). |
+| `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
+| `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
 
 ## Rules and where they are enforced
@@ -83,7 +90,8 @@ from a pinned pool:
   calls `Execution.interrupt` on the ticket. **That consumes the input set's one repair**: the
   next `begin` is the repair attempt, and if the exhausted ticket was already the repair, the
   module is blocked for those inputs. The manifest `retries` block (`attempt_number`,
-  `max_retries`, `exhausted`, `ticket_interrupted`, `journal_consequence`) records it, and a
+  `step_try`, `max_retries`, `exhausted`, `ticket_interrupted`, `journal_consequence`) records
+  it, and a
   dispatch beyond the bound raises before any spending. If the last allowed attempt dies with a
   non-transport exception (for example a validator bug), the ticket stays pending: the caller
   must call `Execution.interrupt` before dispatching again, and the next dispatch raises naming
@@ -93,7 +101,124 @@ from a pinned pool:
   0008) the block carries only the issues of the previous attempt's failing step, and only on that
   step's prompt; where no step failed validation (an interruption, a module-level refusal) the module issues are carried
   as before. A `repair_prompt` event records the scope (`failing-step`, `module` or `none`), the
-  failing step and the issue count. The repair budget stays module-wide.
+  failing step and the issue count. The module-wide repair stays as the second line.
+- **Per-step repair within the attempt (task 7.0g, decision 0008 MC-7 item 2).** When the journal
+  rejects one of CP-1's four model steps (`source_context`, `financials`, `narrative`,
+  `readiness`) for the first time in its attempt, the attempt stays pending (`DispatchResult`
+  `attempt_pending`) and `expected_step` returns the same step again. Its next dispatch is the
+  step's one repair try (`step_try: 2`): its REPAIR block carries that step's own first-try
+  issues (`Attempt.step_repairs`), scope `failing-step`, and nothing from a previous attempt.
+  Precedence is within-attempt first, so a step sees its own prior try's issues or the previous
+  attempt's, never both. The repair try has its own attempt ids (`<ticket>-<step>-repair-<n>`)
+  and so its own retry budget (`max_retries`; `retry_of_attempt_id` links its retries, not the
+  rejected try), and its manifest `links.step_repair_of_attempt_id` names the rejected try's
+  attempt id, a pool or proxy try (null on a first try); a proxy payload (`accept_proxy_payload`)
+  on a step-repair try gets the same `-repair-<n>` id, links and `retries.step_try`.
+  `repair_count` keeps its meaning (the attempt number). Each
+  dispatch reserves and settles on its own. A second rejection of the step finishes the attempt
+  as one rejection did before; the module-wide repair (`Execution.begin`) is then the next
+  line. Bound: two tries per step per attempt, two attempts per input set; with retries, a step
+  can use up to 2 x (`max_retries` + 1) dispatches per attempt. CP-0's single
+  review, CP-1's `quality` promotion step and CP-1A's single `business_context` step (task
+  7.2; not in `WITHIN_ATTEMPT_REPAIR`) keep the attempt-level repair only.
+- **The `quality` step promotes CP-1 (task 7.4).** CP-1 has five live steps:
+
+  | # | Step | The model supplies | Python fills or computes | Enters the journal through |
+  | --- | --- | --- | --- | --- |
+  | 1 | `source_context` | source descriptions, citations | pack and source hashes | `submit_cp1_step` |
+  | 2 | `financials` | statement values, definition review, context binding | every hash binding (task 7.0i); each book's and period's four dimension strings from the bound scope (task 7.13) | `submit_cp1_step` |
+  | 3 | `narrative` | the narrative review | `inputs_sha256` | `submit_cp1_step` |
+  | 4 | `readiness` | the downstream review | `inputs_sha256` | `submit_cp1_step` |
+  | 5 | `quality` | per claim `material` and a rationale; per evidence id a `lineage_class` at or below its ceiling with a rationale; findings with severity, status and resolution | `inputs_sha256` (`cp1_quality_inputs` of the recomputed registers), the confidence score, band and QA status | `promote_cp1` |
+
+  `expected_step` returns the next step of `CP1_PROMOTION` by the count of valid steps. The
+  `quality` prompt carries, in place of the four stage outputs, a second CONTEXT block
+  `<<<CONTEXT id=quality-scope sha256=<body hash>>>>` (`prompts.quality_scope`, compact JSON):
+  each candidate claim (an analytical finding) with its text and evidence ids, each such
+  evidence id's lineage ceiling, basis and register record with citations, the coverage slots
+  (the register cells counted by table and status, not listed: the synthetic case holds about
+  45,000), the source gate, the module status, the reference count per basis and any inherited
+  findings. Its contract (rules a to e: claims once, lineage at or below the ceiling with the
+  class order, findings, nonblank text, no softening on a repair) asks for no score, band or
+  status. An accepted review
+  **is** the promotion: the attempt finishes and the CP-1 head records `PROMOTED`'s four
+  statuses, so `write_cp1_envelope` and CP-MODEL publication follow. A rejected review
+  (`validate_quality_review`'s issues, a Blocked QA, a handoff that does not verify) finishes the
+  attempt rejected: `quality` settles the module, so it has no repair within the attempt, and
+  the `module` driver begins the module repair, which re-runs the chain from `source_context`
+  with the review's issues on the repaired `quality` prompt. Exception (fix round 1,
+  coordinator ruling): a rejection whose issues are only the QA Blocked verdict ("CP-1 QA
+  Blocked: confidence N (band); a Blocked handoff is not promoted", `cli.qa_blocked_only`, built
+  on `cp1_workflow.is_qa_blocked`, the check of the text `_quality_stage` emits, since task 7.10)
+  is an analytical outcome, not a defect to repair. Only a `quality` rejection qualifies; the same
+  text on any other step is an ordinary rejection. The verdict stands in the journal, the cell ends
+  without a module repair (as at a truncation) and `Repairs dispatched` does not count it. Rule
+  e of the contract says a REPAIR block never justifies lowering a severity or changing a status.
+  A truncated `quality` is submitted like any truncated payload and, since the step settles the
+  module, finishes the attempt rejected: the four accepted stages are not promoted, and the cell
+  ends without a repair (7.0h), as for CP-0. No valid `readiness` step, or registers that do not
+  stage (the QA inputs cannot be computed), raise ValueError before anything is spent or
+  written. A crash after the valid `quality` step is retained but before settlement leaves five
+  valid steps on a pending ticket: the runner refuses a further dispatch ("every CP-1 step is
+  already retained"), and the resume is `promote_cp1` (or `execution cp1-promote`) with the
+  **retained, pre-filled** payload; the raw model output differs from it and raises "Ticket
+  already retains a different QA review". The manifest's `hashes.quality_inputs_sha256` names
+  the QA inputs the scope was projected from, which the review must bind. The proxy cohort
+  (`accept_proxy_payload`) takes the same route.
+- **What each step receives (task 7.5).** The journal retains every step's full output and every
+  validator recomputes from it; a model is sent a bounded projection (`live.context`), never the
+  raw output of a later step's producer. Each retained block's header keeps the step's content
+  hash and names the projection: `<<<SOURCE id=step:<step> sha256=<content hash>
+  projection=<name>>>>`. A consumer/producer pair `PROJECTIONS` does not list raises before
+  anything is spent. Pack SOURCE blocks go only to a step whose validator matches quotes against
+  the pack text; `build` refuses them for any other step (`cli` declares none there).
+
+  | Consumer | Retained step | Projection | What it holds | Pack SOURCE blocks |
+  | --- | --- | --- | --- | --- |
+  | `source_context` | none | | | yes (spans checked) |
+  | `financials` | `source_context` | `full` | the source-context report, unchanged | yes (spans checked) |
+  | `narrative` | `source_context` | `omitted` | the same report is the ledger's `context` below | no: the review has evidence ids, no citations |
+  | `narrative` | `financials` | `narrative-evidence` | one evidence-table line per catalogue entry (its `evidence_id` and a compact value summary per kind: period, metric, amount, unit, status; gaps with severity, origin, metric, periods and a description of at most 120 characters), no `record_json`, no citation; the scope, calculation status and issues, the ledger's limitations, its source-context report without citations or hashes, the model's metrics (key, period, amount, unit, status) and limitations. Not sent: the audit, the period reconciliation, the gap rows, `historical` (the catalogue's historical_value, construction and source_period lines carry it), the model's values and computations | |
+  | `readiness` | `source_context`, `financials` | `omitted` | the validator reads the narrative step's output only, which holds the same catalogue | no: the review has evidence and gap ids, no citations |
+  | `readiness` | `narrative` | `readiness-inputs` | the requested consumers with their requirements and policy, the narrative status, limitations and review (without its binding), the gaps the narrative added, and the same evidence table with each gap line's `gap_id`. Not sent: the model readiness report (Python's CP-MODEL row) and the financial book | |
+  | `quality` | all four | `omitted` | the QA scope CONTEXT block (task 7.4). QA finding references are optional; gap ids, evidence no claim cites and `qa-cell:` ids are referenceable by the validator but not shown in the QA scope (task 7.4's scope design, unchanged here; whether to show them is a follow-up) | no: the review has evidence ids and coverage field ids |
+  | `source_readiness`, `business_context` | none (one step per attempt) | | | yes (spans checked) |
+
+  Synthetic CP-1 case (`staged`, 2,913 catalogue entries): `narrative-evidence` is 5.2% of the
+  10.2 MB raw `financials` output (about 174 characters per evidence line on average);
+  `readiness-inputs` is 6.0% of the 9.9 MB raw `narrative` output. Tests hold every catalogue
+  evidence id (and, for readiness, every gap id) to exactly one line.
+- **A truncated completion is not repaired (task 7.0h).** A try classified `truncated` (cut at
+  the `--max-tokens` budget) is a budget verdict, not a validator verdict the model can act on:
+  the `module` driver neither re-sends the step (its one in-attempt repair stays unused, the
+  journal keeps the invalid try in `step_repairs`) nor begins a module repair, whether the cut
+  is the first try or the step repair. The cell ends, the row keeps `truncated`, the batch goes
+  on, and the header counts `- Truncated: N`. Raise `--max-tokens` instead.
+- **The `module` driver's repair loop (task 7.0e).** In `deploy-vii live module` (and only
+  there; `probe`, `regression` and `canary` stay single-attempt) a step whose status is
+  `rejected` with the attempt still pending is re-sent once, as the step's repair within the
+  attempt (task 7.0g); if that try is accepted the cell goes on to the next step. A step whose
+  status is `rejected` with the attempt finished (a journal verdict on a submitted payload) is
+  followed by one `Execution.begin` on the same module: the repair attempt. It restarts the module at its first step
+  (`expected_step`: `source_readiness` for CP-0, `source_context` for CP-1, `business_context`
+  for CP-1A) and runs the steps
+  in order again, each with its own cap reservation; a CP-1 repair therefore re-sends
+  `source_context` and costs one extra context call. At most one repair per module per cell: the
+  cell ends at the first step that is not accepted, whether in the first attempt after its
+  repair is spent, in the repair itself, or at its end. A `no-response` or withheld fallback is
+  no verdict (the ticket stays pending), so it ends the cell with no repair; so does a CP-1
+  `quality` rejection that is only the QA Blocked verdict (task 7.4 fix round 1: the verdict
+  stands). A cap too small
+  for the repair's reservation raises `CapExceeded`, ends the batch with `Stopped: cap` and
+  leaves no row for the unsent step. A journal refusal of the repair ("...one repair has been
+  consumed") is not caught and fails the batch. A CP-0 accepted on repair authorizes the CP-1
+  steps that follow. The report's Steps table has a `Repair` column (`-` a first try in the
+  first attempt, `step` the step's repair within that attempt, `1` the repair attempt, the
+  journal's attempt number, and `1+step` a step's repair within the repair attempt) and the
+  header counts `Repairs dispatched` of both kinds, `N (module repair attempts M, within-attempt
+  step repairs S)` (repairs that sent at least one step: a step sealed `ineligible` was not
+  sent). A repair that is accepted counts as accepted in the Cohorts
+  table, so first-pass validity is read from the `Repair` column, not from the cohort totals.
 - **Scrubbing.** Evidence and model output are only ever changed by the exact key and key-shaped
   tokens (`scrub_key`); text such as "Authorization: the board..." stays verbatim. The wider
   `redact`, which also rewrites `Authorization` header values, is applied to exception and error
@@ -107,7 +232,8 @@ from a pinned pool:
 - **Prompts.** Source text appears only inside `<<<SOURCE id=... sha256=...>>>` blocks in the user
   message. A source that contains a delimiter is refused, not escaped (escaping would break verbatim
   citations). Declared inputs only: the prepared-pack identity, the named sources, and retained
-  earlier steps of the same ticket (`step:<id>`, with the step hash and the hash of its output).
+  earlier steps of the same ticket (`step:<id>`, with the step's content hash and, since task
+  7.5, the projection of its output the step is sent; see "What each step receives" below).
   The pack identity is a `<<<CONTEXT id=prepared-pack sha256=...>>>` block marked not citable; it lists each
   source with its extraction coverage (located spans, first and last locator, page numbers missing
   between them) and, for `source_readiness`, the exact consumer list. Since task 2.10 each consumer
@@ -121,24 +247,68 @@ from a pinned pool:
   `schema_keywords_unverified`; the validator still rejects an empty list in its own words);
   `source_context` states the same sources-once, citation and coverage rules
   (`prompts.SOURCES_ONCE_RULE`, `CITATION_RULE`, `COVERAGE_RULE`, one text each, task 2.9).
+  Task 7.0 teaches what the validator enforces: `CITATION_RULE` (both steps) adds "Copy a run
+  that is contiguous in the SOURCE block as printed; never reassemble a sentence across
+  interleaved table text. Never continue a quote onto the next page.", and rule h adds the
+  task 6.2 run-text rule for `analysis[].text` (`prompts.RUN_TEXT_RULE`: digits only in period,
+  filing and section labels, SEC file numbers and coverage counts; every other figure belongs in
+  a citation's quote), also a paragraph of `methods/cp0.md`. A test holds each example label in
+  the rule to `prose.bare_figures`, so the prompt never allows a figure the validator rejects.
+  Stored replay payloads are unaffected (the corpus replays payloads, not prompts).
+  Task 7.0h adds `prompts.COMPACT_OUTPUT_RULE` once to the common preamble of every step (rule
+  6, after the no-tools rule): emit the JSON object compactly, with no indentation and no line
+  breaks between fields, because the budget is finite and charged per token.
 - **Quotes and absence claims (task 2.9).** Every citation check uses `deploy_vii.quotes`: quote
   and span text are compared after removing soft hyphens, mapping curly quotes, dashes and the
   minus sign to ASCII and collapsing every whitespace run to one space; the quote must still be
   one contiguous substring of the span its locator names. A failing citation is one issue,
   `Quote/locator mismatch: quote not found under <source> <locator> (normalised whitespace, quote
-  marks and dashes): "<first 60 characters>…"` (`no locator <locator> in <source>` when the
-  locator does not exist). The absence rule skips a negated absence ("no pages missing", "none
+  marks and dashes): "<quote>"` plus, since task 7.0, a clause saying why (below); the quote is
+  shown normalised, cut on a word boundary after at most 200 characters (60 until task 7.0) and
+  then `…` (`no locator <locator> in <source>` when the locator does not exist). The absence rule skips a negated absence ("no pages missing", "none
   missing", "not missing") and the coverage field restated as empty; `source_context` applies it
   to every free-text value outside citations.
-- **Hyphen-wrap (task 2.10).** On the span side only, the matcher also tries the span with each
+- **Hyphen-wrap (task 2.10).** On the span side, the matcher also tries the span with each
   ASCII hyphen that ends a line (plus the spaces after the newline) joined to the next word:
   `PUT-\nCALL  RIGHT` reads `PUT-CALL RIGHT` (probe-4 Sol 9594d016 p135). Both readings are
-  tried, so matching only widens; the model's quote is normalised as before and never has its
-  hyphens altered. Under a span with such a wrap the mismatch issue says `(normalised whitespace,
-  quote marks and dashes; hyphen-wrap)`; elsewhere the text is unchanged. Known layout limit: a
-  two-column table that interleaves another column inside a sentence (Sol p104, Grok p102) is not
-  handled, so a quote stitched across it fails; so do case changes and wrong-page citations.
-  A quote that joins one wrap and copies another as a space matches neither reading.
+  tried, so matching only widens. Task 7.11 (E1 batch e1-cp1-13, decision 0005): the same join
+  on the quote side, for a model that breaks the line after a hyphen the span prints whole
+  (`first-\npriority` for `first-priority`); the quote is tried as written and with its wraps
+  joined, against both span readings. No hyphen is dropped or added on either side, so a wrapped
+  hyphen with no hyphen in the span (`first priority`) still fails, and every quote accepted
+  before still is (a property test). The mismatch issue says `(normalised whitespace, quote
+  marks and dashes; hyphen-wrap)` only when a wrap lies inside the span region the failed quote
+  occupies (the classified region below, else its longest matching prefix), or when that region
+  exists only with the quote's own wraps joined; a wrap elsewhere in the span is not named
+  (task 7.0; probe-5 Gemini p84 printed it for an unrelated wrap). Known layout limit:
+  a two-column table that interleaves another column inside a sentence (Sol p104, Grok p102) is
+  not matched, so a quote stitched across it fails; so do case changes and wrong-page
+  citations. A quote that joins one wrap and copies another as a space matches neither reading.
+- **Mismatch text (task 7.0).** `quotes.explain` says why a quote failed; it never accepts one
+  (`explain` leaves `quoted`'s verdict as it is, and a property test holds that no classified
+  quote is accepted; `quoted` itself was widened by task 7.11's quote-side join above). Over
+  both span readings, in order, it appends to the issue: a case or lookalike difference (the
+  quote matches once case and a closed set of quote-mark and dash lookalikes the normalisation
+  leaves alone are folded) `: the quote matches the span only ignoring case and character
+  variants; first difference at offset N: "F" (U+0046) in the quote, "f" (U+0066) in the span`;
+  a page straddle (the quote's first run ends the cited span with at most 200 normalised
+  characters of page furniture after it, and the rest starts the next span of the same source
+  with at most 200 characters of running header before it) `: the quote continues on
+  <next locator>; quote within one page`, or, cited on the page where it ends (probe-5 Gemini
+  50115c10 p44), `: the quote begins on <previous locator>; quote within one page`; a column
+  interleave (the quote is two runs of the span, in order, with other span text between them)
+  `: the quote matches the span as two runs separated by interleaved text (columns or table
+  cells) at offset N; quote one contiguous run or choose another locator` when at most 400
+  normalised characters separate the runs (`quotes.INTERLEAVE_GAP_CHARS`), else `as two separate
+  runs on this page` with the same advice. A quote with a wrap of its own is classified as
+  written first, then with its wraps joined (task 7.11). Offsets count
+  characters of the normalised quote, joined where that reading was classified (for the interleave, the first run is its first N
+  characters); every run has at least two words. Otherwise the issue is unchanged. Against the
+  main checkout's pack this names Sol p104 (probe-4 and probe-6) and Grok p102 as interleaves,
+  Sol p13 as a case change, Gemini p76 and p44 as straddles; wrong-page quotes, Gemini's p84 year
+  and its whole-row p102/p104 reassemblies (cells out of order) stay unclassified. The journal
+  keeps issue lines of up to 600 characters (`execution.MAX_ISSUE_CHARS`, 300 until task 7.0) so
+  the clause reaches the MC-7 REPAIR prompt whole.
 - **Effort.** `high` by default; `xhigh` is sent only where the catalog lists it (the Luna entry does,
   the GLM entry does not). Otherwise the nearest lower supported level is sent and the request,
   mapping and catalog efforts are recorded; provider acceptance is `null` with a reason.
@@ -146,11 +316,30 @@ from a pinned pool:
 ## Retention layout
 
 `artifacts/model-tests/<experiment=batch id>/<case>/<model with / as __>/<attempt id>/` holds
-`request.json` (written before sending), `response.json` (an envelope keeping the exact bytes and their
-SHA-256), `output.md`, `events.jsonl`, `metrics.json`, `checks/`, `render/not-run.json` and
-`manifest.json` last. A directory without `manifest.json` is an incomplete attempt. Files are never
+`request.json` (written before sending), `response.json` (an envelope keeping the returned bytes and
+the SHA-256 of the bytes it stores), `output.md`, `events.jsonl`, `metrics.json`, `checks/`, `render/not-run.json` and
+`manifest.json` last. A directory without `manifest.json` is an incomplete attempt (task 7.11:
+`live reconcile` writes the manifest of an interrupted one once; see Charge reconciliation). Files are never
 overwritten, with one exception: `live reconcile` rewrites the `ledger` block of `metrics.json`
-(keeping the replaced values; see Charge reconciliation). Unknown metrics are `null` with a `_reason` sibling; provider values, local measurements
+(keeping the replaced values; see Charge reconciliation). Task 7.10: the stored body is the
+returned body with every `user_id` value (OpenRouter's account id, in 402s and other replies alike)
+replaced by `"<redacted>"`, the key and every other byte kept (`retention.redact_account_id`);
+`body_bytes` and `body_sha256` then describe the stored bytes, and `response.json` and the
+manifest say `body_redactions: ["user_id"]`. A body that may still hold an account id is
+withheld whole (`body_text` null, `body_withheld` says why, `body_redactions: []` since nothing
+stored was redacted, and the manifest names none), never stored with the id: task 7.11 (from
+the 7.10 review), the byte sequence `user_id` left anywhere outside a redacted pair (an escaped
+`\"user_id\"` inside a JSON string, as in OpenRouter's `error.metadata.raw` copy of the upstream
+body, or a body that is not JSON, such as `user_id=` in a form-encoded echo); or, in a JSON body,
+a `user_id` the in-place match cannot reach (a key spelled with a JSON escape, duplicates
+included) or a body too deep to parse. Documented fail-closed: a 200 whose model answer itself
+contains `user_id` is withheld too; `output.md` still keeps the answer, which the journal and
+validators read. The DC-8 cohort path (`cohort.accept_proxy_payload`)
+stores the coordinator-supplied proxy payload unredacted, with `body_sha256` the hash of the
+payload as received: it is model output, not a provider reply, and that hash must equal the
+hash of `output.md` and of the journal's retained output, so it is not redacted (by design,
+recorded in task 7.11 from the 7.10 review). Python reads a 402 from the body as received, before
+retention (`credit.from_dispatch_402`). Unknown metrics are `null` with a `_reason` sibling; provider values, local measurements
 and estimates are separate objects.
 
 ## CLI and Make targets (Task B)
@@ -164,7 +353,13 @@ section). Common options of the four batch commands:
 (saved models JSON; without it the catalog is fetched), `--report-directory`, `--max-tokens N`
 (task 2.10: the completion budget of every call in the batch, every model alike, default 16000,
 `runner.DEFAULT_MAX_TOKENS`; a positive integer, no per-model syntax; it goes through the context
-fit below, into each manifest's `budgets.max_tokens` and into the report header). There is no key
+fit below, into each manifest's `budgets.max_tokens` and into the report header),
+`--timeout SECONDS` (task 7.0c: the request deadline of every call, every model alike, default 600,
+`client.DEFAULT_TIMEOUT_SECONDS`; a positive finite number in Python float syntax, so `1e3` is
+1000 s; into each manifest's `budgets.timeout_s` and `budgets.deadline_s` and into the report
+header as `- Timeout:`, shown as a float, `1800.0`; Sol at about 70 completion tokens a second
+needs up to 15 minutes for 64,000 tokens, so raise it with the budget; `make live-module` takes
+`TIMEOUT=`). There is no key
 option: the runner reads the DC-7 file from settings at dispatch, taking the token at
 `credential_token_index`.
 
@@ -179,15 +374,29 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   batches are run one at a time (one owner per worktree). Seeds of cells are strictly increasing, so they are distinct.
   An existing `live-<batch>.md` is never overwritten.
 - `probe`: per eligible model, `--draws-per-model` cells of CP-0, `source_context`, `financials`.
-  `canary`: one cell per eligible model over CP-0 and the four CP-1 steps. `module --module`: one
-  seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the four
-  steps; other modules have no live step contract and are refused before spending.
-  `regression`: cases `cp0` and `cp1`, every candidate once per case in an order shuffled by the
-  seed; it refuses a pool with an ineligible arm.
+  `canary`: one cell per eligible model over CP-0 and the five CP-1 steps. `module --module`: one
+  seeded draw; CP-0 runs `source_readiness`, CP-1 runs CP-0 first (its prerequisite) then the five
+  steps (`CP1_CHAIN`, ending in `quality`, task 7.4; the `regression` `cp1` case too), CP-1A (alias CP-2C; task 7.2) runs CP-0 first then its one step `business_context`;
+  other modules have no live step contract and are refused before spending. A CP-0 that does not
+  write `Run CP-1A` for CP-1A ends the cell `not-authorized` before the step is sent.
+- **`business_context` (CP-1A, task 7.2).** One step; the model returns judgments and verbatim
+  quotes only (`BusinessContextSubmission`, decision 0008 MC-1) and Python composes the 22 r14
+  registers plus `cp1a.cp_model_snapshot_fields` (docs/development/business-context.md). The
+  system prompt is `methods/cp1a.md` plus the step contract (rules a to i: sources once,
+  citations, coverage, run text, categories, conflicts logged not reconciled, no prohibited
+  conclusion, consumers exactly as listed, row rules). The CONTEXT block adds `consumers` (CP-MODEL
+  and every selected consumer of CP-1A, registry order, `{module_id, title, purpose}`) and
+  `cp1_facts` (`ref`, label, period, unit, shown value) only when the journal binds a settled
+  (accepted or restricted) CP-1 head as an input of the ticket; otherwise `cp1_facts` is empty
+  and `cp1_facts_note` says no figure may be referenced. A valid step settles CP-1A at once
+  (`submit_cp1a_step`), with the four statuses in its head as 6.4 does.
+  `regression`: cases `cp0`, `cp1` and (task 7.0h) `cp1a` (`CP1A_CHAIN`), every candidate once
+  per case in an order shuffled by the seed; it refuses a pool with an ineligible arm.
 - The catalog-rule pool (no `--models`) is `settings/project.toml` `[[model_tests.candidates]]`,
   with `default_effort`/`complex_effort`. Since the decision 0005 amendment (user decision,
-  22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone at `high`, so every cell's draw is
-  trivial and `regression` runs one arm per case. The earlier Luna / GLM 5.3 Flash / DeepSeek
+  22 Oct 2026), it is GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at `medium` since the 24 Oct 2026
+  amendment (at `high` before), so every cell's draw is trivial and `regression` runs one arm per
+  case. The earlier Luna / GLM 5.3 Flash / DeepSeek
   pool is superseded, and its stored outputs and replay entries are retained.
 - `--models ID[@EFFORT],ID[@EFFORT],...` (task 2.8; `probe`, `module`, `regression`, `canary`)
   replaces the settings pool with the user's models, in the given order, and labels the pool
@@ -216,12 +425,16 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   below `max_tokens`, is recorded `ineligible: context <n> < bound <m>` (m = bound + max_tokens):
   the attempt is sealed with status `ineligible`, nothing is sent or reserved, the ticket is
   untouched and the cell stops. It applies to every pool, since the check needs the step's prompt.
-  A repair attempt can hit it too: the repair prompt carries a REPAIR block, so its bound is
-  larger than the first attempt's, and a model that fitted the first attempt can be
-  `ineligible` for the repair (sealed the same way; the repair ticket stays pending).
+  A repair attempt, or a step's repair try within its attempt, can hit it too: the repair
+  prompt carries a REPAIR block, so its bound is larger than the first try's, and a model that
+  fitted the first try can be `ineligible` for the repair (sealed the same way; the ticket stays
+  pending).
 - For `probe`, `canary` and `regression` the seed of each cell is the first seed at or after the
   base seed whose recorded draw selects the intended model, so coverage is guaranteed and the draw
   record stays honest. A cell stops at its first step that is not accepted (no automatic repair).
+  Since task 7.0g a first rejection of a CP-1 model step no longer finishes the attempt: these
+  single-attempt drivers never re-send, so the cell ends with the cell journal's attempt still
+  pending and that try kept as one `step_repairs` entry (not settled `rejected`).
 - CP-0 gate outcome (task 2.10). An accepted CP-0 whose T8 `exact_command` for the next module is
   not `Run <id>` (a CONDITIONAL or BLOCKED consumer) makes `Execution.begin` raise
   `execution.NotAuthorized`, a `ValueError` subclass; `_run_cell` catches exactly that type around
@@ -240,11 +453,20 @@ option: the runner reads the DC-7 file from settings at dispatch, taking the tok
   credential, ledger, transport or journal error. The report is written even when a batch aborts.
 - Reports (`live-<batch>.md`): command, seed, cap and ledger totals, catalog source and hash,
   registry-derived module counts, max tokens, cells planned with steps run and steps not
-  authorized by CP-0, the pool with exclusion reasons, and a per-step table (cell, model, seed,
-  attempt, status, classification, cost, issue count). The reconciled report lists the
+  authorized by CP-0 (`steps run` counts report rows, so an in-flight-refused 402 attempt,
+  which is no model try and has its own row, counts as a step run beside its re-send; see
+  "No-credit backup cohort"), the pool with exclusion reasons, and a per-step table (cell, model, seed,
+  attempt, status, classification, cost, issue count). Task 7.0: an attempt with no model
+  payload (status `no-response`: a timeout, an HTTP error or a provider error inside a 200, a
+  deadline hold) shows `-` for its issue count and is counted in the Cohorts table's
+  `No response` column, never as `Rejected`; the Pool table prints each model's largest
+  `Prompt token bound` (the reservation's prompt bound, also for an attempt sealed ineligible)
+  beside its largest reservation. The reconciled report lists the
   not-authorized steps from their records after the retained attempts (a record of another shape
   is refused before any lookup). No prompts, responses, source text or validator wording.
-- Make: `replay` (pytest, below), `live-probe CAP=`, `live-module MODULE= CAP=`, `live-regression CAP=`,
+- Make: `replay` (pytest, below), `live-probe CAP=`, `live-module MODULE= CAP=` (task 7.0: also
+  `MODELS=`, `MAX_TOKENS=`, `BATCH_ID=` and `SEED=`, each passed as its option only when set),
+  `live-regression CAP=`,
   `live-canary CAP=`; `DIRECTORY=` (default `artifacts/execution`) names the journal.
 
 ### `live schema-check` (task 2.11)
@@ -289,7 +511,14 @@ from OpenRouter's `error.metadata.raw` (prefixed with `provider_name` and `provi
 key scrubbed, capped at 500 characters with `[truncated from N chars]`), for example `HTTP 400:
 Provider returned error; OpenAI invalid_json_schema: Invalid schema for response_format
 'source_context'. Please ensure it is a valid JSON Schema.` No prompt, response body or content
-is shown.
+is shown. Task 7.15: an `error_detail` in which the account id survives (the stored body's check,
+`client.account_id_left`, applied to the whole detail and to the provider text before its cap)
+is replaced whole by `<provider detail withheld: account id>` in every path, so it reaches neither
+`checks/classification.json`, the manifest nor this column; the reply body is still read as
+received for a 402 (DC-7). Withholding changes no verdict: the client reads the schema words on
+the detail as composed, before it is withheld (`ChatResult.detail_names_schema`, task 7.15 fix
+round 1), so such a 400 is a schema rejection exactly when it was before 7.15 (OpenAI's
+`invalid_json_schema` code, or a detail that names the schema).
 
 Runner use. `probe`, `module`, `regression` and `canary` read every `schema-check-attempt/1`
 manifest under their artifact root before the first cell (an unreadable one fails the batch
@@ -366,7 +595,7 @@ a deliberate validator wording change shows up as `issues-changed` and the entry
 `deploy-vii live corpus <attempt-dir> <case-id> [--root DIR]` writes an entry from a sealed attempt
 (manifest.json plus output.md); it refuses attempts that never reached the validators
 (fallback, no-response, interrupted), attempts whose output was credential-scrubbed, unreplayable
-steps and existing entries (unless `--replace`). The four seed entries are labelled synthetic
+steps and existing entries (unless `--replace`). The seed entries are labelled synthetic
 (`synthetic` in the case id and `provenance.batch_id`) so `make replay` is green before any probe.
 
 Optional keys beyond the five of the brief: `pack`, the name of a registered synthetic builder
@@ -378,8 +607,12 @@ registered builder's hash (`corpus.SYNTHETIC_PACKS`; a test asserts they still m
 and leaves it unset otherwise, so a probe on another pack replays as `stale-inputs` with the
 reason "no registered synthetic pack" until that pack is registered. `upstream` is read from the
 accepted sibling attempts of the same ticket (their `output.md`); a missing predecessor is a
-`CorpusError`, never a guess. Replayable steps: `source_readiness` and the four CP-1 steps; seeded
-and tested are `source_readiness`, `source_context` and `financials`.
+`CorpusError`, never a guess. Replayable steps: `source_readiness` and the five CP-1 steps.
+Task 7.10: a `quality` entry holds all four stages in `upstream` and its review replays through
+`promote_cp1` (as live, via `submit_model_payload`), so an accepted entry is the promotion and a
+rejected one keeps the refusal, the QA Blocked verdict included; seeded and tested are
+`source_readiness`, `source_context`, `financials` and `quality` (one promotion, one QA Blocked
+verdict, both on `synthetic-cp1`). Real-pack replay still covers `source_readiness` only.
 
 To regenerate an entry after a deliberate validator change (`issues-changed`), rerun
 `deploy-vii live corpus <attempt-dir> <case-id> --replace`; without `--replace` an existing entry is
@@ -440,13 +673,23 @@ artifacts).
   entry is still `ok` (no outcome or issue text moved; the spans the rejected Luna 8634aa17
   quotes cite have no hyphen line wrap). Probe-4 attempts were not added; the Sol 9594d016 spans
   and quotes are unit fixtures in `test_readiness.py`.
+- Task 7.0 (mismatch text) changed one entry's wording: `probe-3-gpt-6-luna-8634aa17`'s first
+  issue now quotes 200 characters instead of 60 (no clause applies to its two quotes). The
+  corpus tool cannot revalidate it (`live corpus` reads the run/1 pack hash from the attempt
+  manifest, see task 2.11 below), so a script ran the tool's own `corpus._validate_now` over the
+  stored entry (its payload, input hashes and `czr-fy2025-v2` pack in the main checkout) and
+  rewrote `expected` only, refusing any change of outcome or issue count; `live`,
+  `expected_basis: "revalidated"` and every other key are as stored. With the main checkout's
+  packs linked in, all seven real entries replay `ok`.
 - Task 2.11 re-keyed the seven real entries to the `run/2` pack (main's `deploy-vii prepare`, 22
   October 2026, same PDF; pack sha256 77395ae0091b14ec0a5539ae45d3be0b272f2931c00a8a53e3e39d16eddeaf3c,
   was 0132418198863b1c7b4fbad4ffc4621fec852eec794b53b98ad450ecc23f776b at
   `artifacts/public-case/caesars-fy2025-preparation-1`, `run/1`, which the `run/2` loader rejects).
   A re-prepared case pack is placed as its own `artifacts/public-case/<case-dir>/` (here
   `czr-fy2025-v2`, whose `complete.json` records the new hash), so `find_case_pack` finds it by
-  `pack_sha256` with no code change. Only `pack_sha256`, `pack_source` and
+  `pack_sha256` with no code change. Since task 7.0 `find_case_pack` returns the first directory
+  (in name order) whose marker matches and whose pack loads under the current contract; one that
+  cannot be read or loaded is skipped with a logged warning naming it and the reason. Only `pack_sha256`, `pack_source` and
   `input_hashes.prepared-pack` changed; each entry was revalidated on the new pack first and its
   outcome and issues were identical, so `expected`, `live`, `expected_basis` and
   `outcome_changed_by` are as before. `live corpus` cannot re-key (it reads the run/1 hash from
@@ -459,7 +702,9 @@ A payload that fails the Pydantic parse (`cp0_workflow`, both `cp1_workflow` par
 `readiness.validate_review`) now yields one issue per error, `<field.path>: <message>`, with no
 library URL and no `input_value` repr (`readiness.shape_issues`); an unparseable payload is
 `(root): Invalid JSON: ...`. Replay compares text exactly, so this is stable across Pydantic
-upgrades, and the report's Issues column counts each error.
+upgrades, and the report's Issues column counts each error. Since task 7.0f a container
+`min_length` error ("Tuple/List should have at least ...") is dropped when another error's path
+extends its path, because it only echoes an item that failed; a genuinely empty container keeps it.
 
 Earlier note corrected: the synthetic CP-1 pack is hash-stable. The instability was
 `tests/product/test_model_readiness.py:31`, where `dict.fromkeys(ACCOUNT_IDS, ...)` iterated a
@@ -487,6 +732,37 @@ leaves it unchanged.
   mid-batch aborts the batch (report line `Stopped: aborted: CreditExhausted`), prints
   "ticket pending; coordinator decision (DC-8)" and exits 4 (`EXIT_CREDIT`; 2 is a failure, 3 a
   cap stop). `accept_proxy_payload` has no CLI entry: the coordinator calls it from Python.
+- Task 7.8 (the two 402 reasons; it qualifies the item above). `credit.from_dispatch_402` reads
+  the 402's `error` object (top level, else `choices[0].error`). `error.metadata.reason ==
+  "in_flight_budget_exhausted"` or `limit_source == "openrouter_in_flight_budget"` is the
+  in-flight refusal: transient, `exhausted` null, `transient: true`. Every other 402
+  (`openrouter_credits`, no metadata, a body that is not JSON) is exhaustion as before. The
+  manifest `credit` block of a dispatch 402 adds `transient`, `reason` (metadata `reason`, else
+  `limit_source`), `retry_after_s` (`error.metadata.headers.Retry-After`, else the HTTP header,
+  which `Response.retry_after` now carries), `requested_max_tokens` and `affordable_max_tokens`
+  (from "You requested up to N tokens, but can only afford M"); each null has its `<name>_reason`.
+  Only these fields are copied: the body's `user_id` and message text are not recorded there
+  (the body stays in `response.json`, as for every reply, with its `user_id` value redacted
+  since task 7.10; see Retention layout). The key-endpoint record is
+  unchanged. Retry rule: `dispatch` seals the refused attempt (`no-response`,
+  `insufficient_credit`, settled at zero, ticket pending, nothing interrupted), calls
+  `sleep(min(Retry-After, 300))` (120 s when absent; `sleep` is injectable, the CLI passes
+  `time.sleep`) and re-sends once: the same drawn model and request, a new attempt id and a new
+  reservation under the same cap. Credit is not a model failure, so the refused attempt uses up
+  no `max_retries` try (fix round 1): its ledger settle reason ends with `; in-flight 402: not a
+  model try`, `_plan` leaves such ids out of its try count (`runner.in_flight_refused`), and the
+  re-send carries the same `retries.attempt_number`, also on the last allowed try; the refused
+  attempt's manifest records `retries.exhausted: false` (a re-send follows; task 7.10) and the
+  re-send's keeps the real value. Its manifest
+  names the refused try in `links.in_flight_retry_of_attempt_id` (and `retry_of_attempt_id`);
+  its events start with `in_flight_retry` (`retry_of`, `waited_s`). `DispatchResult.retried`
+  holds the refused attempt; `dispatch(..., on_in_flight=)` hands it over before the wait, which
+  the CLI uses to give it its own report row even when the re-send raises (cap refusal,
+  connection failure, a second refusal). A second in-flight 402 is exhaustion: its credit block
+  says `exhausted: true` and the detail names both attempts. `live schema-check` does not retry: an in-flight 402 there stops the check
+  as exhaustion, named as in flight. The CLI abort line and the report's `Stopped:` line carry
+  `CreditState.summary()`, e.g. `Stopped: aborted: CreditExhausted (reason openrouter_credits;
+  requested max_tokens 128000, affordable 91075; HTTP 402)`; `EXIT_CREDIT` stays 4.
 - Replay corpus entries carry a required `provenance.cohort` taken from the attempt manifest
   (`synthetic` for the seed entries, `proxy:<label>` for proxy attempts); the replay verdict lists it.
 - A proxy attempt after a cap overrun is refused by its zero reservation (the cap's job); the
@@ -554,6 +830,179 @@ pass over the strict copy (`strict_schema = relax(strict_copy)`):
 | `drop-length` | `minLength` / `maxLength` | dropped |
 | `nullable-array-anyof` (round 3) | `{"type": ["array", "null"], "items": X, "maxItems": n}` | `{"anyOf": [{"type": "array", "items": X, "maxItems": n}, {"type": "null"}]}` (annotations stay outside) |
 | `oneof-anyof` (round 3) | `{"oneOf": [...], "discriminator": {...}}` | `{"anyOf": [...]}` (no discriminator) |
+| `decimal-number-only` (task 7.0d) | a `Number` amount: `{"anyOf": [{"type": "number", ...bounds}, {"type": "string"}], "x-deploy-vii-decimal": true}` (null joins when nullable) | `{"type": "number", ...bounds}`, or `{"anyOf": [{"type": "number", ...bounds}, {"type": "null"}]}` |
+| `prefixed-enum` (task 7.0d fix 1) | an id: `{"type": "string", "pattern": P, "x-deploy-vii-prefixed-enum": {"enum": [...], "pattern": "^other:..."}}` | `{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern": "^other:..."}]}` |
+| `drop-prefilled` (task 7.0i) | a hash binding Python fills: `{"type": "string", "pattern": "^[0-9a-f]{64}$", "x-deploy-vii-prefilled": "<kind>"}` under `properties`, named in `required` | left out of `properties` and `required` (a marker anywhere else, or one naming no kind, raises `ValueError`) |
+
+Task 7.0f (E1 batch `e1-cp1-4`): the `financials` contract carries a fifth step rule
+(`prompts.SIGN_RULE`): `sign_convention` is `signed` when the amount carries the statement's
+arithmetic sign (balance-sheet lines always), and `outflow_magnitude` only with at least one
+located `sign_citations` span showing the printed positive magnitude; a negative amount under
+`outflow_magnitude` is a contradiction. The two `StatementLine.sign_evidence` messages now name
+their remedy; the validator's semantics are unchanged.
+
+Task 7.0j (E1 batch 6, proxy cohort): the `financials` contract carries four more step rules (e to
+h), each the validator's own fact: `LINE_IDENTITY_RULE` (one `line_id` and one `display_priority`
+across periods, the same `statement`, `item_id`, `label` and `line_kind` in every row; likewise
+`addback_id` and `segment_id`), `STATEMENT_ITEMS_RULE` (the admitted `item_id`s per statement,
+rendered from `statement_validation.REQUIRED_ITEMS` and `OPTIONAL_ITEMS`, otherwise `other:`),
+`CONFLICT_RULE` (an account and its linked statement line carry one amount, else the observation
+is `conflicting` with `alternatives`; a conflicting line leaves the account amount null) and
+`SEGMENT_ALLOCATION_RULE` (every segment allocated exactly once, keeping its presentation row).
+Prompt text only; no validator or contract change.
+
+Task 7.6 (E1 batch 6, proxy cohort): the `narrative` and `readiness` contracts carry lettered step
+rules (a to e) stating what `validate_narrative_review` and `validate_downstream_review` enforce,
+in the terms of the evidence table: the prose rule (`REVIEW_PROSE_RULE`: nonblank, no bare
+figure), the passage parts (an issuer part per finding, no separator parts), dimension coverage
+(rendered from `narrative._DIMENSIONS` and `_FINANCIAL`), funding rows (only `statement_BS`
+evidence with a `line_id`; the standard items rendered from `REQUIRED_ITEMS` and
+`OPTIONAL_ITEMS`), required stories (only `subsequent_event`, `multi_figure_event` and material
+funding rows), and for readiness the consumer and requirement keys, the evidence tag groups
+(rendered from `downstream_readiness._EVIDENCE_GROUPS`), the action and dashboard rules and the
+gap-scope rules. Prompt text only; the evidence table already carried every column the rules
+name (no projection change); no validator or contract change.
+
+Task 7.9 (E1 batch `e1-cp1-7`, DC-8 proxy cohort): each analyst step was accepted once its rules were
+stated, but the analysts had resolved some wording by guessing, so the contracts now also say, once
+each and true to the code: for `narrative` that a material funding row is a non-debt liability
+detail line (the validator admits equity, asset and `other:long_term_debt` rows; the review must
+not name them) and that a story is required for each listed material id and no unlisted one, that
+a separator part is the contract's rule (the validator rejects whitespace, not a lone `.`), that
+parts are joined with nothing between them and an issuer part renders as the issuer's name in
+place, and a new rule f (`model_metrics` lines carry no evidence id; directional comparisons of
+cited figures only); for `readiness` the single `consumer_specific_cp1_sufficiency` request of a
+`consumer_specific_review` consumer, the unlabelled `computation` line, and that an unscoped gap
+keeps a consumer `not_ready` (scope by class within the completion budget); for `quality` that
+`module_status` and `source_gate` are not defects to record; for `business_context` the item-range
+joiners `prose` admits, a single-source self-contradiction as one conflict with two citations, and
+the `other` behaviour type with its `dimension`. Prompt text only; no validator, contract,
+projection or hash change.
+
+Task 7.11 (E1 batch `e1-cp1-13`, GPT-6.1 Sol at high) added three prompt sentences, each true to
+the code. In the common preamble every step receives (rule 3, because `CITATION_RULE` does not
+reach `financials`): `PAGE_SPAN_RULE`, a locator names the span that contains the quoted text,
+its page taken from the `locator=` marker that opens that span, above the text, never from a
+printed page number or the next span's marker (both batch 13 first tries cited `page:95` for a
+heading in the `page:94` span); and `HYPHEN_COPY_RULE`, copy a hyphenated word whole, with no
+line break after its hyphen (guidance beside the quote-side join in `quotes.quoted`). And
+`financials` rule i (`BOUND_SCOPE_RULE`), which 7.11 wrote as "copy the bound scope's four
+strings verbatim" and task 7.13 rewords now that Python fills them: the book's and periods'
+`currency`, `unit`, `accounting_basis` and `entity_perimeter` are not in the schema; the
+model's `binding.books[].entity_id` and each period's `period_type`, `start_date` and
+`end_date` select the scope (a `historical_duration` or `period_end` scope with the end date,
+and unless `PERIOD_END` a `historical_duration` scope with the start date too); money amounts
+are in that scope's `unit` and `currency`; a period with no such scope, or a book whose
+periods' scopes differ, is a rejection. No batch has yet run with these sentences (batch 14 ran
+on 92b249b, before them).
+
+Task 7.14 (batches `e1-cp1-13` and `-14`; decision 0005, user-approved 23 Oct 2026): three of the
+four `source_context` outputs left `currency` null on every scope and worded the FY2025
+`entity_perimeter` unlike the comparative years, so the `financials` prefill could bind no book.
+`validate_source_context` now rejects that at the step the model can repair, fail closed and
+compared exactly: every `historical_duration` and `period_end` scope of a `financial` source
+states `currency`, `unit`, `entity_perimeter` and `accounting_basis` (`Financial scope lacks
+<field>: <scope_id>`, one per field and scope), and all such scopes of one entity across every
+financial source state the same four strings (`Financial scopes of one entity disagree on
+<field>: <entity_id> <scope ids> vs <scope ids>`, one per entity and field, grouped by value; a
+null is the first rule's alone). Forecast and unspecified scopes, and scopes of a non-financial
+source, are held to neither. That is the scope set `live.submission._period_scopes` and
+`context_binding` choose from, so after a passing `source_context` only two prefill rejections
+become unreachable: `Bound source scopes disagree` and the `Field required` the prefill records
+for a null scope dimension (a property test holds this; both stay as defence in depth). A
+period whose dates match no scope is still left unfilled and still gets the shape check's
+`Field required` (or `context_binding`'s wording where it cites a source). `source_context`
+rule d (`SCOPE_DIMENSION_RULE`) states both rules once; no other step carries it.
+
+Task 7.19 (decision 0005, user-approved 24 Oct 2026): `financials` rule j (`QUOTE_PAGE_RULE`)
+adds the quote/locator fact the page rule above leaves implicit: the quoted words must appear on
+the cited page, and a heading printed at the foot of the preceding page is not on the table's
+page (quote a row label or figure from the table's own page, or cite the heading's own page).
+Prompt text only; the validator is unchanged and no citation is ever corrected by Python.
+
+Task 7.0i (E1 batch `e1-cp1-5`, three attempts lost to a copied 64-hex value): the model
+supplies no hash. Python fills these bindings:
+- `FinancialSubmission.context_step_sha256`, from the retained `source_context` step;
+- `SourceContextReview.pack_sha256` and `FinancialReview.pack_sha256`, from the pack;
+- every `Citation.source_sha256`, from the ready pack source the citation names;
+- `FinancialContextBinding.source_context_review_sha256`, from the retained `SourceContextReview`;
+- `FinancialContextBinding.financial_review_sha256` and `DefinitionReview.financial_review_sha256`,
+  from the submitted `financial` parsed as `FinancialReview`;
+- `FacilityFxConversion.facility_sha256`, from the book's facility row;
+- `AuditBasisExplanation.annual_observation_sha256` and `quarter_observation_sha256`, from the
+  book's effective account values;
+- `NarrativeReview.inputs_sha256` and `DownstreamReview.inputs_sha256`, from the financial stage's
+  `NarrativeInputs` and the narrative step's `DownstreamInputs`.
+
+Each field is marked `x-deploy-vii-prefilled: <kind>`. The sent schemas leave it out
+(`drop-prefilled`), so no CP-1 sent schema has a hash-typed property. The `financials` step rules
+are four: a amounts, b account metrics, c declared periods, d sign convention
+(`CONTEXT_STEP_RULE` is gone). `source_context` no longer states the `pack_sha256` rule, and the
+retained-step block is the header `sha256=` and the step output, with no `step_output_sha256=`
+line.
+
+`submission.submit_model_payload` fills each binding after null resolution and overwrites any
+value the reply carries. A reference Python cannot resolve is rejected with the validator's
+own message first. The cases are an unknown or not-ready source ("Unavailable or changed source:
+<id>"), an unknown facility or period ("FX conversion <id>: unknown facility/period") and an audit
+explanation's missing period or observation. The stage's remaining issues follow, without the
+"Field required" of a field the sent schema never offers (`_validate_prefilled`, recomputed on
+resume; not on a manual `execution_cli` resume, which returns the plain stage issues). Task 7.16
+(hybrid CP-1 probes, 23-24 Oct: a balance-sheet period with a null `start_date` and no
+limitation also drew `definition.financial_review_sha256: Field required` and
+`binding.financial_review_sha256: Field required`) routes every payload the pre-fill leaves a
+marked field unset in through `_validate_prefilled`, unbound reference or not, so the model sees
+only the shape issue; the rejection is unchanged, and those lines stay when they are the stage's
+only issues. The journal retains the pre-filled payload, and output.md keeps the raw reply. A reply
+that already holds every value is kept byte for byte, and a reply that is not a JSON object is
+handed on as received. The changed paths are in `Submitted.prefilled` and in a
+`payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`). The
+validators still reject a mismatched binding.
+
+Task 7.13 (E1 batches `e1-cp1-13` and `-14`, decision 0005 row 7.13, user-approved 23 Oct 2026):
+identity strings are Python's to fill, not the model's to retype. `FinancialBook` and
+`FinancialPeriod` mark `currency`, `unit`, `accounting_basis` and `entity_perimeter` with the
+binding kind `scope-dimension`, so the sent `financials` schema leaves them out. In its own
+phase, after the hashes that read only sent fields and before the facility and observation
+hashes (which parse the book), `prefill` takes the retained `SourceContextReview`
+(`Known.context`) and, for each book, the one entity `binding.books[]` names for it. A period
+binds to the scopes of that entity in the financial sources by `context_binding`'s rule: a
+`historical_duration` or `period_end` scope with the period's `end_date`, and unless
+`period_type` is `PERIOD_END` a `historical_duration` scope with its `start_date` too. The book
+and each bound period take the one four-string tuple every bound period shares. Where they
+share none (or more than one) the book is left unfilled, each period with a single scope tuple
+keeps its own, and the attempt is rejected with one issue, `Bound source scopes disagree on
+<fields>: <book> <periods>` (fail closed: no majority, no first-wins). A period with no such
+scope is left unfilled and rejected with `context_binding`'s own wording for each source it
+cites (`No matching entity/date/basis source scope: <book> <period> <source>`); a binding that
+names no single entity, or an entity the context lacks, with that validator's binding wording.
+A scope's null dimension is never written, so the stored contract's `Field required` names it
+(E1 batch 14: every scope's `currency` was null). These issues reach the journal first through
+`_validate_prefilled`, without the `Field required` of the strings left unset. A payload whose
+strings already equal the scope's is unchanged (the recorded corpus, `test_replay.py`). The
+filled paths appear in `Submitted.prefilled` and the `payload_prefilled` event (`by_kind`
+`scope-dimension`); output.md keeps what the model sent. `context_binding` and `book_issues`
+are untouched and still reject a payload that reaches the journal with drifted strings. Read
+only on the recorded payloads: batch 13's input set caad83cc is filled and bound; batch 13's
+c8272a66 and both batch 14 input sets carry source scopes whose `entity_perimeter` differs between
+FY2025 and the comparative years, so the prefill rejects them with the disagreement issue,
+which a `financials` repair cannot fix (the strings are the source-context step's).
+
+Task 7.0d (E1 batch `e1-cp1-3`): Sol sent 131 `financials` amounts as printed strings (`"3,624"`,
+`"(211)"`), which the stored contract refused, and the sent schema allowed them. The
+`decimal-number-only` relaxation selects a node by the marker `financial_contracts.Number` adds
+(`DECIMAL_MARKER`), never by its shape, so a real number-or-text union is never rewritten. A
+marked node that is not exactly one number branch, one string branch and at most one null branch
+raises `ValueError`. The stored contract still accepts a string amount, so a stored payload
+replays unchanged. The same task sends `AccountObservation.metric_id` as an enum of the 36
+`ACCOUNT_IDS` (a `json_schema_extra` on the field; `controlled_metric` still decides). Fix round 1
+adds `prefixed-enum` for an id that the validators accept as a listed value or an `other:` id
+(`PREFIXED_ENUM_MARKER`, whose value carries the list and the pattern). The node is sent whole as
+`{"anyOf": [{"type": "string", "enum": [...]}, {"type": "string", "pattern":
+"^other:[A-Za-z0-9_.:-]*$"}]}`, with annotations kept outside. `StatementLine.item_id` lists the 78
+r14 statement items and `BalanceMovementBridge.balance_item_id` the 32 BS items. Python still
+enforces the per-statement split. A marked node that is not a plain string, or a malformed marker,
+raises `ValueError`.
 
 Round 3 rests on two live bisects of the sent schema (`schema-check --bisect`, batches
 `schema-2026-10-22-bisect` and `schema-2026-10-22-bisect2`). OpenAI (GPT-6.1 Sol) accepted
@@ -629,9 +1078,10 @@ at the per-operation timeout, so the overrun past the deadline is at most one su
 An HTTP error status body is read as before (whole, per-operation timeout only): it arrives at
 once, without keep-alive padding.
 Unlike a 504-in-200, an expiry keeps no body and so no generation id: `live reconcile` reports it
-unresolved ("no provider_request_id recorded") until the coordinator settles it. Each manifest
-records `budgets.deadline_s` beside `budgets.timeout_s` (the same value: whole call, and each
-socket operation).
+unresolved ("no provider_request_id recorded") until the coordinator settles it. The deadline is per call, set by `--timeout` (default 600 s):
+each socket operation and the whole-call wall clock both use it. Each manifest records
+`budgets.deadline_s` beside `budgets.timeout_s` (the same value: whole call, and each socket
+operation).
 
 Settling a deadline-expiry hold. With no generation id there is nothing to look up, so the
 generation endpoint can never price it and `live reconcile` leaves it held. The only evidence that
@@ -682,7 +1132,9 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   whose `id` is not the requested one ("generation id mismatch"), a missing or malformed
   recorded id, or a ledger that holds no unreconciled settlement leaves the attempt unreconciled
   with the reason in `metrics.json` and the report; no figure is inferred. A connection failure
-  stops the run (exit 2) after the report is written. A fixture holds the documented example
+  (a generation lookup or the fresh usage reading below) stops the run (exit 2) after the report
+  is written; adjustments already written in that run stay, and a rerun picks up the attempts
+  still held. A fixture holds the documented example
   record verbatim (`tests/product/fixtures/live/generation-documented-example.json`).
   `metrics.json` is the one retained file reconcile rewrites (atomic replace); the ledger line is
   the authority, and a rerun after an interrupted write re-synchronises metrics from it without a
@@ -707,14 +1159,139 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   `reconciled_usd` 0 and an `evidence` object (status 404, both usage figures and times, the
   delta, the other attempts and their sum, the difference, the tolerance, who recorded the
   usage). Replay refuses that source with a non-zero figure or without evidence. A missing
-  record, a usage that is not a number, checks made with different key tokens or a difference
-  above the tolerance leave the attempt unresolved with the reason. Probe-2 predates the
+  record, a record whose `schema` is not `account-usage-check/1` (task 7.15), a usage that is
+  not a number, checks with different key-file notes (`the two account usage checks record
+  different key-file notes`) or a difference above the tolerance leave the attempt unresolved
+  with the reason. Probe-2 predates the
   records: its holds stay unresolved until the coordinator writes the two files from the
   recorded checks (25.7172663 before, 25.724167155 after).
+- **Account usage and a hold without a generation id (task 7.0).** A held pool attempt with no
+  recorded generation id (a deadline expiry: nothing reached the provider's response, so there is
+  nothing to look up; it used to stand as spent) is adjusted from the same usage window only when
+  the delta is attributable to it alone: it is the batch ledger's only attempt without a measured
+  cost, and every other ledger attempt is a retained pool attempt whose charge is measured
+  (provider-reported or known-zero, or adjusted from the generation endpoint, read from the
+  ledger line). It then takes the delta less those charges (a residual below zero within
+  US$0.000001 is 0): ledger `adjust` with `source: "account-usage-delta"`, `generation_id: null`,
+  the figure and an `evidence` object (both usage figures and times, the delta, the held attempt,
+  the other attempts and their sum, the residual, the reservation, the tolerance, who recorded
+  the usage). Replay refuses that source with a generation id, without evidence, or above the
+  attempt's reservation. Two or more held attempts, a charge that is not measured (an estimate,
+  a 404 zero), a residual below zero by more than the tolerance, a residual above the
+  reservation (other spend on the account in the window, which the delta cannot tell apart) or
+  a missing usage record leave the attempt held, with `no provider_request_id recorded; nothing
+  to look up; <reason>`. `live reconcile` looks up attempts with a generation id first
+  (`reconcile.lookup_order`), so a hold that becomes the only one after those lookups is
+  attributed in the same run whatever order the attempt directories sort in. Fail closed on the
+  safe side of the cap: the figure never exceeds the hold it replaces.
+- **Usage unmoved since the after-check (task 7.0).** Both usage-window rules,
+  `generation-404+usage-delta` and `account-usage-delta`, assume the after-batch check already
+  includes every charge of the batch; the provider may bill a 404'd or given-up call later,
+  which the delta would then omit. So either adjust also needs a fresh `GET /api/v1/key` reading
+  at reconcile time, taken only once the rule's own conditions hold, equal to the recorded
+  after-figure within US$0.000001 and recording the same key-file note
+  (`reconcile.usage_unmoved`; the evidence adds `usage_now_usd` and `usage_now_checked_at`).
+  Otherwise the attempt stays held with `usage moved since the after-check (<after> then, <now>
+  now); not attributed; a later reconcile may retry` (or `the account usage now is not
+  reported; ...`, or `the usage check now records another key-file note than the after-check;
+  ...`, with the same ending), after `HTTP 404 ...;` or `no provider_request_id recorded;
+  nothing to look up;` (decision 0008, task 7.0 amendment).
+- **An interrupted attempt (task 7.11).** A process killed after its reservation and before the
+  reply (batch e1-cp1-12, stopped by the user mid-`financials`) leaves an open `reserve` with no
+  `settle` and an attempt directory holding `request.json` only; before 7.11 reconcile saw
+  nothing (no manifest, so no `metrics.json` flag) and the reservation stayed counted. After the
+  lookups, `live reconcile` now takes each attempt directory of the batch whose ledger id is
+  still open (`reconcile.interrupted_attempts`) and has no `manifest.json`. When the directory is
+  that shape (`request.json` only, a pool chat request, not a schema-check or bisect case,
+  written more than twice its recorded `timeout_s` ago: a call lives at most one socket
+  operation past its deadline, so a younger one may still be in flight and the runner may still
+  seal it; reconcile beside a live batch therefore leaves it alone, unresolved) it
+  writes, once, the manifest it can truthfully write: `status: "no-response"`, `classification:
+  "interrupted"`, `reason: "process ended before the reply; no generation id"`,
+  `recorded_by: "deploy-vii live reconcile"`, the batch, case, model and attempt id from the
+  path and `request.json`, `ticket_id` and `step_id` from the attempt id, the draw and
+  `hashes.request_sha256` (the runner's own hash of the request body) from `request.json`, and
+  no served, effort, usage, credit or validator block. It then applies the
+  `account-usage-delta` rule above (the batch's only attempt without a measured cost, every
+  other charge measured, the residual at most the reservation, usage unmoved since the
+  after-check): only when all hold does it write the `settle` (cost unknown, the reservation
+  held) and the `adjust` (`source: "account-usage-delta"`, both facts in `evidence`). Otherwise
+  the attempt is unresolved with `interrupted attempt; reservation kept open: <reason>`, the
+  ledger is not touched and the exit code stays 0, as for any unresolved attempt; a later
+  reconcile retries from the manifest it wrote (never rewritten). A reconcile stopped between
+  that settle and its adjust leaves a held charge, which the next run adjusts without a second
+  settle. Any other directory without a manifest (a retained reply, no `request.json`, a
+  proxy-shaped request, a held settle without a manifest) is reported unresolved with its shape
+  and nothing is written; a directory with a runner-sealed manifest is never touched by this
+  path. The reconciled report lists the attempt in Steps (status, class and `reserved <amount>
+  (open)` while open) and in Reconciliation (outcome and reason, which names the settlement
+  source). The real e1-cp1-12 batch has no `account-usage-after.json` (the kill skipped the
+  after-check), so under 7.11 its reservation stays open there: no window, no figure.
+- **The next batch's before-check closes a killed batch's window (task 7.13).** When the batch
+  recorded no `account-usage-after.json`, `reconcile.next_batch_window` closes its usage window
+  at the `account-usage-before.json` of the earliest later batch under the same artifact root
+  (by `checked_at`; a later check without a readable time, or two in one second, leaves the next
+  batch unknown). It holds only when both checks record the same key-file note (`credit.key_file`: the token count found and the token used, not a key fingerprint), the batch's own ledger
+  ends before the closing check, and no other batch reserved or settled between the two checks
+  or held a reservation open at the first (opened before it and settled after it, or never):
+  every `.ledgers/*.jsonl` is read, and the next batch's own lines in the second of its check
+  are after it (the runner records the check before its first reservation). For the batch's own
+  ledger only the runner's lines count (`reserve`, and a `settle` other than reconcile's
+  interrupted settle): a reconcile stopped between its settle and its `adjust` leaves lines
+  after the closing check, and the next run still writes the one `adjust`. The
+  `account-usage-delta` attribution then runs over that window (only held attempt, every other
+  charge measured, residual within the tolerance and at most the reservation) and writes the
+  settle and an `adjust` with `source: "account-usage-delta/next-batch-before"`; the evidence
+  adds `usage_window_closed_by`, `usage_before_file`, `usage_after_file` (paths under the
+  artifact root), `next_batch_id`, `reservations_between_checks: 0`, `ledgers_read` and
+  `reconcile_time_reading: false`, and the reconciled report's reason names both files, both
+  times, the no-reservation fact and `no reconcile-time reading: a charge booked after <closing
+  check> is not seen`. There is
+  no reconcile-time reading (later batches have moved the usage since), so unlike the in-batch
+  rule this one cannot see a charge the provider books after the next batch's before-check (see
+  the 7.13 review section). Anything short of it, a reservation in the gap above all, leaves the
+  attempt unresolved with the reason, as before. Read only on the real artifacts: e1-cp1-12's
+  window closes at e1-cp1-13's before-check (08:39:00Z to 08:43:18Z, 32 ledgers read, none
+  reserving between), usage moved US$0.8463945, exactly the two settled charges, so the
+  interrupted `financials` attempt would settle at US$0; the coordinator runs that reconcile.
+  A resumed run that finds the manifest this path wrote uses it only while the directory holds
+  exactly `manifest.json` and `request.json` (a `response.json` means the runner got
+  further, so no usage delta settles it). The reason states the full window rule (`no other
+  batch held a reservation open at the before-check, nor reserved or settled inside the window
+  (<n> ledgers read)`). A reservation another batch's ledger never settled therefore leaves
+  every later killed batch's window unresolved until it is settled (fail closed).
+- **Spend cross-check (task 7.14).** Neither window sees a charge billed after it closes:
+  batch e1-cp1-13's after-check lagged its settled charges by US$1.0737551, which had caught up
+  by e1-cp1-14's before-check. After every lookup and adjust, `live reconcile` ends the
+  reconciled report with a `## Spend cross-check` section (`reconcile.spend_cross_check`):
+  the key's usage now, from one `GET /api/v1/key` read as `usage_unmoved` reads it (DC-7: the
+  key is read for that call, in memory, never printed), less the origin, against the sum of the
+  settled charges of the `<artifact-root>/.ledgers/*.jsonl` ledgers opened at or after the
+  origin (each ledger replayed: an adjusted attempt counts its adjusted figure, a hold of
+  unknown cost its whole reservation, shown separately; open reservations are not counted,
+  their number is shown). The origin is the earliest recorded `account-usage-before.json` under
+  the artifact root (today `probe-2`), and the section names every ledger opened before it
+  with their settled sum (today `probe-1`), which the figure does not cover (coordinator
+  ruling, fix round 1). The difference is `Unattributed USD` (positive: billed but in no
+  counted ledger, late billing or spend outside the runner; negative: settled but not billed,
+  refunds or lag), with both inputs, their times and the ledger count. It is reported only:
+  nothing is settled or adjusted from it. No figure is shown, with `- No figure: <reason>`,
+  when there is no ledger, a ledger does not replay or records no opening time, no batch
+  recorded a before-check, any recorded before-check is unreadable or lacks a usage figure or a
+  time, the two earliest checks fall in the same second, the usage now is not reported, or the
+  reading `records another key-file note than the origin check`; the key is read only when the
+  ledgers and the origin can be used. A failed key read for the cross-check (credential or
+  connection) leaves the section `not checked: <reason>`, is printed, and does not change the
+  reconcile's exit code, which stays what the lookups and settlements make it (coordinator
+  ruling, fix round 1); a reconcile stopped earlier says `not checked: the reconcile stopped
+  before the cross-check`.
 
 ## Not covered here
 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep
-their stored contracts until their own MC-1 skeletons); a per-step repair budget and a
-`FinancialSubmission` split (deferred by decision 0008); provider acceptance of the
-`ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun).
+their stored contracts until their own MC-1 skeletons); a `FinancialSubmission` split
+(deferred by decision 0008); a per-step repair of CP-0 or of CP-1's `quality` step (task 7.0g
+covers CP-1's four stage steps); provider acceptance of the
+`ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun); provider
+acceptance of the `quality` sent schema and a live or proxy QA review on the real pack (task
+7.4); a real-pack replay of any CP-1 entry (the synthetic `quality` entries replay, task 7.10).

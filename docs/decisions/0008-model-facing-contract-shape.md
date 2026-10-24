@@ -130,8 +130,8 @@ applied three execution-boundary fixes. (1) One quote matcher for every citation
 (`deploy_vii.quotes`): both sides are compared after removing soft hyphens, mapping curly quotes,
 dashes and the minus sign to ASCII and collapsing whitespace runs; the quote must still be one
 contiguous substring of the span its locator names (no fuzzy match, no other span searched), and
-the issue names the locator, the normalisation and the quote's first 60 characters, one per
-failing citation. It applies to the journal, financial and definition citation checks too,
+the issue names the locator, the normalisation and the normalised quote cut at a whole word
+within 200 characters (task 7.0; 60 characters before), one per failing citation. It applies to the journal, financial and definition citation checks too,
 because the journal re-checks the CP-0 candidate's citations with the same function. (2) A
 negator followed by at most four words from a closed list and the absence word, or the coverage
 field restated as empty, is not an absence word; positive claims still fail. (3) `source_context`
@@ -247,6 +247,141 @@ and the analysis,
 verified: acceptance beyond the 16-token schema check (probe-6 is to show Sol's replies under
 the round-3 schemas).
 
+## Amendment, 22 Oct 2026 (task 7.0)
+
+Task 7.0 widened the quote shown in a citation issue from the first 60 characters to at most
+200, cut at a whole word, so the REPAIR prompt carries the clause the model must correct. It also
+adds the `account-usage-delta` adjust for a lone deadline hold that has no generation id. That
+rule and the `generation-404+usage-delta` rule above share one exposure, now closed for both:
+the provider may bill the call after the after-batch usage check, so the delta would omit its
+cost, and therefore `live reconcile` takes a fresh `GET /api/v1/key` reading and makes either
+adjust only when it equals the recorded after-figure within US$0.000001; otherwise the attempt
+stays held with "usage moved since the after-check" and a later reconcile may retry.
+
+## Amendment, 22 Oct 2026 (task 7.0d)
+
+E1 batch `e1-cp1-3` (Sol @high) ran CP-1 `financials` to completion for the first time: 61,035
+completion tokens, a 232 KB `FinancialSubmission`, 745 s and US$1.08. Shape validation then
+rejected it for two causes the sent schema permitted: 131 amounts were strings copied as printed
+(`"3,624"`, `"(211)"`; "Input should be a valid decimal"), and 19 of the 22 `metric_id` values
+were invented (12 issues "unknown CP-1 account metric"). The sent copy now says both rules. The
+new `decimal-number-only` relaxation keeps only the number branch, with its bounds and any null
+branch, of each `Number` amount (Pydantic's `anyOf` of number and string). It selects these nodes
+by a marker that `financial_contracts.Number` adds, never by shape. `AccountObservation.metric_id`
+is sent as an enum of the 36 `ACCOUNT_IDS`. The `prefixed-enum` relaxation sends
+`StatementLine.item_id` as `anyOf` of an enum of the 78 r14 statement item ids and the pattern
+`^other:[A-Za-z0-9_.:-]*$`, and `BalanceMovementBridge.balance_item_id` the same way with the 32
+BS ids. The pattern is exactly the `Identifier` ids the validators accept by their `other:`
+prefix rule. The flat list is a superset for any one statement: Python still enforces the
+per-statement split. `ProFormaObservation.metric_id` (6 ids or `facility:<facility_id>`, a
+derived prefix) is deferred. The `financials` prompt states these rules and the unit of each
+amount: money as printed in the book's `unit` and currency, or a facility's own currency, never
+arithmetic; `effective_tax_rate` a decimal fraction; spreads and floors in basis points;
+`fixed_rate` a percent; FX rates and KPIs in their own units. It also states the
+`statement_lines` home of a figure that has no account metric, and the declared-period rule.
+The stored contracts, their validators and the values they accept are unchanged: a stored
+string amount still validates, and `controlled_metric` still refuses an unknown id with the same
+message. Item 3 (`FinancialSubmission` split) stays deferred. Its measured basis is now one
+draw: about 61k output tokens, 12.5 minutes and about US$1.1. Its trigger is first-pass validity
+below 2 of 3 draws *after* the sent schema enforces the Python vocabularies.
+
+## Amendment, 22 Oct 2026 (task 7.0g)
+
+Item 2's trigger was met. E1 batch `e1-cp1-4` (Sol) exhausted the module-wide budget:
+`source_context` was rejected on one case-variant quote, the module's one repair re-ran it
+(accepted, US$0.47), then `financials` (62,980 tokens, 805 s, US$1.11) was rejected on a rule
+its prompt had not stated, and with no repair left the cell ended. Item 2's per-step budget is
+adopted as an execution-boundary change (decision 0005): each of CP-1's four model steps
+(`source_context`, `financials`, `narrative`, `readiness`) may be repaired once within its
+attempt, re-sending only that step with its own issues in the REPAIR block (scope
+`failing-step`); the module-wide repair attempt is kept as the second line. Bound: at most two
+tries per step per attempt and two attempts per input set. The journal keeps the rejected first
+try in a new `Attempt.step_repairs` (the invalid submission with its payload hash and issues),
+outside the positional `steps`, so the CP-1 workflow and envelope readers and the module's
+content hash are unchanged: the same final payloads give the same `result_sha256` with or
+without a repaired step. An empty `step_repairs` is omitted from the JSON, so stored
+`execution/5` snapshots keep their bytes and the schema is not bumped. A reader older than this
+amendment fails on a snapshot that holds `step_repairs` (an unexpected field, not the schema
+message); no older reader is deployed. Analytical meaning is
+unchanged: the same validators decide, the same issues are carried and acceptance semantics are
+untouched. A REPAIR block comes from the step's own prior try (within the attempt, first) or from
+the previous attempt, never both. CP-0's single review and CP-1's `quality` promotion step keep
+the attempt-level repair only. The runner records `step_try` (1 or 2) and
+`links.step_repair_of_attempt_id`; `repair_count` stays the attempt number. Not verified: a live
+within-attempt repair (E1 batch 5).
+
+## Amendment, 23 Oct 2026 (task 7.0i)
+
+E1 batch `e1-cp1-5` (Sol) lost three `financials` attempts (about US$3) to one 64-hex copy.
+The retained-step block showed two hashes: the header `sha256=` (the step's content hash,
+`f56a66…`, which the validator binds) and the body line `step_output_sha256=` (its output hash,
+`fc55f2…`). Rule c said only "the sha256 shown on the step:source_context block". The three
+attempts wrote three values, none of them the header's. The last one (46,020 completion tokens,
+587 s, US$0.90, 85 statement lines, 55 observations, no shape issue) was rejected on that issue
+alone, "Financial extraction does not bind the retained source step". The validator returns on
+that check first. Behind it the payload still bound the model's own `FinancialReview` by hash,
+twice, a value no model can compute.
+
+MC-1 now covers every hash binding of the CP-1 steps. The model supplies no hash; Python fills
+these bindings (`kind`: field, value):
+
+- `context-step`: `FinancialSubmission.context_step_sha256`, the content hash of the ticket's
+  valid retained `source_context` step;
+- `pack`: `SourceContextReview.pack_sha256` and `FinancialReview.pack_sha256`, the prepared
+  pack's hash;
+- `source`: every `Citation.source_sha256` (in `source_context` and `financials`), the hash of
+  the ready pack source the citation's `source_id` names;
+- `source-context-review`: `FinancialContextBinding.source_context_review_sha256`, the hash of
+  the retained `SourceContextReview`;
+- `financial-review`: `FinancialContextBinding.financial_review_sha256` and
+  `DefinitionReview.financial_review_sha256`, the hash of the submitted `financial` object
+  parsed as `FinancialReview`;
+- `facility`: `FacilityFxConversion.facility_sha256`, the hash of the book's facility row with
+  the conversion's facility and period (the last such row, as `fx_conversion_issues` reads it);
+- `annual-observation` and `quarter-observations`: `AuditBasisExplanation.
+  annual_observation_sha256` and `quarter_observation_sha256`, the hashes of the book's effective
+  account values for the explanation's periods and metric;
+- `step-inputs`: `NarrativeReview.inputs_sha256` (the financial stage's `NarrativeInputs`) and
+  `DownstreamReview.inputs_sha256` (the narrative step's `DownstreamInputs`).
+
+Each field carries `x-deploy-vii-prefilled: <kind>`. The new `drop-prefilled` relaxation leaves
+a marked property out of the sent schema's `properties` and `required`. A marker anywhere else,
+or one that names no kind, raises `ValueError`. No CP-1 sent schema has a hash-typed property
+any more. Rule c, `CONTEXT_STEP_RULE`, the `source_context` sentence on `pack_sha256` and the
+retained-step block's `step_output_sha256=` line are removed; the block header `sha256=` stays.
+
+After null resolution, `live.submission.submit_model_payload` fills each binding with the value
+its validator compares against and overwrites any value the payload carries. Phases keep the
+dependencies: citations and step values first, then facility rows, then observations, then the
+financial review.
+
+A reference Python cannot resolve is rejected with the validator's own message, listed first,
+as CP-0's uncomposable path does. The cases are an unknown or not-ready source ("Unavailable or
+changed source: <id>"), an unknown facility or period ("FX conversion <id>: unknown
+facility/period"), and an audit explanation whose period or observation the book lacks ("Unknown
+audit explanation period: <id>", "Stale audit explanation observation: <id> <period>"). The step
+is entered through `store.submit_step` with a validator that recomputes these issues from the
+retained payload and the bindings read before the write. It then appends the stage validation's
+issues (`cp1_workflow.validate_cp1_stage`), less the "Field required" of any marked field left
+unset, a field the sent schema never offers. Such a payload was rejected before and still is.
+A binding that cannot be filled because its sub-object does not parse is left as sent, so the
+shape rejection names the cause.
+
+A payload that already holds every right value is kept byte for byte; a payload that is not a
+JSON object is handed on as received. A missing retained step raises before any write. The
+journal retains the pre-filled payload, rewritten with every number's digits kept, and output.md
+keeps the raw reply. Every changed JSON path is recorded in `Submitted.prefilled` and in the
+attempt's `payload_prefilled` event (`paths`, `count`, `by_kind`, `retained_payload_sha256`).
+
+The stored contracts, the validators' binding checks and their messages are unchanged, so
+analytical meaning is unchanged (decision 0005). On the live path every binding check
+re-checks Python's fill. Python fills the context-step, source-context-review, pack, source and
+step-input values from the same artefacts the validator compares against. Those five checks stay
+real guards on the direct `submit_cp1_step` / `execution_cli` route. The facility,
+audit-observation and financial-review checks are self-consistency checks of the payload. Not
+verified: provider acceptance of the changed CP-1 sent schemas (`live schema-check`) and live
+uptake (E1 batch 7).
+
 ## Evidence
 
 - [live-probe-2.md](../development/tasks/implementation/live-probe-2.md): batch report and
@@ -260,3 +395,80 @@ Not verified: provider acceptance of the submission schema; first-pass validity 
 (the rerun); whether GLM's absence claims came from the model or from provider-side truncation
 (154,609 billed prompt tokens argues against truncation, not conclusively); whether the 3.0 ratio
 holds for other models, packs and languages.
+
+## Amendment, 23 Oct 2026 (task 7.0h)
+
+E1 batch `e1-cp1-5` (Sol, 23 Oct 2026) met item 3's trigger: `financials` was cut at exactly
+64,000 completion tokens (the `--max-tokens` budget; classification `truncated`) twice in the
+first attempt, and a third time in the module repair. The
+7.0g step repair re-sent the step at the same budget with a REPAIR block that said only
+`(root): Invalid JSON: EOF while parsing a string at line 5928 column 13`; the model compacted
+its JSON (184,578 characters on 100 statement lines, against 263,993 characters on 70 lines
+indented) and was cut again (US$1.09 lost); the 7.0e module repair then re-ran `source_context`
+(US$0.47) and `financials` (about US$1.1) at the same budget, and was cut a third time.
+
+Rule: a `truncated` classification consumes no repair, step or module. A truncation is a budget
+verdict, not a validator verdict the model can act on, and the budget is the operator's knob
+(`--max-tokens`); a re-send at the same budget is a near-certain loss. The driver leaves the
+step's one in-attempt repair unused, the ticket stays pending, the cell ends and the batch goes
+on; the report counts such rows under `Truncated`. Compact-output rule: every step's preamble
+states that the JSON object is emitted compactly (no indentation, no line breaks between fields)
+because the completion budget is finite and charged per token. Item 3's trigger (truncation
+observed) is now met; the `FinancialSubmission` split stays deferred until batch 6 measures
+`--max-tokens 128000` (Sol's maximum completion). Analytical meaning is unchanged: no validator,
+acceptance rule or journal rule moves.
+
+Not verified: a live truncation under the guard and the compact rule's live effect (E1 batch 6).
+
+## Amendment, 23 Oct 2026 (task 7.4)
+
+CP-1 gains a fifth live step, `quality`, so a live or proxy case can reach a promoted CP-1 head
+(the envelope, CP-MODEL publication and the Front Page's CP-1 blocks). The model-facing shape is
+the stored `QualityReview` (`quality-review/1`). The model supplies the analyst's judgments only:
+per candidate claim `material` and a rationale, per evidence id a `lineage_class` at or below the
+producer ceiling with a rationale, and findings (severity, status, resolution, references). It
+never supplies a score, band or QA status: Python computes them (`assess_quality`). Python
+pre-fills `inputs_sha256` (MC-1, the 7.0i mechanism: marker kind `quality-inputs`, dropped from
+the sent schema) with `cp1_quality_inputs(cp1_registers(store, ticket)).content_hash()`; registers
+that do not stage raise before anything is written. The prompt carries the QA scope Python
+projects from the same registers (`<<<CONTEXT id=quality-scope ...>>>`): claims with their text
+and evidence ids, each such id's ceiling, basis and register record, the coverage slots (register
+cells counted by table and status) and the source gate and module status. The review enters the
+journal only through `promote_cp1`, so an accepted `quality` step is the promotion; a rejected
+review finishes the attempt (the step settles the module, so it is outside
+`WITHIN_ATTEMPT_REPAIR`) and the module repair re-runs the chain. A QA Blocked verdict alone
+is an analytical outcome, not a defect to repair (coordinator ruling, fix round 1): it stands in
+the journal and the `module` driver ends the cell without a module repair, as for a truncation;
+the contract adds that a REPAIR block never justifies lowering a severity or changing a status.
+`promote_cp1`, `validate_quality_review`, the lineage ceilings and the status rules are
+unchanged.
+
+Not verified: provider acceptance of the `quality` sent schema (`live schema-check`); a live or
+proxy QA review on the real pack.
+
+## Amendment, 23 Oct 2026 (task 7.5)
+
+E1 batch 6 (proxy cohort, the first accepted `financials` on the real Caesars pack) built a
+`narrative` prompt of 8,900,941 characters of user content (about 2.2M tokens, above every pool
+model's context), because each later CP-1 step received every retained step's raw output: the
+`financials` output alone (the whole `FinancialStage`) was 8,023,867 characters, of which
+`narrative_inputs` 7.44 MB (catalogue 4.11 MB: 2,564 records with their full `record_json` and
+inlined citations; ledger 3.33 MB) and `model` 0.85 MB, with the 307 KB historical table three
+times. Rule: a later step is sent a bounded projection of each retained step, chosen per consumer
+and producer by `live.context.PROJECTIONS` (a pair it does not list raises); the block header
+keeps the retained step's content hash and names the projection (`projection=<name>`).
+`narrative` receives `narrative-evidence`, one evidence-table line per catalogue entry (its
+evidence id and a compact value summary, no `record_json`, no citation) with the scope, the
+ledger's limitations and context and the model's metrics; `readiness` receives
+`readiness-inputs` from the narrative step (consumers, the narrative review and added gaps, the
+same table with gap ids); `quality` receives none (its QA scope, task 7.4); `financials` keeps the
+source-context report whole. Pack SOURCE blocks go only to steps whose validators match quotes
+against the pack (`source_readiness`, `source_context`, `financials`, `business_context`); the
+`narrative`, `readiness` and `quality` validators check evidence and gap ids only, so `build`
+refuses pack sources for them. An execution boundary only (decision 0005): validators, retained
+outputs, hashes and acceptance are unchanged; they recompute from the retained artifacts, not
+from what a model saw. Synthetic CP-1 case: the narrative block is 5.2% of the raw output.
+
+Not verified: the real-pack block sizes (target: at most 600,000 characters for the narrative
+block; measured by the coordinator on the batch-6 journal); live or proxy uptake of the
+projections.

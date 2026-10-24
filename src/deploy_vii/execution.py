@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -77,6 +77,12 @@ class StepValidation(Contract):
 
 
 class Attempt(Contract):
+    """One ticket of a module. `steps` are the retained steps in module order: the valid ones,
+    then at most one pending or invalid entry where the attempt stopped. `step_repairs` holds
+    each step's rejected first try that was repaired within this attempt (task 7.0g), in order;
+    it is never part of `steps`, so positional step readers and content hashes ignore it, and it
+    is omitted from the JSON while empty, so attempts written before it keep their bytes."""
+
     ticket_id: Identifier
     module_id: Identifier
     inputs: tuple[Input, ...]
@@ -89,6 +95,32 @@ class Attempt(Contract):
     result_sha256: Hash | None = None
     interruption: Text | None = None
     steps: tuple[StepSubmission, ...] = ()
+    step_repairs: tuple[StepSubmission, ...] = ()
+
+    @model_validator(mode="after")
+    def bounded_step_repairs(self) -> Self:
+        if any(item.status != "invalid" for item in self.step_repairs):
+            raise ValueError("A step repair retains an invalid try")
+        ids = [item.step_id for item in self.step_repairs]
+        if len(ids) != len(set(ids)):
+            raise ValueError("A step is repaired at most once per attempt")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_step_repairs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if not self.step_repairs:
+            data.pop("step_repairs", None)
+        return data
+
+
+# Decision 0008 MC-7 item 2 (task 7.0g): the steps that may be repaired once within their
+# attempt. CP-1's four model steps; not its `quality` promotion step (it settles the module), and
+# not CP-0's single review: those keep the attempt-level repair only. Equal to
+# `cp1_workflow.CP1_STEPS` (tested), named here because the workflow imports this module.
+WITHIN_ATTEMPT_REPAIR: Mapping[str, frozenset[str]] = {
+    "CP-1": frozenset({"source_context", "financials", "narrative", "readiness"})
+}
 
 
 class Command(Contract):
@@ -183,6 +215,11 @@ class NotAuthorized(ValueError):
         self.commands = commands
 
 
+# Settled modules whose facts a consumer may reference without requiring them (CP-1A cites
+# CP-1 figures as `{ref|unit}` only when CP-1 is settled; its registry edge stays CP-0 only).
+CONTEXT_PRODUCERS: dict[str, tuple[str, ...]] = {"CP-1A": ("CP-1",)}
+
+
 def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, ...]:
     graph = dependencies(snapshot.run.requested_modules)
     if module_id not in graph:
@@ -204,6 +241,15 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
     upstream = tuple(
         bound(item) for item in plan(snapshot.run.requested_modules) if item in required
     )
+    # Task 7.2: a settled (accepted or restricted) context producer is bound when present, so
+    # the figures a consumer cites from it are lineage and go stale with it; never required.
+    context: list[Input] = []
+    for item in CONTEXT_PRODUCERS.get(module_id, ()):
+        head = heads.get(item)
+        if item not in graph or item in required or head is None:
+            continue
+        if head.status == "accepted" or head.status == "restricted":
+            context.append(Input(input_id=item, sha256=head.result_sha256, status=head.status))
     if module_id not in {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}:
         readiness = heads.get("CP-0")
         commands = (
@@ -213,7 +259,7 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
         )
         if commands != (f"Run {module_id}",):
             raise NotAuthorized(module_id, commands)
-    return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream)
+    return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream, *context)
 
 
 def candidate_issues(
@@ -315,15 +361,18 @@ def inherited_limitations(
 
 
 MAX_ISSUES = 20
-MAX_ISSUE_CHARS = 300
+# Task 7.0: an issue line holds a quote mismatch whole (a 200-character quoted fragment plus
+# the clause saying why it failed), since the REPAIR prompt carries these lines.
+MAX_ISSUE_CHARS = 600
+MAX_INTERRUPTION_CHARS = 300
 
 
-def shortened(text: str) -> str:
-    return text if len(text) <= MAX_ISSUE_CHARS else text[: MAX_ISSUE_CHARS - 1] + "…"
+def shortened(text: str, limit: int = MAX_ISSUE_CHARS) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def bounded_issues(issues: Sequence[str]) -> tuple[str, ...]:
-    """At most 20 lines of at most 300 characters, then a count of the lines left out.
+    """At most 20 lines of at most 600 characters, then a count of the lines left out.
 
     Issue text can quote caller content (a citation locator, a field name), so no issue
     list reaches a snapshot unbounded.
@@ -364,7 +413,7 @@ def settle(
         issues = candidate_issues(snapshot, attempt, candidate, pack=pack)
     except ValidationError as error:
         issues = malformed_issues(error)
-    reason = None if interruption is None else shortened(interruption)
+    reason = None if interruption is None else shortened(interruption, MAX_INTERRUPTION_CHARS)
     if reason is not None:
         issues = (f"Interrupted: {reason}",)
     if candidate is not None and not issues:
@@ -684,9 +733,12 @@ class Execution:
     ) -> Attempt:
         """Retain an ordered response before trusted validation, sharing the module budget.
 
-        Sequence and validator come from the module implementation. Invalid model
-        responses finish this attempt; validator exceptions leave its exact input
-        pending for resumption. A valid step is not module acceptance.
+        Sequence and validator come from the module implementation. An invalid response to
+        a `WITHIN_ATTEMPT_REPAIR` step that has not been repaired in this attempt moves to
+        `step_repairs` and the attempt stays pending: the next submission of the same step
+        is its one repair (task 7.0g). Any other invalid response finishes this attempt, so
+        a step gets at most two tries per attempt. Validator exceptions leave its exact
+        input pending for resumption. A valid step is not module acceptance.
         """
         if not sequence or len(sequence) != len(set(sequence)):
             raise ValueError("Step sequence must be nonempty and unique")
@@ -756,6 +808,19 @@ class Execution:
                     "issues": bounded_issues(outcome.issues),
                 }
             )
+            repairable = step_id in WITHIN_ATTEMPT_REPAIR.get(module_id, frozenset())
+            if (
+                outcome.issues
+                and repairable
+                and all(item.step_id != step_id for item in attempt.step_repairs)
+            ):
+                # The step's first rejection: retained apart from `steps`, and the attempt stays
+                # pending (no settlement, no head, the module-wide repair untouched).
+                attempt = attempt.model_copy(
+                    update={"steps": completed, "step_repairs": (*attempt.step_repairs, submitted)}
+                )
+                self._write(with_attempt(snapshot, attempt))
+                return attempt
             attempt = attempt.model_copy(update={"steps": (*completed, submitted)})
             if outcome.issues:
                 empty = Module(

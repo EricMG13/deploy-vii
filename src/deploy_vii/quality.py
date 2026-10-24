@@ -10,7 +10,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import AfterValidator, Field, model_validator
 
-from deploy_vii.contracts import Contract, Hash, Identifier, Text
+from deploy_vii.contracts import PREFILLED_MARKER, Contract, Hash, Identifier, Text
 
 Lineage = Literal[
     "Directly Sourced",
@@ -155,7 +155,9 @@ class ClaimAssessment(Contract):
 
 class QualityReview(Contract):
     schema_version: Literal["quality-review/1"] = "quality-review/1"
-    inputs_sha256: Hash
+    # Task 7.4: a model review never sends it; Python fills the current QA inputs' hash
+    # (`live.submission`), and `validate_quality_review` still checks it.
+    inputs_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "quality-inputs"})
     claims: tuple[ClaimAssessment, ...]
     findings: tuple[QaFinding, ...] = ()
 

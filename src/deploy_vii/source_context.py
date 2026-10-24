@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Run, Text
+from deploy_vii.contracts import PREFILLED_MARKER, Citation, Contract, Hash, Identifier, Run, Text
 from deploy_vii.financial_contracts import Currency, Located, Unit
 from deploy_vii.financial_periods import _id
 from deploy_vii.financial_validation import records
@@ -37,6 +37,11 @@ _TIERS: dict[EvidenceClass, EvidenceTier] = {
     "internal": "3a",
     "external": "3b",
 }
+# Task 7.14: a financial source's historical and period-end scopes state these four strings
+# (rule 1), the same for every such scope of one entity (rule 2, `_disagreements`): the book's
+# and its periods' strings are copied from them. Forecast and unspecified scopes are not bound.
+_STATED_KINDS = frozenset({"historical_duration", "period_end"})
+_DIMENSIONS = ("currency", "unit", "entity_perimeter", "accounting_basis")
 
 
 class EntityContext(Contract):
@@ -95,7 +100,7 @@ class SubsequentEvent(Contract):
 
 class SourceContextReview(Contract):
     schema_version: Literal["source-context-review/1"] = "source-context-review/1"
-    pack_sha256: Hash
+    pack_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "pack"})
     entities: Annotated[tuple[EntityContext, ...], Field(max_length=2000)]
     sources: Annotated[tuple[SourceContext, ...], Field(max_length=2000)]
     events: Annotated[tuple[SubsequentEvent, ...], Field(max_length=20000)] = ()
@@ -247,6 +252,7 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
                 issues.append(
                     f"Historical reporting scope ends after publication: {scope.scope_id}"
                 )
+            issues.extend(_lacks(assessment, scope))
         source_event_ids = set(assessment.event_ids)
         if (
             len(source_event_ids) != len(assessment.event_ids)
@@ -264,6 +270,7 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
                     f"Event attachment lacks evidence from source: {source.source_id} {event_id}"
                 )
         referenced_events.update(assessment.event_ids)
+    issues.extend(_disagreements(review))
     # Event chronology and evidence coverage follow all source-local checks.
     for event in review.events:
         event_scope = scopes.get(event.reporting_scope_id)
@@ -301,6 +308,43 @@ def validate_source_context(pack: PreparedPack, review: SourceContextReview) -> 
                 )
     issues.extend(absence_issues(pack, _prose_scopes(review)))
     return tuple(issues)
+
+
+def _lacks(assessment: SourceContext, scope: ReportingScope) -> Iterator[str]:
+    """Task 7.14, rule 1: a historical or period-end scope of a financial source states all
+    four dimensions; one issue per missing field. Forecast and unspecified scopes, and a
+    non-financial source's scopes, are not held to it."""
+    if assessment.classification == "financial" and scope.period_kind in _STATED_KINDS:
+        for name in _DIMENSIONS:
+            if getattr(scope, name) is None:
+                yield f"Financial scope lacks {name}: {scope.scope_id}"
+
+
+def _disagreements(review: SourceContextReview) -> Iterator[str]:
+    """Task 7.14 (batches e1-cp1-13/-14), rule 2: the historical and period-end scopes of one
+    entity, over every financial source, state the same four strings. Those are the scopes
+    `context_binding` and the financials prefill (`live.submission._period_scopes`) choose from
+    by entity and dates alone, so one book's periods must find one tuple. Compared exactly, with
+    no normalisation; a null is rule 1's issue alone. One issue per entity and field, naming
+    the scope ids that share each stated value, in review order."""
+    by_entity: dict[str, list[ReportingScope]] = {}
+    for source in review.sources:
+        if source.classification == "financial":
+            for scope in source.scopes:
+                if scope.period_kind in _STATED_KINDS:
+                    by_entity.setdefault(scope.entity_id, []).append(scope)
+    for entity_id, scopes in by_entity.items():
+        for name in _DIMENSIONS:
+            stated: dict[str, list[str]] = {}
+            for scope in scopes:
+                value = getattr(scope, name)
+                if value is not None:
+                    stated.setdefault(value, []).append(scope.scope_id)
+            if len(stated) > 1:
+                yield (
+                    f"Financial scopes of one entity disagree on {name}: {entity_id} "
+                    + " vs ".join(", ".join(ids) for ids in stated.values())
+                )
 
 
 def _prose(item: BaseModel) -> Iterator[str]:

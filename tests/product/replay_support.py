@@ -3,7 +3,8 @@
 An entry holds one retained payload, the input hashes it was produced against and the
 validator outcome recorded at the time, plus optionally `pack` (a registered synthetic builder)
 or `pack_sha256` + `pack_source` (a real case pack under `artifacts/public-case/`), and
-`upstream` (earlier CP-1 step payloads). Replay builds the store, submits the upstream payloads
+`upstream` (earlier CP-1 step payloads; a `quality` entry holds all four stages and replays
+through the promotion, task 7.10). Replay builds the store, submits the upstream payloads
 in order and then the payload the way a live dispatch does (`live.submission.
 submit_model_payload`: null resolution, then for source_readiness Python's composition of the
 review from the model's submission) and compares. An entry with `payload_kind: "journal"` holds
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from deploy_vii.cp0_workflow import submit_cp0_review
-from deploy_vii.cp1_workflow import CP1_STEPS, submit_cp1_step
+from deploy_vii.cp1_workflow import CP1_PROMOTION, promote_cp1, submit_cp1_step
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live.corpus import (
     CORPUS_ROOT,
@@ -38,6 +39,7 @@ from deploy_vii.live.corpus import (
     load_case_pack,
     real_pack_ticket,
 )
+from deploy_vii.live.runner import journal_outcome
 from deploy_vii.live.schema import normalise
 from deploy_vii.live.submission import submit_model_payload
 from deploy_vii.readiness import ReadinessReview
@@ -110,11 +112,16 @@ def _submit(
         if step_id == "source_readiness":
             payload, _ = normalise(ReadinessReview, payload)
             return list(submit_cp0_review(store, ticket.ticket_id, payload).issues)
-        return list(submit_cp1_step(store, ticket.ticket_id, step_id, payload).steps[-1].issues)
-    journal = submit_model_payload(store, ticket.ticket_id, step_id, payload).journal
-    if step_id == "source_readiness":
-        return list(journal.issues)
-    return list(journal.steps[-1].issues)
+        if step_id == "quality":  # the review enters the journal only through the promotion
+            journal = promote_cp1(store, ticket.ticket_id, payload)
+        else:
+            journal = submit_cp1_step(store, ticket.ticket_id, step_id, payload)
+    else:
+        journal = submit_model_payload(store, ticket.ticket_id, step_id, payload).journal
+        if step_id == "source_readiness":
+            return list(journal.issues)
+    # The step's own verdict: a first CP-1 rejection is kept in `step_repairs` (task 7.0g).
+    return list(journal_outcome(store, step_id, journal)[1])
 
 
 def replay_entry(path: Path, work: Path, *, repository: Path = REPOSITORY_ROOT) -> Verdict:
@@ -185,7 +192,7 @@ def _replay(path: Path, work: Path, repository: Path = REPOSITORY_ROOT) -> Verdi
         return Verdict(name, "unsupported-step", f"{step_id!r} cannot be replayed")
     if pack is not None and pack not in PACKS:
         return Verdict(name, "malformed", f"unknown synthetic pack {pack!r}")
-    earlier = CP1_STEPS[: CP1_STEPS.index(step_id)] if step_id in CP1_STEPS else ()
+    earlier = CP1_PROMOTION[: CP1_PROMOTION.index(step_id)] if step_id in CP1_PROMOTION else ()
     if set(upstream) != set(earlier):
         return Verdict(name, "malformed", f"upstream must hold exactly {list(earlier)}")
     built = _store(name, entry, work, repository)

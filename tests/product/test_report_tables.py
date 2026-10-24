@@ -19,6 +19,7 @@ from deploy_vii.statement_history import statement_history
 from deploy_vii.statement_output import statement_report
 from deploy_vii.statement_view import statement_view, write_statement_preview
 from deploy_vii.table_markdown import markdown_cell, table_markdown
+from tests.product.evidence import evidence_path
 from tests.product.oracle import (
     expected_by_fact,
     expected_text,
@@ -298,7 +299,7 @@ def test_statement_panels_offline_exact_fields_keyboard_and_provenance(
     view = statement_view(pack, financial, financial.books[0].book_id)
     path = tmp_path / "candidate.html"
     path.write_text(render(view), encoding="utf-8")
-    evidence = Path("artifacts/rendering/statements") / tmp_path.parent.name / tmp_path.name
+    evidence = evidence_path("statements", tmp_path)
     evidence.mkdir(parents=True)
     (evidence / "candidate.html").write_bytes(path.read_bytes())
     (evidence / "view.json").write_text(view.model_dump_json())
@@ -580,7 +581,7 @@ def test_derived_statement_cells_show_comparison_and_actual_formula_offline(
     receipt = json.loads((path.parent / "complete.json").read_text())
     assert receipt["schema_version"] == "statement-preview/2"
     assert receipt["history_sha256"] == report.content_hash() == module_view.artifact_sha256
-    evidence = Path("artifacts/rendering/statement-history") / tmp_path.parent.name / tmp_path.name
+    evidence = evidence_path("statement-history", tmp_path)
     evidence.mkdir(parents=True)
     for name in ("candidate.html", "view.json", "statement-history.json", "complete.json"):
         (evidence / name).write_bytes((path.parent / name).read_bytes())

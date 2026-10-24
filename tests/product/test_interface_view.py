@@ -10,6 +10,7 @@ from playwright.sync_api import expect, sync_playwright
 from deploy_vii.contracts import View
 from deploy_vii.cp1_workflow import cp1_statement_preview, submit_cp1_step
 from deploy_vii.interface_view import write_interface_preview
+from tests.product.evidence import evidence_path
 from tests.product.oracle import expected_by_fact, front_blocks, parity_record
 from tests.product.test_financials import book, freeze, observed
 from tests.product.test_workflow import cp1_case
@@ -78,7 +79,7 @@ def test_interface_fields_offline_and_coupon_inspection(
     path = write_interface_preview(pack, review, value.book_id, tmp_path / "report")
     view = View.model_validate_json((path.parent / "view.json").read_bytes())
     module = next(m for m in view.modules if m.module_id == "CP-1")
-    evidence = Path("artifacts/rendering/model-interface") / tmp_path.parent.name / tmp_path.name
+    evidence = evidence_path("model-interface", tmp_path)
     evidence.mkdir(parents=True)
     for name in ("candidate.html", "view.json", "tables.md", "complete.json"):
         (evidence / name).write_bytes((path.parent / name).read_bytes())

@@ -12,6 +12,7 @@ every claim and the provenance footer. It authenticates the Markdown against its
 callers bind the sidecar to the journal (the module hash) themselves.
 """
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -80,7 +81,18 @@ SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Limitation Flags", ()),
     (
         "Module Handoff",
-        ("T4.14", "T4.15", "T4.16", "T4.17", "T4.18", "T4.19", "operating-kpis", "pro-forma"),
+        (
+            "T4.14",
+            "T4.15",
+            "T4.16",
+            "T4.17",
+            "T4.18",
+            "T4.19",
+            # Emitted only for a segmented book (model_interface); in the interface's order.
+            "segment-allocation",
+            "operating-kpis",
+            "pro-forma",
+        ),
     ),
 )
 FINDINGS = "Findings"
@@ -156,6 +168,16 @@ class _Block:
 class _Section:
     name: str
     blocks: tuple[_Block, ...]
+
+
+def _content_hash(model: Contract) -> str:
+    """``model.content_hash()``, hashed from the serializer's UTF-8 JSON bytes instead of a str.
+
+    ``model_dump_json()`` is ``to_json()`` (same defaults) decoded to a str, which
+    ``content_hash`` encodes back; one non-ASCII character (an em dash) makes that str two bytes
+    per character, an 86 MB copy of a 43 MB module (task 7.12). The bytes, so the hash, are equal.
+    """
+    return hashlib.sha256(model.__pydantic_serializer__.to_json(model)).hexdigest()
 
 
 def _grid(headings: tuple[str, ...], rows: Sequence[tuple[str, ...]], interface: str | None) -> str:
@@ -348,7 +370,7 @@ def _sections(envelope: Envelope) -> tuple[_Section, ...]:
     tables = {t.table_id: t for t in module.tables}
     if extra := sorted(set(tables) - set(placed)):
         raise ValueError("No r14 envelope section for table: " + ", ".join(extra))
-    module_sha256 = module.content_hash()
+    module_sha256 = _content_hash(module)
     details, index = _index(envelope, module_sha256)
     gaps = {fact_id: ref for (_, fact_id), ref in gap_refs(index).items()}
     facts = {f.fact_id: f for f in module.facts}
@@ -421,7 +443,7 @@ def write_envelope(envelope: Envelope) -> tuple[str, str]:
     Raises ``ValueError`` when the module cannot be written losslessly (an unplaced table, a
     known value that would read as a gap marker, a claim that does not resolve).
     """
-    envelope = Envelope.model_validate_json(envelope.model_dump_json())
+    envelope = Envelope.model_validate_json(envelope.__pydantic_serializer__.to_json(envelope))
     return _markdown(_sections(envelope)), envelope.model_dump_json()
 
 
@@ -543,7 +565,7 @@ def _footer_issues(
     footer = dict(row for row in table.rows if len(row) == 2)
     quality = envelope.quality
     expected = {
-        "module_sha256": envelope.module.content_hash(),
+        "module_sha256": _content_hash(envelope.module),
         "registers_sha256": envelope.registers_sha256,
         "quality_report_sha256": quality.content_hash() if quality else "Not produced",
         "quality_inputs_sha256": quality.inputs_sha256 if quality else "Not produced",
@@ -638,6 +660,6 @@ def register_envelope(registers: CanonicalTables) -> Envelope:
     return Envelope(
         run=ledger.context.run,
         module=registers.module,
-        registers_sha256=registers.content_hash(),
+        registers_sha256=_content_hash(registers),
         gap_limitations=ledger.limitations,
     )

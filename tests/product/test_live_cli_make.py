@@ -34,6 +34,38 @@ def test_cap_is_required_by_every_live_target(target: str) -> None:
     assert done.returncode != 0 and "required" in done.stdout + done.stderr
 
 
+def test_live_module_passes_models_max_tokens_batch_id_and_seed_through() -> None:
+    """Task 7.0: E1 runs `make live-module` with its pinned model, budget, batch id and seed."""
+    done = make(
+        "live-module",
+        "MODULE=CP-1",
+        "CAP=3",
+        "MODELS=openai/gpt-6.1-sol@high",
+        "MAX_TOKENS=32000",
+        "BATCH_ID=e1-cp1",
+        "SEED=1404762132",
+    )
+    assert done.returncode == 0
+    assert (
+        '--module "CP-1" --cap "3" --models "openai/gpt-6.1-sol@high" --max-tokens "32000" '
+        '--batch-id "e1-cp1" --seed "1404762132"'
+    ) in done.stdout
+
+
+def test_live_module_without_the_optional_variables_sends_no_such_option() -> None:
+    done = make("live-module", "MODULE=CP-0", "CAP=2")
+    assert done.returncode == 0
+    for option in ("--models", "--max-tokens", "--timeout", "--batch-id", "--seed"):
+        assert option not in done.stdout
+
+
+def test_live_module_passes_timeout_through() -> None:
+    """Task 7.0c: a longer request deadline for a large completion budget."""
+    done = make("live-module", "MODULE=CP-1", "CAP=3", "MAX_TOKENS=64000", "TIMEOUT=1800")
+    assert done.returncode == 0
+    assert '--max-tokens "64000" --timeout "1800"' in done.stdout
+
+
 def test_makefile_never_names_the_key() -> None:
     text = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "OPENROUTER" not in text and "sk-or" not in text and "--key" not in text

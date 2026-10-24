@@ -4,21 +4,69 @@ One book is one entity perimeter/accounting basis/currency/unit. Multiple books
 preserve industrial/finance and other distinct perimeters without blending them.
 """
 
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
+from pydantic.config import JsonDict
 
-from deploy_vii.contracts import Citation, Claim, Contract, Hash, Identifier, Text
+from deploy_vii.contracts import (
+    PREFILLED_MARKER,
+    Citation,
+    Claim,
+    Contract,
+    Hash,
+    Identifier,
+    Text,
+)
 from deploy_vii.model.dates import fiscal_year_number
 from deploy_vii.model.history import BALANCE_METRICS, FLOW_METRICS
 
+# Task 7.0d: marks a `Number` node in the JSON schema. The sent copy keeps only its number branch
+# (`live.schema`, "decimal-number-only"); the stored contract and its parse are unchanged, so a
+# stored string amount still validates.
+DECIMAL_MARKER = "x-deploy-vii-decimal"
 Number = Annotated[
     Decimal,
-    Field(gt=Decimal("-1e18"), lt=Decimal("1e18"), max_digits=28, decimal_places=10),
+    Field(
+        gt=Decimal("-1e18"),
+        lt=Decimal("1e18"),
+        max_digits=28,
+        decimal_places=10,
+        json_schema_extra={DECIMAL_MARKER: True},
+    ),
 ]
+# Task 7.0d fix 1: marks an id whose validator accepts a listed id or an `other:` id; the sent copy
+# states that as `anyOf` [enum, pattern] (`live.schema`, "prefixed-enum"). Python keeps deciding,
+# including the per-statement split the flat enum does not state.
+PREFIXED_ENUM_MARKER = "x-deploy-vii-prefixed-enum"
+# Exactly what `Identifier` (^[A-Za-z0-9][A-Za-z0-9_.:-]*$) accepts that `startswith("other:")`:
+# the leading "o" satisfies its first class and every later character its second.
+OTHER_ITEM_PATTERN = r"^other:[A-Za-z0-9_.:-]*$"
+
+
+def _statement_items(*statements: str) -> Callable[[JsonDict], None]:
+    """`json_schema_extra` naming the r14 statement item ids of `statements` (sorted, distinct)."""
+
+    def extra(schema: JsonDict) -> None:
+        # Imported here: `statement_validation`, where the item lists live, imports this module.
+        from deploy_vii.statement_validation import OPTIONAL_ITEMS, REQUIRED_ITEMS
+
+        listed = {i for s in statements for i in (*REQUIRED_ITEMS[s], *OPTIONAL_ITEMS[s])}
+        schema[PREFIXED_ENUM_MARKER] = {"enum": [*sorted(listed)], "pattern": OTHER_ITEM_PATTERN}
+
+    return extra
+
+
 Currency = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
+# Task 7.13 (E1 batches e1-cp1-13 and -14): a book's and each period's `currency`, `unit`,
+# `accounting_basis` and `entity_perimeter` are the strings of the source scope the model's
+# entity and period dates bind them to; Python copies them (`live.submission.prefill`), so the
+# sent schema leaves them out. The stored contract still requires them, and `context_binding` and
+# `financial_validation.book_issues` still compare them exactly.
+SCOPE_DIMENSION: JsonDict = {PREFILLED_MARKER: "scope-dimension"}
 Unit = Literal["UNITS", "THOUSANDS", "MILLIONS"]
 Located = Annotated[tuple[Citation, ...], Field(min_length=1)]
 ACCOUNT_IDS = FLOW_METRICS | BALANCE_METRICS | {"effective_tax_rate"}
@@ -70,10 +118,11 @@ class FinancialPeriod(Contract):
     end_date: date | None
     day_count: int | None = Field(ge=1, le=110000)
     audit_status: Text
-    currency: Currency
-    unit: Unit
-    accounting_basis: Text
-    entity_perimeter: Text
+    # Task 7.13: Python copies these from the bound source scope (`live.submission`); never sent.
+    currency: Currency = Field(json_schema_extra=SCOPE_DIMENSION)
+    unit: Unit = Field(json_schema_extra=SCOPE_DIMENSION)
+    accounting_basis: Text = Field(json_schema_extra=SCOPE_DIMENSION)
+    entity_perimeter: Text = Field(json_schema_extra=SCOPE_DIMENSION)
     citations: tuple[Citation, ...]
     component_period_ids: tuple[Identifier, ...] = ()
     expense_presentation: Literal["by_function", "by_nature", "unknown"] = "unknown"
@@ -106,7 +155,8 @@ class FinancialPeriod(Contract):
 
 
 class AccountObservation(Contract):
-    metric_id: Identifier
+    # The enum is for the sent schema only (task 7.0d); `controlled_metric` still decides.
+    metric_id: Identifier = Field(json_schema_extra={"enum": [*sorted(ACCOUNT_IDS)]})
     period_id: Identifier
     value: Observation
 
@@ -224,7 +274,7 @@ class FacilityFxConversion(Contract):
     conversion_id: Identifier
     facility_id: Identifier
     period_id: Identifier
-    facility_sha256: Hash
+    facility_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "facility"})
     source_currency: Currency
     target_currency: Currency
     rate_date: date
@@ -260,7 +310,8 @@ class StatementLine(Contract):
 
     line_id: Identifier
     statement: Literal["IS", "CFS", "BS"]
-    item_id: Identifier
+    # Sent as the three statements' ids or an `other:` id; `statement_issues` still decides.
+    item_id: Identifier = Field(json_schema_extra=_statement_items("IS", "CFS", "BS"))
     label: Text
     period_id: Identifier
     display_priority: int = Field(ge=1)
@@ -272,9 +323,15 @@ class StatementLine(Contract):
     @model_validator(mode="after")
     def sign_evidence(self) -> Self:
         if self.statement == "BS" and self.sign_convention == "outflow_magnitude":
-            raise ValueError("balance-sheet amounts are signed balances, not outflow magnitudes")
+            raise ValueError(
+                "balance-sheet amounts are signed balances, not outflow magnitudes: use "
+                "`sign_convention: signed`"
+            )
         if self.sign_convention == "outflow_magnitude" and not self.sign_citations:
-            raise ValueError("outflow magnitude normalization requires source evidence")
+            raise ValueError(
+                "outflow magnitude normalization requires source evidence: cite the span that "
+                "prints the magnitude in `sign_citations`, or use `sign_convention: signed`"
+            )
         return self
 
 
@@ -335,7 +392,10 @@ class BalanceMovement(Contract):
     @model_validator(mode="after")
     def sign_evidence(self) -> Self:
         if self.sign_convention == "outflow_magnitude" and not self.sign_citations:
-            raise ValueError("balance movement outflow normalization requires source evidence")
+            raise ValueError(
+                "balance movement outflow normalization requires source evidence: cite the span "
+                "that prints the magnitude in `sign_citations`, or use `sign_convention: signed`"
+            )
         return self
 
 
@@ -344,7 +404,8 @@ class BalanceMovementBridge(Contract):
 
     bridge_id: Identifier
     period_id: Identifier
-    balance_item_id: Identifier
+    # Sent as the BS ids or an `other:` id; `balance_movement_issues` still decides.
+    balance_item_id: Identifier = Field(json_schema_extra=_statement_items("BS"))
     movement_ids: Annotated[tuple[Identifier, ...], Field(max_length=20000)]
     disclosure: Disclosure
 
@@ -356,18 +417,26 @@ class AuditBasisExplanation(Contract):
     annual_period_id: Identifier
     metric_id: Identifier
     quarter_period_ids: Annotated[tuple[Identifier, ...], Field(min_length=4, max_length=4)]
-    annual_observation_sha256: Hash
-    quarter_observation_sha256: Annotated[tuple[Hash, ...], Field(min_length=4, max_length=4)]
+    annual_observation_sha256: Hash = Field(
+        json_schema_extra={PREFILLED_MARKER: "annual-observation"}
+    )
+    quarter_observation_sha256: Annotated[
+        tuple[Hash, ...],
+        Field(
+            min_length=4, max_length=4, json_schema_extra={PREFILLED_MARKER: "quarter-observations"}
+        ),
+    ]
     explanation: Text
     citations: Located
 
 
 class FinancialBook(Contract):
     book_id: Identifier
-    entity_perimeter: Text
-    accounting_basis: Text
-    currency: Currency
-    unit: Unit
+    # Task 7.13: the common strings of its periods' bound source scopes (`live.submission`).
+    entity_perimeter: Text = Field(json_schema_extra=SCOPE_DIMENSION)
+    accounting_basis: Text = Field(json_schema_extra=SCOPE_DIMENSION)
+    currency: Currency = Field(json_schema_extra=SCOPE_DIMENSION)
+    unit: Unit = Field(json_schema_extra=SCOPE_DIMENSION)
     periods: Annotated[tuple[FinancialPeriod, ...], Field(min_length=1, max_length=200)]
     accounts: Annotated[tuple[AccountObservation, ...], Field(max_length=20000)]
     addbacks: Annotated[tuple[AddbackObservation, ...], Field(max_length=20000)]
@@ -403,7 +472,7 @@ class FinancialBook(Contract):
 
 class FinancialReview(Contract):
     schema_version: Literal["financial-review/5"] = "financial-review/5"
-    pack_sha256: Hash
+    pack_sha256: Hash = Field(json_schema_extra={PREFILLED_MARKER: "pack"})
     run_id: Identifier
     issuer_id: Identifier
     as_of: date
