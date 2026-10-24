@@ -1,10 +1,13 @@
 # Live model runner (M2, Task A: runner core)
 
 Status: implemented and tested offline on 21 October 2026; every HTTP exchange in the tests
-goes through an injected fake transport. Live calls run only through this runner under DC-7 and
-DC-8; their batches are recorded under `artifacts/model-tests` and summarised in the [M7 live
-acceptance review](tasks/implementation/m7-live-acceptance-review.md), where CP-1's analytical
-qualification (E1, task 7.1) is still open. Contract: [testing and
+goes through an injected fake transport. Pool and proxy live calls for E1 to E3 run through
+this runner under DC-7 and DC-8; they are recorded under `artifacts/model-tests` and summarised
+in the [M7 live acceptance review](tasks/implementation/m7-live-acceptance-review.md), where
+CP-1's analytical qualification (E1, task 7.1) is still open. The 23–24 Oct 2026 hybrid probes
+(OpenRouter and the Anthropic API) ran through the devtools harness on branch `hybrid-cp1-m7`,
+which is not in this lane; their ledgers sit beside the runner's under
+`artifacts/model-tests/.ledgers`. Contract: [testing and
 telemetry](../testing-and-telemetry.md); decisions [0005](../decisions/0005-methodology-changes-and-regular-testing.md)
 and [0006](../decisions/0006-delegated-choices-and-orchestration.md) (DC-6 to DC-8). API facts used:
 [coordinator inputs](live-runner-inputs-2026-10-21.md). Task 2.7b applied
