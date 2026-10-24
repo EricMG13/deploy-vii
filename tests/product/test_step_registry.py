@@ -4,10 +4,12 @@ The pins hold the hand-kept values of base ceba3dc literally: every table the li
 the journal and the CLI read must keep exactly these values, whichever code builds them.
 """
 
-from typing import Literal
+import dataclasses
+from typing import Any, Literal
 
 import pytest
 
+from deploy_vii import registry
 from deploy_vii.business_context import BusinessContextSubmission
 from deploy_vii.cp1_workflow import CP1_PROMOTION, CP1_STEPS, FinancialSubmission
 from deploy_vii.downstream_readiness import DownstreamReview
@@ -163,3 +165,129 @@ def test_the_run_identity_reads_every_base_step_in_base_order() -> None:
             "step_id": step_id,
         }
     assert _run_identity("case-1-unknown-1") == {}
+
+
+# --- the registry (task 8.0a): one record per live module; every table above derives from it ---
+
+
+def test_the_registry_derives_every_base_table() -> None:
+    assert registry.step_modules() == {step_id: module for step_id, module, _ in BASE_STEPS}
+    assert list(registry.step_modules()) == [step_id for step_id, _, _ in BASE_STEPS]
+    assert registry.prefilled_kinds() == BASE_PREFILLED
+    assert registry.bound_steps() == BASE_BOUND_STEPS
+    assert registry.within_attempt_repair() == BASE_WITHIN_ATTEMPT_REPAIR
+    assert registry.projections() == BASE_PROJECTIONS
+    assert registry.pack_source_steps() == BASE_PACK_SOURCE_STEPS
+    assert registry.settling_steps() == {"source_readiness", "quality", "business_context"}
+    assert registry.step_chain("CP-1").steps == BASE_CP1_PROMOTION
+    assert registry.step_chain("CP-1").settling == "quality"
+    assert {m: registry.module_route(m) for m in BASE_MODULE_ROUTES} == BASE_MODULE_ROUTES
+    assert registry.regression_cases() == BASE_REGRESSION_CASES
+
+
+SYNTHETIC = registry.StepChain(
+    module_id="CP-2",
+    cell="cp2",
+    steps=("alpha", "beta", "gamma"),
+    repairable=frozenset({"alpha", "beta"}),
+    prefilled={"beta": frozenset({"pack"}), "gamma": frozenset({"step-inputs"})},
+    projections={
+        ("beta", "alpha"): registry.FULL,
+        ("gamma", "alpha"): registry.OMITTED,
+        ("gamma", "beta"): registry.FULL,
+    },
+    pack_sources=frozenset({"alpha"}),
+)
+
+
+def test_a_second_module_record_yields_consistent_tables_everywhere() -> None:
+    """CP-2 needs CP-0, CP-1 and CP-1A (methodology.json): one more record extends every table
+    and leaves the base rows as they were."""
+    chains = registry.checked_chains((*registry.STEP_CHAINS, SYNTHETIC))
+    base = registry.STEP_CHAINS
+    assert registry.step_modules(chains) == {
+        **registry.step_modules(base),
+        "alpha": "CP-2",
+        "beta": "CP-2",
+        "gamma": "CP-2",
+    }
+    assert list(registry.step_modules(chains))[-3:] == ["alpha", "beta", "gamma"]
+    assert registry.within_attempt_repair(chains) == {
+        **BASE_WITHIN_ATTEMPT_REPAIR,
+        "CP-2": frozenset({"alpha", "beta"}),
+    }
+    assert registry.settling_steps(chains) == registry.settling_steps(base) | {"gamma"}
+    assert registry.prefilled_kinds(chains) == {**BASE_PREFILLED, **SYNTHETIC.prefilled}
+    assert registry.bound_steps(chains) == {
+        **BASE_BOUND_STEPS,
+        "beta": ("alpha",),
+        "gamma": ("alpha", "beta"),
+    }
+    assert registry.projections(chains) == {**BASE_PROJECTIONS, **SYNTHETIC.projections}
+    assert registry.pack_source_steps(chains) == BASE_PACK_SOURCE_STEPS | {"alpha"}
+    route = ("source_readiness", *BASE_CP1_PROMOTION, "business_context", "alpha", "beta", "gamma")
+    assert registry.module_route("CP-2", chains) == route
+    assert registry.regression_cases(chains) == (*BASE_REGRESSION_CASES, ("cp2", route))
+    assert registry.step_chain("CP-2", chains).settling == "gamma"
+
+
+def test_a_route_through_a_module_without_live_steps_is_refused() -> None:
+    chains = registry.checked_chains((*registry.STEP_CHAINS[:2], SYNTHETIC))  # no CP-1A
+    with pytest.raises(ValueError, match="CP-1A has no live step contract"):
+        registry.module_route("CP-2", chains)
+    with pytest.raises(ValueError, match="CP-2 has no live step contract"):
+        registry.step_chain("CP-2")
+    unknown = registry.checked_chains((dataclasses.replace(SYNTHETIC, module_id="CP-99"),))
+    with pytest.raises(ValueError, match="Unknown r14 entry: CP-99"):
+        registry.module_route("CP-99", unknown)
+
+
+def test_every_chain_is_keyed_by_its_r14_module_id() -> None:
+    assert all(registry.canonical(c.module_id) == c.module_id for c in registry.STEP_CHAINS)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"steps": ()}, "no steps"),
+        ({"steps": ("alpha", "alpha", "gamma")}, "repeats a step"),
+        ({"repairable": frozenset({"gamma"})}, "repairs gamma within the attempt"),
+        ({"repairable": frozenset({"delta"})}, "repairs delta within the attempt"),
+        ({"prefilled": {"delta": frozenset({"pack"})}}, "prefills delta"),
+        ({"pack_sources": frozenset({"delta"})}, "sends pack sources to delta"),
+        ({"projections": {("beta", "alpha"): registry.FULL}}, r"no projection.*gamma"),
+        (
+            {"projections": {**SYNTHETIC.projections, ("alpha", "beta"): registry.FULL}},
+            r"projection.*\('alpha', 'beta'\)",
+        ),
+        (
+            {"projections": {**SYNTHETIC.projections, ("beta", "alpha"): "raw"}},
+            "unknown projection raw",
+        ),
+    ],
+)
+def test_an_inconsistent_record_is_refused(change: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        dataclasses.replace(SYNTHETIC, **change)
+
+
+@pytest.mark.parametrize(
+    ("other", "message"),
+    [
+        (dataclasses.replace(SYNTHETIC, module_id="CP-1"), "CP-1 has two step chains"),
+        (dataclasses.replace(SYNTHETIC, cell="cp1"), "cell cp1 names two modules"),
+        (
+            dataclasses.replace(
+                SYNTHETIC,
+                steps=("alpha", "quality"),
+                prefilled={},
+                projections={("quality", "alpha"): registry.OMITTED},
+                repairable=frozenset(),
+            ),
+            "step quality belongs to two modules",
+        ),
+    ],
+)
+def test_records_that_collide_are_refused(other: registry.StepChain, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        registry.checked_chains((*registry.STEP_CHAINS, other))
