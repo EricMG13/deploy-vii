@@ -113,7 +113,14 @@ from deploy_vii.live.settings import (
     load_settings,
 )
 from deploy_vii.live.tools import ToolRules
-from deploy_vii.registry import canonical, module_route, modules, regression_cases, step_chain
+from deploy_vii.registry import (
+    canonical,
+    module_route,
+    modules,
+    regression_cases,
+    step_chain,
+    tool_sets,
+)
 
 REPORT_DIRECTORY = Path("docs/development/tasks/implementation")
 TRUNCATED = "truncated"  # a response classification: the completion was cut at the budget
@@ -556,8 +563,9 @@ def _run_cell(
     within the attempt (task 7.0g); a rejection that finishes the attempt is followed by the
     module's one MC-7 repair attempt, which restarts the module from its first step. The cell
     ends at the first step that is not accepted. With `tool_loop` (settings `tool_loop`, task
-    8.0d) each step it names runs as a tool loop (`live.loop`) at that effort plan under its
-    rules; its repair within the attempt is a second tool loop."""
+    8.0d; task 8.9: every registered step) each step it names runs as a tool loop (`live.loop`)
+    at that effort plan under its rules; its repair within the attempt is a second tool loop.
+    The one-shot `dispatch` runs every other step (none while the tool loop is on)."""
     store = Execution.create(journals / cell.cell_id, base.pack())
     sources = tuple(item.source_id for item in store.pack().sources)
 
@@ -847,8 +855,10 @@ def _tool_loop_lines(tool_loop: ToolLoop | None) -> list[str]:
     floor; the limits replace the max-tokens and timeout lines for those steps."""
     if tool_loop is None or not tool_loop.efforts:
         return []
+    kinds = tool_sets()
     plans = ", ".join(
-        f"{step} {plan.effort} (ceiling {plan.ceiling})" for step, plan in tool_loop.efforts.items()
+        f"{step} {plan.effort} (ceiling {plan.ceiling}; {kinds[step]} tools)"
+        for step, plan in tool_loop.efforts.items()
     )
     floor = tool_loop.rules.floor
     floor_text = (
@@ -896,10 +906,16 @@ def render_report(
     )
     live = {definition.module_id for definition in STEPS.values()}
     refused = sum(row.status == NOT_AUTHORIZED for row in batch.rows)
+    # Task 8.9: with the tool loop on every registered step is a tool loop, so the one-shot
+    # budget lines apply to no planned step unless a step runs one-shot.
+    looped = tool_loop.efforts if tool_loop is not None else {}
+    one_shot = [step for cell in cells for step in cell.steps if step not in looped]
     scope = (
-        "(one-shot steps; tool-loop steps: see Tool loop)"
-        if tool_loop is not None and tool_loop.efforts
-        else "(every model)"
+        "(every model)"
+        if not looped
+        else "(one-shot steps; tool-loop steps: see Tool loop)"
+        if one_shot
+        else "(unused: every planned step is a tool loop; see Tool loop)"
     )
     steps_header = ("Cell", "Case", "Step", "Model", "Seed", "Attempt", "Status", "Class", "USD")
     pool_header = (

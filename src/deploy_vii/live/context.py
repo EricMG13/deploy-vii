@@ -141,6 +141,16 @@ def declared_sources(
     return tuple(source_id for source_id in scope(store, attempt) if source_id in source_ids)
 
 
+def readable_sources(store: Execution, attempt: Attempt, step_id: str) -> tuple[str, ...]:
+    """The pack sources a pack-tool step's tools read on `attempt` (task 8.9): its source
+    scope's (`SOURCE_SCOPES`: CP-4's legal, CP-3's market sources), else every pack source
+    (the whole pack, as the 8.0d CP-1 loops read it)."""
+    every = tuple(source.source_id for source in store.pack().sources)
+    if step_id not in SOURCE_SCOPES:
+        return every
+    return declared_sources(store, attempt, step_id, every)
+
+
 def integrity_projection(scope: cp5_integrity.ReviewScope) -> cp5_integrity.FactProjection:
     """The facts of each head the CP-5 CONTEXT lists (`cp5_integrity.context_block`'s seam): the
     facts a claim names as `{ref|unit}`, every member of a cross-module identity group and
