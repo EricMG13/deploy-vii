@@ -500,6 +500,22 @@ def test_the_effort_table_floor_and_flag_are_read_and_checked(tmp_path: Path) ->
             load_settings(settings_file(tmp_path / str(number), bad), root=tmp_path)
 
 
+def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling() -> None:
+    """Task 8.9 item 4: a row per tool-loop step, each with its reason as a comment; Sol at
+    medium (decision 0005, 24 Oct 2026) and one escalation to high at most. The floor stays
+    off (user decision, 24 Oct 2026)."""
+    path = Path("settings/project.toml")
+    loaded = load_settings(path)
+    assert loaded.tool_loop and loaded.completeness_floor is None
+    assert set(loaded.step_efforts) == tool_loop_steps()
+    assert set(loaded.step_efforts.values()) == {StepEffort("medium", "high")}
+    table = path.read_text(encoding="utf-8").split("[model_tests.step_effort]\n", 1)[1]
+    rows = table.split("\n\n[", 1)[0].splitlines()
+    for step in tool_loop_steps():
+        (index,) = [n for n, line in enumerate(rows) if line.startswith(f"{step} = ")]
+        assert rows[index - 1].startswith("# "), f"{step} has no reason above its row"
+
+
 @given(st.sampled_from(EFFORT_LADDER), st.sampled_from(EFFORT_LADDER))
 @example("medium", "high")
 @example("max", "max")

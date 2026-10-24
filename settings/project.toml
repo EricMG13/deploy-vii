@@ -80,10 +80,36 @@ tool_loop = true
 # rejected submits or a completeness-floor rejection) may reach. User-owned; `--effort` given on
 # the command line applies to every step instead.
 [model_tests.step_effort]
+# Task 8.9: a row for every tool-loop step (every live step). Effort sets reasoning, not input:
+# input grows only with what a step reads, and every call's output is capped at 128,000 tokens
+# whatever the level, so the ceiling never raises a call's worst case (`ToolLimits`).
+# CP-0, pack tools: first call about 3k tokens on czr-fy2025-v2 (pages read on demand).
+source_readiness = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): Sol medium hybrid-cp1-6 sent 4k-28k prompt tokens per call.
 source_context = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): 21k-68k prompt tokens per call in hybrid-cp1-6.
 financials = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): about 183k prompt tokens per call in hybrid-cp1-6 (its projection).
 narrative = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): about 231k prompt tokens per call in hybrid-cp1-6 (its projection).
 readiness = { effort = "medium", ceiling = "high" }
+# CP-1 QA, submit-only: about 24k tokens on the hybrid-cp1-6 registers; nothing to read.
+quality = { effort = "medium", ceiling = "high" }
+# CP-1A, pack tools: first call about 9k tokens (method, rules, schema); pages on demand.
+business_context = { effort = "medium", ceiling = "high" }
+# CP-2, submit-only: a 108,950-byte CONTEXT (task 8.6; 19k-36k tokens at 5.61-3.0 bytes a
+# token), fixed, nothing to read: below the CP-1 stages already at medium, high at most.
+credit_synthesis = { effort = "medium", ceiling = "high" }
+# CP-4, pack tools: about 200k tokens of legal pages readable, read on demand at most 5 pages a
+# call instead of one 841 KB SOURCE block; effort does not change what is read, and Sol's
+# 1,050,000-token context holds every page plus the conversation, so medium, high at most.
+legal_covenants = { effort = "medium", ceiling = "high" }
+# CP-3, pack tools over its market sources only: first call about 5k tokens on the fixture.
+relative_value = { effort = "medium", ceiling = "high" }
+# CP-5, submit-only: projected review scope of 13,451 bytes (task 8.6), about 2k-4k tokens.
+integrity_review = { effort = "medium", ceiling = "high" }
+# CP-6, submit-only: about 8k tokens on the fixture; the real pack is unmeasured.
+committee_challenge = { effort = "medium", ceiling = "high" }
 
 # Task 8.0d: the `financials` completeness floor (statement lines per expected statement and
 # source scope) stays off: user decision, 24 Oct 2026, revisited after the cheaper-model choice
