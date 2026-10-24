@@ -5,6 +5,7 @@ exercised on bytes it did not produce. Every row is synthetic: a fictional issue
 fictional providers, no market data.
 """
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -310,3 +311,56 @@ def test_report_ok_must_agree_with_issues() -> None:
         ValidationReport(ok=True, rows=0, issues=(issue,))
     with pytest.raises(ValueError, match="ok"):
         ValidationReport(ok=False, rows=0, issues=())
+
+
+def run_cli(arguments: list[str], monkeypatch: pytest.MonkeyPatch) -> int:
+    from deploy_vii.__main__ import main
+
+    monkeypatch.setattr(sys, "argv", ["deploy-vii", "validate-input", *arguments])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    code = exit_info.value.code
+    assert isinstance(code, int)
+    return code
+
+
+def test_cli_prints_ok_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write(tmp_path, [VALID, VALID | {"quote_kind": "indicative_talk"}])
+    assert run_cli(["rv", str(path)], monkeypatch) == 0
+    assert capsys.readouterr().out == "OK: 2 rows\n"
+
+
+def test_cli_prints_one_line_per_issue_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write(tmp_path, [VALID | {"currency": "usd", "as_of": None}])
+    assert run_cli(["rv", str(path)], monkeypatch) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{FILE}:rv_quotes!B2: as_of is empty — fix: {AS_OF_FIX}",
+        f"{FILE}:rv_quotes!L2: currency 'usd' is not a three-letter ISO 4217 code"
+        f" — fix: {CURRENCY_FIX}",
+        "FAILED: 2 issues",
+    ]
+
+
+def test_cli_json_prints_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write(tmp_path, [VALID | {"currency": "usd"}])
+    assert run_cli(["rv", str(path), "--json"], monkeypatch) == 1
+    printed = ValidationReport.model_validate_json(capsys.readouterr().out)
+    assert printed == validate_rv_quotes(path)
+    assert not printed.ok
+
+
+def test_cli_kind_comes_from_the_input_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from deploy_vii.inputs import KINDS
+
+    assert tuple(KINDS) == ("rv",)
+    assert KINDS["rv"] is validate_rv_quotes
+    assert run_cli(["portfolio", str(tmp_path / "x.xlsx")], monkeypatch) == 2
+    assert "invalid choice: 'portfolio'" in capsys.readouterr().err
