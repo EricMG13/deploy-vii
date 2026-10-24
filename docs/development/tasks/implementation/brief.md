@@ -38,7 +38,7 @@ dependencies, invalidation and at most one targeted repair.
   requested GLM/DeepSeek only. Preserve separate host cohorts and unknown metrics.
 - Confidence review after code. Key-area code (artifact state, provenance, financial
   calculations, execution ordering) lands with a committed differential or property
-  test; rewrite-tournament is retired (decision 0011, 24 October 2026). Routine UI, CLI
+  test; rewrite-tournament is retired (decision 0012, 24 October 2026). Routine UI, CLI
   and adapter work uses focused tests and confidence review. Review notes stay short
   (CLAUDE.md review regime). Bounded maintenance after accepted layers.
 - Track implementation, analytical qualification, rendering acceptance and native
@@ -269,7 +269,7 @@ normalizer received the Sol/high tournament. See facility-fx-review.md and
 Next: bind CP-1/Model outputs to the execution
 journal, canonical Markdown and Workbench. CP-1A remains an explicit requirement;
 current internal readiness decisions are not full CP-1 acceptance.
-Tournaments remained key-area only (retired 24 October 2026, decision 0011);
+Tournaments remained key-area only (retired 24 October 2026, decision 0012);
 confidence review applies to all code changes.
 
 Execution review: execution-review.md. Native/live qualification remains unrun.

@@ -58,7 +58,7 @@ defaults apply only where this file is silent.
 ## Review regime
 
 After code changes run confidence-review. Rewrite-tournament is retired
-(decision 0011): in 28 runs it found no defect. Key-area code (artifact state,
+(decision 0012): in 28 runs it found no defect. Key-area code (artifact state,
 provenance, financial calculations, execution ordering) instead lands with a
 committed differential or property test (hypothesis): differential against the
 previous implementation or an independent reference when behaviour must be

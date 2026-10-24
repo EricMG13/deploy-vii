@@ -1,4 +1,4 @@
-# 0011: Retire rewrite-tournament
+# 0012: Retire rewrite-tournament
 
 Date: 24 October 2026. Status: adopted. Supersedes the tournament part of the
 review row in [decision 0003](0003-claude-coordinated-environment.md).

@@ -75,7 +75,7 @@ there as history. The brief remains the append-only progress log. Base: `main` a
   vocabulary is `unrun | partial | implemented`.
 - Reviews: confidence-review after every code change. Key-area code (artifact state,
   provenance, financial calculations, execution ordering) lands with a committed
-  differential or property test; rewrite-tournament is retired (decision 0011). Review
+  differential or property test; rewrite-tournament is retired (decision 0012). Review
   notes stay short (CLAUDE.md review regime). M1–M6 "Tournament" lines are historical.
 - Escalate to `dv-escalate` after two concrete failed repairs. No recursive agent
   spawning.
@@ -438,7 +438,7 @@ report delivery. Keep external blockers visible.
 | 0007 | Degradation and status semantics, with per-edge rules | M4 |
 | 0008 | Model-facing contract shape and repair budget, from probe evidence | **Adopted** 21 October 2026 (M2.7) |
 | 0009 | Pathway presets and the `not_in_pathway` status | M3.5 |
-| 0011 | Retire rewrite-tournament; differential/property tests for key areas; short review notes | **Adopted** 24 October 2026 |
+| 0012 | Retire rewrite-tournament; differential/property tests for key areas; short review notes | **Adopted** 24 October 2026 |
 
 ## Budget plan
 
