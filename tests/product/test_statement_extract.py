@@ -213,6 +213,12 @@ def test_pack_extraction_refuses_an_unknown_locator() -> None:
         extract_pack_statements(pack, ["page:1", "page:9"])
 
 
+def test_pack_extraction_refuses_a_bare_string_of_locators() -> None:
+    pack = _pack(("a", (("page:1", _ROW),)))
+    with pytest.raises(TypeError, match="an iterable of locators, not one string"):
+        extract_pack_statements(pack, "page:1")
+
+
 def test_pack_extraction_refuses_a_locator_two_sources_share() -> None:
     pack = _pack(("a", (("page:1", _ROW),)), ("b", (("page:1", _ROW),)))
     with pytest.raises(ValueError, match=r"page:1.*sources 'a' and 'b'"):

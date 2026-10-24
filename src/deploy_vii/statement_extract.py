@@ -221,6 +221,9 @@ def extract_pack_statements(
     rather than return a table whose source is ambiguous; a requested locator that no span has
     raises too. Every span in scope yields a table, an empty one for a page without data lines.
     """
+    if isinstance(locators, str):
+        # A str is an Iterable[str] of characters; reading it so would miss every page.
+        raise TypeError("locators must be an iterable of locators, not one string")
     wanted = None if locators is None else frozenset(locators)
     owners: dict[str, str] = {}
     tables: list[ExtractedTable] = []
