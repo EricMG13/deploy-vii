@@ -24,7 +24,7 @@ candidate in the same call, as `submit_cp0_review` does for CP-0, recording the 
 """
 
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, get_args
 
@@ -453,6 +453,32 @@ INSTRUMENT_NOUN = (
     r"(?:creditors?|lenders?|noteholders?|bondholders?|holders?|investors|claims?|bonds?|notes?|"
     r"loans?|instruments?|debts?|tranches?|securities|facility|revolver|lien)"
 )
+# Task 8.3 (CP-3, ruling 3): explicit action phrases, the narrowed instrument recommendation a
+# relative-value ordering may not state (buy, sell, overweight, underweight, recommend, switch
+# into or out of). Not a CP-1A kind: `prohibited_issues` checks it only when a caller selects it.
+ACTIONS: Mapping[str, tuple[str, ...]] = {
+    "instrument action": (
+        "buy",
+        "buys",
+        "buying",
+        "bought",
+        "sell",
+        "sells",
+        "selling",
+        "overweight",
+        "underweight",
+        "recommend",
+        "recommends",
+        "recommended",
+        "recommending",
+        "recommendation",
+        "recommendations",
+        "switch into",
+        "switch out of",
+        "switching into",
+        "switching out of",
+    ),
+}
 # r14 permits these as a labelled quote: a Management Language row may carry them.
 LABELLED_QUOTES = frozenset({"best-in-class", "best in class"})
 # A cited Documentary Fact or Management Language row may quote a recommendation (the board's
@@ -473,10 +499,13 @@ def _near(phrase: str) -> str:
 
 _PROHIBITED = tuple(
     (kind, phrase, re.compile(pattern(phrase), re.IGNORECASE))
-    for table, pattern in ((PROHIBITED, _word), (NEAR_INSTRUMENT, _near))
+    for table, pattern in ((PROHIBITED, _word), (NEAR_INSTRUMENT, _near), (ACTIONS, _word))
     for kind, phrases in table.items()
     for phrase in phrases
 )
+# The kinds checked when a caller selects none: CP-1A's three, exactly as before task 8.3.
+DEFAULT_KINDS = frozenset(PROHIBITED)
+PROHIBITED_KINDS = frozenset({*PROHIBITED, *ACTIONS})
 
 
 def _rows(submission: BusinessContextSubmission) -> Iterator[tuple[str, BaseModel]]:
@@ -547,11 +576,18 @@ def _populated(value: str) -> bool:
     return value.strip().casefold() not in _PLACEHOLDERS
 
 
-def prohibited_issues(path: str, text: str, *, quoted: str | None = None) -> tuple[str, ...]:
+def prohibited_issues(
+    path: str, text: str, *, quoted: str | None = None, kinds: Collection[str] | None = None
+) -> tuple[str, ...]:
     """A text that states a prohibited CP-1A conclusion (`PROHIBITED`, `NEAR_INSTRUMENT`), one
     issue per phrase. `quoted` is the category of a cited row: Management Language admits
     `LABELLED_QUOTES`, and Documentary Fact or Management Language admits `QUOTED_KINDS`.
+    `kinds` selects the phrase kinds checked (task 8.3); None is CP-1A's three
+    (`DEFAULT_KINDS`), and an unknown kind raises ValueError rather than checking nothing.
     A guard over phrases, not a semantic review."""
+    selected = DEFAULT_KINDS if kinds is None else frozenset(kinds)
+    if unknown := sorted(selected - PROHIBITED_KINDS):
+        raise ValueError(f"Unknown prohibited kind: {', '.join(unknown)}")
 
     def exempt(kind: str, phrase: str) -> bool:
         if quoted == "Management Language" and phrase in LABELLED_QUOTES:
@@ -561,7 +597,7 @@ def prohibited_issues(path: str, text: str, *, quoted: str | None = None) -> tup
     return tuple(
         f'{path}: prohibited conclusion ({kind}): "{phrase}"'
         for kind, phrase, pattern in _PROHIBITED
-        if not exempt(kind, phrase) and pattern.search(text)
+        if kind in selected and not exempt(kind, phrase) and pattern.search(text)
     )
 
 
