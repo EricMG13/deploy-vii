@@ -12,7 +12,17 @@ from typing import Any
 import openpyxl
 import pytest
 
-from deploy_vii.inputs.rv_quotes import COLUMNS, Issue, ValidationReport, validate_rv_quotes
+from deploy_vii.inputs.rv_quotes import (
+    COLUMNS,
+    FIX,
+    Issue,
+    ValidationReport,
+    validate_rv_quotes,
+)
+from scripts.build_templates import README_LINES, SYNTHETIC_ROWS, build, workbook_bytes
+
+ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE = ROOT / "docs" / "templates" / "rv-quotes.template.xlsx"
 
 FILE = "quotes.xlsx"
 HEADER_FIX = (
@@ -364,3 +374,41 @@ def test_cli_kind_comes_from_the_input_table(
     assert KINDS["rv"] is validate_rv_quotes
     assert run_cli(["portfolio", str(tmp_path / "x.xlsx")], monkeypatch) == 2
     assert "invalid choice: 'portfolio'" in capsys.readouterr().err
+
+
+def test_template_validates_ok_with_six_synthetic_rows() -> None:
+    report = validate_rv_quotes(TEMPLATE)
+    assert rendered(report) == []
+    assert report.lines() == ("OK: 6 rows",)
+    assert {row["quote_kind"] for row in SYNTHETIC_ROWS} == {"observed", "indicative_talk"}
+    assert len({row["facility_id"] for row in SYNTHETIC_ROWS}) == 2
+    assert all("synthetic" in row["issuer"].casefold() for row in SYNTHETIC_ROWS)
+
+
+def test_builder_is_byte_stable_and_matches_the_committed_template(tmp_path: Path) -> None:
+    build(tmp_path / "first.xlsx")
+    build(tmp_path / "second.xlsx")
+    first = (tmp_path / "first.xlsx").read_bytes()
+    assert first == (tmp_path / "second.xlsx").read_bytes()
+    assert first == workbook_bytes(SYNTHETIC_ROWS)
+    assert first == TEMPLATE.read_bytes(), "run: uv run python scripts/build_templates.py"
+
+
+def test_an_independent_reader_sees_the_template_sheets_header_and_readme() -> None:
+    book = openpyxl.load_workbook(TEMPLATE, read_only=True)
+    assert book.sheetnames == ["rv_quotes", "README"]
+    quotes = list(book["rv_quotes"].iter_rows(values_only=True))
+    assert quotes[0] == COLUMNS
+    assert len(quotes) == 7
+    readme = [row[0] for row in book["README"].iter_rows(values_only=True)]
+    assert readme == list(README_LINES)
+    assert readme[0] == "synthetic example — replace every row"
+
+
+def test_readme_documents_every_column_and_fix() -> None:
+    readme = (ROOT / "docs" / "templates" / "README.md").read_text(encoding="utf-8")
+    assert all(f"`{column}`" in readme for column in COLUMNS)
+    assert [key for key, fix in FIX.items() if fix not in readme] == []
+    assert "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in readme
+    assert "sheet:rv_quotes" in readme
+    assert "third_party" in readme
