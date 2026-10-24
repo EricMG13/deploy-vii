@@ -181,11 +181,13 @@ off) and is the reference of the differential in `tests/devtools/test_loop_diffe
   would resend the header).
 - **Reservation.** `prompt_bound x prompt_price + max_tokens x completion_price + request_price`.
   The prompt bound is `ceil(request bytes / prompt_bytes_per_token_lower_bound) + 64` over the
-  UTF-8 bytes of the whole request body (decision 0008, MC-10). The ratio is 3.0 in
-  `settings/project.toml`: probe-2 measured 5.61 bytes per token (GLM 5.3 Flash, 867,481 bytes,
-  154,609 prompt tokens), so the bound still over-estimates, by about 1.9x; the probe-2 body bounds
-  at 289,225 tokens instead of 867,545. The ratio, the byte count and the basis are recorded in
-  `request.json` and `metrics.json`. Prices are pinned per batch as the maximum of the base price and every published
+  UTF-8 bytes of the whole request body (decision 0008, MC-10). The ratio is 2.5 in
+  `settings/project.toml` (decision 0008 amendment of 25 Oct 2026; 3.0 before). Recorded bodies
+  measure 2.58 to 6.18 bytes per prompt token on Sol: the low end is the CP-1 `readiness` body
+  (2.58) and `narrative` (2.80); most steps run at 4.9 to 6.0, and probe-2's GLM body at 5.61.
+  The bound therefore over-estimates by about 1.03x on the densest Sol body and 2x to 2.4x on a
+  typical one. At 3.0 it had fallen short on `narrative` and `readiness`. The ratio, the byte
+  count and the basis are recorded in `request.json` and `metrics.json`. Prices are pinned per batch as the maximum of the base price and every published
   override (time-of-day and long-prompt tiers), with the base recorded. Reasoning tokens bill at the
   completion rate, so `max_tokens` is reserved in full.
 - **Settlement.** Provider `usage.cost` when present; otherwise tokens x pinned price, marked as an

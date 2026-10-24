@@ -472,3 +472,31 @@ from what a model saw. Synthetic CP-1 case: the narrative block is 5.2% of the r
 Not verified: the real-pack block sizes (target: at most 600,000 characters for the narrative
 block; measured by the coordinator on the batch-6 journal); live or proxy uptake of the
 projections.
+
+## Amendment, 25 Oct 2026 (task 8.9 fix round 2, MC-10)
+
+The ratio of the prompt-token bound is now `prompt_bytes_per_token_lower_bound = 2.5` in
+`settings/project.toml`. It is still required, with no code default, and it is read by
+`live.settings` and passed to every one-shot and tool-loop call's reservation.
+
+Why: Sol's request bodies in the recorded hybrid-cp1-6 run were denser than the probe-2 GLM
+body that set 3.0.
+- `narrative`: 512,213 bytes for 183,047 prompt tokens, 2.80 bytes per token.
+- `readiness`: 594,487 bytes for 230,571 prompt tokens, 2.58 bytes per token. The same body in
+  hybrid-cp1-1 measured 2.577.
+
+At 3.0 the bound fell short of the provider's tokens on those calls: 170,802 against 183,047,
+and 198,227 against 230,571. A worst-case readiness call was then reserved at US$2.71 against a
+possible US$2.84.
+
+At 2.5, every recorded Sol request bounds at or above its prompt tokens. That covers 98 harness
+calls and 63 live-runner attempts. The four committed I2 transcripts' 19 requests are pinned in
+`tests/product/test_live_runner.py::test_the_settings_bound_covers_every_recorded_i2_request`.
+The cost is a larger reservation, by a factor of 1.2 on the prompt term. Settlement is
+unchanged.
+
+The ratio is model-specific: schema-check runs of models outside the pool measured as low as
+1.33 bytes per token (Grok 4.7) and 2.12 (Gemini 4 Argon). A pool change re-measures it before
+any batch.
+
+Not verified: bodies of other modules' steps under Sol (no recording yet); a new pool model's ratio.
