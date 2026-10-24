@@ -35,7 +35,7 @@ No CI timing distribution was collected, so this review claims no measured savin
 
 ## Current environment checks
 
-The workflow defines two named jobs:
+The workflow defines these named jobs (the product job is described under Product checks shards):
 
 1. **Repository hygiene:** YAML/JSON/TOML syntax, merge markers, file endings,
    trailing whitespace, private-key patterns and unexpected large files. Ruff
@@ -43,7 +43,7 @@ The workflow defines two named jobs:
 2. **Secrets:** checksum-pinned Gitleaks scans all fetched reachable history,
    redacts output and refuses scan errors. A shallow/empty scan is not accepted.
 
-The product job runs the browser tests on ubuntu, where the Front Page pixel
+The product test shards run the browser tests on ubuntu, where the Front Page pixel
 comparison skips with the stated reason "no reviewed baseline for linux": glyph
 rasterisation differs between operating systems, so baselines
 (`tests/product/baselines/<platform>/`) exist only for darwin, where they were reviewed.
@@ -74,6 +74,25 @@ file with `--cov-append`.
 one worker. The 90% floor applies to the single combined TOTAL report. Debug serially with
 `-n 0` (`PYTEST_XDIST_AUTO_NUM_WORKERS=1` still runs one worker subprocess); cap workers with `--maxprocesses N` where memory
 is short (the heaviest tests peak near 2.3 GiB per worker).
+
+**Product checks shards.** The single hosted job outgrew its budget (55 to 63 min of 75 on
+the 4-vCPU runner), so `Product checks` is now a gate job over six jobs: `changes` (the
+docs-only detection above), `Product static checks` (ruff, format, mypy, `node --check`:
+`make product-static`), three `Product tests (shard-a|b|c)` matrix jobs and `Product coverage
+(combined)`. Each shard runs `make coverage-shard SHARD=<name>`, the same pytest command as
+`make coverage` (`-m 'not live and not private'`, `-n auto --dist loadfile`, branch coverage) on
+the files that `.github/shards/product.txt` lists for it, writes its own data file
+(`COVERAGE_FILE=cov-<shard>`, uploaded with `actions/upload-artifact`) and has `--cov-fail-under=0`
+because a part of the suite cannot meet the floor alone. The combined job downloads the
+three files, runs `coverage combine` and `coverage report`, which enforces the unchanged
+`fail_under = 90` of `pyproject.toml` on the combined total. A missing shard file fails the upload.
+The static split by test file needs no dependency; `tests/devtools/test_ci_shards.py` fails if a
+`tests/product` test file is in no shard or in two, or if the workflow matrix differs from the
+list. A new test file must be added to `product.txt` (the guard says so). The `Product checks`
+gate (one status for branch rules) succeeds only if every job succeeded, or, for a docs-only
+diff, every test job was skipped; a failed, cancelled or unexpectedly skipped job fails it.
+Each shard keeps `timeout-minutes: 75`. `make product-check` is unchanged locally: one process,
+all tests, one coverage report.
 
 Use read-only contents permissions and checkout without persistent credentials.
 Pin Actions to verified commits. Keep model calls, private packs, publication and
@@ -114,6 +133,31 @@ Use the [testing and telemetry policy](testing-and-telemetry.md) and
 [Direction C acceptance](frontend-direction-c.md). An LLM evaluator supplements
 deterministic checks and never proves arithmetic.
 Missing private inputs or live access leave the relevant acceptance pending.
+
+## Docs-only pull requests and superseded runs
+
+On `pull_request` events the `changes` job runs
+`.github/scripts/code_changed.sh` over the changed paths and the static, shard and combine
+jobs are skipped (the `Product checks` gate, name and status unchanged, still reports success) only when every path matches the allow-list: anything under `docs/`, top-level
+`*.md` (no slash), `LICENSE`, `LICENSE.*`, `LICENSE-*`, `.gitignore`, `.gitattributes`,
+`CODEOWNERS`. The default is fail-closed: an empty diff, a fetch or diff error, a non-PR
+event, any path with a slash outside `docs/` (so `src/.../x.md` counts as code) or any
+other path (including `src/`, `tests/`, `pyproject.toml`, `uv.lock`, `Makefile`,
+`.github/`, `settings/`, scripts and unknown files) runs the full suite. Repository
+hygiene and Secrets always run. `make audit` is a local gate for dependency changes; the
+"Dependency vulnerabilities" job lives in `.github/workflows/dependency-audit.yml` with
+its own `pull_request` path filter and weekly cron. Concurrency groups by PR number and cancels superseded runs for
+pull requests only; other events group by `run_id`, so a push to `main` is never
+cancelled.
+
+| Changed paths | Product test run |
+| :--- | :--- |
+| `docs/x.md`; `README.md`; `CHANGELOG.md`; `docs/my notes.md`; `docs/sub/dir/x.md` | skipped |
+| `LICENSE_x/a.py`; `src/deploy_vii/prompts/x.md`; `tests/fixtures/notes.md` | full |
+| `docs/ci-gates.md` + `src/deploy_vii/x.py` | full |
+| `settings/project.toml`; `uv.lock`; `.github/workflows/ci.yml` | full |
+| `scripts/anything`; `tests/devtools/t.py`; `foo.txt` | full |
+| (empty) | full |
 
 ## Branch settings
 

@@ -35,7 +35,7 @@ permission, a zero balance, stopped processes or completed reviews from omission
 - **Decisions:** rationale, authoritative requirement and conditions for revisiting:
 - Failed approaches: exact failure and why it should not be blindly repeated:
 - Tests/reviews completed, failed, blocked or pending, bound to the tested tree;
-  confidence-review and applicable rewrite-tournament obligations remain visible:
+  confidence-review and key-area differential/property-test obligations remain visible:
 - Smallest next action; prerequisites; when earlier evidence becomes stale:
 
 ## Successor preflight

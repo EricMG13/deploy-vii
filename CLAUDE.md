@@ -43,7 +43,8 @@ defaults apply only where this file is silent.
 ## User requirements for product increments
 
 - Model-assisted tests use the pool named in decision 0005, currently GPT-6.1 Sol
-  at high effort; retain outputs, metrics and
+  at medium effort (high for the probe and E1 batches 1–14; medium from 24 Oct
+  2026); retain outputs, metrics and
   telemetry under docs/testing-and-telemetry.md. Run the regular internal and
   external module tests (tiers I1–I3, E1–E3) of decision 0005.
 - Preserve Direction C Workbench and test each completed Module's output in its
@@ -57,8 +58,14 @@ defaults apply only where this file is silent.
 
 ## Review regime
 
-After code changes run confidence-review. Per the user's correction, limit
-rewrite-tournament to key areas: artifact state, provenance, financial
-calculations and execution ordering. Use no-argument post-edit mode there.
-Routine UI, CLI and adapter changes receive focused tests and confidence review.
-Skip tournaments for trivial edits, docs/config, test-only and generated files.
+After code changes run confidence-review. Rewrite-tournament is retired
+(decision 0012): in 28 runs it found no defect. Key-area code (artifact state,
+provenance, financial calculations, execution ordering) instead lands with a
+committed differential or property test (hypothesis): differential against the
+previous implementation or an independent reference when behaviour must be
+preserved, properties of its invariants when behaviour is new. Routine UI, CLI
+and adapter changes receive focused tests and confidence review.
+
+Review notes stay short: what changed, findings and fixes, gate commands with
+exit codes, deviations and `Not verified:`. Cite commits and paths; never copy
+code into a note.

@@ -62,7 +62,7 @@ tracker. Real development loops include repairs and integration. Start with one
 active brief and add structure only when a concrete coordination need appears.
 
 The user's confidence-review requirement applies after code changes, and
-rewrite-tournament applies to key-area code (CLAUDE.md review regime). ICM adds no new approval
+key-area code carries a committed differential or property test (CLAUDE.md review regime). ICM adds no new approval
 chain and does not waive either requirement. Publication stays with the
 [coordinator](pr-worktree-workflow.md).
 
