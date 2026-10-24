@@ -116,6 +116,16 @@ and CP-6's `thesis_challenges` `minItems: 1` are sent).
   regression` plans no cell for it and names it under `Cases skipped (no recorded corpus entry for
   the settling step; not run, not a pass)`. No fixture is recorded to make a case pass.
 
+User-supplied relative-value evidence (task RV-1, 24 Oct 2026): in the user's environment the
+market evidence CP-3 reads is a quote workbook the user supplies. It has one sheet, `rv_quotes`;
+the template and column guide are in [docs/templates](../templates/README.md). The user checks
+it before `prepare` with `deploy-vii validate-input rv <file>` (`deploy_vii.inputs.rv_quotes`,
+which reads the workbook through `preparation.xlsx_content`). The file enters the pack as an
+ordinary XLSX source. The CP-0 reviewer classes its authority, and Python sets none. Only a
+`third_party` classification puts it in CP-3's SOURCE block, where market-evidence rows quote
+its `sheet:rv_quotes!<cell>` spans. CP-3's rules, `declared_sources` and the runner are
+unchanged. The validator is the user's self-check: no runner or journal step calls it.
+
 ## Rules and where they are enforced
 
 - **Key.** Read at dispatch, held in memory, sent only in the `Authorization` header
