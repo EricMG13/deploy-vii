@@ -50,6 +50,13 @@ any 402 whose body cannot be read, is exhaustion as before, and the stop reports
 and affordable max_tokens the body states. Nothing else in DC-8 changes: no model or cohort is
 switched, and the no-credit route stays a coordinator decision.
 
+### Amendment, 24 Oct 2026 (DC-6, user: one ceiling across providers)
+
+Amendment (user, 24 Oct 2026): the US$200 cumulative ceiling is one ceiling across providers
+— OpenRouter and Anthropic-API spend count together, summed over every ledger under
+`artifacts/model-tests/.ledgers`. Charged at the decision: US$60.11 of 200 (OpenRouter 40.94,
+Anthropic 19.17).
+
 ## Consequences
 
 - CLAUDE.md, `docs/pr-worktree-workflow.md`, `settings/project.toml` and
