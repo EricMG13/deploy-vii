@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.canonical_audit import DefinitionReview
@@ -38,6 +38,7 @@ from deploy_vii.live.schema import (
 from deploy_vii.live.submission import (
     NOT_ASSESSED,
     PREFILLED,
+    SCOPE_DIMENSIONS,
     STEPS,
     SUPERSEDED_SHAPE,
     ConsumerJudgment,
@@ -956,6 +957,186 @@ def test_stripping_the_unset_fields_lines_never_turns_a_rejection_into_an_accept
     submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
     (rejected,) = submitted.journal.step_repairs
     assert (rejected.status, rejected.issues) == ("invalid", only)
+
+
+# --- task H1 (hybrid-cp1-7, 24 Oct): null start dates never surface a Python-filled hash -------
+
+HASH_REQUIRED = re.compile(r"_sha256: Field required$")
+MISSING_DATES_RULE = ": Value error, missing period dates require a limitation"
+
+
+def hash_lines(issues: tuple[str, ...]) -> list[str]:
+    """The issues that ask the model for a hash binding (every one is Python-filled)."""
+    return [issue for issue in issues if HASH_REQUIRED.search(issue)]
+
+
+def test_two_balance_sheet_periods_without_start_dates_name_only_their_shape_issue(
+    tmp_path: Path,
+) -> None:
+    """H1 regression: the hybrid-cp1-7 submit-1 shape (synthetic): two `PERIOD_END` periods
+    with `start_date: null` and no limitation fail the period contract's own rule; no issue is
+    the "Field required" of a hash the sent schema never offers. Task 7.16 already holds this
+    on be92508 (the batch journal's two hash lines do not recur when it is replayed there)."""
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    periods = document["financial"]["books"][0]["periods"]
+    second = json.loads(json.dumps(periods[0]))  # a second balance-sheet date (FY end)
+    second.update(period_id="CLOSE", start_date="2025-12-31", end_date="2025-12-31")
+    periods.append(second)
+    for period in (periods[0], second):
+        assert (period["period_type"], period["limitation"]) == ("PERIOD_END", None)
+        period["start_date"] = None
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs
+    assert hash_lines(rejected.issues) == [], (
+        f"hash asked of the model: {hash_lines(rejected.issues)}"
+    )
+    for index in (0, len(periods) - 1):
+        assert f"financial.books.0.periods.{index}{MISSING_DATES_RULE}" in rejected.issues
+
+
+def test_a_duration_without_a_start_date_or_its_own_citations_never_asks_for_a_hash(
+    tmp_path: Path,
+) -> None:
+    """H1 (fails on be92508): a duration period with `start_date: null` binds no scope, so its
+    four strings stay unset and the financial object fails only on their "Field required"
+    (the period rule after them never runs). Citing nothing itself (its evidence is its
+    components'), it records no unbound issue, so the stage's only issues were unset fields'
+    lines and every one stayed, the review hashes too. The hash lines go; the rest stand."""
+    store, ticket_id, value = journal_at(tmp_path, "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    periods = document["financial"]["books"][0]["periods"]
+    index, period = next((i, p) for i, p in enumerate(periods) if p["period_type"] == "FY")
+    period.update(start_date=None, citations=[], component_period_ids=["Q1", "Q2", "Q3", "Q4"])
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    (rejected,) = submitted.journal.step_repairs
+    assert hash_lines(rejected.issues) == [], (
+        f"hash asked of the model: {hash_lines(rejected.issues)}"
+    )
+    assert rejected.status == "invalid" and rejected.output_sha256 is None
+    where = f"financial.books.0.periods.{index}"
+    assert rejected.issues == tuple(f"{where}.{name}: Field required" for name in SCOPE_DIMENSIONS)
+
+
+def test_a_balance_sheet_period_without_a_start_date_binds_and_settles_with_its_limitation(
+    tmp_path: Path,
+) -> None:
+    """H1: `start_date: null` on a `PERIOD_END` period binds to its end-date scope; with the
+    limitation the period contract asks for, the step settles valid, and the duration periods
+    keep their dates and strings exactly."""
+    store, ticket_id, value = journal_at(tmp_path / "null", "financials")
+    payload, paths = without_bindings(FinancialSubmission, value)
+    document = json.loads(payload)
+    period = document["financial"]["books"][0]["periods"][0]
+    assert period["period_type"] == "PERIOD_END"
+    period.update(start_date=None, limitation="Balance-sheet date; no duration start applies")
+    submitted = submit_model_payload(store, ticket_id, "financials", json.dumps(document))
+    step = submitted.journal.steps[-1]
+    assert (step.step_id, step.status) == ("financials", "valid"), step.issues
+    assert sorted(submitted.prefilled) == sorted(paths)
+    bound = FinancialSubmission.model_validate_json(submitted.payload).financial.books[0]
+    expected = value.financial.books[0]
+    assert bound.periods[0].start_date is None
+    assert bound.periods[0].model_dump(exclude={"start_date", "limitation"}) == (
+        expected.periods[0].model_dump(exclude={"start_date", "limitation"})
+    )
+    assert bound.periods[1:] == expected.periods[1:]
+    # The valid path, unchanged: the same fixture with its dates binds as before.
+    fresh, fresh_ticket, _ = journal_at(tmp_path / "dated", "financials")
+    plain = submit_model_payload(fresh, fresh_ticket, "financials", payload)
+    assert plain.journal.steps[-1].status == "valid", plain.journal.steps[-1].issues
+    assert FinancialSubmission.model_validate_json(plain.payload) == value
+
+
+@pytest.fixture(scope="module")
+def financials_start(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, str, dict[str, Any]]:
+    """A financials journal before any submission, and the fixture as a model writes it."""
+    store, ticket_id, value = journal_at(tmp_path_factory.mktemp("h1"), "financials")
+    payload, _ = without_bindings(FinancialSubmission, value)
+    return store.directory, ticket_id, json.loads(payload)
+
+
+NO_START = "Balance-sheet date; no duration start applies"
+QUARTERS = ["Q1", "Q2", "Q3", "Q4"]
+
+
+def outcome(attempt: Attempt) -> StepSubmission:
+    return (attempt.step_repairs or attempt.steps)[-1]
+
+
+@settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(st.dictionaries(st.integers(0, 5), st.tuples(*[st.booleans()] * 4), min_size=1, max_size=3))
+def test_null_start_dates_never_surface_a_hash_and_durations_still_need_both_dates(
+    financials_start: tuple[Path, str, dict[str, Any]],
+    tmp_path_factory: pytest.TempPathFactory,
+    draws: dict[int, tuple[bool, bool, bool, bool]],
+) -> None:
+    """H1 property over the fixture's period set (one period-end, five durations): up to three
+    periods may be retyped `PERIOD_END`, lose `start_date`, carry a limitation and lose their own
+    citations (FY then rests on its quarters). Whatever the outcome: no issue asks the model for
+    a hash; a duration period with a null start date is rejected and an issue names it (the
+    period rule, or the scope rule or its unset strings when the rule cannot run); and,
+    differentially against the trusted plain path on the same pre-filled payload, the status is
+    the same and every issue is the plain path's or a validator-worded unbound one."""
+    directory, ticket_id, written = financials_start
+    root = tmp_path_factory.mktemp("h1-draw")
+    shutil.copytree(directory, root / "model")
+    shutil.copytree(directory, root / "plain")
+    document = json.loads(json.dumps(written))
+    periods = document["financial"]["books"][0]["periods"]
+    for index, (period_end, null_start, limited, uncited) in draws.items():
+        period = periods[index]
+        if period_end:
+            period.update(period_type="PERIOD_END", fiscal_quarter=None)
+        if null_start:
+            period["start_date"] = None
+        if limited:
+            period["limitation"] = NO_START
+        if uncited:
+            period["citations"] = []
+            if period["period_id"] == "FY":
+                period["component_period_ids"] = QUARTERS
+    submitted = submit_model_payload(
+        Execution(root / "model"), ticket_id, "financials", json.dumps(document)
+    )
+    step = outcome(submitted.journal)
+    assert hash_lines(step.issues) == [], f"hash asked of the model: {hash_lines(step.issues)}"
+    for index, period in enumerate(periods):
+        if period["start_date"] is None and period["period_type"] != "PERIOD_END":
+            assert step.status == "invalid", "a duration without a start date was accepted"
+            if not period["citations"]:
+                continue  # its cause can be hidden behind another issue (H1 report, concern)
+            where, period_id = f"financial.books.0.periods.{index}", period["period_id"]
+            assert any(  # its own shape line, its unset strings' or a rule naming its id
+                issue.startswith((f"{where}:", f"{where}.")) or f" {period_id} " in f"{issue} "
+                for issue in step.issues
+            ), step.issues
+            if not period["limitation"]:
+                assert f"{where}{MISSING_DATES_RULE}" in step.issues or not any(
+                    issue.startswith(f"{where}:") for issue in step.issues
+                ), step.issues  # when the period rule runs, its first check names the dates
+    plain = outcome(
+        submit_cp1_step(Execution(root / "plain"), ticket_id, "financials", submitted.payload)
+    )
+    assert step.status == plain.status, (step.issues, plain.issues)
+    assert step.payload_sha256 == plain.payload_sha256
+    if step.status == "valid":
+        assert step.output_sha256 == plain.output_sha256
+        kept = json.loads(submitted.payload)["financial"]["books"][0]["periods"]
+        assert [p["start_date"] for p in kept] == [p["start_date"] for p in periods]
+    else:
+        unbound = {issue for _, issue in prefill_of(root / "model", ticket_id, submitted.payload)}
+        assert set(step.issues) <= set(plain.issues) | unbound, (step.issues, plain.issues)
+
+
+def prefill_of(directory: Path, ticket_id: str, payload: str) -> tuple[tuple[str, str], ...]:
+    """The unbound (path, issue) pairs Python records for a retained financials payload."""
+    known = known_bindings(Execution(directory), ticket_id, "financials")
+    return prefill(FinancialSubmission, payload, known, PREFILLED["financials"]).unbound
 
 
 def retained_repair(store: Execution, ticket_id: str) -> str:

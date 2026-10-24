@@ -841,9 +841,11 @@ def _validate_prefilled(
 
     With an unresolvable reference (as `_validate_uncomposable` is CP-0's) the validator-worded
     unbound issues come first and the step is rejected. Otherwise the stage's outcome stands
-    with only those lines removed; when they are its only issues they stay, so stripping never
-    turns a rejection into an acceptance. Acceptance is unchanged: such a payload never
-    validated."""
+    with only those lines removed; when they are its only issues, the unset dimension strings'
+    lines stay (task H1: a period bound to no scope that cites nothing itself; never a hash's,
+    which covers what did not parse), and only a stage whose issues are all hash lines keeps
+    them, so stripping never turns a rejection into an acceptance. Acceptance is unchanged:
+    such a payload never validated."""
     retained = store.payload(attempt.steps[-1].payload_sha256)
     result = prefill(STEPS[step_id].schema, retained, known, PREFILLED[step_id])
     if not (result.unbound or result.unset):
@@ -855,7 +857,13 @@ def _validate_prefilled(
         issues = (*(issue for _, issue in result.unbound), *kept)
         return StepValidation(issues=tuple(dict.fromkeys(issues)))
     if not kept:
-        return stage
+        hashes = {
+            f"{path}: Field required"
+            for path in result.unset
+            if path.rsplit(".", 1)[-1] not in SCOPE_DIMENSIONS
+        }
+        named = tuple(issue for issue in stage.issues if issue not in hashes)
+        return StepValidation(output=stage.output, issues=named) if named else stage
     return StepValidation(output=stage.output, issues=kept)
 
 
