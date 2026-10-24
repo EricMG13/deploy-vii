@@ -468,6 +468,8 @@ def test_a_404_billed_after_the_after_check_stays_held(rig: Rig) -> None:
         ("delete-before", "no account usage was recorded before the batch"),
         ("delete-after", "no account usage was recorded after the batch"),
         ("null-usage", "is not a recorded number"),
+        # Task 7.15 item 6: a record of another schema is not read as a usage check.
+        ("other-schema", "account usage after the batch is not an account-usage-check/1 record"),
         # 7.14 addendum: the refusals use the documented "key-file note" wording.
         ("other-token", "the two account usage checks record different key-file notes"),
         (
@@ -497,6 +499,8 @@ def test_a_404_without_a_usable_usage_record_stays_unresolved(
         record = load(after)
         if edit == "null-usage":
             record["credit"]["usage"] = None
+        elif edit == "other-schema":
+            record["schema"] = "account-usage-check/2"
         else:
             record["credit"]["key_file"] = {"key_tokens_found": 2, "key_token_used": 2}
         after.write_text(json.dumps(record), encoding="utf-8")

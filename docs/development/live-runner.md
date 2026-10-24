@@ -1139,9 +1139,10 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   `reconciled_usd` 0 and an `evidence` object (status 404, both usage figures and times, the
   delta, the other attempts and their sum, the difference, the tolerance, who recorded the
   usage). Replay refuses that source with a non-zero figure or without evidence. A missing
-  record, a usage that is not a number, checks with different key-file notes (`the two account
-  usage checks record different key-file notes`) or a difference above the tolerance leave the
-  attempt unresolved with the reason. Probe-2 predates the
+  record, a record whose `schema` is not `account-usage-check/1` (task 7.15), a usage that is
+  not a number, checks with different key-file notes (`the two account usage checks record
+  different key-file notes`) or a difference above the tolerance leave the attempt unresolved
+  with the reason. Probe-2 predates the
   records: its holds stay unresolved until the coordinator writes the two files from the
   recorded checks (25.7172663 before, 25.724167155 after).
 - **Account usage and a hold without a generation id (task 7.0).** A held pool attempt with no

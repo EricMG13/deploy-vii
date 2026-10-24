@@ -35,7 +35,7 @@ from deploy_vii.business_context import cp1_context_facts
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import CP1_PROMOTION, cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
-from deploy_vii.live.catalog import PinnedCandidate, PinnedPool, utc_stamp
+from deploy_vii.live.catalog import PinnedCandidate, PinnedPool
 from deploy_vii.live.client import (
     CHAT_URL,
     DEFAULT_TIMEOUT_SECONDS,
@@ -48,7 +48,7 @@ from deploy_vii.live.context import OMITTED, projection_name, upstream_text
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
-from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, Settlement
+from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, Settlement, utc_stamp
 from deploy_vii.live.prompts import (
     QUALITY,
     UpstreamInput,

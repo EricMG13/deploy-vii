@@ -384,12 +384,38 @@ REGISTER_PEAK_BOUND = 79_000_000  # 63.3 MB measured (293.8 MB before task 7.12)
 
 
 def _traced_peak[A, T](call: Callable[[A], T], argument: A) -> tuple[T, int]:
-    tracemalloc.start()
+    """The call's result and its tracemalloc peak above what was traced when it began. An
+    outside tracer (``PYTHONTRACEMALLOC``) is measured from ``reset_peak()`` and left running
+    (task 7.15); otherwise tracing starts and stops around the call."""
+    outside = tracemalloc.is_tracing()
+    if not outside:
+        tracemalloc.start()
     try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
         result = call(argument)
-        return result, tracemalloc.get_traced_memory()[1]
+        return result, tracemalloc.get_traced_memory()[1] - before
     finally:
-        tracemalloc.stop()
+        if not outside:
+            tracemalloc.stop()
+
+
+def test_the_traced_peak_neither_counts_nor_ends_an_outside_tracer() -> None:
+    """Task 7.15 (7.12 review): under an outside tracer (``PYTHONTRACEMALLOC``) the helper
+    measures from ``reset_peak()`` and leaves the tracer running, so what was traced before
+    the call is not in the peak."""
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        held = bytearray(20_000_000)
+        size, peak = _traced_peak(lambda n: len(bytearray(n)), 2_000_000)
+        assert size == 2_000_000 and 2_000_000 <= peak < 10_000_000, peak
+        assert tracemalloc.is_tracing()
+        del held
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
 
 
 def test_the_synthetic_case_hashes_its_json_bytes_within_its_memory_bounds(

@@ -111,15 +111,17 @@ HYPHEN_COPY_RULE = (
 # Task 7.0d (E1 batch e1-cp1-3): the `financials` rules its sent schema (amounts as JSON numbers,
 # `live.schema` "decimal-number-only"; the `metric_id` enum) and its validators enforce.
 # The units are the ones `canonical_audit._positions` assigns to each register and field.
+# Task 7.15: money is in the bound scope's `unit` and `currency` (Python fills the book's, 7.13).
 AMOUNT_RULE = (
     "Every `amount` is a JSON number, never a string, with no unit or currency symbol: remove "
     "thousands separators, and write parentheses or a leading minus as a negative number "
     "(`3,624` is 3624; `(211)` is -211). Money amounts are written as the source prints them, in "
-    "the book's `unit` and `currency` (a facility's in the facility's own `currency`), and are "
-    "never arithmetic. Other amounts have their own unit: `effective_tax_rate` is a decimal "
-    "fraction (21.0% is 0.21); a facility's `spread_bps` and `floor_bps` are basis points (2.75% "
-    "is 275) and its `fixed_rate` is a percent (5.25% is 5.25); an FX `rate` is target-currency "
-    "units per source-currency unit; a KPI amount is in that KPI's own `unit`."
+    "the `unit` and `currency` of the source scope the book binds to (rule i; a facility's in "
+    "the facility's own `currency`), and are never arithmetic. Other amounts have their own "
+    "unit: `effective_tax_rate` is a decimal fraction (21.0% is 0.21); a facility's `spread_bps` "
+    "and `floor_bps` are basis points (2.75% is 275) and its `fixed_rate` is a percent (5.25% is "
+    "5.25); an FX `rate` is target-currency units per source-currency unit; a KPI amount is in "
+    "that KPI's own `unit`."
 )
 ACCOUNT_METRIC_RULE = (
     "`accounts[].metric_id` is one of the account metrics the schema's `metric_id` enum lists: "

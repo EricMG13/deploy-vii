@@ -10,12 +10,12 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from deploy_vii.live.client import Request, Response
+from deploy_vii.live.ledger import utc_stamp
 from deploy_vii.live.settings import CandidateSetting
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
@@ -38,10 +38,6 @@ _EXPERIMENTAL = re.compile(r"(^|[-/])exp($|[-:])")
 
 class CatalogError(Exception):
     """The catalog could not be fetched or parsed."""
-
-
-def utc_stamp() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _price(value: object) -> Decimal | None:

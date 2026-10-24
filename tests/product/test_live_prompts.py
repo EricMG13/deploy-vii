@@ -335,6 +335,18 @@ def test_the_amount_rule_names_the_unit_python_assigns_to_each_rate_and_facility
     assert "Money amounts" in rule and "never arithmetic" in rule
 
 
+def test_the_amount_rule_names_the_bound_scope_not_the_books_dropped_fields() -> None:
+    """Task 7.15 item 5: since task 7.13 the book's `unit` and `currency` are not in the sent
+    schema (Python fills them from the bound scope), so rule a points at that scope, as rule i
+    does, and never at fields the model no longer sees."""
+    rule = prompts.AMOUNT_RULE
+    assert "the book's `unit`" not in rule and "book's `currency`" not in rule
+    assert "in the `unit` and `currency` of the source scope the book binds to (rule i" in rule
+    assert "write money amounts in that scope's `unit` and `currency`" in prompts.BOUND_SCOPE_RULE
+    book = strict_schema(STEPS["financials"].schema)["$defs"]["FinancialBook"]["properties"]
+    assert "unit" not in book and "currency" not in book
+
+
 def test_the_account_rule_names_the_enum_and_where_other_figures_go() -> None:
     rule = prompts.ACCOUNT_METRIC_RULE
     assert "`metric_id`" in rule and "enum" in rule

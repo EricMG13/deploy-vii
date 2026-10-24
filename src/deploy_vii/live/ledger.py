@@ -122,8 +122,13 @@ class LedgerState:
         return self.cap - self.reserved - self.spent
 
 
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+# The one UTC second stamp of ledger lines, usage checks, manifests and the catalog lookup
+# (task 7.15 item 6: the one `utc_stamp` of the live package; `reconcile._instant` parses it).
+STAMP = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def utc_stamp() -> str:
+    return datetime.now(UTC).strftime(STAMP)
 
 
 def _money(value: object, what: str) -> Decimal:
@@ -141,7 +146,9 @@ def _text(value: Decimal) -> str:
 
 
 class Ledger:
-    def __init__(self, path: Path, cap_usd: Decimal, *, clock: Callable[[], str] = _now) -> None:
+    def __init__(
+        self, path: Path, cap_usd: Decimal, *, clock: Callable[[], str] = utc_stamp
+    ) -> None:
         if not cap_usd.is_finite() or cap_usd <= 0:
             raise LedgerError("the cap must be a positive amount")
         self.path = path

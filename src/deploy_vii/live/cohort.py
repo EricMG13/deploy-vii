@@ -21,12 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from deploy_vii.execution import Attempt, Execution
-from deploy_vii.live.catalog import utc_stamp
 from deploy_vii.live.client import ChatClient
 from deploy_vii.live.context import PACK_SOURCE_STEPS
 from deploy_vii.live.credential import redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_key_response
-from deploy_vii.live.ledger import Ledger, Settlement
+from deploy_vii.live.ledger import Ledger, Settlement, utc_stamp
 from deploy_vii.live.retention import AttemptLocator, AttemptWriter
 from deploy_vii.live.runner import (
     StepSpec,

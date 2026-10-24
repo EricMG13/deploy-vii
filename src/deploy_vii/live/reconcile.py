@@ -87,16 +87,16 @@ from deploy_vii.live.ledger import (
     ADJUST_NEXT_BEFORE_SOURCE,
     ADJUST_SOURCE,
     ADJUST_USAGE_SOURCE,
+    STAMP,
     AttemptRecord,
     Ledger,
     LedgerError,
     LedgerState,
 )
 from deploy_vii.live.retention import dump, write_once
-from deploy_vii.live.runner import SCHEMA_BISECT_CASE, SCHEMA_CHECK_CASE
+from deploy_vii.live.runner import COHORT, SCHEMA_BISECT_CASE, SCHEMA_CHECK_CASE
 from deploy_vii.live.submission import STEPS
 
-POOL_COHORT = "openrouter-pool"
 USAGE_TOLERANCE_USD = Decimal("0.000001")
 # Cost bases that are a measured figure (metrics.json `ledger.cost_basis`); an estimate is not.
 MEASURED_BASES = frozenset({"provider-reported", "known-zero", ADJUST_SOURCE})
@@ -220,6 +220,10 @@ class UsageWindow:
         return self.after - self.before
 
 
+# The record `cli.record_usage` writes; `_usage_check` reads no other (task 7.15 item 6).
+USAGE_SCHEMA = "account-usage-check/1"
+
+
 def usage_path(artifact_root: Path, batch_id: str, phase: str) -> Path:
     return artifact_root / batch_id / USAGE_FILE.format(phase=phase)
 
@@ -239,6 +243,8 @@ def _usage_check(path: Path, phase: str) -> tuple[_Check | None, str]:
     if not path.is_file():
         return None, f"no account usage was recorded {phase} the batch"
     document = _read(path)
+    if document.get("schema") != USAGE_SCHEMA:
+        return None, f"account usage {phase} the batch is not an {USAGE_SCHEMA} record"
     credit = document.get("credit")
     usage = credit.get("usage") if isinstance(credit, dict) else None
     try:
@@ -277,8 +283,7 @@ def read_usage(artifact_root: Path, batch_id: str) -> tuple[UsageWindow | None, 
 
 
 # Task 7.13: the window of a batch with no after-check may close at the next batch's
-# before-check. Times are `catalog.utc_stamp`'s, the clock of the ledger and the usage checks.
-STAMP = "%Y-%m-%dT%H:%M:%SZ"
+# before-check. Times are `ledger.STAMP`'s, the clock of the ledger and the usage checks.
 NEXT_BATCH_BEFORE = "next-batch-before"
 
 
@@ -462,7 +467,7 @@ def corroborate_404(
 
     def measured(record: AttemptRecord) -> bool:
         other = retained.get(record.attempt_id)
-        if other is None or other.manifest.get("cohort") != POOL_COHORT:
+        if other is None or other.manifest.get("cohort") != COHORT:
             return False
         block = other.metrics.get("ledger")
         basis = block.get("cost_basis") if isinstance(block, dict) else None
@@ -510,7 +515,7 @@ def _measured_now(record: AttemptRecord, retained: dict[str, RetainedAttempt]) -
     """Whether a ledger charge is a measured pool cost, read from the ledger where it was
     adjusted (metrics read at the start of a run may predate that adjust)."""
     other = retained.get(record.attempt_id)
-    if other is None or other.manifest.get("cohort") != POOL_COHORT or record.actual_usd is None:
+    if other is None or other.manifest.get("cohort") != COHORT or record.actual_usd is None:
         return False
     if record.adjustment is not None:
         return record.adjustment.source == ADJUST_SOURCE
@@ -1040,7 +1045,7 @@ def interrupted_manifest(directory: Path) -> tuple[dict[str, Any] | None, str]:
         "attempt_id": directory.name,
         "model": model,
         **_run_identity(directory.name),
-        "cohort": POOL_COHORT,
+        "cohort": COHORT,
         "status": "no-response",
         "classification": INTERRUPTED,
         "reason": INTERRUPTED_REASON,
@@ -1141,5 +1146,5 @@ def candidates(artifact_root: Path, batch_id: str) -> list[RetainedAttempt]:
     return [
         attempt
         for attempt in batch_attempts(artifact_root, batch_id)
-        if attempt.unreconciled and attempt.manifest.get("cohort") == POOL_COHORT
+        if attempt.unreconciled and attempt.manifest.get("cohort") == COHORT
     ]

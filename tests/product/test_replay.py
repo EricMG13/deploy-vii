@@ -165,28 +165,22 @@ def test_synthetic_cp1_pack_hash_is_stable_across_hash_seeds() -> None:
 
 
 @pytest.mark.parametrize("path", ENTRIES, ids=lambda p: f"{p.parent.name}/{p.stem}")
-def test_corpus_entry_replays_as_recorded(path: Path, tmp_path: Path) -> None:
-    verdict = replay_entry(path, tmp_path)
-    if verdict.status == replay_support.SKIPPED:
-        pytest.skip(str(verdict))  # counted and listed by `make replay`; never a pass
-    assert verdict.passed, str(verdict)
-
-
-def test_every_corpus_envelope_hashes_its_json_bytes_like_content_hash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_corpus_entry_replays_as_recorded(
+    path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Task 7.12: the envelope writer hashes ``to_json()`` bytes (``envelope._content_hash``).
-    For every envelope and register set the corpus replays write, that hash is
-    ``content_hash()``'s (pydantic 2.14.1 / pydantic-core 2.50.1 when adopted), so a dependency
-    bump that changes the dumped bytes fails here rather than moving a provenance hash."""
-    checked: dict[str, list[str]] = {}  # entry -> kinds checked; models are not retained
+    """Each entry replays as recorded. Task 7.12: the envelope writer hashes ``to_json()`` bytes
+    (``envelope._content_hash``); for every envelope and register set the replay writes, that
+    hash is ``content_hash()``'s (pydantic 2.14.1 / pydantic-core 2.50.1 when adopted), so a
+    dependency bump that changes the dumped bytes fails here rather than moving a provenance
+    hash. Task 7.15: checked within this one replay per entry, so a failure names its entry."""
+    checked: list[str] = []  # kinds checked; models are not retained
     mismatched: list[str] = []
     write, register = envelope_writer.write_envelope, envelope_writer.register_envelope
 
     def check(kind: str, *models: Contract) -> None:
-        checked[current].append(kind)
+        checked.append(kind)
         mismatched.extend(
-            f"{current} {kind} {type(m).__name__}"
+            f"{kind} {type(m).__name__}"
             for m in models
             if envelope_writer._content_hash(m) != m.content_hash()
         )
@@ -202,14 +196,18 @@ def test_every_corpus_envelope_hashes_its_json_bytes_like_content_hash(
     monkeypatch.setattr(envelope_writer, "write_envelope", write_seen)
     monkeypatch.setattr(cp1_workflow, "write_envelope", write_seen)
     monkeypatch.setattr(cp1_quality, "register_envelope", register_seen)
-    for number, path in enumerate(ENTRIES):
-        current = f"{path.parent.name}/{path.stem}"
-        checked[current] = []
-        verdict = replay_entry(path, tmp_path / str(number))
-        assert verdict.passed or verdict.status == replay_support.SKIPPED, str(verdict)
-    quality = [name for name in checked if name.startswith("quality/")]
-    assert quality and all({"envelope", "registers"} <= set(checked[name]) for name in quality)
+    verdict = replay_entry(path, tmp_path)
     assert mismatched == []
+    if path.parent.name == "quality":
+        assert {"envelope", "registers"} <= set(checked), checked
+    if verdict.status == replay_support.SKIPPED:
+        pytest.skip(str(verdict))  # counted and listed by `make replay`; never a pass
+    assert verdict.passed, str(verdict)
+
+
+def test_the_corpus_replays_quality_entries() -> None:
+    """The envelope hash identity above is exercised: the corpus holds `quality` entries."""
+    assert [path for path in ENTRIES if path.parent.name == "quality"]
 
 
 def test_the_dimension_prefill_leaves_every_recorded_financials_payload_as_recorded(

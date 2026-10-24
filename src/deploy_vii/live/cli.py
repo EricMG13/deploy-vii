@@ -34,7 +34,6 @@ from deploy_vii.live.catalog import (
     PinnedCandidate,
     PinnedPool,
     parse_selection,
-    utc_stamp,
 )
 from deploy_vii.live.client import (
     DEFAULT_TIMEOUT_SECONDS,
@@ -50,9 +49,10 @@ from deploy_vii.live.corpus import CORPUS_ROOT, REPOSITORY_ROOT, CorpusError, wr
 from deploy_vii.live.credential import CredentialError
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.draw import NoEligibleModel, draw
-from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, LedgerError
+from deploy_vii.live.ledger import AttemptRecord, CapExceeded, Ledger, LedgerError, utc_stamp
 from deploy_vii.live.prompts import schema_text
 from deploy_vii.live.reconcile import (
+    USAGE_SCHEMA,
     Outcome,
     RetainedAttempt,
     SpendCrossCheck,
@@ -892,9 +892,6 @@ def _finish_report(path: Path, content: str, inflight: BaseException | None) -> 
         if inflight is None:
             raise
         inflight.add_note(f"live report not written: {type(problem).__name__}: {problem}")
-
-
-USAGE_SCHEMA = "account-usage-check/1"
 
 
 def record_usage(root: Path, batch_id: str, phase: str, client: ChatClient, command: str) -> None:
