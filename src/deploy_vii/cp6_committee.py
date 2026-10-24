@@ -134,7 +134,6 @@ SIDE_TABLE: Mapping[str, str] = MappingProxyType(
 
 ActionBias = Literal["Overweight", "Neutral", "Underweight", "Insufficient Information"]
 ACTION_BIASES: tuple[ActionBias, ...] = get_args(ActionBias)
-DIRECTIONAL = frozenset({"Overweight", "Underweight"})
 # Confidence from least to most; the call band's meter runs from 1 to 5 (`CallItem`).
 CONFIDENCES: tuple[Confidence, ...] = ("Insufficient Information", "Low", "Medium", "High")
 ACTION_BIAS_FACT = "T6A.4.recommendation.action_bias"
