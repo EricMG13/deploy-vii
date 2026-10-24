@@ -3,8 +3,8 @@
 Three states (docs/frontend-direction-c.md): populated from a settled (accepted or restricted)
 CP-6 head, the honest no-judgement item when there is no settled head, and the call withheld
 when CP-6 is outside the Pathway or cannot run (CP-6 or a required producer of it blocked).
-Every value is the head's own final-bias fact text (`T6.final_bias.action_bias` and
-`T6.final_bias.confidence`, task CP6-R); the meter is `cp6_committee.call_scale`, held
+Every value is the head's own final-bias fact text (`T6-FINAL.final_bias.action_bias`
+and `T6-FINAL.final_bias.confidence`, task CP6-R); the meter is `cp6_committee.call_scale`, held
 here to a hand-written reference table (decision 0012 differential) and to a property over the
 whole Literal. SYNTHETIC data only: the CP-6 head is composed by Python from the CP-6 test's
 submission over the SYNTHETIC Credit Snapshot fixture.

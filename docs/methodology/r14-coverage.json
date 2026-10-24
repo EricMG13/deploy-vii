@@ -590,7 +590,7 @@
           "T6A.7"
         ]
       },
-      "implementation": "partial (task 8.5: contract, Python checks, composer and bindings; task CP6-R: the table mapping verified against the pinned r14 source and remapped, composing T6A.4, T6A.6, T6A.7 and T6A.11 of the 8 required tables with only the columns the contract rows supply (T6A.6 carries the recovery views, not its nine-dimension scoring), the final bias under CP-6's own T6 id (T6.final_bias), and none of T6E.4, T6E.6, T6E.7 and T6E.11, the CP-6A Portfolio Debate tables; registered in the live runner and the Front Page call band wired in task 8.7, reading the settled T6.final_bias action bias and confidence since task CP6-R; live acceptance (E1) pending)",
+      "implementation": "partial (task 8.5: contract, Python checks, composer and bindings; task CP6-R: the table mapping verified against the pinned r14 source and remapped, composing T6A.4, T6A.6, T6A.7 and T6A.11 of the 8 required tables with only the columns the contract rows supply (T6A.6 carries the recovery views, not its nine-dimension scoring), the final bias under Deploy VII's own T6-FINAL id (T6-FINAL.final_bias, outside r14's T6A and T6E ids), and none of T6E.4, T6E.6, T6E.7 and T6E.11, the CP-6A Portfolio Debate tables; registered in the live runner and the Front Page call band wired in task 8.7, reading the settled T6-FINAL.final_bias action bias and confidence since task CP6-R; live acceptance (E1) pending)",
       "analytical_qualification": "unrun",
       "rendering_acceptance": "unrun",
       "native_host_qualification": "unrun"

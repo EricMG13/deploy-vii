@@ -31,14 +31,15 @@ in Python only, to:
   recovery conclusion; peer ranking, buy, sell and switch phrases and trade terms (a price or a
   size) stay prohibited.
 
-`committee_challenge` then composes, in Python, the final bias under CP-6's own `T6` id (r14's
-Step 8 has no table) and minimal tables under the r14 CP-6 ids they denote, `T6A.4`, `T6A.6`,
-`T6A.7` and `T6A.11` (`methods/cp6.md` records the verified mapping and the decision 0005
-adaptation; the `T6E.*` ids are CP-6A Portfolio Debate tables, which CP-6 never writes), the
-FP 01 `committee-challenge` table, the CP-6 side of `strengths-weaknesses` keyed by CP-2 row
-id, the referenced CP-1 facts, claims and own limitations. The call band reads the settled
-final-bias action bias and confidence (`settled_call`, `ACTION_BIAS_FACT`, `CONFIDENCE_FACT`);
-final integrity at report assembly is out of scope (ruling 4).
+`committee_challenge` then composes, in Python, the final bias under Deploy VII's own
+`T6-FINAL` id (r14's Step 8 has no table) and minimal tables under the r14 CP-6 ids they
+denote, `T6A.4`, `T6A.6`, `T6A.7` and `T6A.11` (`methods/cp6.md` records the verified
+mapping and the decision 0005 adaptation; the `T6E.*` ids are CP-6A Portfolio Debate
+tables, which CP-6 never writes), the FP 01 `committee-challenge` table, the CP-6 side of
+`strengths-weaknesses` keyed by CP-2 row id, the referenced CP-1 facts, claims and own
+limitations. The call band reads the settled final-bias action bias and confidence
+(`settled_call`, `ACTION_BIAS_FACT`, `CONFIDENCE_FACT`); final integrity at report assembly is
+out of scope (ruling 4).
 `submit_cp6_step` settles CP-6 as `submit_cp3_step` does and needs no registry entry.
 """
 
@@ -149,9 +150,10 @@ ActionBias = Literal["Overweight", "Neutral", "Underweight", "Insufficient Infor
 ACTION_BIASES: tuple[ActionBias, ...] = get_args(ActionBias)
 # Confidence from least to most; the call band's meter runs from 1 to 5 (`CallItem`).
 CONFIDENCES: tuple[Confidence, ...] = ("Insufficient Information", "Low", "Medium", "High")
-# The final bias (r14 CP-6 Step 8, which has no table): CP-6's own `T6` id, outside r14's A and
-# E phase ids, one `final_bias` row. The call band reads these two facts and nothing else.
-FINAL_BIAS_TABLE = "T6"
+# The final bias (r14 CP-6 Step 8, which has no table): Deploy VII's own `T6-FINAL` id, outside
+# r14's T6A and T6E ids and distinct from every other module's table ids (r14 CP-0 has a `T6`),
+# one `final_bias` row. The call band reads these two facts and nothing else.
+FINAL_BIAS_TABLE = "T6-FINAL"
 FINAL_BIAS_ROW = "final_bias"
 ACTION_BIAS_FACT = f"{FINAL_BIAS_TABLE}.{FINAL_BIAS_ROW}.action_bias"
 CONFIDENCE_FACT = f"{FINAL_BIAS_TABLE}.{FINAL_BIAS_ROW}.confidence"
@@ -1105,7 +1107,7 @@ def _name(row: CatalogueRow) -> str:
 
 
 def _recommendation(submission: CommitteeSubmission, out: _Composer) -> Cell:
-    """The final bias (`T6`) and the FP 01 action-bias line."""
+    """The final bias (`T6-FINAL`) and the FP 01 action-bias line."""
     row = submission.recommendation
     rationale, conditions = out.text(row.rationale), out.text(row.conditions)
     out.table(

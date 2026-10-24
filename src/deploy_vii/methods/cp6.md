@@ -18,9 +18,9 @@ or legal-exploit column), `T6A.6` Chair evidence weighting (the `recovery_view` 
 dimension, no score and no bull, bear or chair column there: its rows are the recovery views
 (subject, view, confidence, basis, limitation) and nothing else. The action bias and its
 confidence are r14's Final Bias step, which has no table: Python composes them, with the
-rationale, conditions, basis and limitation, under CP-6's own `T6` id, outside r14's A and E
-phase ids, and the call band reads `T6.final_bias.action_bias` and
-`T6.final_bias.confidence` only. `T6E.4`, `T6E.6`, `T6E.7` and `T6E.11` are the CP-6A
+rationale, conditions, basis and limitation, under `T6-FINAL`, Deploy VII's own id for r14's
+Final Bias formulation, outside r14's T6A and T6E ids, and the call band reads
+`T6-FINAL.final_bias.action_bias` and `T6-FINAL.final_bias.confidence` only. `T6E.4`, `T6E.6`, `T6E.7` and `T6E.11` are the CP-6A
 Portfolio Debate tables, reserved for its owner (M10): CP-6 writes none of them. The final
 integrity check at report assembly is a separate change.
 
