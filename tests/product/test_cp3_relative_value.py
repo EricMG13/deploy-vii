@@ -43,8 +43,8 @@ from deploy_vii.cp2_synthesis import (
 )
 from deploy_vii.cp2_synthesis import Upstream as Cp2Upstream
 from deploy_vii.cp3_relative_value import (
+    CP3_PROHIBITED_KINDS,
     MODULE_ID,
-    PROHIBITED_KINDS,
     RELATIVE_VALUE,
     REQUIRED_TABLES,
     STEP_ID,
@@ -504,6 +504,47 @@ def test_talk_stated_as_not_a_level_is_accepted() -> None:
     assert issues_of(valuation(market_evidence=(*evidence()[:2], honest))) == ()
 
 
+@pytest.mark.parametrize(
+    "verb",
+    ["trading around", "trading near", "trades wide", "trades tight", "indicated at", "yields"],
+)
+def test_each_added_level_verb_is_guarded_over_talk(verb: str) -> None:
+    revolver = instruments()[2].model_copy(
+        update={
+            "market_observation": f"The revolver extension {verb} the talk.",
+            "basis": Basis(cp2_refs=(RISK,), quotes=(quote(TALK_LINE),)),
+        }
+    )
+    found = issues_of(valuation(instruments=(*instruments()[:2], revolver)))
+    assert (
+        f'instruments[2].market_observation: indicative talk worded as a market level: "{verb}"'
+    ) in found
+    worded = evidence()[2].model_copy(update={"limitation": f"The extension {verb} the talk"})
+    assert (
+        f'market_evidence[2].limitation: indicative talk worded as a market level: "{verb}"'
+    ) in issues_of(valuation(market_evidence=(*evidence()[:2], worded)))
+
+
+def test_a_mixed_basis_keeps_the_talk_rows_own_text_guarded() -> None:
+    """Fix round 1 item 2: under a basis that quotes observed and talk evidence together, the
+    talk row's own text still may not state a level. The citing text itself is not guarded:
+    Python cannot tell which clause speaks of which quote, so a level stated for the observed
+    quote ("the loan trades at ...") stays allowed beside the talk."""
+    mixed = Basis(cp2_refs=(RISK,), quotes=(quote(TLB_LINE), quote(TALK_LINE)))
+    revolver = instruments()[2].model_copy(
+        update={
+            "market_observation": "The loan trades at par; the extension has talk only.",
+            "basis": mixed,
+        }
+    )
+    rows = (*instruments()[:2], revolver)
+    assert issues_of(valuation(instruments=rows)) == ()
+    worded = evidence()[2].model_copy(update={"limitation": "The extension trades at the talk"})
+    assert (
+        'market_evidence[2].limitation: indicative talk worded as a market level: "trades at"'
+    ) in issues_of(valuation(instruments=rows, market_evidence=(*evidence()[:2], worded)))
+
+
 def test_talk_only_evidence_caps_and_limits() -> None:
     talk = evidence()[2]
     rows = tuple(
@@ -604,6 +645,17 @@ def test_action_recommendation_recovery_and_peer_ranking_are_prohibited(
     preference = valuation().preference.model_copy(update={"rationale": text})
     found = issues_of(valuation(preference=preference))
     assert any(f"preference.rationale: prohibited conclusion ({kind})" in i for i in found)
+
+
+@pytest.mark.parametrize(
+    "phrase", ["sold", "switches into", "switches out of", "switched into", "switched out of"]
+)
+def test_each_added_action_phrase_is_prohibited(phrase: str) -> None:
+    """Fix round 1 item 3: one case per action phrase added to `business_context.ACTIONS`."""
+    text = f"The desk {phrase} the notes."
+    found = prohibited_issues("t", text, kinds=CP3_PROHIBITED_KINDS)
+    assert f't: prohibited conclusion (instrument action): "{phrase}"' in found
+    assert prohibited_issues("t", text) == ()  # never a CP-1A (default) kind
 
 
 @pytest.mark.parametrize(
@@ -760,7 +812,7 @@ def test_text_is_never_blank_and_malformed_references_are_issues() -> None:
 # --- optional upstreams (decision 0007, ruling 4) ---------------------------------------------
 
 
-def test_a_blocked_or_missing_optional_upstream_limits_and_caps_never_halts() -> None:
+def test_a_blocked_optional_upstream_limits_and_caps_never_halts() -> None:
     accepted = cp2_head(cp1_head(market_pack()), accepted=True)
     high = valuation().preference.model_copy(update={"confidence": "High"})
     assert issues_of(valuation(preference=high), upstream_of(cp2=accepted)) == ()
@@ -771,15 +823,11 @@ def test_a_blocked_or_missing_optional_upstream_limits_and_caps_never_halts() ->
             "Optional upstream CP-4 blocked: CP-3 reads no covenant and legal context",
         ),
         (
+            cp1a_head(pack_fixture()).model_copy(
+                update={"status": "blocked", "limitations": ("Malformed candidate",)}
+            ),
             DEFAULT,
-            None,
-            "Optional upstream CP-4 not in this run: CP-3 reads no covenant and legal context",
-        ),
-        (
-            None,
-            DEFAULT,
-            "Optional upstream CP-1A not in this run: CP-3 reads no business and transaction "
-            "context",
+            "Optional upstream CP-1A blocked: CP-3 reads no business and transaction context",
         ),
     ):
         up = upstream_of(cp2=accepted, cp1a=cp1a, cp4=cp4)
@@ -787,6 +835,22 @@ def test_a_blocked_or_missing_optional_upstream_limits_and_caps_never_halts() ->
         assert wording in relative_value(market_pack(), valuation(), up).limitations
         found = issues_of(valuation(preference=high), up)
         assert any(i.startswith("preference.confidence: capped below High because") for i in found)
+
+
+@pytest.mark.parametrize(("cp1a", "cp4"), [(DEFAULT, None), (None, DEFAULT), (None, None)])
+def test_an_optional_upstream_not_selected_in_the_run_is_silent(
+    cp1a: Module | _Default | None, cp4: Module | _Default | None
+) -> None:
+    """Fix round 1 ruling: not in the run is named in CONTEXT only; no cap, no limitation."""
+    accepted = cp2_head(cp1_head(market_pack()), accepted=True)
+    up = upstream_of(cp2=accepted, cp1a=cp1a, cp4=cp4)
+    high = valuation().preference.model_copy(update={"confidence": "High"})
+    assert issues_of(valuation(preference=high), up) == ()
+    assert up.caps == () and up.limits == ()
+    report = relative_value(market_pack(), valuation(preference=high), up)
+    assert not any(text.startswith("Optional upstream") for text in report.limitations)
+    named = json.dumps(context_block(market_pack(), up)["optional_upstream"])
+    assert '"status": "not in this run"' in named
 
 
 def test_a_restricted_cp2_caps_the_confidence() -> None:
@@ -1003,7 +1067,7 @@ def test_the_context_block_prefills_facilities_rows_sources_and_statuses() -> No
     assert block["market_evidence_sources"] == [
         {"source_id": MARKET, "name": "market-sheet.txt", "spans": 4}
     ]
-    assert block["confidence_caps"] == ["CP-2 is restricted", "optional CP-4 is not in this run"]
+    assert block["confidence_caps"] == ["CP-2 is restricted"]
     bare = context_block(pack_fixture(), upstream_of(pack_fixture()))
     assert bare["market_evidence_sources"] == []
     assert "Insufficient Information" in str(bare["market_evidence_note"])
@@ -1217,7 +1281,7 @@ def test_missing_market_evidence_and_upstream_gaps_always_limit_and_cap(
     talk = 'market_evidence[2]: an observed row quotes indicative talk: "talk"'
     assert (talk in issues) == mislabelled  # indicative talk is never accepted as observed
     none = not drawn
-    upstream_cap = (not cp2_accepted) or cp4 != "accepted"
+    upstream_cap = (not cp2_accepted) or cp4 == "blocked"  # not selected is silent
     capped = upstream_cap or drawn == {"indicative_talk"} or none
     capping = any(i.startswith("preference.confidence: capped below High") for i in issues)
     # A missing evidence base is its own issue (Insufficient Information), not a cap.
@@ -1241,14 +1305,14 @@ def test_missing_market_evidence_and_upstream_gaps_always_limit_and_cap(
     if capped:
         assert cells["T3.4.preference.confidence"].text != "High"
         assert result.limitations or result.inherited_limitations
-    if cp4 != "accepted" or none or drawn == {"indicative_talk"} or gapped:
+    if cp4 == "blocked" or none or drawn == {"indicative_talk"} or gapped:
         assert result.status == "restricted"
     if not cp2_accepted:
         assert "Gap (Material): No segment disclosure" in result.inherited_limitations
     if not (
         none
         or gapped
-        or cp4 != "accepted"
+        or cp4 == "blocked"
         or drawn == {"indicative_talk"}
         or confidence == "Insufficient Information"
     ):
@@ -1484,6 +1548,11 @@ FORBIDDEN = {
     "is our recommendation": "instrument action",
     "is a reason to switch into the loan": "instrument action",
     "is a reason to switch out of the notes": "instrument action",
+    "was sold last quarter": "instrument action",
+    "is what the desk switches into": "instrument action",
+    "is what the desk switches out of": "instrument action",
+    "is what the desk switched into": "instrument action",
+    "is what the desk switched out of": "instrument action",
     "ranks above peers": "peer ranking",
     "looks cheap versus peers": "peer ranking",
     "would recover in full": "recovery conclusion",
@@ -1505,7 +1574,7 @@ def test_the_prohibited_phrase_check_matches_a_naive_reference(
     text = " ".join(f"{subject} {middle}." for subject, middle in clauses)
     found = {
         m.group(1)
-        for issue in prohibited_issues("t", text, kinds=PROHIBITED_KINDS)
+        for issue in prohibited_issues("t", text, kinds=CP3_PROHIBITED_KINDS)
         if (m := re.search(r"prohibited conclusion \(([^)]+)\)", issue))
     }
     naive = {FORBIDDEN[middle] for _, middle in clauses if middle in FORBIDDEN}

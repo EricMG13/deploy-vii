@@ -465,6 +465,7 @@ ACTIONS: Mapping[str, tuple[str, ...]] = {
         "sell",
         "sells",
         "selling",
+        "sold",
         "overweight",
         "underweight",
         "recommend",
@@ -477,6 +478,10 @@ ACTIONS: Mapping[str, tuple[str, ...]] = {
         "switch out of",
         "switching into",
         "switching out of",
+        "switches into",
+        "switches out of",
+        "switched into",
+        "switched out of",
     ),
 }
 # r14 permits these as a labelled quote: a Management Language row may carry them.

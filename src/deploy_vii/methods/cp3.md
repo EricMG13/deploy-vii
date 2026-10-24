@@ -48,10 +48,12 @@ What to return:
 - `gaps`: what the analysis lacks, why it matters, what it affects, its severity and the action.
 
 Gap propagation. With no observed and no indicative evidence the preference is Insufficient
-Information and the module is restricted. Talk-only evidence, a CP-2 that is not accepted, any
-blocked input, or CP-1A or CP-4 missing from the run (each listed under `confidence_caps`)
-keeps the confidence below High. Python records the limitations and the status; do not
-restate them as findings.
+Information and the module is restricted. Talk-only evidence, a CP-2 that is not accepted or
+any blocked input, a blocked CP-1A or CP-4 included (each listed under `confidence_caps`),
+keeps the confidence below High. CP-1A or CP-4 that the run does not select is shown as "not in
+this run" and limits nothing; a selected one is never unrun or stale here, since CP-3 does not
+start until it settles, so blocked is the only missing state. Python records the limitations and
+the status; do not restate them as findings.
 
 Prohibited: an ordering of the issuer's own instruments is this module's output, but write no
 action phrase (buy, sell, overweight, underweight, recommend, switch into or out of), no final

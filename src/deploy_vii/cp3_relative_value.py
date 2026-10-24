@@ -21,8 +21,9 @@ restated) or a `{ref|unit}` reference to a referencable fact of the bound CP-1 h
   worded as a market level; a market observation cites a market-evidence quote;
 - the ordering: each instrument exactly once, nothing else;
 - gap propagation (decision 0007, ruling 4): no observed or indicative evidence makes the
-  preference Insufficient Information; a CP-2 that is not `accepted`, any blocked bound input,
-  a missing optional CP-1A or CP-4 or talk-only evidence caps its confidence below High;
+  preference Insufficient Information; a CP-2 that is not `accepted`, any blocked bound input
+  (a blocked optional CP-1A or CP-4 included) or talk-only evidence caps its confidence below
+  High; an optional upstream the run does not select is silent;
 - the prohibited conclusions (ruling 3, `business_context.prohibited_issues` with the CP-3
   kinds): no buy, sell or other action phrase, no final recommendation, no recovery conclusion
   and no external peer ranking; an intra-issuer ordering is CP-3's own output.
@@ -118,7 +119,7 @@ THIRD_PARTY = "third_party"
 NONE = "none"
 # Ruling 3: action phrases, a final recommendation, a recovery conclusion and an external peer
 # ranking stay prohibited; an ordering of the issuer's own instruments does not.
-PROHIBITED_KINDS = ("peer ranking", "instrument action", "recovery conclusion")
+CP3_PROHIBITED_KINDS = ("peer ranking", "instrument action", "recovery conclusion")
 # A text that cites indicative talk only may not word it as a market level: the verbs that
 # assert where an instrument trades. Nouns ("market level") are not listed, so an honest
 # negation ("talk, not a market level") passes (confidence review).
@@ -133,6 +134,12 @@ LEVEL_PHRASES = (
     "bid at",
     "offered at",
     "changed hands",
+    "trading around",
+    "trading near",
+    "trades wide",
+    "trades tight",
+    "indicated at",
+    "yields",
 )
 # Wording that marks a quote as indicative talk: an `observed` row never quotes it.
 TALK_MARKERS = (
@@ -340,8 +347,8 @@ class Upstream:
     @property
     def caps(self) -> tuple[str, ...]:
         """Why the preference's confidence is below High whatever the evidence (decision 0007,
-        ruling 4): a CP-2 that is not accepted, any blocked bound input, a read optional
-        upstream missing from the run."""
+        ruling 4): a CP-2 that is not accepted and any blocked bound input. An optional upstream
+        the run does not select is silent (fix round 1 ruling)."""
         reasons: list[str] = []
         if self.cp2_status != "accepted":
             reasons.append(f"CP-2 is {self.cp2_status or 'absent'}")
@@ -350,21 +357,18 @@ class Upstream:
             for item in self.bound
             if item.input_id.startswith("CP-") and item.status == "blocked"
         ]
-        reasons += [
-            f"optional {module_id} is {NOT_IN_RUN}"
-            for module_id in READ_OPTIONAL
-            if self.status(module_id) is None
-        ]
         return tuple(dict.fromkeys(reasons))
 
     @property
     def limits(self) -> tuple[str, ...]:
-        """The own limitations a missing or blocked read optional upstream records (ruling 4,
-        decision 0007 wording: never a halt)."""
+        """The own limitation a bound blocked read optional upstream records (ruling 4,
+        decision 0007 wording: never a halt). One the run does not select records none:
+        `current_inputs` refuses a selected one that is unrun or stale, so blocked is the only
+        missing state a bound attempt can show."""
         return tuple(
             f"Optional upstream {module_id} {self.optional_status(module_id)}: CP-3 reads no {what}"
             for module_id, what in READ_OPTIONAL.items()
-            if self.optional_status(module_id) in {"blocked", NOT_IN_RUN}
+            if self.optional_status(module_id) == "blocked"
         )
 
 
@@ -686,7 +690,7 @@ def _text_issues(
                 continue
             issues.extend(f"{where}: {issue}" for issue in prose.issues(text, bound, names=names))
             # Quotes are source text, not CP-3's words: only the model's own text is guarded.
-            issues.extend(prohibited_issues(where, text, kinds=PROHIBITED_KINDS))
+            issues.extend(prohibited_issues(where, text, kinds=CP3_PROHIBITED_KINDS))
             if isinstance(row, MarketEvidence) and row.kind == "indicative_talk":
                 issues += _level_issues(where, text)
     return issues
@@ -1078,8 +1082,8 @@ def relative_value(
     evidence = _bind_evidence(pack, submission, upstream)
     offered = upstream.facilities
     out = _Composer(prose.bind(referencable(upstream.cp1.facts)), upstream.catalogue, evidence)
-    # Own limitations: the gaps rows, the market evidence, a missing or blocked read optional
-    # upstream, an empty required register and an Insufficient Information preference.
+    # Own limitations: the gaps rows, the market evidence, a blocked read optional upstream, an
+    # empty required register and an Insufficient Information preference.
     # Inherited ones (a restricted CP-2's included) are settlement's (`execution.settle`).
     out.limitations.extend(f"Gap ({g.severity}): {out.text(g.gap)}" for g in submission.gaps)
     out.limitations.extend(_evidence_limitations(evidence))
