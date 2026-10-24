@@ -11,8 +11,9 @@ and verify the runner before claiming that selection or retention is operational
 
 Amendment, 22 Oct 2026 (user decision,
 [decision 0005](decisions/0005-methodology-changes-and-regular-testing.md)): the pool is the
-user-named set, currently GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at **high** for every step,
-including cases predefined as difficult. The random draw below applies only to a pool of more
+user-named set, currently GPT-6.1 Sol (`openai/gpt-6.1-sol`) alone, at **medium** for every
+step, including cases predefined as difficult, since the 24 Oct 2026 amendment to decision 0005
+(the user's decision; at high before). The random draw below applies only to a pool of more
 than one model. With one model, the draw is recorded as trivial, and the pool, exclusions and
 seed are still recorded. The Luna / GLM 5.3 Flash / DeepSeek table and the xhigh rule below
 describe the superseded pool. They are kept for the stored outputs and for a future pool of more
