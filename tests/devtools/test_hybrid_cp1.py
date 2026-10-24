@@ -328,7 +328,12 @@ def test_the_anthropic_request_has_the_documented_shape() -> None:
     provider = cp1.Anthropic(as_stream(transport), Decimal("3.0"))
     tools = cp1.step_tools("source_context")
     prepared = provider.prepare(
-        CELL["sonnet-xhigh"], "system text", [{"role": "user", "content": "u"}], tools, 60.0
+        CELL["sonnet-xhigh"],
+        "system text",
+        [{"role": "user", "content": "u"}],
+        tools,
+        60.0,
+        step_id="source_context",
     )
     body = json.loads(prepared.payload)
     assert body == {
@@ -880,7 +885,8 @@ def test_the_connection_is_closed_once_message_stop_is_read() -> None:
         return cp1.Stream(200, lines())
 
     provider = cp1.Anthropic(open_stream, Decimal("3.0"), tool_choice="auto")
-    prepared = provider.prepare(CELL["opus-high"], "s", [{"role": "user", "content": "u"}], (), 60)
+    user = [{"role": "user", "content": "u"}]
+    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 60, step_id="narrative")
     assert provider.send(CELL["opus-high"], prepared, ANT_KEY).classification == "ok"
     assert closed == [True]
 
@@ -900,7 +906,7 @@ def test_an_idle_stream_is_cut_at_the_idle_limit() -> None:
 
     provider = cp1.Anthropic(silent_after_start, Decimal("3.0"), tool_choice="auto")
     user = [{"role": "user", "content": "u"}]
-    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 900.0)
+    prepared = provider.prepare(CELL["opus-high"], "s", user, (), 900.0, step_id="financials")
     reply = provider.send(CELL["opus-high"], prepared, ANT_KEY)
     assert seen == [cp1.IDLE_S]
     assert reply.classification == "stream-incomplete" and reply.cost is None
@@ -1084,3 +1090,207 @@ def test_a_resume_needs_the_batchs_ledger(
     args = cli(tmp_path, case.frozen, "--resume", "--cells", "sonnet-xhigh")
     assert cp1.main(args, transport=unexpected_send, stream_transport=unexpected_stream) == 2
     assert "hybrid-cp1-1-anthropic.jsonl does not exist" in capsys.readouterr().err
+
+
+# --- corrective fixes: caching per step, completeness, call-limit nudge -------------------------
+
+
+@pytest.mark.parametrize(
+    ("step_id", "cached"),
+    [("source_context", True), ("financials", True), ("narrative", False), ("readiness", False)],
+)
+def test_top_level_cache_control_is_sent_only_for_multi_call_steps(
+    step_id: str, cached: bool
+) -> None:
+    provider = cp1.Anthropic(as_stream(FakeTransport()), Decimal("3.0"))
+    user = [{"role": "user", "content": "u"}]
+    tools = cp1.step_tools(step_id)
+    prepared = provider.prepare(CELL["opus-medium"], "s", user, tools, 60.0, step_id=step_id)
+    body = json.loads(prepared.payload)
+    assert cp1.CACHE_CONTROL_BY_STEP[step_id] is cached
+    if cached:
+        assert body["cache_control"] == {"type": "ephemeral"}
+    else:
+        assert "cache_control" not in body
+    # Everything else is the same request either way.
+    assert body["stream"] is True and body["tool_choice"] == {"type": "any"}
+    assert body["messages"] == user and body["max_tokens"] == 128000
+
+
+def test_the_plan_records_the_cache_table_and_the_harness_rules(
+    case: Case, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_keys(monkeypatch)
+    args = cli(tmp_path, case.frozen, "--dry-run", "--seed", "7")
+    assert cp1.main(args, transport=unexpected_send) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["anthropic"]["cache_control_by_step"] == {
+        "source_context": True,
+        "financials": True,
+        "narrative": False,
+        "readiness": False,
+    }
+    assert plan["harness_rules"]["call_limit_nudge"]["from_calls_left"] == 3
+    assert "submit" in plan["harness_rules"]["call_limit_nudge"]["text"]
+
+
+def test_the_call_limit_nudge_appears_from_the_third_last_call_only(
+    case: Case, tmp_path: Path
+) -> None:
+    # Two tool calls a turn: the line goes once, on the turn's last result.
+    search = ant_stream(
+        ("t1", "search_pack", '{"query": "revenue"}'), ("t2", "search_pack", '{"query": "debt"}')
+    )
+    transport = FakeTransport(*[search] * cp1.MAX_CALLS)
+    harness = make_harness(tmp_path, transport, case.frozen)
+    [run] = runs(harness, "opus-medium")
+    cp1.run_cell(harness, run)
+    assert run.steps[0].verdict == "rejected: limit" and len(transport.requests) == cp1.MAX_CALLS
+    third_last = cp1.MAX_CALLS - 2
+    for number, request in enumerate(transport.requests, start=1):
+        latest = body_of(request)["messages"][-1]
+        texts = [block["content"] for block in latest["content"]] if number > 1 else []
+        left = cp1.MAX_CALLS - number + 1  # calls left when this request's results were written
+        if number < third_last:
+            assert not any("calls remain" in text for text in texts), number
+            continue
+        assert texts[-1].endswith(
+            f"\nHarness: {left} of {cp1.MAX_CALLS} calls remain in this step; "
+            "the step must end with submit_source_context."
+        ), number
+        assert sum(text.count("calls remain") for text in texts) == 1
+
+
+# A financials payload shaped like sol-high's two submits: the second has 143 statement lines
+# against the first's 284, and no balance movement against five.
+FIRST_LINES = {
+    ("IS", "2025"): 40,
+    ("IS", "2024"): 40,
+    ("IS", "2023"): 40,
+    ("BS", "2025"): 50,
+    ("BS", "2024"): 50,
+    ("CFS", "2025"): 22,
+    ("CFS", "2024"): 21,
+    ("CFS", "2023"): 21,
+}
+SECOND_LINES = {("IS", "2025"): 40, ("IS", "2024"): 40, ("BS", "2025"): 43, ("CFS", "2025"): 20}
+
+
+def financial_payload(
+    lines: dict[tuple[str, str], int], movements: int, bridges: int, identities: int
+) -> str:
+    periods = [{"period_id": f"FY{year}", "fiscal_year": year} for year in ("2023", "2024", "2025")]
+    statement_lines = [
+        {"statement": statement, "period_id": f"FY{year}", "line_id": f"{statement}-{year}-{n}"}
+        for (statement, year), count in lines.items()
+        for n in range(count)
+    ]
+    book = {
+        "periods": periods,
+        "statement_lines": statement_lines,
+        "accounts": [{"metric_id": f"m{n}"} for n in range(60)],
+        "balance_movements": [{"movement_id": f"mv{n}"} for n in range(movements)],
+        "balance_movement_bridges": [{"bridge_id": f"b{n}"} for n in range(bridges)],
+        "statement_identities": [{"identity_id": f"i{n}"} for n in range(identities)],
+    }
+    assessments = [{"observation_ids": ["r25", "r24", f"x{n}"]} for n in range(5)]
+    return json.dumps({"financial": {"books": [book]}, "definition": {"assessments": assessments}})
+
+
+SOL_HIGH_FIRST = financial_payload(FIRST_LINES, movements=5, bridges=1, identities=8)
+SOL_HIGH_SECOND = financial_payload(SECOND_LINES, movements=0, bridges=0, identities=7)
+
+
+def test_completeness_counts_lines_by_statement_and_fiscal_year() -> None:
+    assert cp1.completeness(SOL_HIGH_FIRST) == {
+        "statement_lines": 284,
+        "statement_lines_by_statement": {"BS": 100, "CFS": 64, "IS": 120},
+        "statement_lines_by_fiscal_year": {"2023": 61, "2024": 111, "2025": 112},
+        "accounts": 60,
+        "balance_movements": 5,
+        "balance_movement_bridges": 1,
+        "statement_identities": 8,
+        "definition_assessments": 5,
+        "definition_observation_ids": 7,
+    }
+    second = cp1.completeness(SOL_HIGH_SECOND)
+    assert second is not None
+    assert second["statement_lines"] == 143 and second["balance_movements"] == 0
+    assert second["statement_lines_by_fiscal_year"] == {"2024": 40, "2025": 103}
+    assert cp1.completeness("not json") is None and cp1.completeness("[]") is None
+    # A line whose period the book does not list is counted, not dropped.
+    odd = json.loads(SOL_HIGH_SECOND)
+    odd["financial"]["books"][0]["statement_lines"].append({"statement": "IS", "period_id": "Q9"})
+    counted = cp1.completeness(json.dumps(odd))
+    assert counted is not None and counted["statement_lines_by_fiscal_year"]["unknown"] == 1
+
+
+def test_a_later_submit_with_fewer_lines_or_movements_sets_completeness_drop() -> None:
+    first = {"submit": 1, "completeness": cp1.completeness(SOL_HIGH_FIRST)}
+    second = {"submit": 2, "completeness": cp1.completeness(SOL_HIGH_SECOND)}
+    assert cp1.completeness_drop([first, second]) == {
+        "flag": True,
+        "dropped": [
+            {
+                "submit": 2,
+                "first_then_now": {"statement_lines": [284, 143], "balance_movements": [5, 0]},
+            }
+        ],
+        "basis": "each later submit vs the first",
+    }
+    assert cp1.completeness_drop([first, first | {"submit": 2}])["flag"] is False
+    assert cp1.completeness_drop([first])["flag"] is False
+
+
+def test_financials_metrics_carry_completeness_beside_the_shrink_flag(
+    case: Case, tmp_path: Path
+) -> None:
+    opus = Model(case, tmp_path / "m")
+    transport = FakeTransport(TOOL_CHOICE_400, *[opus] * 4)
+    harness = make_harness(tmp_path, transport, case.frozen)
+    [run] = runs(harness, "opus-medium")
+    cp1.run_cell(harness, run)
+    assert run.verdict == "accepted"
+    metrics = {step.step_id: cp1.step_metrics(step) for step in run.steps}
+    financials = metrics["financials"]
+    expected = cp1.completeness(opus.payload("financials"))
+    assert expected is not None and expected["statement_lines"] > 0
+    assert financials["submits"][0]["completeness"] == expected
+    assert financials["final_payload_completeness"] == expected
+    assert financials["completeness_drop"]["flag"] is False
+    assert "submit_shrinkage" in financials
+    for other in ("source_context", "narrative", "readiness"):
+        assert metrics[other]["final_payload_completeness"] is None
+        assert "completeness" not in metrics[other]["submits"][0]
+
+
+def test_completeness_is_back_filled_from_a_retained_tool_log(tmp_path: Path) -> None:
+    log = tmp_path / "tool-calls.jsonl"
+    entries = [
+        {"call": 2, "index": 1, "name": "read_pages", "arguments": "{}", "status": "ok"},
+        {
+            "call": 4,
+            "index": 1,
+            "name": "submit_financials",
+            "arguments": SOL_HIGH_FIRST,
+            "status": "rejected",
+        },
+        {
+            "call": 6,
+            "index": 1,
+            "name": "submit_financials",
+            "arguments": SOL_HIGH_SECOND,
+            "status": "accepted",
+        },
+    ]
+    log.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    before = log.read_bytes()
+    rows = cp1.completeness_from_log(log)
+    assert [(r["submit"], r["call"], r["status"]) for r in rows] == [
+        (1, 4, "rejected"),
+        (2, 6, "accepted"),
+    ]
+    assert rows[0]["completeness"]["statement_lines"] == 284
+    assert rows[1]["completeness"]["balance_movements"] == 0
+    assert cp1.completeness_drop(rows)["flag"] is True
+    assert log.read_bytes() == before  # read only

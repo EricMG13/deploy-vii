@@ -147,6 +147,17 @@ CELLS = (
 # hybrid-cp1-1, on that batch's OpenRouter ledger). Decision 0005's amendment superseded Luna.
 EXTRA_CELLS = (Cell("luna-xhigh", "openai/gpt-6-luna", "openrouter", "xhigh"),)
 SKIPPED_BY_USER = "skipped by user"  # user decision, 24 Oct 2026: "skip opus high"
+# Top-level Anthropic `cache_control` only for steps that make several calls. In hybrid-cp1-1,
+# opus-medium's narrative and readiness were single calls that wrote 321,972 and 397,890 tokens
+# to the 5-minute cache at the write rate and read none back.
+CACHE_CONTROL_BY_STEP = {
+    "source_context": True,
+    "financials": True,
+    "narrative": False,
+    "readiness": False,
+}
+# From this many calls left, each turn's tool results end with one line saying so.
+NUDGE_FROM_CALLS_LEFT = 3
 
 
 @dataclass(frozen=True)
@@ -271,6 +282,8 @@ class Provider(Protocol):
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
         timeout_s: float,
+        *,
+        step_id: str,
     ) -> Prepared: ...
 
     def send(self, cell: Cell, prepared: Prepared, key: str) -> Reply: ...
@@ -292,6 +305,8 @@ class OpenRouter:
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
         timeout_s: float,
+        *,
+        step_id: str,  # unused: OpenRouter sends no cache directive
     ) -> Prepared:
         candidate = self.candidates[cell.model]
         request = cp0.ToolChatRequest(
@@ -554,8 +569,9 @@ class Anthropic:
         system: str,
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
+        step_id: str,
     ) -> dict[str, Any]:
-        return {
+        body = {
             "model": cell.model,
             "max_tokens": MAX_TOKENS,
             "system": system,
@@ -564,9 +580,11 @@ class Anthropic:
             "tool_choice": {"type": self.tool_choice},
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": cell.effort},
-            "cache_control": {"type": "ephemeral"},
             "stream": True,
         }
+        if CACHE_CONTROL_BY_STEP[step_id]:
+            body["cache_control"] = {"type": "ephemeral"}
+        return body
 
     def prepare(
         self,
@@ -575,8 +593,10 @@ class Anthropic:
         conversation: Sequence[Mapping[str, Any]],
         tools: Sequence[Tool],
         timeout_s: float,
+        *,
+        step_id: str,
     ) -> Prepared:
-        payload = exact_json(self.body(cell, system, conversation, tools)).encode()
+        payload = exact_json(self.body(cell, system, conversation, tools, step_id)).encode()
         bound = token_bound(len(payload), self.bytes_per_token)
         needed = bound + MAX_TOKENS
         return Prepared(
@@ -922,6 +942,91 @@ def evidence_counts(payload: str) -> dict[str, int] | None:
     return counts
 
 
+COMPLETENESS_COUNTED = ("statement_lines", "balance_movements")
+
+
+def _objects(node: object, key: str) -> list[dict[str, Any]]:
+    """The JSON objects in `node[key]` when that is a list (none otherwise)."""
+    value = node.get(key) if isinstance(node, dict) else None
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def completeness(payload: str) -> dict[str, Any] | None:
+    """What a financials payload covers, summed over its books (None: not an object).
+
+    Statement lines by `statement` and by the fiscal year of their period (`unknown` when the
+    book lists no such period); accounts, balance movements and their bridges, statement
+    identities; definition assessments and the distinct observation ids they name."""
+    try:
+        document = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    by_statement: Counter[str] = Counter()
+    by_year: Counter[str] = Counter()
+    sizes: Counter[str] = Counter()
+    for book in _objects(document.get("financial"), "books"):
+        years = {p.get("period_id"): str(p.get("fiscal_year")) for p in _objects(book, "periods")}
+        for line in _objects(book, "statement_lines"):
+            by_statement[str(line.get("statement"))] += 1
+            by_year[years.get(line.get("period_id"), "unknown")] += 1
+        for key in (
+            "accounts",
+            "balance_movements",
+            "balance_movement_bridges",
+            "statement_identities",
+        ):
+            sizes[key] += len(_objects(book, key))
+    assessments = _objects(document.get("definition"), "assessments")
+    observed = {
+        ident
+        for item in assessments
+        if isinstance(item.get("observation_ids"), list)
+        for ident in item["observation_ids"]
+        if isinstance(ident, str)
+    }
+    return {
+        "statement_lines": sum(by_statement.values()),
+        "statement_lines_by_statement": dict(sorted(by_statement.items())),
+        "statement_lines_by_fiscal_year": dict(sorted(by_year.items())),
+        "accounts": sizes["accounts"],
+        "balance_movements": sizes["balance_movements"],
+        "balance_movement_bridges": sizes["balance_movement_bridges"],
+        "statement_identities": sizes["statement_identities"],
+        "definition_assessments": len(assessments),
+        "definition_observation_ids": len(observed),
+    }
+
+
+def completeness_drop(submits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Later financials submits with fewer statement lines or balance movements than the first
+    (beside `submit_shrinkage`, which counts citations, limitations, claims and objects)."""
+    rows = [{"submit": item["submit"], "counts": item["completeness"]} for item in submits]
+    return cp0.shrinkage(rows, COMPLETENESS_COUNTED)
+
+
+def completeness_from_log(path: Path) -> list[dict[str, Any]]:
+    """Each judged `submit_financials` in a retained tool-calls.jsonl, in order, with its
+    completeness: a back-fill for batches run before submits recorded it. Reads only."""
+    rows: list[dict[str, Any]] = []
+    for text in path.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(text)
+        if entry.get("name") == "submit_financials" and entry.get("status") in (
+            "accepted",
+            "rejected",
+        ):
+            rows.append(
+                {
+                    "submit": len(rows) + 1,
+                    "call": entry["call"],
+                    "status": entry["status"],
+                    "completeness": completeness(entry["arguments"]),
+                }
+            )
+    return rows
+
+
 # --- one step --------------------------------------------------------------------------------
 
 
@@ -1080,7 +1185,9 @@ def run_step(harness: Harness, cell: Cell, step: StepRun, base: Path, ticket: st
                 break
             timeout = harness.deadline_s - elapsed
             provider = harness.providers[cell.provider]
-            prepared = provider.prepare(cell, system, conversation, tools, timeout)
+            prepared = provider.prepare(
+                cell, system, conversation, tools, timeout, step_id=step.step_id
+            )
             call = send(harness, cell, step, prepared)
             if call is None:
                 break
@@ -1153,7 +1260,18 @@ def _turn(
         results.append((tool_call.call_id, text))
         if status == "accepted" or (status == "rejected" and len(step.submits) >= MAX_SUBMITS):
             step.verdict = status
+    left = MAX_CALLS - call.number
+    if results and 0 < left <= NUDGE_FROM_CALLS_LEFT:  # one line, on the turn's last result
+        ident, text = results[-1]
+        results[-1] = (ident, f"{text}\n{call_nudge(left, step.step_id)}")
     conversation.extend(provider.tool_results(results))
+
+
+def call_nudge(left: int, step_id: str) -> str:
+    return (
+        f"Harness: {left} of {MAX_CALLS} calls remain in this step; "
+        f"the step must end with {submit_name(step_id)}."
+    )
 
 
 def _execute(step: StepRun, tool_call: ToolCall, journal: tuple[Path, str]) -> tuple[str, str]:
@@ -1193,6 +1311,7 @@ def _execute(step: StepRun, tool_call: ToolCall, journal: tuple[Path, str]) -> t
             "issue_classes": dict(Counter(map(cp0.issue_class, issues))),
             "counts": evidence_counts(arguments),
         }
+        | ({"completeness": completeness(arguments)} if step.step_id == "financials" else {})
     )
     if outcome == "accepted":
         step.accepted_journal = directory
@@ -1272,6 +1391,9 @@ def step_metrics(step: StepRun) -> dict[str, Any]:
         },
         "final_payload_evidence": evidence_counts(final) if final else None,
     }
+    financials = step.step_id == "financials"
+    metrics["completeness_drop"] = completeness_drop(step.submits) if financials else None
+    metrics["final_payload_completeness"] = completeness(final) if financials and final else None
     for name in USAGE:
         metrics |= _summed(step.calls, name)
     tools = step.tools
@@ -1421,7 +1543,7 @@ def step_prompts(
             per_cell = {}
             for cell in cells:
                 prepared = providers[cell.provider].prepare(
-                    cell, system, conversation, tools, DEFAULT_TIMEOUT_SECONDS
+                    cell, system, conversation, tools, DEFAULT_TIMEOUT_SECONDS, step_id=step_id
                 )
                 per_cell[cell.cell_id] = {
                     "request_bytes": len(prepared.payload),
@@ -1658,7 +1780,7 @@ def main(
     first_calls = {}
     for cell in order:
         prepared = providers[cell.provider].prepare(
-            cell, system, first, tools, DEFAULT_TIMEOUT_SECONDS
+            cell, system, first, tools, DEFAULT_TIMEOUT_SECONDS, step_id=CP1_STEPS[0]
         )
         first_calls[cell.cell_id] = {
             "request_bytes": len(prepared.payload),
@@ -1693,6 +1815,15 @@ def main(
             "cost_basis": "computed-from-list-prices",
             "tool_choice": "any first; auto after a 400 naming tool_choice",
             "thinking": {"type": "adaptive"},
+            "cache_control_by_step": CACHE_CONTROL_BY_STEP,
+        },
+        "harness_rules": {
+            "call_limit_nudge": {
+                "from_calls_left": NUDGE_FROM_CALLS_LEFT,
+                "where": "one line appended to the last tool result of each turn after which "
+                "1 to 3 calls remain (first sent with the step's third-last call)",
+                "text": call_nudge(NUDGE_FROM_CALLS_LEFT, "<step>"),
+            }
         },
         "credential": {"recorded": False, **notes},
         "limits": {
