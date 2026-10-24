@@ -94,7 +94,8 @@ from deploy_vii.live.ledger import (
     LedgerState,
 )
 from deploy_vii.live.retention import dump, write_once
-from deploy_vii.live.runner import COHORT, SCHEMA_BISECT_CASE, SCHEMA_CHECK_CASE
+from deploy_vii.live.runner import COHORT
+from deploy_vii.live.schema_check import SCHEMA_BISECT_CASE, SCHEMA_CHECK_CASE
 from deploy_vii.registry import step_modules
 
 USAGE_TOLERANCE_USD = Decimal("0.000001")

@@ -38,7 +38,8 @@ _REDACTED_PAIR = re.compile(rb'(?<!\\)"user_id"\s*:\s*"' + re.escape(REDACTED.en
 # those would otherwise block the paid path with nothing able to lift it. Without OpenAI's code,
 # only "invalid schema" (or "invalid_json_schema") or `response_format` names the schema; a bare
 # "json_schema" can be the request feature ("max_tokens too small for json_schema output").
-# Read here, on the detail before it is withheld (task 7.15 fix round 1); `runner.schema_shaped`.
+# Read here, on the detail before it is withheld (task 7.15 fix round 1);
+# `schema_check.schema_shaped`.
 SCHEMA_WORDS = re.compile(r"invalid[ _](json[ _])?schema|response_format", re.IGNORECASE)
 USAGE_FIELDS = (
     "prompt_tokens",
@@ -371,7 +372,7 @@ def _withheld(result: ChatResult, *, account_id: bool = False) -> ChatResult:
 
     Task 7.15 item 4: the detail is written to `checks/classification.json`, the schema-check
     manifest and its report. Fix round 1: `detail_names_schema` is read on the detail as
-    composed, so withholding changes no schema verdict (`runner.schema_shaped`)."""
+    composed, so withholding changes no schema verdict (`schema_check.schema_shaped`)."""
     detail = result.error_detail
     if detail is None:
         return result

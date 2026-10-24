@@ -36,16 +36,18 @@ from deploy_vii.live.draw import draw
 from deploy_vii.live.ledger import CapExceeded, Ledger
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import (
-    SCHEMA_BISECT_RECORD,
-    SCHEMA_CHECK_RECORD,
     DispatchResult,
-    SchemaCheck,
     StepSpec,
-    check_schema,
     dispatch,
-    schema_rejections,
 )
 from deploy_vii.live.schema import strict_schema
+from deploy_vii.live.schema_check import (
+    SCHEMA_BISECT_RECORD,
+    SCHEMA_CHECK_RECORD,
+    SchemaCheck,
+    check_schema,
+    schema_rejections,
+)
 from deploy_vii.live.settings import load_settings
 from deploy_vii.live.submission import SUPERSEDED_SHAPE, ReadinessSubmission
 from deploy_vii.preparation import PreparedPack, SourceRequest, prepare_source

@@ -72,15 +72,11 @@ from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import (
     COHORT,
     DEFAULT_MAX_TOKENS,
-    SCHEMA_CHECK_MAX_TOKENS,
     STEPS,
     DispatchResult,
-    SchemaCheck,
     StepSpec,
-    check_schema,
     dispatch,
     expected_step,
-    schema_rejections,
 )
 from deploy_vii.live.schema import (
     BISECT_VARIANTS,
@@ -94,6 +90,12 @@ from deploy_vii.live.schema import (
     schema_relaxations,
     schema_shape,
     strict_schema,
+)
+from deploy_vii.live.schema_check import (
+    SCHEMA_CHECK_MAX_TOKENS,
+    SchemaCheck,
+    check_schema,
+    schema_rejections,
 )
 from deploy_vii.live.settings import DEFAULT_SETTINGS, LiveSettings, SettingsError, load_settings
 from deploy_vii.registry import canonical, module_route, modules, regression_cases, step_chain
