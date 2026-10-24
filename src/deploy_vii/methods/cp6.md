@@ -78,3 +78,11 @@ bare number, a `[ref]` chip, a table id or a row ref in a text field.
 
 Status (decision 0007): own limitations restrict CP-6; a blocked ancestor restricts it with
 the inherited "Upstream ... blocked" wording; a failed repair leaves it blocked.
+
+User decision (24 October 2026): the action bias keeps its four values (Overweight, Neutral,
+Underweight, Insufficient Information), and the call band's confidence meter is adopted as
+Python maps it (`call_scale`): Insufficient Information fills one step of five, Low two,
+Medium three and High all five. The differential test
+`test_the_call_scale_is_total_monotone_and_matches_the_reference` holds `CALL_SCALE` to a
+hand-written reference table. The design-system spelling of the action-bias fact on the page
+is still open for M10, in decision 0004 terms.

@@ -1669,7 +1669,7 @@ def test_the_method_text_names_the_tables_and_the_rules_and_states_no_figure() -
         "assumption",
     ):
         assert anchor in brief, anchor
-    keys = {"cp2_refs", "cp3_refs", "cp5_refs", "cp1_facts", "0005", "0007"}
+    keys = {"cp2_refs", "cp3_refs", "cp5_refs", "cp1_facts", "0004", "0005", "0007", "M10"}
     keys |= {"cp2_rows", "cp3_rows", "cp5_rows", "cp5_cp4_rows", "cp5_flagged_claims"}
     assert {f.strip("`") for f in bare_figures(brief)} <= {*REQUIRED_TABLES, *keys}
 
