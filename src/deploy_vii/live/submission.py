@@ -67,8 +67,8 @@ numbers keep their digits) and every changed JSON path is recorded in `Submitted
 reference Python cannot resolve (an unknown or not-ready source, an unknown facility or period,
 an audit explanation whose period or observation the book lacks) is rejected with the validator's
 own wording first (`_validate_prefilled`, mirroring CP-0's uncomposable path); a binding whose
-sub-object does not parse is left as sent, so the shape rejection names the cause and (task
-7.16) the model is never told "Field required" of the binding it was never offered; a payload that
+sub-object does not parse is left as sent, so the shape rejection names the cause, without
+(task 7.16) the "Field required" of the binding the model was never offered; a payload that
 is not a JSON object or cannot be stored as UTF-8 is handed on as received. A missing retained
 step raises ValueError before anything is written. The validators' binding checks are unchanged.
 """
@@ -878,7 +878,8 @@ def submit_model_payload(
     caller can record them even if validation raises. Then every CP-1 step's hash bindings are
     pre-filled (`prefill`; see the module docstring); a payload the pre-fill leaves a marked field
     unset in is validated by `_validate_prefilled` (an unresolvable reference rejected with the
-    validator's wording first, and never "Field required" of a field the sent schema omits)."""
+    validator's wording first; the "Field required" of a field the sent schema omits is dropped,
+    unless, with no unbound reference, those lines are the stage's only issues)."""
     step = STEPS[step_id]
     normalised, resolved = normalise(step.schema, payload)
     if on_normalised is not None:
