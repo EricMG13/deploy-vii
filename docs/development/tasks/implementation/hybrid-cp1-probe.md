@@ -235,3 +235,70 @@ Comparison where the records allow it:
 - **Single-call steps** (opus-medium narrative and readiness) paid cache writes with no reads.
 - **Call budget.** A cell that never submits uses the whole call budget: sonnet-max used 30 calls
   and US$1.66 at source_context.
+
+## 8. Luna at xhigh (batch hybrid-cp1-2)
+
+Evidence only. Decision 0005's amendment superseded Luna as a model-test pool member, so this
+cell informs nothing about adoption. It was run at the user's request after hybrid-cp1-1.
+
+Setup:
+- **Model.** Cell `luna-xhigh`, model `openai/gpt-6-luna`, served as
+  `openai/gpt-6-luna-20260922` (canonical slug).
+- **Effort.** The live catalog (sha256 `3df8a74a…9d`) lists low, medium, high, xhigh and max.
+  xhigh was sent unmapped (`mapped: false`).
+- **Prices.** US$0.20 input and US$0.75 output per million tokens.
+- **Run shape.** The hybrid CP-1 shape and frozen CP-0 journal are the same as above.
+  `max_tokens` 128,000; 3,600 s per step; seed 3282685796; harness commit 9ab6689.
+- **Ledger.** The cell spent against hybrid-cp1-1's OpenRouter ledger
+  (`--openrouter-ledger`, cap US$15, headroom US$9.9424022 at the start).
+- **Artifacts.** `/Users/ericguei/Documents/DEPLOY VII/artifacts/model-tests/hybrid-cp1-2/`
+  (`plan.json`, `batch-summary.json`, `luna-xhigh/…`).
+
+| Step | Verdict | Wall s | Calls | Prompt tok | Completion tok | Reasoning tok | Cached tok | USD settled | Submits | First submit accepted | Issue classes (rejected submits) | Pages read | Citations | Shrink |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| source_context | accepted | 150.9 | 10 | 402,750 | 14,799 | 8,865 | 323,356 | 0.0205 | 2 | no | Quote/locator mismatch ×8 | 26 | 38 | no |
+| financials | accepted | 245.7 | 6 | 265,852 | 35,007 | 9,835 | 192,918 | 0.0285 | 2 | no | binding.financial_review_sha256 ×1, definition.financial_review_sha256 ×1, financial.books.N.periods.N ×2 | 18 | 90 | **yes** |
+| narrative | accepted | 77.9 | 2 | 154,350 | 7,411 | 5,171 | 76,746 | 0.0142 | 1 | yes | – | 0 | 22 | no |
+| readiness | accepted | 160.6 | 3 | 294,595 | 19,252 | 11,897 | 188,173 | 0.0248 | 2 | no | Invalid gap-scope evidence ×1 | 0 | 34 | **yes** |
+
+Cell outcome:
+- **Verdict:** accepted (4/4 steps).
+- **Wall clock:** 635.2 s.
+- **Cost:** US$0.088024530, provider-reported, with nothing held.
+- **Calls:** 21, all classified ok and all served by `openai/gpt-6-luna`.
+- **Shrink flags:**
+  - financials: citations 168 → 90, objects 450 → 242;
+  - readiness: citations 36 → 34.
+- **Invalid tool calls:** four in readiness.
+- **Accepted payload evidence** (citations / limitations / claims / objects):
+  - source_context 38 / 3 / 0 / 46;
+  - financials 90 / 12 / 2 / 242;
+  - narrative 22 / 4 / 3 / 54;
+  - readiness 34 / 0 / 6 / 23.
+
+Against the six hybrid-cp1-1 cells:
+
+| Cell | Wall s | USD | Steps accepted on first submit | Final | Citations, four accepted payloads | Financials citations |
+| --- | --- | --- | --- | --- | --- | --- |
+| luna-xhigh | **635.2** | **0.0880** | 1 of 4 | 4/4 | 184 | 90 |
+| sol-medium | 970.9 | 2.0675 | 3 of 4 | 4/4 | 431 | 268 |
+| sol-high | 1,719.5 | 2.9901 | 3 of 4 | 4/4 | 670 | 381 |
+| opus-medium | 1,708.1 | 9.4578 (computed) | 3 of 4 | 4/4 | 737 | 543 |
+| sonnet-xhigh | 2,522.2 | 8.0547 (computed) | 3 of 4 | 4/4 | 831 | 484 |
+| sonnet-max | 496.4 | 1.6586 (computed) | 0 of 1 | stopped at step 1 | – | – |
+| opus-high | – | 0 | – | skipped by user | – | – |
+
+- **Speed and cost.** Luna was the fastest cell to a module accept and about 23 times cheaper
+  than sol-medium.
+- **First-pass acceptance.** It had the lowest: three of four steps needed a second submit.
+- **Evidence.** Its accepted payloads carry the fewest citations: 184 against 431–831, and in
+  financials 90 against 268–543.
+- **Completeness concern.** Its financials payload is the second submit, which shrank by about
+  half from the first (168 → 90 citations). An accept here says the payload passed the runner's
+  checks, not that it is as complete as the other cells'.
+- **Caveat.** n = 1 and a single issuer, as above.
+
+Spend for this batch: US$0.088024530 against hybrid-cp1-1's OpenRouter ledger. That ledger now
+shows spent US$5.145622330 over 54 attempts, nothing open, no overrun, and remaining
+US$9.854377670 of its US$15 cap. Prior committed across all ledgers after both batches is
+US$56.877314249830.
