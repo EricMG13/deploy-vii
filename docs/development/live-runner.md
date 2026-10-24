@@ -62,7 +62,8 @@ one more record plus its schemas, composer and prompt contract.
 | `context.py` | `PROJECTIONS` (what each later CP-1 step is sent of each retained step), `upstream_text`, `evidence_table`, `PACK_SOURCE_STEPS` and `step_sources` (which steps get the pack's SOURCE blocks; task 7.5). |
 | `submission.py` | `ReadinessSubmission` (the model-facing `source_readiness` schema), `STEPS` (each step's model-facing schema), `compose`, `PREFILLED`, `known_bindings` and `prefill` (every CP-1 hash binding, filled by Python, task 7.0i; the financial dimension strings from the bound source scope, task 7.13), `quality_inputs` (the QA scope the `quality` review binds, task 7.4), `submit_model_payload` (decision 0008). |
 | `schema.py` | `strict_copy` (strict-mode copy of a step schema), `relax` and `relaxations` (the sent copy, task 2.11), `strict_schema` (the relaxed strict copy that is sent and printed), `schema_relaxations`, `normalise` (nulls for omitted defaults back to the default), `json_object` and `exact_json` (the parse and digit-preserving dump `normalise` and `prefill` share), `marked_fields` (a payload's `x-deploy-vii-prefilled` properties), `unverified_keywords`. |
-| `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`; `check_schema`, `schema_rejections` (`live schema-check`, task 2.11). |
+| `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
+| `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
 
 ## Rules and where they are enforced
 
@@ -534,7 +535,7 @@ round 1), so such a 400 is a schema rejection exactly when it was before 7.15 (O
 Runner use. `probe`, `module`, `regression` and `canary` read every `schema-check-attempt/1`
 manifest under their artifact root before the first cell (an unreadable one fails the batch
 before any spend). Only verdicts on the schema count: an `accepted` row, or an HTTP 400 that is
-schema-shaped (`runner.schema_shaped`: provider error code `invalid_json_schema`, or a detail
+schema-shaped (`schema_check.schema_shaped`: provider error code `invalid_json_schema`, or a detail
 saying "invalid schema" (or `invalid_json_schema`) or naming `response_format`; a bare
 `json_schema` can name the request feature and does not count), recorded as `schema_rejection: true` with
 `provider_error_code` in the manifest. The latest such verdict per (model, step, sent schema
