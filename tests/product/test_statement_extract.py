@@ -1,8 +1,16 @@
 """Python statement-line extraction from whitespace-aligned page text (task 8.10, decision "A")."""
 
 from decimal import Decimal
+from types import MappingProxyType
 
-from deploy_vii.statement_extract import ExtractedLine, extract_statement_lines
+import pytest
+
+from deploy_vii.statement_extract import (
+    ExtractedLine,
+    ExtractedTable,
+    extract_pack_statements,
+    extract_statement_lines,
+)
 
 _SMALL = "\n".join(
     (
@@ -144,3 +152,68 @@ def test_prose_and_empty_text_yield_an_empty_table() -> None:
         table = extract_statement_lines(text, "page:8")
         assert table.lines == ()
         assert table.headers == ()
+
+
+def _pack(*sources: tuple[str, tuple[tuple[str, str], ...]]) -> dict[str, object]:
+    return {
+        "schema_version": "pack/1",
+        "sources": [
+            {
+                "source_id": source_id,
+                "spans": [{"locator": locator, "text": text} for locator, text in spans],
+            }
+            for source_id, spans in sources
+        ],
+    }
+
+
+_ROW = "Goodwill        10,441        10,601"
+
+
+def test_pack_extraction_reads_every_span_in_pack_order() -> None:
+    pack = _pack(("a", (("page:2", _ROW), ("page:1", "prose only"))), ("b", (("sheet:x", _ROW),)))
+    tables = extract_pack_statements(pack)
+    assert [table.locator for table in tables] == ["page:2", "page:1", "sheet:x"]
+    assert tables[0] == extract_statement_lines(_ROW, "page:2")
+    assert tables[1] == ExtractedTable(locator="page:1", headers=(), lines=())
+
+
+def test_pack_extraction_restricts_to_the_given_locators_and_is_read_only() -> None:
+    spans = (("page:1", _ROW), ("page:2", _ROW), ("page:3", _ROW))
+    pack = MappingProxyType(_pack(("a", spans)))
+    tables = extract_pack_statements(pack, iter(["page:3", "page:1"]))
+    assert [table.locator for table in tables] == ["page:1", "page:3"]
+    assert extract_pack_statements(pack, ()) == ()
+    assert pack == _pack(("a", spans))
+
+
+def test_pack_extraction_refuses_an_unknown_locator() -> None:
+    pack = _pack(("a", (("page:1", _ROW),)))
+    with pytest.raises(ValueError, match=r"not in the pack: \['page:9'\]"):
+        extract_pack_statements(pack, ["page:1", "page:9"])
+
+
+def test_pack_extraction_refuses_a_locator_two_sources_share() -> None:
+    pack = _pack(("a", (("page:1", _ROW),)), ("b", (("page:1", _ROW),)))
+    with pytest.raises(ValueError, match=r"page:1.*sources 'a' and 'b'"):
+        extract_pack_statements(pack)
+    with pytest.raises(ValueError, match=r"page:1.*sources 'a' and 'b'"):
+        extract_pack_statements(pack, ["page:1"])
+
+
+@pytest.mark.parametrize(
+    ("pack", "message"),
+    [
+        ({}, "pack has no sources list"),
+        ({"sources": "x"}, "pack has no sources list"),
+        ({"sources": [{"source_id": "a"}]}, "source 'a' has no spans list"),
+        ({"sources": [{"spans": []}]}, "a source has no string source_id"),
+        ({"sources": [{"source_id": "a", "spans": [{"locator": "p"}]}]}, r"span 'p'.*no string"),
+        ({"sources": [{"source_id": "a", "spans": [{"text": "t"}]}]}, "a span of source 'a'"),
+        ({"sources": ["x"]}, "a source is not an object"),
+        ({"sources": [{"source_id": "a", "spans": ["x"]}]}, "a span of source 'a' is not an"),
+    ],
+)
+def test_pack_extraction_refuses_a_malformed_pack(pack: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        extract_pack_statements(pack)

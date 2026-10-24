@@ -25,7 +25,7 @@ Rules (docs/development/live-runner.md, "Statement extraction"):
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -176,3 +176,64 @@ def extract_statement_lines(text: str, locator: str) -> ExtractedTable:
             pending = []
     headers = () if first is None else _headers(lines, first)
     return ExtractedTable(locator=locator, headers=headers, lines=tuple(found))
+
+
+def _objects(value: object, missing: str, not_object: str) -> list[Mapping[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise ValueError(missing)
+    objects: list[Mapping[str, object]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError(not_object)
+        objects.append(item)
+    return objects
+
+
+def _pack_spans(pack_json: Mapping[str, object]) -> list[tuple[str, str, str]]:
+    """(source_id, locator, text) of every span in pack order; a malformed pack raises."""
+    found: list[tuple[str, str, str]] = []
+    sources = pack_json.get("sources")
+    for source in _objects(sources, "pack has no sources list", "a source is not an object"):
+        source_id = source.get("source_id")
+        if not isinstance(source_id, str):
+            raise ValueError("a source has no string source_id")
+        of = f"of source {source_id!r}"
+        spans = source.get("spans")
+        for span in _objects(
+            spans, f"source {source_id!r} has no spans list", f"a span {of} is not an object"
+        ):
+            locator, text = span.get("locator"), span.get("text")
+            if not isinstance(locator, str):
+                raise ValueError(f"a span {of} has no string locator")
+            if not isinstance(text, str):
+                raise ValueError(f"span {locator!r} {of} has no string text")
+            found.append((source_id, locator, text))
+    return found
+
+
+def extract_pack_statements(
+    pack_json: Mapping[str, object], locators: Iterable[str] | None = None
+) -> tuple[ExtractedTable, ...]:
+    """One table per span of `sources[*].spans`, in pack order; read-only, no file I/O.
+
+    With `locators` given, only those spans (phase 2 binds them to the step's declared sources).
+    A table names its span by locator only, so a locator two sources share in scope raises
+    rather than return a table whose source is ambiguous; a requested locator that no span has
+    raises too. Every span in scope yields a table, an empty one for a page without data lines.
+    """
+    wanted = None if locators is None else frozenset(locators)
+    owners: dict[str, str] = {}
+    tables: list[ExtractedTable] = []
+    for source_id, locator, text in _pack_spans(pack_json):
+        if wanted is not None and locator not in wanted:
+            continue
+        if locator in owners:
+            raise ValueError(
+                f"locator {locator!r} is in sources {owners[locator]!r} and {source_id!r}; an "
+                "extracted table names its span by locator only"
+            )
+        owners[locator] = source_id
+        tables.append(extract_statement_lines(text, locator))
+    if wanted is not None and (missing := sorted(wanted - owners.keys())):
+        raise ValueError(f"locators not in the pack: {missing}")
+    return tuple(tables)
