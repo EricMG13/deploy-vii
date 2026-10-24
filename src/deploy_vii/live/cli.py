@@ -57,7 +57,14 @@ from deploy_vii.live.ledger import (
     LedgerError,
     utc_stamp,
 )
-from deploy_vii.live.loop import LIMITS, NO_SUBMIT, TOOL_STEPS, ToolStepResult, run_tool_step
+from deploy_vii.live.loop import (
+    LIMITS,
+    NO_SUBMIT,
+    TOOL_SET_LIMITS,
+    TOOL_STEPS,
+    ToolStepResult,
+    run_tool_step,
+)
 from deploy_vii.live.prompts import schema_text
 from deploy_vii.live.reconcile import (
     USAGE_SCHEMA,
@@ -114,6 +121,8 @@ from deploy_vii.live.settings import (
 )
 from deploy_vii.live.tools import ToolRules
 from deploy_vii.registry import (
+    PACK_TOOLS,
+    SUBMIT_ONLY,
     canonical,
     module_route,
     modules,
@@ -866,9 +875,13 @@ def _tool_loop_lines(tool_loop: ToolLoop | None) -> list[str]:
         if floor is None
         else f"completeness floor: {floor} statement lines per expected cell"
     )
+    calls = (
+        f"{TOOL_SET_LIMITS[PACK_TOOLS].max_calls} calls on pack-tool steps and "
+        f"{TOOL_SET_LIMITS[SUBMIT_ONLY].max_calls} on submit-only steps"
+    )
     return [
-        f"- Tool loop: {plans}; per step at most {LIMITS.max_calls} calls, {LIMITS.max_submits} "
-        f"submits and {LIMITS.deadline_s} s, {LIMITS.max_tokens} max tokens per call; "
+        f"- Tool loop: {plans}; per step at most {calls}, {LIMITS.max_submits} submits and "
+        f"{LIMITS.deadline_s} s, {LIMITS.max_tokens} max tokens per call; "
         f"{floor_text}"
     ]
 

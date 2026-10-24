@@ -26,14 +26,15 @@ reconcile paths of tasks 7.11, 7.13 and 7.14 read, so an interrupted call is rec
 interrupted attempt. Each sent call also keeps its tool transcript (`tool-calls.jsonl`). A step
 whose first call is already reserved or retained is never run again (`_started`).
 
-Limits per step (`ToolLimits`, the harness's): 30 calls, 3 submits, 3,600 s of wall clock and
-128,000 output tokens per call; a call may use the rest of the step's wall clock. From three
-calls left, each turn's tool results are followed by a Python-owned user message saying so
-(harness review C6: never inside tool or pack text). A transport, timeout or stream failure
-(`transient`) is retried once: the failed call is recorded and settled, the retry is a new call
-within the same budgets and is never a submit; a second failure in a row ends the step. An
-in-flight 402 is waited out and re-sent once per step, as `runner.dispatch` does (task 7.8); any
-other 402 raises CreditExhausted once the call is sealed.
+Limits per step (`ToolLimits`, the harness's): 30 calls (6 on a submit-only step, task 8.9 fix
+round 1: `limits_for`), 3 submits, 3,600 s of wall clock and 128,000 output tokens per call; a
+call may use the rest of the step's wall clock. From three calls left, each turn's tool results
+are followed by a Python-owned user message saying so (harness review C6: never inside tool or
+pack text). A transport, timeout or stream failure (`transient`) is retried once: the failed
+call is recorded and settled, the retry is a new call within the same budgets and is never a
+submit; a second failure in a row ends the step. An in-flight 402 is waited out and re-sent
+once per step, as `runner.dispatch` does (task 7.8); any other 402 raises CreditExhausted
+once the call is sealed.
 
 Judging: every submit is judged as the step's current try on the runner's trusted path
 (`submission.submit_model_payload`, then `runner.journal_outcome`) in a scratch copy of the
@@ -127,7 +128,7 @@ from deploy_vii.live.tools import (
     submit_name,
     tool_specs,
 )
-from deploy_vii.registry import PACK_TOOLS, ToolSet, tool_loop_steps, tool_set
+from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, ToolSet, tool_loop_steps, tool_set
 from deploy_vii.source_context import SourceContextReview
 
 TOOL_STEPS = tool_loop_steps()
@@ -157,6 +158,17 @@ class ToolLimits:
 
 
 LIMITS = ToolLimits()
+# Task 8.9 fix round 1 (user decision, 24 Oct 2026): a submit-only step has 6 calls, so a model
+# that keeps calling a refused tool stops early; a pack-tool step keeps the harness's 30.
+TOOL_SET_LIMITS: Mapping[ToolSet, ToolLimits] = {
+    PACK_TOOLS: LIMITS,
+    SUBMIT_ONLY: replace(LIMITS, max_calls=6),
+}
+
+
+def limits_for(step_id: str) -> ToolLimits:
+    """The step's limits, from its registry tool set (`registry.tool_set`)."""
+    return TOOL_SET_LIMITS[tool_set(step_id)]
 
 
 def call_nudge(left: int, step_id: str, max_calls: int) -> str:
@@ -544,7 +556,7 @@ def run_tool_step(
     bytes_per_token: Decimal,
     effort: StepEffort,
     rules: ToolRules,
-    limits: ToolLimits = LIMITS,
+    limits: ToolLimits | None = None,
     clock: Callable[[], str] = utc_stamp,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -557,7 +569,9 @@ def run_tool_step(
     caller's report keeps the calls already spent). On exhausted credit the step has ended, so
     its last judged submit, if any, is already in the live journal; on a cap refusal or any
     other raise mid-step the live journal is untouched (the submits were judged in scratch only)
-    and the ticket stays pending, with this try started and never re-run (`_started`)."""
+    and the ticket stays pending, with this try started and never re-run (`_started`). Without
+    `limits`, the step's tool set decides them (`limits_for`)."""
+    limits = limits_for(spec.step_id) if limits is None else limits
     step = _prepare(spec, store, ticket_id, ledger, pool, seed, writer, effort, rules, limits)
     loaded = load_key_with_note(key_path, key_index)
     if loaded.tokens_found > 1:

@@ -5,7 +5,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -29,10 +29,12 @@ from deploy_vii.live.loop import (
     LIMIT,
     LIMITS,
     NO_SUBMIT,
+    TOOL_SET_LIMITS,
     ToolLimits,
     ToolStepResult,
     call_nudge,
     issue_class,
+    limits_for,
     run_tool_step,
     transient,
 )
@@ -212,7 +214,7 @@ class Rig:
         *,
         effort: StepEffort = MEDIUM,
         rules: ToolRules | None = None,
-        limits: ToolLimits = LIMITS,
+        limits: ToolLimits | None = None,
         sleep: Callable[[float], None] = no_wait,
         on_stop: Callable[[ToolStepResult], None] | None = None,
         step_id: str = "source_context",
@@ -988,6 +990,37 @@ def test_a_rejected_new_step_finishes_its_attempt_after_its_submits(tmp_path: Pa
     assert not result.attempt_pending and result.issues
     attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
     assert attempt.status == "finished" and attempt.issues == result.issues
+
+
+def test_the_call_limit_is_the_tool_sets_six_or_thirty_from_the_registry() -> None:
+    """Fix round 1 (user decision, 24 Oct 2026): a submit-only step has 6 calls, a pack-tool
+    step 30; the limit follows the registry's tool set, never a per-step list."""
+    assert {kind: limits.max_calls for kind, limits in TOOL_SET_LIMITS.items()} == {
+        PACK_TOOLS: 30,
+        SUBMIT_ONLY: 6,
+    }
+    for step_id, kind in tool_sets().items():
+        assert limits_for(step_id) == replace(LIMITS, max_calls=30 if kind == PACK_TOOLS else 6)
+
+
+@pytest.mark.parametrize("step_id", sorted(s for s in STARTS if tool_set(s) == SUBMIT_ONLY))
+def test_a_submit_only_step_calling_a_refused_tool_ends_at_its_sixth_call(
+    step_id: str, tmp_path: Path
+) -> None:
+    rig = step_rig(tmp_path, step_id)
+    script = rig.script(*(search(f"s{n}") for n in range(10)))
+    result = rig.run(script, step_id=step_id)  # the registry's limits, not the rig's
+    assert (result.verdict, result.status) == (LIMIT, NO_SUBMIT)
+    assert str(result.verdict_reason).startswith("6 calls, ")
+    assert len(script.requests) == 6 and not result.submits
+    records = rig.ledger.state().attempts
+    assert [r.attempt_id for r in records] == [f"{rig.ticket}-{step_id}-{n}" for n in range(1, 7)]
+    assert all(r.status == "settled" for r in records)
+    assert rig.ledger.state().spent == result.cost_usd
+    limits = request_of(rig, step_id, 6)["tool_loop"]["limits"]
+    assert limits["max_calls"] == 6
+    texts = tool_messages(script)
+    assert texts and all(t.startswith("error: unknown tool 'search_pack'") for t in texts)
 
 
 # --- task 8.9 properties (decision 0012) -------------------------------------------------------
