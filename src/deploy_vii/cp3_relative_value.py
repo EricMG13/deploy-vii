@@ -119,21 +119,19 @@ NONE = "none"
 # Ruling 3: action phrases, a final recommendation, a recovery conclusion and an external peer
 # ranking stay prohibited; an ordering of the issuer's own instruments does not.
 PROHIBITED_KINDS = ("peer ranking", "instrument action", "recovery conclusion")
-# A text that cites indicative talk only may not word it as a market level.
+# A text that cites indicative talk only may not word it as a market level: the verbs that
+# assert where an instrument trades. Nouns ("market level") are not listed, so an honest
+# negation ("talk, not a market level") passes (confidence review).
 LEVEL_PHRASES = (
     "trades at",
     "traded at",
     "trading at",
-    "trading level",
     "quoted at",
     "is quoted",
     "are quoted",
     "priced at",
     "bid at",
     "offered at",
-    "market level",
-    "market price",
-    "secondary level",
     "changed hands",
 )
 # Wording that marks a quote as indicative talk: an `observed` row never quotes it.
@@ -516,8 +514,16 @@ def _bind_evidence(
     market = upstream.market_sources
     kinds: dict[QuoteKey, str] = {}
     citations: dict[QuoteKey, Citation] = {}
+    first: dict[QuoteKey, int] = {}
     issues: list[str] = []
     for index, row in enumerate(submission.market_evidence):
+        # One row per quoted span: a basis quote names its row, so a span quoted twice (under
+        # two kinds, say) would leave the row it names to submission order.
+        if row.quote is not None and (seen := first.setdefault(_key(row.quote), index)) != index:
+            issues.append(
+                f"market_evidence[{index}]: quotes the same span as market_evidence[{seen}] "
+                f"({row.quote.source_id} {row.quote.locator})"
+            )
         path = f"market_evidence[{index}]"
         quote = row.quote
         if row.kind == NONE:

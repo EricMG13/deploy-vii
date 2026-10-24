@@ -489,6 +489,21 @@ def test_indicative_talk_is_never_worded_as_a_market_level() -> None:
     assert issues_of(valuation(instruments=(level, *instruments()[1:]))) == ()
 
 
+def test_a_span_is_quoted_by_one_market_evidence_row_only() -> None:
+    """Confidence review: a span quoted twice under two kinds was re-kinded by the later row."""
+    again = evidence()[0].model_copy(update={"kind": "indicative_talk"})
+    found = issues_of(valuation(market_evidence=(*evidence(), again)))
+    assert (
+        "market_evidence[3]: quotes the same span as market_evidence[0] (market-sheet line:2)"
+    ) in found
+
+
+def test_talk_stated_as_not_a_level_is_accepted() -> None:
+    """Confidence review: the guard matches level verbs, not an honest negation."""
+    honest = evidence()[2].model_copy(update={"limitation": "Indicative talk, not a market level"})
+    assert issues_of(valuation(market_evidence=(*evidence()[:2], honest))) == ()
+
+
 def test_talk_only_evidence_caps_and_limits() -> None:
     talk = evidence()[2]
     rows = tuple(
