@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from hypothesis import find, given, settings
+from hypothesis import example, find, given, settings
 from hypothesis import strategies as st
 
 import deploy_vii.source_context as source_context_module
@@ -1070,6 +1070,26 @@ def _prefill_at_base(
 
 @settings(max_examples=1000, deadline=None)
 @given(_PERIOD_TYPES, _SCOPE_KINDS, _DAYS, _DAYS, _DAYS, _DAYS)
+@example(
+    "FY", "historical_duration", None, date(2024, 12, 31), None, date(2024, 12, 31)
+)  # scope start None, period start None
+@example(
+    "PERIOD_END", "period_end", date(2024, 1, 1), date(2024, 12, 31), None, date(2024, 12, 31)
+)  # PERIOD_END scope with a start date
+@example(
+    "FY",
+    "historical_duration",
+    date(2024, 1, 1),
+    date(2024, 12, 31),
+    date(2024, 1, 1),
+    date(2025, 12, 31),
+)  # unequal end dates
+@example(
+    "FY", "historical_duration", date(2024, 1, 1), None, date(2024, 1, 1), date(2024, 12, 31)
+)  # scope end None
+@example(
+    "FY", "historical_duration", date(2024, 1, 1), date(2024, 12, 31), date(2024, 1, 1), None
+)  # period end None
 def test_the_scope_predicate_equals_both_callers_rule_at_base(
     period_type: str,
     period_kind: str,
