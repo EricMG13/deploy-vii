@@ -24,7 +24,9 @@ from deploy_vii.live.submission import STEPS, submit_model_payload
 from deploy_vii.live.tools import (
     ABSENCE,
     ABSENCE_MARKERS,
+    EXTRACT,
     INCOMPLETE,
+    MAX_PAGES_PER_EXTRACT,
     UNBACKED_ABSENCE,
     UNREAD,
     UNREAD_PAGE,
@@ -41,11 +43,13 @@ from deploy_vii.live.tools import (
     tool_specs,
     unread_citation_issues,
 )
+from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import (
     PACK_TOOLS,
     STEP_CHAINS,
     SUBMIT_ONLY,
     StepChain,
+    extract_tool_steps,
     pack_tool_steps,
     step_modules,
     tool_loop_steps,
@@ -173,7 +177,7 @@ def test_a_request_with_tools_drops_the_response_format_and_copies_the_conversat
     body = request.body()
     assert "response_format" not in body and body["tool_choice"] == "required"
     assert body["messages"][1] == turn and body["messages"][1] is not turn
-    assert body["tools"][2]["function"]["name"] == "submit_financials"
+    assert body["tools"][3]["function"]["name"] == "submit_financials"
     with pytest.raises(ValueError, match="together"):
         replace(request, tool_choice=None)
     with pytest.raises(ValueError, match="together"):
@@ -613,3 +617,135 @@ def test_corpus_refuses_a_verdict_that_holds_a_tool_loop_rule(tmp_path: Path) ->
     (directory / "output.md").write_text("{}")
     with pytest.raises(corpus.CorpusError, match="tool-loop evidence rule"):
         corpus.entry_from_attempt(directory)
+
+
+# --- extract_statements (task 8.10b, user decision "A" phase 2) ------------------------------
+
+STATEMENT_PAGE = "\n".join(
+    (
+        "                       December 31,",
+        "(In millions)          2025          2024",
+        "CURRENT ASSETS:",
+        "   Cash               $    887    $    866",
+        "Accumulated deficit      (3,303)    (2,801)",
+        "Revenue (1)        (1)        100        200",
+        "Total 1,234 5,678        9,012        3,456",
+    )
+)
+DECK_PAGE = "Deck revenue        1        2"
+
+
+def statement_pack(store: Execution) -> PreparedPack:
+    """The synthetic pack with S1's spans as pages 1-9 (page:2 a statement page) and a second
+    source `deck` holding a statement page too."""
+    pack = store.pack()
+    source = pack.sources[0]
+    spans = tuple(
+        Span(locator=f"page:{n}", text=STATEMENT_PAGE if n == 2 else f"Page {n} revenue")
+        for n in range(1, 10)
+    )
+    deck = source.model_copy(
+        update={"source_id": "deck", "spans": (Span(locator="page:1", text=DECK_PAGE),)}
+    )
+    paged_source = source.model_copy(update={"spans": spans})
+    return pack.model_copy(update={"sources": (paged_source, deck)})
+
+
+def names(specs: tuple[dict[str, Any], ...]) -> list[str]:
+    return [spec["function"]["name"] for spec in specs]
+
+
+def test_only_financials_is_offered_extract_statements() -> None:
+    assert extract_tool_steps() == {"financials"}
+    assert names(tool_specs("financials")) == [
+        "search_pack",
+        "read_pages",
+        EXTRACT,
+        "submit_financials",
+    ]
+    for step in tool_sets():
+        if step != "financials":
+            assert EXTRACT not in names(tool_specs(step)), step
+            assert EXTRACT not in names(tool_specs(step, PACK_TOOLS)), step
+    assert names(tool_specs("financials", SUBMIT_ONLY)) == ["submit_financials"]
+    (spec,) = (s for s in tool_specs("financials") if s["function"]["name"] == EXTRACT)
+    parameters = spec["function"]["parameters"]
+    assert parameters["required"] == ["source_id", "locators"]
+    assert parameters["additionalProperties"] is False
+    assert parameters["properties"]["locators"]["maxItems"] == MAX_PAGES_PER_EXTRACT == 8
+    assert parameters["properties"]["locators"]["minItems"] == 1
+
+
+def test_the_extract_tool_steps_quote_the_pack() -> None:
+    cp1 = next(c for c in STEP_CHAINS if c.module_id == "CP-1")
+    assert cp1.extract_tools == {"financials"}
+    assert all(not c.extract_tools for c in STEP_CHAINS if c.module_id != "CP-1")
+    with pytest.raises(ValueError, match="extracts statements in narrative, not one of its"):
+        StepChain(**{**cp1.__dict__, "extract_tools": frozenset({"narrative"})})
+    with pytest.raises(ValueError, match="extracts statements in nowhere, not one of its"):
+        StepChain(**{**cp1.__dict__, "extract_tools": frozenset({"nowhere"})})
+    assert extract_tool_steps((cp1,)) == {"financials"}
+
+
+def test_extract_statements_renders_the_lines_as_delimited_source_data(case: Case) -> None:
+    tools = PackTools(statement_pack(case.store), sources=("S1",))
+    text = tools.extract_statements({"source_id": "S1", "locators": ["page:2", "page:3"]})
+    digest = tools.ready["S1"].sha256
+    assert text == (
+        f"<<<SOURCE id=S1 sha256={digest}>>>\n"
+        "locator=page:2 | statement lines extracted by Python from this page's text\n"
+        "header:                        December 31,\n"
+        "header: (In millions)          2025          2024\n"
+        "line_no | label | caption | raw_values | flags\n"
+        "4 | Cash | CURRENT ASSETS: | 887 866 | -\n"
+        "5 | Accumulated deficit | CURRENT ASSETS: | (3,303) (2,801) | -\n"
+        "6 | Revenue (1) | CURRENT ASSETS: | (1) 100 200 | more_values_than_header_years,"
+        "label_ends_numeric\n"
+        "7 | Total 1,234 5,678 | CURRENT ASSETS: | 9,012 3,456 | label_ends_numeric\n"
+        "<<<END>>>\n"
+        f"<<<SOURCE id=S1 sha256={digest}>>>\n"
+        "locator=page:3 | statement lines extracted by Python from this page's text\n"
+        "no statement lines extracted from this page\n"
+        "<<<END>>>"
+    )
+    # A page extracted counts as read: the model saw its lines (the cited-page rule).
+    assert tools.seen().read == {("S1", "page:2"), ("S1", "page:3")}
+    cited = json.dumps({"x": {"source_id": "S1", "locator": "page:2", "quote": "Cash"}})
+    assert unread_citation_issues(cited, tools.seen()) == ()
+    assert unread_citation_issues(cited, Seen()) == (f"{UNREAD_PAGE}: S1 page:2",)
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        ({"source_id": "deck", "locators": ["page:1"]}, "deck is not one of the sources this"),
+        ({"source_id": "S9", "locators": ["page:1"]}, "unknown source_id 'S9'"),
+        ({"source_id": "S1", "locators": ["page:99"]}, "page:99 is not a located span of S1"),
+        ({"source_id": "S1", "locators": ["page:02"]}, "page:02 is not a located span of S1"),
+        (
+            {"source_id": "S1", "locators": [f"page:{n}" for n in range(1, 10)]},
+            "at most 8 pages per call",
+        ),
+        ({"source_id": "S1", "locators": "page:2"}, "locators must be a list of page:N"),
+        ({"source_id": "S1", "locators": {"page:2": 1}}, "locators must be a list of page:N"),
+        ({"source_id": "S1", "locators": None}, "locators must be a list of page:N"),
+        ({"source_id": "S1", "locators": []}, "locators must name at least one page"),
+        ({"source_id": "S1", "locators": [2]}, "locators must be a list of page:N"),
+        ({"source_id": "S1", "locators": ["sheet:x"]}, "locators must be a list of page:N"),
+        ({"source_id": "S1", "locators": ["page:2", "page:2"]}, "locators repeat page:2"),
+        ({"source_id": "S1"}, "missing"),
+        ({"source_id": "S1", "locators": ["page:2"], "pages": 1}, "unexpected"),
+    ],
+)
+def test_an_extract_call_outside_the_declared_sources_or_the_pack_is_refused(
+    case: Case, raw: dict[str, Any], reason: str
+) -> None:
+    tools = PackTools(statement_pack(case.store), sources=("S1",))
+    with pytest.raises(ToolError, match=reason):
+        tools.extract_statements(raw)
+    assert tools.seen() == Seen()  # a refused call records nothing
+
+
+def test_extract_statements_needs_page_locators(case: Case) -> None:
+    with pytest.raises(ToolError, match="has no page:N locators"):
+        PackTools(case.store.pack()).extract_statements({"source_id": "S1", "locators": ["page:1"]})

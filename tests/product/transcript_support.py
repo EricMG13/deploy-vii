@@ -22,6 +22,12 @@ Two kinds of entry:
 A system prompt changed deliberately after the recording names the change (`system_prompt.
 changed_by`, a task or decision) and the hash it now has; any other change fails. Its other
 messages, its tools and every tool result must still be identical.
+
+A tool added to the step after the recording (task 8.10b) is named the same way: `tools_added`
+lists the added tools' names and `tools_added_by` the dated reason. The check requires each
+named tool exactly once in every replayed request, strips only those specs, and the rest must
+then hash exactly as recorded, so any other change to the tool list (or a tool named but not
+sent) still fails.
 """
 
 import hashlib
@@ -97,6 +103,7 @@ class Replayed:
     result: ToolStepResult
     requests: list[dict[str, str]]
     tool_results: list[str]
+    bodies: list[dict[str, Any]]
 
     def record(self) -> dict[str, Any]:
         return {
@@ -193,8 +200,31 @@ def replay(
         sleep=lambda _: None,
     )
     return Replayed(
-        result, [request_record(body) for body in sent], list(_tool_results(writer, pinned, result))
+        result,
+        [request_record(body) for body in sent],
+        list(_tool_results(writer, pinned, result)),
+        sent,
     )
+
+
+def _without_added_tools(
+    replayed: Replayed, added: list[str]
+) -> tuple[list[dict[str, str]], str | None]:
+    """The request records with the named added tools stripped, or the first call that does
+    not carry each named tool exactly once (as a reason)."""
+    records: list[dict[str, str]] = []
+    for number, body in enumerate(replayed.bodies, 1):
+        tools = body.get("tools", [])
+        sent = [spec["function"]["name"] for spec in tools]
+        for name in added:
+            if sent.count(name) != 1:
+                return [], (
+                    f"call {number}: tools_added names {name}, which the request carries "
+                    f"{sent.count(name)} times"
+                )
+        kept = [spec for spec in tools if spec["function"]["name"] not in added]
+        records.append(request_record({**body, "tools": kept}))
+    return records, None
 
 
 def start_journal(entry: dict[str, Any], repository: Path, work: Path) -> Path | None:
@@ -232,7 +262,16 @@ def check(entry: dict[str, Any], work: Path, repository: Path = REPOSITORY_ROOT)
                 return "evidence-changed", f"{entry['transcript']}/{name} does not hash as recorded"
         if Execution(start).pack().content_hash() != entry["pack_sha256"]:
             return "evidence-changed", "the starting journal's pack does not hash as recorded"
-    replayed = replay(entry, start, work / "plain", repository=repository).record()
+    added = entry.get("tools_added")
+    if added is not None and not entry.get("tools_added_by"):
+        return "entry-invalid", "tools_added needs tools_added_by"
+    plain = replay(entry, start, work / "plain", repository=repository)
+    replayed = plain.record()
+    if added is not None:
+        stripped, problem = _without_added_tools(plain, added)
+        if problem is not None:
+            return "request-changed", problem
+        replayed["requests"] = stripped
     expected = entry["expected"]
     system = entry.get("system_prompt", {})
     if len(replayed["requests"]) != len(expected["requests"]):

@@ -112,6 +112,7 @@ from deploy_vii.live.schema_check import schema_shaped
 from deploy_vii.live.settings import EFFORT_LADDER, StepEffort
 from deploy_vii.live.submission import submit_model_payload
 from deploy_vii.live.tools import (
+    EXTRACT,
     INCOMPLETE,
     READ,
     SEARCH,
@@ -128,7 +129,14 @@ from deploy_vii.live.tools import (
     submit_name,
     tool_specs,
 )
-from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, ToolSet, tool_loop_steps, tool_set
+from deploy_vii.registry import (
+    PACK_TOOLS,
+    SUBMIT_ONLY,
+    ToolSet,
+    extract_tool_steps,
+    tool_loop_steps,
+    tool_set,
+)
 from deploy_vii.source_context import SourceContextReview
 
 TOOL_STEPS = tool_loop_steps()
@@ -773,6 +781,8 @@ def _execute(
             return "ok", step.tools.search_pack(raw), None
         if name == READ and step.tools is not None:
             return "ok", step.tools.read_pages(raw), None
+        if name == EXTRACT and step.tools is not None and step.step_id in extract_tool_steps():
+            return "ok", step.tools.extract_statements(raw), None
         if name != submit_name(step.step_id):
             raise ToolError(f"unknown tool {name!r}")
     except json.JSONDecodeError:

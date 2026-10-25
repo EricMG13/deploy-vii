@@ -37,6 +37,15 @@ offered its submit alone. Each step applies the rules its contract can fail
 (`applicable_rules`): CP-1's four stages both, as 8.0d set them; CP-0, CP-1A, CP-3 and CP-4 the
 cited-page rule, and CP-1A and CP-4 the absence rule over their `ABSENCE_MARKERS` (fix round 1);
 submit-only steps none.
+
+Task 8.10b (user decision "A", phase 2): a step in the registry's `extract_tool_steps()` (CP-1's
+`financials` only) is offered a fourth tool, `extract_statements`: the statement lines Python
+extracts from up to `MAX_PAGES_PER_EXTRACT` pages of one declared source
+(`deploy_vii.statement_extract`), rendered as SOURCE blocks: per page its locator, raw header
+lines, then `line_no | label | caption | raw_values | flags`. A page it returns counts as read
+for the cited-page rule (the model saw its printed lines), as `read_pages` does. A source
+outside the step's declared sources, a locator the source does not hold, more than
+`MAX_PAGES_PER_EXTRACT` pages or malformed locators are a refused call (`ToolError`).
 """
 
 import json
@@ -55,15 +64,20 @@ from deploy_vii.live.prompts import block, span_line
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.submission import STEPS
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.registry import SUBMIT_ONLY, ToolSet, step_chain, tool_set
+from deploy_vii.registry import SUBMIT_ONLY, ToolSet, extract_tool_steps, step_chain, tool_set
 from deploy_vii.source_context import ReportingScope, SourceContextReview, scope_matches_period
+from deploy_vii.statement_extract import ExtractedTable, extract_statement_lines
 
 MAX_PAGES_PER_READ = 5
+# Task 8.10b: an extracted page is compact (one row per printed data line), so a call may name
+# more pages than `read_pages` returns.
+MAX_PAGES_PER_EXTRACT = 8
 MAX_HITS = 15
 DEFAULT_HITS = 10
 SNIPPET_CHARS = 300
 TOOL_CHOICE = "required"
-SEARCH, READ = "search_pack", "read_pages"
+SEARCH, READ, EXTRACT = "search_pack", "read_pages", "extract_statements"
+EXTRACT_COLUMNS = "line_no | label | caption | raw_values | flags"
 _PAGE = re.compile(r"page:([0-9]+)")
 # A fiscal year in days, inclusive of both ends: 52 weeks (364) to 53 weeks (371).
 FISCAL_YEAR_DAYS = range(364, 372)
@@ -114,13 +128,39 @@ def submit_spec(step_id: str) -> dict[str, Any]:
     )
 
 
+def extract_spec() -> dict[str, Any]:
+    return _function(
+        EXTRACT,
+        "The statement lines Python extracted from pages of one source (at most "
+        f"{MAX_PAGES_PER_EXTRACT} per call), each page as a SOURCE block with its locator and "
+        f"raw header lines, then one row per printed data line: {EXTRACT_COLUMNS}. Labels and "
+        "raw_values are verbatim from the page (`$` dropped; `(n)` is negative; a dash is nil).",
+        {
+            "type": "object",
+            "properties": {
+                "source_id": {"type": "string"},
+                "locators": {
+                    "type": "array",
+                    "items": {"type": "string", "pattern": "^page:[0-9]+$"},
+                    "minItems": 1,
+                    "maxItems": MAX_PAGES_PER_EXTRACT,
+                },
+            },
+            "required": ["source_id", "locators"],
+            "additionalProperties": False,
+        },
+    )
+
+
 def tool_specs(step_id: str, kind: ToolSet | None = None) -> tuple[dict[str, Any], ...]:
     """The tools a tool-loop step is offered, by its tool set (`kind`, default the registry's,
     task 8.9): `pack` is `search_pack`, `read_pages` and `submit_<step_id>`, as the harness
-    offers them; `submit-only` is `submit_<step_id>` alone."""
+    offers them, with `extract_statements` before the submit for an `extract_tool_steps()`
+    step (task 8.10b); `submit-only` is `submit_<step_id>` alone."""
     kind = tool_set(step_id) if kind is None else kind
     if kind == SUBMIT_ONLY:
         return (submit_spec(step_id),)
+    extract = (extract_spec(),) if step_id in extract_tool_steps() else ()
     return (
         _function(
             SEARCH,
@@ -153,6 +193,7 @@ def tool_specs(step_id: str, kind: ToolSet | None = None) -> tuple[dict[str, Any
                 "additionalProperties": False,
             },
         ),
+        *extract,
         submit_spec(step_id),
     )
 
@@ -283,9 +324,62 @@ class PackTools:
             self.read.add((source_id, span.locator))
         return "\n".join(parts)
 
+    def extract_statements(self, raw: Mapping[str, Any]) -> str:
+        """The statement lines of the named pages of one declared source, as SOURCE blocks
+        (task 8.10b); every page returned is recorded as read. A refused call records nothing."""
+        _arguments(raw, ("source_id", "locators"))
+        source_id = self._source(raw["source_id"])
+        locators = raw["locators"]
+        if not isinstance(locators, list) or not all(
+            isinstance(item, str) and _PAGE.fullmatch(item) for item in locators
+        ):
+            raise ToolError("bad arguments: locators must be a list of page:N locators")
+        if not locators:
+            raise ToolError("bad arguments: locators must name at least one page")
+        if len(locators) > MAX_PAGES_PER_EXTRACT:
+            raise ToolError(f"bad arguments: at most {MAX_PAGES_PER_EXTRACT} pages per call")
+        if repeated := sorted({item for item in locators if locators.count(item) > 1}):
+            raise ToolError(f"bad arguments: locators repeat {', '.join(repeated)}")
+        if not self.pages[source_id]:
+            raise ToolError(f"source {source_id} has no page:N locators")
+        spans = {span.locator: span for span in self.pages[source_id].values()}
+        if unknown := [item for item in locators if item not in spans]:
+            raise ToolError(f"{', '.join(unknown)} is not a located span of {source_id}")
+        digest = str(self.ready[source_id].sha256)
+        parts = [
+            block(
+                "SOURCE",
+                source_id,
+                digest,
+                extracted_body(
+                    extract_statement_lines(spans[item].text, item, source_id=source_id)
+                ),
+            )
+            for item in locators
+        ]
+        self.read.update((source_id, item) for item in locators)
+        return "\n".join(parts)
+
     def seen(self) -> "Seen":
         """What the model has been shown so far, frozen (a submit is judged on this)."""
         return Seen(frozenset(self.read), tuple(self.searched))
+
+
+def extracted_body(table: ExtractedTable) -> str:
+    """One extracted page as `extract_statements` renders it inside its SOURCE block: the
+    locator, each raw header line, then a row per data line (`EXTRACT_COLUMNS`; raw values
+    space-separated, `-` for no caption or no flag)."""
+    rows = [f"locator={table.locator} | statement lines extracted by Python from this page's text"]
+    rows += [f"header: {header.rstrip()}" for header in table.headers]
+    if not table.lines:
+        return "\n".join([*rows, "no statement lines extracted from this page"])
+    rows.append(EXTRACT_COLUMNS)
+    rows += [
+        f"{line.line_no} | {line.label} | {line.caption or '-'} | {' '.join(line.raw_values)} | "
+        f"{','.join(line.flags) or '-'}"
+        for line in table.lines
+    ]
+    return "\n".join(rows)
 
 
 @dataclass(frozen=True)

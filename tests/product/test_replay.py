@@ -1004,3 +1004,61 @@ def test_a_harness_transcript_whose_reply_file_changed_is_a_failure(tmp_path: Pa
         (transcript / name).write_bytes(b"{}")
     status, reason = transcript_support.check(entry, tmp_path / "w", repository=tmp_path / "repo")
     assert status == "evidence-changed" and reason.endswith("does not hash as recorded")
+
+
+# --- task 8.10b: a named tool added after the recording ---------------------------------------
+
+FINANCIALS_TRANSCRIPTS = transcript_support.TRANSCRIPT_ROOT / "financials"
+SYNTHETIC_FINANCIALS = FINANCIALS_TRANSCRIPTS / "synthetic-search-accept.json"
+
+
+def test_only_the_financials_entries_name_an_added_tool() -> None:
+    named = {
+        f"{path.parent.name}/{path.stem}": load_entry(path).get("tools_added")
+        for path in TRANSCRIPTS
+    }
+    assert {key: value for key, value in named.items() if value is not None} == {
+        "financials/hybrid-cp1-6-sol-medium": ["extract_statements"],
+        "financials/synthetic-search-accept": ["extract_statements"],
+    }
+    for path in FINANCIALS_TRANSCRIPTS.glob("*.json"):
+        assert load_entry(path)["tools_added_by"].startswith("task 8.10b (25 Oct 2026)")
+
+
+def test_a_changed_tool_list_without_a_named_tool_still_fails(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    for key in ("tools_added", "tools_added_by"):
+        del entry[key]
+    status, reason = transcript_support.check(entry, tmp_path)
+    assert (status, reason) == ("request-changed", "call 1: the conversation, tools or parameters")
+
+
+def test_a_named_tool_the_request_does_not_carry_fails(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["tools_added"] = ["extract_statements", "no_such_tool"]
+    status, reason = transcript_support.check(entry, tmp_path / "a")
+    assert (status, reason) == (
+        "request-changed",
+        "call 1: tools_added names no_such_tool, which the request carries 0 times",
+    )
+    context = load_entry(SYNTHETIC_TRANSCRIPT / "synthetic-search-reject-accept.json")
+    context |= {"tools_added": ["extract_statements"], "tools_added_by": "a test"}
+    status, reason = transcript_support.check(context, tmp_path / "b")
+    assert (status, reason) == (
+        "request-changed",
+        "call 1: tools_added names extract_statements, which the request carries 0 times",
+    )
+
+
+def test_naming_another_tool_than_the_one_added_fails_the_hash(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["tools_added"] = ["read_pages"]  # stripped, extract_statements kept: not as recorded
+    status, reason = transcript_support.check(entry, tmp_path)
+    assert (status, reason) == ("request-changed", "call 1: the conversation, tools or parameters")
+
+
+def test_a_named_tool_needs_its_dated_reason(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    del entry["tools_added_by"]
+    status, reason = transcript_support.check(entry, tmp_path)
+    assert (status, reason) == ("entry-invalid", "tools_added needs tools_added_by")
