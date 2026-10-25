@@ -24,9 +24,14 @@ from deploy_vii.cp_model_workflow import (
     verify_cp_model_publication,
 )
 from deploy_vii.execution import Attempt, Execution
-from deploy_vii.module_submits import MODULE_SUBMITS, host_context, submit_module_step
+from deploy_vii.module_submits import (
+    MODULE_SUBMITS,
+    host_context,
+    step_instructions,
+    submit_module_step,
+)
 from deploy_vii.preparation import load_pack
-from deploy_vii.registry import canonical, modules, step_chain
+from deploy_vii.registry import STEP_CHAINS, canonical, modules, step_chain
 from deploy_vii.render import render as render_view
 from deploy_vii.report_view import build, call_state, pathways
 
@@ -62,6 +67,13 @@ def configure(parser: argparse.ArgumentParser) -> None:
     context.add_argument("--step", required=True)
     for module_action in (submit, context):
         module_action.add_argument("--ticket", required=True)
+    instructions = actions.add_parser("step-instructions")
+    instructions.add_argument(
+        "--module", required=True, choices=tuple(chain.module_id for chain in STEP_CHAINS)
+    )
+    instructions.add_argument("--ticket", required=True)
+    instructions.add_argument("--step", required=True)
+    instructions.add_argument("--with-sources", action="store_true")
     report = actions.add_parser("report")
     report.add_argument("--pathway", required=True, choices=PATHWAY_IDS)
     report.add_argument("--output", type=Path, required=True)
@@ -108,28 +120,42 @@ def issue_lines(attempt: Attempt) -> tuple[str, ...]:
     return waiting[-1].issues if waiting else ()
 
 
-def module_submit(store: Execution, args: argparse.Namespace) -> str:
-    """Submit the review file as the module's step: the attempt record on stdout, and when the
-    validator rejected it each issue line on stderr and exit 1 (the host agent repairs on them)."""
+def settled_json(store: Execution, attempt: Attempt) -> str:
+    """The attempt record on stdout. When the validator rejected the review (or kept the step's
+    first try for its one repair) each issue line goes to stderr and the exit is 1, so the host
+    agent branches on the exit code; 0 only for an accepted review."""
+    shown = attempt_json(store, attempt)
+    issues = issue_lines(attempt)
+    if issues:
+        print(shown)
+        print("\n".join(issues), file=sys.stderr)
+        raise SystemExit(1)
+    return shown
+
+
+def review_text(args: argparse.Namespace) -> str:
+    """The `--review` file's text; a missing file is a one-line refusal, exit 2."""
+    path: Path = args.review
     try:
-        review = args.review.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError as missing:
-        raise refusal_exit(f"module-submit refused: no review file at {args.review}") from missing
+        raise refusal_exit(f"{args.action} refused: no review file at {path}") from missing
+
+
+def module_submit(store: Execution, args: argparse.Namespace) -> str:
+    """Submit the review file as the module's step (`settled_json`: exit 1 on a rejection)."""
+    review = review_text(args)
     try:
         attempt = submit_module_step(store, args.module, args.ticket, args.step, review)
     except ValueError as refusal:
         raise refusal_exit(f"module-submit refused: {refusal}") from refusal
-    issues = issue_lines(attempt)
-    if issues:
-        print(attempt_json(store, attempt))
-        print("\n".join(issues), file=sys.stderr)
-        raise SystemExit(1)
-    return attempt_json(store, attempt)
+    return settled_json(store, attempt)
 
 
 def module_context_json(store: Execution, args: argparse.Namespace) -> str:
-    """The CONTEXT entries the live runner sends for this step of the ticket, as it serialises
-    them (`live.prompts`); `{}` with a note on stderr for a step that has none."""
+    """The CONTEXT entries the live runner sends for this step of the ticket, as JSON with
+    indent 1 and sorted keys (how the pack CONTEXT block carries them; `step-instructions` prints
+    the exact bytes, CP-5's scope included, which the runner sends as compact JSON)."""
     attempt = next((a for a in store.read().attempts if a.ticket_id == args.ticket), None)
     if attempt is None or attempt.module_id != args.module:
         raise refusal_exit(f"module-context refused: {args.ticket} is not a {args.module} ticket")
@@ -142,10 +168,17 @@ def module_context_json(store: Execution, args: argparse.Namespace) -> str:
         entries = host_context(store, attempt, args.step)
     except ValueError as refusal:
         raise refusal_exit(f"module-context refused: {refusal}") from refusal
-    if entries is None:
-        print(f"no module context for step {args.step}", file=sys.stderr)
-        entries = {}
     return json.dumps(entries, indent=1, sort_keys=True)
+
+
+def instructions_text(store: Execution, args: argparse.Namespace) -> str:
+    """The step's prompt as the live runner composes it (`module_submits.step_instructions`)."""
+    try:
+        return step_instructions(
+            store, args.module, args.ticket, args.step, with_sources=args.with_sources
+        ).removesuffix("\n")
+    except ValueError as refusal:
+        raise refusal_exit(f"step-instructions refused: {refusal}") from refusal
 
 
 def write_report(store: Execution, pathway_id: str, output: Path) -> str:
@@ -194,8 +227,7 @@ def execute(args: argparse.Namespace) -> str:
     elif args.action == "cp1-quality-inputs":
         return cp1_quality_inputs(cp1_registers(store, args.ticket)).model_dump_json()
     elif args.action == "cp1-promote":
-        review = args.review.read_text(encoding="utf-8")
-        return attempt_json(store, promote_cp1(store, args.ticket, review))
+        return settled_json(store, promote_cp1(store, args.ticket, review_text(args)))
     elif args.action == "cp-model-publish":
         try:
             return attempt_json(store, publish_cp_model(store, output=args.output))
@@ -238,19 +270,17 @@ def execute(args: argparse.Namespace) -> str:
         return write_report(store, args.pathway, args.output)
     elif args.action == "module-submit":
         return module_submit(store, args)
+    elif args.action == "step-instructions":
+        return instructions_text(store, args)
     elif args.action == "module-context":
         return module_context_json(store, args)
     elif args.action == "interrupt":
         return attempt_json(store, store.interrupt(args.ticket, args.reason))
     elif args.action == "cp0-submit":
-        return attempt_json(
-            store,
-            submit_cp0_review(store, args.ticket, args.review.read_text(encoding="utf-8")),
-        )
+        return settled_json(store, submit_cp0_review(store, args.ticket, review_text(args)))
     elif args.action == "cp1-submit":
-        return attempt_json(
-            store,
-            submit_cp1_step(store, args.ticket, args.step, args.review.read_text(encoding="utf-8")),
+        return settled_json(
+            store, submit_cp1_step(store, args.ticket, args.step, review_text(args))
         )
     elif args.action == "step-output":
         step = next(

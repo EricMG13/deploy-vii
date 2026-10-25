@@ -3,6 +3,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -425,9 +426,17 @@ def test_execution_cli_runs_trusted_cp0_and_reads_stage_output(
     raw.write_text("not json")
     submit = ("cp1-submit", "--ticket", next_ticket, "--step", "source_context")
     submit += ("--review", str(raw))
-    slipped = json.loads(cli(*submit))  # task 7.0g: kept for the step's one repair
+
+    def rejected() -> dict[str, Any]:
+        # M8c: a rejected review exits 1 (it exited 0 before), the attempt JSON still on stdout.
+        with pytest.raises(SystemExit) as stop:
+            cli(*submit)
+        assert stop.value.code == 1
+        return json.loads(capsys.readouterr().out)
+
+    slipped = rejected()  # task 7.0g: kept for the step's one repair
     assert slipped["status"] == "pending" and slipped["step_repairs"][0]["issues"]
-    failed = json.loads(cli(*submit))
+    failed = rejected()
     assert failed["issues"]
     repair = json.loads(cli("begin", "CP-1"))["ticket_id"]
     assert (

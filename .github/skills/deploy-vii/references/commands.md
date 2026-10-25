@@ -24,10 +24,10 @@ Derived from the argparse definitions at origin/main 14e81d2:
 | `status` | none | prints the snapshot |
 | `begin` | `MODULE` | opens an attempt; prints its ticket; an unknown module exits 2 listing the valid ids |
 | `interrupt` | `--ticket ID --reason TEXT` | finishes the attempt as interrupted |
-| `cp0-submit` | `--ticket ID --review FILE` | validates and settles CP-0 |
-| `cp1-submit` | `--ticket ID --step STEP --review FILE` | STEP is one of `source_context`, `financials`, `narrative`, `readiness` |
+| `cp0-submit` | `--ticket ID --review FILE` | validates and settles CP-0; rejected: attempt JSON on stdout, issue lines on stderr, exit 1; missing file: exit 2 |
+| `cp1-submit` | `--ticket ID --step STEP --review FILE` | STEP is one of `source_context`, `financials`, `narrative`, `readiness`; a rejected review (kept for the step's one repair or final) exits 1 as `cp0-submit` |
 | `cp1-quality-inputs` | `--ticket ID` | prints the registers for the QA review |
-| `cp1-promote` | `--ticket ID --review FILE` | retains the QA review and settles CP-1 |
+| `cp1-promote` | `--ticket ID --review FILE` | retains the QA review and settles CP-1; a rejected review exits 1 as `cp0-submit` |
 | `step-output` | `--ticket ID --step STEP` | prints a retained valid step output |
 | `statement-preview` | `--ticket ID --output DIR` | statement preview; never settles |
 | `interface-preview` | `--ticket ID --output DIR` | statement preview with interface |
@@ -35,23 +35,27 @@ Derived from the argparse definitions at origin/main 14e81d2:
 | `envelope` | `--module CP-1 --output DIR` | writes the promoted CP-1 envelope; refuses an existing directory |
 | `render` | `--envelope DIR --output DIR [--pathway ID]` | writes `accepted.html` or `refused.html` and `complete.json` |
 | `module-submit` | `--module CP-1A\|CP-2\|CP-3\|CP-4\|CP-5\|CP-6 --ticket ID --step STEP --review FILE` | validates and settles the module; rejected: issue lines on stderr, exit 1; unknown step: exit 2 |
-| `module-context` | `--module M --ticket ID --step STEP` | prints the step's CONTEXT JSON (`{}` and a stderr note when none) |
+| `module-context` | `--module M --ticket ID --step STEP` | prints the step's CONTEXT entries as indent-1 JSON (CP-5's scope is compact JSON in the runner's prompt; `step-instructions --with-sources` shows the exact text) |
+| `step-instructions` | `--module M --ticket ID --step STEP [--with-sources]` | prints the step's instructions as the development runner composes them: `--- system ---` (contract, rules, JSON Schema) and `--- user ---` (CONTEXT, upstream, REPAIR after a rejection). Declared sources become `source: ID -> originals/<sha256> (extracted text N bytes, sha256 H)` lines under a `--- sources ... ---` header (path under the pack directory; N is the extracted text's length); `--with-sources` prints that text inline as the runner sends it. Exit 2: ticket not of that module, step not in the chain or not the ticket's next |
 | `report` | `--pathway ID --output DIR` | writes `index.html` and `report.json`; the pathway must be the run's; refuses an existing directory |
 | `cp-model-publish` | `--output DIR` | begins and settles CP-MODEL; exit 2 with a message when refused |
 | `cp-model-verify` | `--output DIR` | re-derives from the journal; exit 2 when issues |
 
-### Module steps for `module-submit` and `module-context`
+### Steps and instructions
 
-One step each, in `deploy-vii plan` order: CP-1A `business_context`, CP-2 `credit_synthesis`,
-CP-4 `legal_covenants`, CP-3 `relative_value`, CP-5 `integrity_review`, CP-6
-`committee_challenge` (CP-4 runs only when the run requests it). The flow per module:
-`begin MODULE`, `module-context` (the CONTEXT entries the development runner adds to the pack
-facts: CP-1A's CP-1 figures, CP-2/3/4/6's upstream block, CP-5's `integrity-scope`; the pack
-facts and sources themselves are not printed; `{}` and a stderr note for a step with none), write the review file, `module-submit`. A rejected review
-prints the attempt JSON on stdout and the validator's issue lines on stderr with exit 1; repair
-the review from those lines and `begin MODULE` again (one repair attempt, `resume.md`). Exit 2
-is a refusal with one line: unknown module, step or ticket, or `report` for another pathway than
-the run's. Do not run a module the journal shows blocked or stale; report it.
+`step-instructions` serves every step: CP-0 `source_readiness`; CP-1 `source_context`,
+`financials`, `narrative`, `readiness`, `quality`; and, for `module-submit`/`module-context`, one
+step each in `deploy-vii plan` order: CP-1A `business_context`, CP-2 `credit_synthesis`, CP-4
+`legal_covenants`, CP-3 `relative_value`, CP-5 `integrity_review`, CP-6 `committee_challenge`
+(CP-4 runs only when the run requests it). The flow per step: `begin MODULE` once, then
+`step-instructions` (read its rules and JSON Schema; the `source:` lines name the files under
+`pack/` to read yourself; CONTEXT carries the CP-1A/CP-2/3/4/6 upstream entries and CP-5's
+`integrity-scope`; after a rejection it ends with the REPAIR block), write the review file, then
+the submit command. A rejected review prints the attempt JSON on stdout and the validator's issue
+lines on stderr with exit 1 (all four submit commands); repair the review from those lines and
+resubmit or `begin MODULE` again (one repair attempt, `resume.md`). Exit 2 is a refusal with one
+line: unknown module, step or ticket, a missing review file, or `report` for another pathway
+than the run's. Do not run a module the journal shows blocked or stale; report it.
 
 ## `live` (development only, not a delivery route)
 
