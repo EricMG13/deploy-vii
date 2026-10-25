@@ -47,7 +47,10 @@ that head and drift).
   fan-in, and its consumers), keeps every other head with its attempts and repair count, and
   prints the added modules, kept and staled heads and the new plan; then `begin` the added
   and staled modules in plan order. Readers of the pack blob (CP-0 readiness, CP-1 and CP-1A
-  consumer lists, the live runner) keep the original scope.
+  consumer lists, the live runner) keep the original scope. Open defect: after any
+  extension the CP-1 envelope export (`envelope`, the CP-1 render, `cp-model-publish`)
+  refuses because the promoted handoff hashes the original run; do not extend a run whose
+  CP-1 is promoted until that is fixed.
 
 Gap: no `resume` command and no listing of resumable tickets other than `status`.
 Not verified: behaviour after the host process is killed mid-command; the offline test

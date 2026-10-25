@@ -93,8 +93,13 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
   `view()` takes not-yet-run statuses from `snapshot.run`. Limitation: readers that take scope
   from the pack blob's run (CP-0 readiness, CP-1 consumer entries, CP-1A consumers, CP-0
   delivery, the live runner and the views those modules build from `pack.run`) keep the
-  original scope, and a CP-1 envelope exported before the extension no longer matches the
-  journal's run. Follow-up 9.1b (a CP-0 readiness addendum for added consumers) lifts the
+  original scope. Open defect (found by the task's confidence review, not fixed: it lies in
+  `cp1_workflow.py`, outside the task's paths): CP-1 promotion records its envelope hashes with
+  the run in the sidecar, and `_recheck_handoff` re-renders with `snapshot.run`, so after any
+  extension `write_cp1_envelope` refuses ("CP-1 handoff envelope.json renders as ..."), and with
+  it the `envelope` command, the CP-1 render and `publish_cp_model`; an envelope exported before
+  the extension also fails `cp1_binding_issues`. Until that is resolved, extend only runs
+  without a promoted CP-1 head, or create a new execution. Follow-up 9.1b (a CP-0 readiness addendum for added consumers) lifts the
   assessed-only refusal before M10 owners rely on extension.
 
 ## Claim run text (decision 0005 MC-2)
