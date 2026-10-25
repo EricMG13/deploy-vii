@@ -65,6 +65,9 @@ def host_context(store: Execution, attempt: Attempt, step_id: str) -> dict[str, 
     return module_context(store, attempt, step_id) or {}
 
 
+SOURCES_HEADER = "sources (extracted text as the runner sends it; --with-sources prints it)"
+
+
 def step_instructions(
     store: Execution, module_id: str, ticket_id: str, step_id: str, *, with_sources: bool
 ) -> str:
@@ -110,7 +113,10 @@ def step_instructions(
     shown = "".join(f"--- {message.role} ---\n{message.content}\n" for message in messages)
     if with_sources:
         return shown
-    return shown + "".join(_source_line(pack, source_id) + "\n" for source_id in declared)
+    if not declared:
+        return shown
+    header = f"--- {SOURCES_HEADER} ---\n"
+    return shown + header + "".join(_source_line(pack, source_id) + "\n" for source_id in declared)
 
 
 def _source_line(pack: PreparedPack, source_id: str) -> str:
@@ -123,5 +129,5 @@ def _source_line(pack: PreparedPack, source_id: str) -> str:
     text = "\n".join(span_line(span) for span in source.spans)
     return (
         f"source: {source_id} -> originals/{source.sha256} "
-        f"({len(text.encode())} bytes, sha256 {source.sha256})"
+        f"(extracted text {len(text.encode())} bytes, sha256 {source.sha256})"
     )

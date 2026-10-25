@@ -365,9 +365,14 @@ def check_default(cli: Cli, full: str, short: str, ticket: str, step: str) -> No
     ids = declared_sources(store, attempt, step, [s.source_id for s in pack.sources])
     lines = source_lines(short)
     assert len(lines) == len(ids)
+    header = "--- sources (extracted text as the runner sends it; --with-sources prints it) ---"
+    assert short.count(header) == (1 if ids else 0) and header not in full
+    if ids:
+        assert short.index(header) < short.index(lines[0])
     for line, source_id in zip(lines, ids, strict=True):
         source = next(s for s in pack.sources if s.source_id == source_id)
         assert line.startswith(f"source: {source_id} -> ")
+        assert "(extracted text " in line or source.status != "ready"
         if source.status == "ready":
             assert f"originals/{source.sha256}" in line and f"sha256 {source.sha256}" in line
             body = "\n".join(span_line(span) for span in source.spans)
