@@ -20,7 +20,8 @@ Two kinds of entry:
   hash differs is a failure. The harness ran no rules, so its submits are replayed without them.
 
 A system prompt changed deliberately after the recording names the change (`system_prompt.
-changed_by`, a task or decision) and the hash it now has; any other change fails. Its other
+changed_by`, a task or decision), the recorded hash (which every recorded request must still
+carry) and the hash it now has; any other change fails. Its other
 messages, its tools and every tool result must still be identical.
 
 A tool added to the step after the recording (task 8.10b) is named the same way: `tools_added`
@@ -280,6 +281,11 @@ def check(entry: dict[str, Any], work: Path, repository: Path = REPOSITORY_ROOT)
     for number, (now, then) in enumerate(calls, 1):
         if now["rest_sha256"] != then["rest_sha256"]:
             return "request-changed", f"call {number}: the conversation, tools or parameters"
+        if system.get("recorded_sha256", then["system_sha256"]) != then["system_sha256"]:
+            return (
+                "request-changed",
+                f"call {number}: the recorded system prompt is not system_prompt.recorded_sha256",
+            )
         wanted = system.get("now_sha256", then["system_sha256"])
         if now["system_sha256"] != wanted:
             return "request-changed", f"call {number}: the system prompt (unnamed change)"

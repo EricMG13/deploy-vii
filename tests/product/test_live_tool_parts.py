@@ -17,7 +17,15 @@ from deploy_vii.execution import Execution
 from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient, ChatRequest, Response
 from deploy_vii.live.ledger import OPENROUTER, Ledger, LedgerError, opening_provider
-from deploy_vii.live.prompts import NO_TOOLS_RULE, PromptError, build, span_line, tools_rule
+from deploy_vii.live.prompts import (
+    EXTRACT_RULE,
+    NO_TOOLS_RULE,
+    STEP_CONTRACTS,
+    PromptError,
+    build,
+    span_line,
+    tools_rule,
+)
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
 from deploy_vii.live.submission import STEPS, submit_model_payload
@@ -749,3 +757,19 @@ def test_an_extract_call_outside_the_declared_sources_or_the_pack_is_refused(
 def test_extract_statements_needs_page_locators(case: Case) -> None:
     with pytest.raises(ToolError, match="has no page:N locators"):
         PackTools(case.store.pack()).extract_statements({"source_id": "S1", "locators": ["page:1"]})
+
+
+def test_the_financials_rules_add_the_extract_rule_verbatim(case: Case) -> None:
+    """Task 8.10b item 3: one added `financials` rule, in the brief's words; no other step."""
+    assert EXTRACT_RULE == (
+        "Statement lines come from `extract_statements` (labels and printed amounts verbatim; "
+        "you map `item_id`/`period_id`, choose `line_kind` and `sign_convention`, cite the "
+        "page); never retype a printed amount; a value you cannot find in an extracted line is "
+        "`other:` with a limitation."
+    )
+    assert STEP_CONTRACTS["financials"].endswith(f"\nk. {EXTRACT_RULE}")
+    assert [step for step, text in STEP_CONTRACTS.items() if EXTRACT_RULE in text] == ["financials"]
+    system = build(
+        "financials", case.store.pack(), (), STEPS["financials"].schema, submit_tool="x"
+    )[0].content
+    assert system.count(EXTRACT_RULE) == 1

@@ -571,7 +571,7 @@ REGISTER_RULES = (
 def test_the_financials_step_letters_the_register_rules_e_to_h_once_each() -> None:
     contract = prompts.STEP_CONTRACTS["financials"]
     rules = [line[:3] for line in contract.splitlines() if line[1:3] == ". "]
-    assert rules == [f"{letter}. " for letter in "abcdefghij"]  # 7.11: i; 7.19: j
+    assert rules == [f"{letter}. " for letter in "abcdefghijk"]  # 7.11: i; 7.19: j; 8.10b: k
     for letter, rule in zip("efgh", REGISTER_RULES, strict=True):
         assert f"{letter}. {rule}" in contract
         assert composed("financials").count(rule) == 1, rule
@@ -1772,7 +1772,7 @@ def test_the_financials_step_states_the_quote_page_rule_once_as_rule_j() -> None
     right and Python never moves a citation, so the prompt states the fact."""
     rule = prompts.QUOTE_PAGE_RULE
     contract = prompts.STEP_CONTRACTS["financials"]
-    assert contract.endswith(f"i. {prompts.BOUND_SCOPE_RULE}\nj. {rule}")
+    assert contract.endswith(f"i. {prompts.BOUND_SCOPE_RULE}\nj. {rule}\nk. {prompts.EXTRACT_RULE}")
     assert composed("financials").count(rule) == 1
     for step_id in set(ALL_STEPS) - {"financials"}:
         assert rule not in composed(step_id), step_id

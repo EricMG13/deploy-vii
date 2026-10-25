@@ -25,6 +25,7 @@ from deploy_vii.live.client import ChatClient
 from deploy_vii.live.cohort import accept_proxy_payload
 from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
 from deploy_vii.live.ledger import Ledger
+from deploy_vii.live.prompts import EXTRACT_RULE
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import StepSpec
 from deploy_vii.live.schema import marked_fields
@@ -1062,3 +1063,41 @@ def test_a_named_tool_needs_its_dated_reason(tmp_path: Path) -> None:
     del entry["tools_added_by"]
     status, reason = transcript_support.check(entry, tmp_path)
     assert (status, reason) == ("entry-invalid", "tools_added needs tools_added_by")
+
+
+# The financials system prompt's hash after task 7.19 and before 8.10b's rule k: what the
+# synthetic entry recorded and what the harness entry named as its 7.19 change.
+FINANCIALS_PROMPT_BEFORE_8_10B = "1cd1555964246c8a660a7950ad1615fed1cb2100c77ca94473ddd2e194213a21"
+
+
+def test_the_financials_prompt_change_is_exactly_the_named_rule(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    start = transcript_support.start_journal(entry, transcript_support.REPOSITORY_ROOT, tmp_path)
+    assert start is not None
+    replayed = transcript_support.replay(entry, start, tmp_path / "replay")
+    system = replayed.bodies[0]["messages"][0]["content"]
+    rule = f"\nk. {EXTRACT_RULE}"
+    assert system.count(rule) == 1
+    before = transcript_support.sha256(system.replace(rule, ""))
+    assert before == FINANCIALS_PROMPT_BEFORE_8_10B
+    assert {r["system_sha256"] for r in entry["expected"]["requests"]} == {before}
+    hybrid = load_entry(FINANCIALS_TRANSCRIPTS / "hybrid-cp1-6-sol-medium.json")
+    for named in (entry, hybrid):
+        prompt = named["system_prompt"]
+        assert prompt["now_sha256"] == transcript_support.sha256(system)
+        assert (
+            "task 8.10b (25 Oct 2026" in prompt["changed_by"]
+            and "EXTRACT_RULE" in (prompt["changed_by"])
+        )
+    assert entry["system_prompt"]["recorded_sha256"] == FINANCIALS_PROMPT_BEFORE_8_10B
+    assert hybrid["system_prompt"]["changed_by"].startswith("task 7.19 (QUOTE_PAGE_RULE); ")
+
+
+def test_a_named_prompt_change_still_matches_the_recorded_prompt(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["system_prompt"]["recorded_sha256"] = "0" * 64
+    status, reason = transcript_support.check(entry, tmp_path)
+    assert (status, reason) == (
+        "request-changed",
+        "call 1: the recorded system prompt is not system_prompt.recorded_sha256",
+    )
