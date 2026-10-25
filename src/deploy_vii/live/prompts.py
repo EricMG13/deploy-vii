@@ -1170,8 +1170,9 @@ def build(
     step's review scope (`live.context.integrity_scope`, task 8.6), each sent as its own
     CONTEXT block (`SCOPE_BLOCKS`); required there and refused for every other step (MC-10:
     only the step's declared inputs). `module_context` (task 8.6) is the CONTEXT entries a
-    step of `live.context.MODULE_CONTEXTS` adds to the prepared-pack block, required there and
-    refused elsewhere.
+    step of `live.context.MODULE_CONTEXTS` adds to the prepared-pack block, required there.
+    Other steps permit only the bound `source_readiness_addendum` metadata from
+    `live.context.module_context`; undeclared analytical context is refused.
 
     `submit_tool` (task 8.0d) builds a tool-loop prompt: rule 5 is `tools_rule(submit_tool,
     submits)`, `submits` being the loop's own submit limit, and no pack SOURCE block is sent
@@ -1208,7 +1209,11 @@ def build(
         raise PromptError(f"a scope block is not a declared input of step {step_id}")
     if step_id in MODULE_CONTEXTS and module_context is None:
         raise PromptError(f"step {step_id} needs its module context")
-    if step_id not in MODULE_CONTEXTS and module_context is not None:
+    if (
+        step_id not in MODULE_CONTEXTS
+        and module_context is not None
+        and set(module_context) != {"source_readiness_addendum"}
+    ):
         raise PromptError(f"a module context is not a declared input of step {step_id}")
     if declared_inputs and step_id not in PACK_SOURCE_STEPS:  # task 7.5, R6
         raise PromptError(

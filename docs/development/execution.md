@@ -134,9 +134,11 @@ failed final write by resubmitting the same context/payload if still current; un
 blobs are harmless. An already-applied target remains the ordinary no-op.
 
 `execution/5` optionally carries `readiness_addenda` refs, omitted when empty; ordinary
-reports likewise omit the absent addendum hash. Reads authenticate each grant against
-its retained producing CP-0 attempt and historical pack, then verify every earlier
-applicable attestation and its exact consumer/gap/analysis projection in order. Missing,
+reports likewise omit the absent addendum hash. Reads authenticate any current CP-0
+head's commands, inputs and status against its retained result before using original
+command priority, including when no addendum refs remain. Reads also authenticate each
+grant against its retained producing CP-0 attempt and historical pack, then verify every
+earlier applicable attestation and its exact consumer/gap/analysis projection in order. Missing,
 duplicate, forward/cyclic or forged history refuses; self-consistent cached metadata is
 insufficient. Historical grants remain readable after refresh, with their old bindings
 inapplicable. Canonical blobs/composition and commands/restrictions are also checked.
@@ -144,7 +146,9 @@ Original CP-0 rows always take priority.
 Exactly one matching pack/current-CP-0 grant can authorize an originally absent consumer;
 only READY or READY_WITH_LIMITATIONS can begin. Its ticket appends an accepted/restricted
 `readiness-addendum` input, and its context and descendants retain consumer-local limits
-and gaps. Later disjoint grants preserve earlier consumer input hashes. Pack/CP-0
+and gaps. Normal instructions include this source-readiness metadata even for steps
+without analytical module context; other undeclared context remains refused.
+Later disjoint grants preserve earlier consumer input hashes. Pack/CP-0
 refresh revokes applicability through the existing staleness/lineage rules.
 
 Old CP-0/CP-1/CP-1A heads, qualification, attempts and envelope files are preserved unless

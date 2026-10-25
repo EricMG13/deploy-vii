@@ -801,7 +801,7 @@ class Execution:
         return ExecutionSnapshot.model_validate_json(raw)
 
     def read(self) -> ExecutionSnapshot:
-        """Verify snapshot metadata and the complete retained addendum authority chain."""
+        """Verify metadata, current CP-0 cache and the retained addendum authority chain."""
         snapshot = self._snapshot()
         self._verified_addenda(snapshot)
         return snapshot
@@ -816,6 +816,10 @@ class Execution:
     def _verified_addenda(self, snapshot: ExecutionSnapshot) -> dict[str, ReadinessAddendum]:
         from deploy_vii.cp0_workflow import _original_review
 
+        # Original-command priority requires the actual cache, even if all refs were removed.
+        head = next((h for h in snapshot.heads if h.module_id == "CP-0"), None)
+        if head is not None:
+            self.head_module(head)
         verified: dict[str, ReadinessAddendum] = {}
         for ref in snapshot.readiness_addenda:
             if ref.sha256 in verified:
