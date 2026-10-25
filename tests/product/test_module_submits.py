@@ -6,6 +6,8 @@ readiness fixture) and the reviews are the module tests' accepted fixtures
 """
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,16 +17,22 @@ from deploy_vii.__main__ import main
 from deploy_vii.business_context import context_block
 from deploy_vii.contracts import Module
 from deploy_vii.cp0_workflow import build_readiness
+from deploy_vii.cp1_workflow import FinancialStage, submit_cp1_step
+from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
 from deploy_vii.execution import Attempt, Execution, StepSubmission
 from deploy_vii.execution_cli import issue_lines
-from deploy_vii.live.prompts import INTEGRITY_BLOCK_ID
-from deploy_vii.live.runner import prompt_inputs
+from deploy_vii.live.context import declared_sources
+from deploy_vii.live.prompts import INTEGRITY_BLOCK_ID, Message, build, span_line
+from deploy_vii.live.runner import StepSpec, prompt_inputs, repair_prompt
 from deploy_vii.module_submits import MODULE_SUBMITS, host_context, submit_module_step
 from deploy_vii.report_view import pathways
 from tests.product.test_business_context import cp1_fact, submission_fixture
 from tests.product.test_cp2_synthesis import journal, synthesis
-from tests.product.test_live_modules import CASES, SCHEMAS, cp1a_case
+from tests.product.test_execution import step_text
+from tests.product.test_live_modules import CASES, SCHEMAS, cp0_case, cp1a_case
+from tests.product.test_narrative import populated
 from tests.product.test_readiness import readiness_fixture
+from tests.product.test_workflow import cp1_case
 
 # What the live runner pins (`live.runner.MODULE_STEP_ENTRIES`), written out by hand so the
 # CLI's table is held to the same modules without importing the runner.
@@ -290,3 +298,225 @@ def test_issue_lines_read_a_kept_rejected_try_only_while_its_step_is_unrepaired(
         ticket_id="t", module_id="CP-1", inputs=(), number=0, steps=(good,), step_repairs=(bad,)
     )
     assert issue_lines(repaired) == ()
+
+
+# --- M8c item 1: step-instructions ---
+
+ENTRIES = {  # every step's module, for the argparse choice
+    "source_readiness": "CP-0",
+    "source_context": "CP-1",
+    "financials": "CP-1",
+    "narrative": "CP-1",
+    "readiness": "CP-1",
+    "quality": "CP-1",
+    "business_context": "CP-1A",
+    **{step: module for step, (module, _) in SCHEMAS.items()},
+}
+
+
+def runner_messages(store: Execution, ticket_id: str, step_id: str) -> list[Message]:
+    """`live.runner._plan`'s own composition of the one-shot prompt for the ticket's next step."""
+    snapshot = store.read()
+    attempt = next(a for a in snapshot.attempts if a.ticket_id == ticket_id)
+    step = StepSpec(
+        step_id,
+        "case",
+        declared_sources(store, attempt, step_id, [s.source_id for s in store.pack().sources]),
+    )
+    inputs = prompt_inputs(store, attempt, step_id)
+    return build(
+        step_id,
+        store.pack(snapshot),
+        step.declared_sources,
+        step.schema,
+        upstream=inputs.upstream,
+        repair_issues=repair_prompt(snapshot, attempt, step_id).issues,
+        cp1_facts=inputs.cp1_facts,
+        module_context=inputs.module_context,
+        scope=inputs.scope,
+    )
+
+
+def printed(messages: list[Message]) -> str:
+    return "".join(f"--- {m.role} ---\n{m.content}\n" for m in messages)
+
+
+def check_instructions(cli: Cli, ticket: str, step: str) -> tuple[str, str]:
+    """The CLI's two outputs for `step`; the full one is the runner's messages byte for byte."""
+    base = ("step-instructions", "--module", ENTRIES[step], "--ticket", ticket, "--step", step)
+    code, full, err = cli(*base, "--with-sources")
+    assert code == 0 and err == ""
+    assert full == printed(runner_messages(cli.store, ticket, step))
+    code, short, err = cli(*base)
+    assert code == 0 and err == ""
+    return full, short
+
+
+def source_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("source: ")]
+
+
+def check_default(cli: Cli, full: str, short: str, ticket: str, step: str) -> None:
+    """Without `--with-sources` exactly the declared SOURCE blocks are replaced, one line each."""
+    store = cli.store
+    attempt = next(a for a in store.read().attempts if a.ticket_id == ticket)
+    pack = store.pack()
+    ids = declared_sources(store, attempt, step, [s.source_id for s in pack.sources])
+    lines = source_lines(short)
+    assert len(lines) == len(ids)
+    for line, source_id in zip(lines, ids, strict=True):
+        source = next(s for s in pack.sources if s.source_id == source_id)
+        assert line.startswith(f"source: {source_id} -> ")
+        if source.status == "ready":
+            assert f"originals/{source.sha256}" in line and f"sha256 {source.sha256}" in line
+            body = "\n".join(span_line(span) for span in source.spans)
+            assert body in full and body not in short
+        assert f"<<<SOURCE id={source_id} " not in short
+        assert f"<<<SOURCE id={source_id} " in full
+    assert short.split("--- user ---\n")[0] == full.split("--- user ---\n")[0]
+
+
+def test_the_cli_choice_covers_every_registry_step() -> None:
+    for chain in registry.STEP_CHAINS:
+        assert {s for s, m in ENTRIES.items() if m == chain.module_id} == set(chain.steps)
+
+
+def test_cp0_instructions_are_the_runners_prompt_and_list_every_pack_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, _ = cp0_case(tmp_path)
+    cli = Cli(store, monkeypatch, capsys)
+    ticket = store.begin("CP-0").ticket_id
+    full, short = check_instructions(cli, ticket, "source_readiness")
+    check_default(cli, full, short, ticket, "source_readiness")
+    assert source_lines(short)
+
+
+def test_cp1_instructions_are_the_runners_prompt_at_every_step_incl_quality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, ticket, extraction = cp1_case(tmp_path)  # source_context is already submitted
+    cli = Cli(store, monkeypatch, capsys)
+    seen = []
+
+    def at(step: str) -> None:
+        full, short = check_instructions(cli, ticket.ticket_id, step)
+        check_default(cli, full, short, ticket.ticket_id, step)
+        seen.append(step)
+
+    at("financials")
+    financial = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    output = FinancialStage.model_validate_json(step_text(store, financial.steps[-1]))
+    at("narrative")
+    narrative = submit_cp1_step(
+        store, ticket.ticket_id, "narrative", populated(output.narrative_inputs).model_dump_json()
+    )
+    inputs = DownstreamInputs.model_validate_json(step_text(store, narrative.steps[-1]))
+    at("readiness")
+    review = DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json()
+    submit_cp1_step(store, ticket.ticket_id, "readiness", review)
+    at("quality")
+    # A repair ticket after an interrupt starts at source_context again, a pack-source step.
+    store.interrupt(ticket.ticket_id, "M8c: show source_context on the repair ticket")
+    repair = store.begin("CP-1").ticket_id
+    full, short = check_instructions(cli, repair, "source_context")
+    check_default(cli, full, short, repair, "source_context")
+    assert seen == ["financials", "narrative", "readiness", "quality"]
+    assert source_lines(short)
+
+
+@pytest.mark.parametrize("step", sorted(CONTEXT_CASES))
+def test_module_instructions_are_the_runners_prompt_for_every_module_step(
+    step: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module, case = CONTEXT_CASES[step]
+    store, _ = case(tmp_path)
+    ticket = store.begin(module).ticket_id
+    cli = Cli(store, monkeypatch, capsys)
+    full, short = check_instructions(cli, ticket, step)
+    check_default(cli, full, short, ticket, step)
+    assert "JSON Schema:" in full and "Rules:" in full
+
+
+def test_a_step_rejected_once_within_its_attempt_shows_the_repair_block_in_both_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, ticket, _ = cp1_case(tmp_path)
+    cli = Cli(store, monkeypatch, capsys)
+    assert "<<<REPAIR" not in check_instructions(cli, ticket.ticket_id, "financials")[0]
+    kept = submit_cp1_step(store, ticket.ticket_id, "financials", "not json")
+    assert kept.status == "pending" and kept.step_repairs[0].issues
+    full, short = check_instructions(cli, ticket.ticket_id, "financials")
+    for text in (full, short):
+        assert "<<<REPAIR id=prior-validation-issues" in text
+        assert all(f"- {issue}" in text for issue in kept.step_repairs[0].issues)
+
+
+def test_a_repair_ticket_shows_the_rejected_attempts_issues(cli: Cli, tmp_path: Path) -> None:
+    ticket = json.loads(cli("begin", "CP-2")[1])["ticket_id"]
+    review = tmp_path / "review.json"
+    review.write_text("not json")
+    submit = ("module-submit", "--module", "CP-2", "--ticket", ticket, "--step")
+    code, out, _ = cli(*submit, "credit_synthesis", "--review", str(review))
+    issues = json.loads(out)["issues"]
+    assert code == 1 and issues
+    repair = json.loads(cli("begin", "CP-2")[1])["ticket_id"]
+    full, short = check_instructions(cli, repair, "credit_synthesis")
+    for text in (full, short):
+        assert all(f"- {issue}" in text for issue in issues)
+
+
+def test_instructions_refuse_in_one_line_with_exit_2(cli: Cli, tmp_path: Path) -> None:
+    ticket = json.loads(cli("begin", "CP-2")[1])["ticket_id"]
+    base = ("step-instructions", "--ticket", ticket)
+    refusals = {
+        "wrong module": cli(*base, "--module", "CP-3", "--step", "relative_value"),
+        "unknown ticket": cli(
+            "step-instructions", *("--module", "CP-2", "--ticket", "nope", "--step", "x")
+        ),
+        "wrong step": cli(*base, "--module", "CP-2", "--step", "x"),
+        "not next": cli("step-instructions", *("--module", "CP-0", "--ticket", "t", "--step", "y")),
+    }
+    for name, (code, out, err) in refusals.items():
+        assert code == 2 and out == "" and len(err.splitlines()) == 1, name
+    assert "credit_synthesis" in refusals["wrong step"][2]
+    review = tmp_path / "r.json"
+    review.write_text(synthesis().model_dump_json())
+    settle = ("module-submit", "--module", "CP-2", "--ticket", ticket)
+    assert cli(*settle, "--step", "credit_synthesis", "--review", str(review))[0] == 0
+    code, out, err = cli(*base, "--module", "CP-2", "--step", "credit_synthesis")
+    assert code == 2 and out == "" and "finished" in err and len(err.splitlines()) == 1
+
+
+def test_a_step_that_is_not_the_tickets_next_is_refused_with_the_runners_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, ticket, _ = cp1_case(tmp_path)  # source_context is retained; financials is next
+    cli = Cli(store, monkeypatch, capsys)
+    code, out, err = cli(
+        "step-instructions",
+        *("--module", "CP-1", "--ticket", ticket.ticket_id, "--step", "quality"),
+    )
+    assert (
+        code == 2
+        and out == ""
+        and err.splitlines()
+        == [
+            "step-instructions refused: quality is not the next step for this ticket; financials is"
+        ]
+    )
+
+
+def test_the_live_runner_imports_without_a_credential_or_a_network() -> None:
+    probe = "import deploy_vii.live.runner as r; print(len(r.STEPS))"
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", probe],
+        env={"PATH": "", "HOME": "/nonexistent"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr

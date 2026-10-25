@@ -24,9 +24,14 @@ from deploy_vii.cp_model_workflow import (
     verify_cp_model_publication,
 )
 from deploy_vii.execution import Attempt, Execution
-from deploy_vii.module_submits import MODULE_SUBMITS, host_context, submit_module_step
+from deploy_vii.module_submits import (
+    MODULE_SUBMITS,
+    host_context,
+    step_instructions,
+    submit_module_step,
+)
 from deploy_vii.preparation import load_pack
-from deploy_vii.registry import canonical, modules, step_chain
+from deploy_vii.registry import STEP_CHAINS, canonical, modules, step_chain
 from deploy_vii.render import render as render_view
 from deploy_vii.report_view import build, call_state, pathways
 
@@ -62,6 +67,13 @@ def configure(parser: argparse.ArgumentParser) -> None:
     context.add_argument("--step", required=True)
     for module_action in (submit, context):
         module_action.add_argument("--ticket", required=True)
+    instructions = actions.add_parser("step-instructions")
+    instructions.add_argument(
+        "--module", required=True, choices=tuple(chain.module_id for chain in STEP_CHAINS)
+    )
+    instructions.add_argument("--ticket", required=True)
+    instructions.add_argument("--step", required=True)
+    instructions.add_argument("--with-sources", action="store_true")
     report = actions.add_parser("report")
     report.add_argument("--pathway", required=True, choices=PATHWAY_IDS)
     report.add_argument("--output", type=Path, required=True)
@@ -146,6 +158,16 @@ def module_context_json(store: Execution, args: argparse.Namespace) -> str:
         print(f"no module context for step {args.step}", file=sys.stderr)
         entries = {}
     return json.dumps(entries, indent=1, sort_keys=True)
+
+
+def instructions_text(store: Execution, args: argparse.Namespace) -> str:
+    """The step's prompt as the live runner composes it (`module_submits.step_instructions`)."""
+    try:
+        return step_instructions(
+            store, args.module, args.ticket, args.step, with_sources=args.with_sources
+        ).removesuffix("\n")
+    except ValueError as refusal:
+        raise refusal_exit(f"step-instructions refused: {refusal}") from refusal
 
 
 def write_report(store: Execution, pathway_id: str, output: Path) -> str:
@@ -238,6 +260,8 @@ def execute(args: argparse.Namespace) -> str:
         return write_report(store, args.pathway, args.output)
     elif args.action == "module-submit":
         return module_submit(store, args)
+    elif args.action == "step-instructions":
+        return instructions_text(store, args)
     elif args.action == "module-context":
         return module_context_json(store, args)
     elif args.action == "interrupt":
