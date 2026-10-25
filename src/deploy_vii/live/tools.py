@@ -217,9 +217,10 @@ def _integer(raw: Mapping[str, Any], name: str) -> int:
 class PackTools:
     """`search_pack` and `read_pages` over the prepared pack; records what the model was shown.
 
-    `read`: the (source, `page:N`) spans `read_pages` returned. `surfaced`: the spans a search
-    showed a snippet of. `searched`: the scope of each search that returned a result (None:
-    every source the step reads).
+    `read`: the (source, `page:N`) spans `read_pages` returned. `extracted` (task 8.10b): those
+    `extract_statements` returned, kept apart for telemetry; `seen` counts both as read.
+    `surfaced`: the spans a search showed a snippet of. `searched`: the scope of each search
+    that returned a result (None: every source the step reads).
 
     `sources` (task 8.9): the step's declared sources, the only ones the tools read or search
     (CP-4's legal and CP-3's market sources, `live.context.readable_sources`); None is every
@@ -247,6 +248,7 @@ class PackTools:
         }
         self.located_pages = sum(len(pages) for pages in self.pages.values())
         self.read: set[tuple[str, str]] = set()
+        self.extracted: set[tuple[str, str]] = set()
         self.surfaced: set[tuple[str, str]] = set()
         self.searched: list[str | None] = []
 
@@ -326,7 +328,8 @@ class PackTools:
 
     def extract_statements(self, raw: Mapping[str, Any]) -> str:
         """The statement lines of the named pages of one declared source, as SOURCE blocks
-        (task 8.10b); every page returned is recorded as read. A refused call records nothing."""
+        (task 8.10b); every page returned is recorded as extracted, which `seen` counts as read.
+        A refused call records nothing."""
         _arguments(raw, ("source_id", "locators"))
         source_id = self._source(raw["source_id"])
         locators = raw["locators"]
@@ -363,12 +366,13 @@ class PackTools:
             )
             for item in locators
         ]
-        self.read.update((source_id, item) for item in locators)
+        self.extracted.update((source_id, item) for item in locators)
         return "\n".join(parts)
 
     def seen(self) -> "Seen":
-        """What the model has been shown so far, frozen (a submit is judged on this)."""
-        return Seen(frozenset(self.read), tuple(self.searched))
+        """What the model has been shown so far, frozen (a submit is judged on this): a page
+        read or extracted counts as read."""
+        return Seen(frozenset(self.read | self.extracted), tuple(self.searched))
 
 
 def extracted_body(table: ExtractedTable) -> str:
@@ -390,8 +394,9 @@ def extracted_body(table: ExtractedTable) -> str:
 
 @dataclass(frozen=True)
 class Seen:
-    """The pages `read_pages` returned and the scope of each search (None: every source), as
-    of one submit."""
+    """The pages `read_pages` or `extract_statements` returned (task 8.10b: the model saw an
+    extracted page's printed lines) and the scope of each search (None: every source), as of
+    one submit."""
 
     read: frozenset[tuple[str, str]] = frozenset()
     searched: tuple[str | None, ...] = ()

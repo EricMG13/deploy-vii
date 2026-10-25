@@ -968,6 +968,9 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
     financials = step.step_id == "financials"
     tools = step.tools  # None: a submit-only step, whose reading fields are null (task 8.9)
     read = tools.read if tools is not None else set()
+    # Task 8.10b: `pages_read` stays the full `read_pages` reads (8.0d); extracts are counted
+    # apart, and the cited-not-read list follows the cited-page rule (extracted counts as read).
+    shown = read | tools.extracted if tools is not None else set()
     return {
         "call": call.number,
         "effort_level": call.level,
@@ -983,6 +986,7 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
             "tool_set": step.kind,
             "tool_calls": dict(sorted(step.counts.items())),
             "pages_read": len(read) if tools is not None else None,
+            "pages_extracted": len(tools.extracted) if tools is not None else None,
             "located_pages": tools.located_pages if tools is not None else None,
             "searches_run": len(tools.searched) if tools is not None else None,
             "spans_surfaced_by_search": len(tools.surfaced) if tools is not None else None,
@@ -992,7 +996,7 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
             "completeness_drop": completeness_drop(records) if financials else None,
             "final_payload_completeness": completeness(final) if financials and final else None,
             "final_payload_cited_not_read": sorted(
-                list(item) for item in cited_locators(final) - read
+                list(item) for item in cited_locators(final) - shown
             )
             if final and tools is not None
             else None,

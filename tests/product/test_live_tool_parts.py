@@ -725,8 +725,10 @@ def test_extract_statements_renders_the_lines_as_delimited_source_data(case: Cas
         "no statement lines extracted from this page\n"
         "<<<END>>>"
     )
-    # A page extracted counts as read: the model saw its lines (the cited-page rule).
+    # A page extracted counts as read: the model saw its lines (the cited-page rule). It is
+    # kept apart from the full reads (`read`), which telemetry's `pages_read` counts.
     assert tools.seen().read == {("S1", "page:2"), ("S1", "page:3")}
+    assert tools.extracted == {("S1", "page:2"), ("S1", "page:3")} and tools.read == set()
     cited = json.dumps({"x": {"source_id": "S1", "locator": "page:2", "quote": "Cash"}})
     assert unread_citation_issues(cited, tools.seen()) == ()
     assert unread_citation_issues(cited, Seen()) == (f"{UNREAD_PAGE}: S1 page:2",)
@@ -1101,6 +1103,13 @@ def test_the_financials_loop_extracts_then_submits_to_the_same_accepted_state(
             assert tool["content"] == PackTools(paged_case.store.pack()).extract_statements(
                 json.loads(extract[2])
             )
+        # Review m3: `pages_read` counts full `read_pages` reads only, as 8.0d defined it;
+        # extracts are counted apart, and the cited-not-read list follows the rule's view.
+        step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+        expected = (0, 1) if name == "extract" else (0, 0)
+        assert (step["pages_read"], step["pages_extracted"]) == expected, name
+        # (It lists every cited locator not read, `metadata`-style ones included, as 8.0d did.)
+        assert ["S1", "page:1"] not in step["final_payload_cited_not_read"], name
     assert (
         states["8.0d"]
         == states["extract"]
@@ -1121,3 +1130,14 @@ def test_a_pack_step_other_than_financials_is_refused_the_extract_tool(tmp_path:
     assert result.verdict != "accepted"
     tool = script.bodies()[1]["messages"][-1]
     assert tool["content"] == "error: unknown tool 'extract_statements'"
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert (step["pages_read"], step["pages_extracted"]) == (0, 0)
+
+
+def test_a_submit_only_step_reports_no_pages_extracted(tmp_path: Path) -> None:
+    """Review m3: like every reading field, `pages_extracted` is null on a submit-only step."""
+    rig = step_rig(tmp_path, "quality")
+    script = rig.script(tool_reply(("c-1", "submit_quality", rig.context)))
+    result = rig.run(script, step_id="quality")
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["tool_set"] == SUBMIT_ONLY and step["pages_extracted"] is None

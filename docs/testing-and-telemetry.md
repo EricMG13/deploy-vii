@@ -113,7 +113,10 @@ submit) or `submit-only` (the submit alone). Its `rules` record adds `applied`, 
 rules that step checks. Its `limits` hold the step's own: 30 calls on a `pack` step and 6 on a
 `submit-only` step. A `submit-only` step reads nothing, so its reading fields (`pages_read`,
 `located_pages`, `searches_run`, `spans_surfaced_by_search`, `final_payload_cited_not_read`) are
-null, not zero. The CP-1 `quality` loop's `manifest.json` `hashes` add `quality_inputs_sha256`,
+null, not zero. Task 8.10b: `pages_read` counts full `read_pages` reads only, as 8.0d defined it;
+`pages_extracted` counts the pages `extract_statements` returned (`financials`; null on a
+`submit-only` step), and `final_payload_cited_not_read` treats an extracted page as read, as the
+cited-page rule does. The CP-1 `quality` loop's `manifest.json` `hashes` add `quality_inputs_sha256`,
 the hash of the QA inputs its prompt was built from.
 
 The last call's block is the step's. `manifest.json` records the tools offered, `tool_choice`,
