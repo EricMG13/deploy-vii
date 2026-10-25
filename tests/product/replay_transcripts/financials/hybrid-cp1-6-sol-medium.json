@@ -122,8 +122,8 @@
  "start_journal": "artifacts/model-tests/hybrid-cp1-6/sol-medium/source_context/journal-submit-1",
  "step_id": "financials",
  "system_prompt": {
-  "changed_by": "task 7.19 (QUOTE_PAGE_RULE); task 8.10b (25 Oct 2026; EXTRACT_RULE, financials rule k)",
-  "now_sha256": "b35882f8c4ecdef4b60fc14e361a6fdc68109ca26d6c6e6e7616686a84dee979",
+  "changed_by": "task 7.19 (QUOTE_PAGE_RULE); task 8.10b (25 Oct 2026; EXTRACT_RULE, financials rule k; fix round 1 wording, B1)",
+  "now_sha256": "fd550f847ecffb23d781c9a606b04327cf5b8a9c5a9c6e9a1f6fe3a94707b3a6",
   "recorded_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
  },
  "tools_added": [

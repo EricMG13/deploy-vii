@@ -175,11 +175,15 @@ QUOTE_PAGE_RULE = (
 # Task 8.10b (user decision "A", 24 Oct 2026; phase 2): the candidate screen failed `financials`
 # on hand transcription of about 800 statement objects; Python extracts the printed lines
 # (`live.tools.extract_statements`) and the model maps and cites them instead of retyping them.
+# Fix round 1 (B1): amounts are still written as rule a says and items keep their rule f
+# ids; a value no line holds is read and cited through `read_pages`.
 EXTRACT_RULE = (
-    "Statement lines come from `extract_statements` (labels and printed amounts verbatim; you "
-    "map `item_id`/`period_id`, choose `line_kind` and `sign_convention`, cite the page); never "
-    "retype a printed amount; a value you cannot find in an extracted line is `other:` with a "
-    "limitation."
+    "Statement lines come from `extract_statements`: keep its labels verbatim and take each "
+    "amount from the line's raw_values, written as rule a says, never retyped from memory or "
+    "prose. You map `item_id`/`period_id`, choose `line_kind` and `sign_convention`, and cite "
+    "the page. A value no extracted line holds keeps its rule f `item_id`, is read with "
+    "`read_pages` and cited there, and carries a limitation saying it was not extracted. "
+    "Verify a line the tool flags with `read_pages` before using it."
 )
 # Task 7.14 (batches e1-cp1-13 and -14: three of four source contexts left `currency` null on every
 # scope and worded the current year's perimeter unlike the comparative years'):

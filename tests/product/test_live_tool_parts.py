@@ -786,12 +786,16 @@ _ONE_ROW = "Other revenue        3        4"
 
 
 def test_the_financials_rules_add_the_extract_rule_verbatim(case: Case) -> None:
-    """Task 8.10b item 3: one added `financials` rule, in the brief's words; no other step."""
+    """Task 8.10b item 3 (fix round 1, B1: the coordinator's wording, consistent with rules a
+    and f): one added `financials` rule; no other step."""
     assert EXTRACT_RULE == (
-        "Statement lines come from `extract_statements` (labels and printed amounts verbatim; "
-        "you map `item_id`/`period_id`, choose `line_kind` and `sign_convention`, cite the "
-        "page); never retype a printed amount; a value you cannot find in an extracted line is "
-        "`other:` with a limitation."
+        "Statement lines come from `extract_statements`: keep its labels verbatim and take "
+        "each amount from the line's raw_values, written as rule a says, never retyped from "
+        "memory or prose. You map `item_id`/`period_id`, choose `line_kind` and "
+        "`sign_convention`, and cite the page. A value no extracted line holds keeps its rule "
+        "f `item_id`, is read with `read_pages` and cited there, and carries a limitation "
+        "saying it was not extracted. Verify a line the tool flags with `read_pages` before "
+        "using it."
     )
     assert STEP_CONTRACTS["financials"].endswith(f"\nk. {EXTRACT_RULE}")
     assert [step for step, text in STEP_CONTRACTS.items() if EXTRACT_RULE in text] == ["financials"]

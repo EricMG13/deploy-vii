@@ -1471,12 +1471,18 @@ phase 2 (task 8.10b) wires it into the `financials` tool loop.
   `line_no | label | caption | raw_values | flags`. `raw_values` are the printed tokens,
   space-separated (`$` dropped, `(n)` negative, a dash nil); `-` stands for no caption or no
   flag. On CZR `page:56` the block is 3,034 bytes against 7,717 for `read_pages`.
-- **What the model does with it.** The added `financials` rule k (`prompts.EXTRACT_RULE`):
-  statement lines come from the tool with labels and printed amounts verbatim; the model maps
-  `item_id` and `period_id`, chooses `line_kind` and `sign_convention`, cites the page, never
-  retypes a printed amount, and enters a value no extracted line holds as `other:` with a
-  limitation. The `FinancialSubmission` payload is unchanged (per-statement submits are task
-  8.11).
+- **What the model does with it.** The added `financials` rule k (`prompts.EXTRACT_RULE`, fix
+  round 1 wording):
+  - statement lines come from the tool, with labels kept verbatim;
+  - each amount is taken from the line's raw_values and written as rule a says, never retyped
+    from memory or prose;
+  - the model maps `item_id` and `period_id`, chooses `line_kind` and `sign_convention`, and
+    cites the page;
+  - a value no extracted line holds keeps its rule f `item_id`, is read and cited through
+    `read_pages`, and carries a limitation saying it was not extracted;
+  - a flagged line is verified with `read_pages` before use.
+
+  The `FinancialSubmission` payload is unchanged (per-statement submits are task 8.11).
 - **Read for the cited-page rule.** A page `extract_statements` returned counts as read: the
   model saw its printed lines, so citing it is not an unread citation.
 - **Flags** (`ExtractedLine.flags`; they inform and never drop a line):
