@@ -875,6 +875,11 @@ def _tool_loop_lines(tool_loop: ToolLoop | None) -> list[str]:
         if floor is None
         else f"completeness floor: {floor} statement lines per expected cell"
     )
+    if (coverage := tool_loop.rules.coverage_min) is not None:  # task 8.12, decision "C"
+        floor_text += (
+            f"; extracted-coverage floor: {coverage} of each expected cell's extracted "
+            "statement lines"
+        )
     calls = (
         f"{TOOL_SET_LIMITS[PACK_TOOLS].max_calls} calls on pack-tool steps and "
         f"{TOOL_SET_LIMITS[SUBMIT_ONLY].max_calls} on submit-only steps"
@@ -1164,9 +1169,7 @@ def run_live(
     skipped = unrecorded_cases(recorded) if args.live_command == "regression" else ()
     cells = _cells(args, pool, seed, recorded)
     efforts = _tool_efforts(settings, args.effort, cells)  # bad effort raises before spend
-    tool_loop = (
-        None if efforts is None else ToolLoop(efforts, ToolRules(floor=settings.completeness_floor))
-    )
+    tool_loop = None if efforts is None else ToolLoop(efforts, ToolRules.from_settings(settings))
     ledger = Ledger(ledgers / f"{batch_id}.jsonl", args.cap, provider=OPENROUTER)
     ledger.state()  # an opened ledger is bound to its first cap; a different one raises here
     usage_client = ChatClient(

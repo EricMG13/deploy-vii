@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from hypothesis import HealthCheck, example, given, settings
@@ -391,11 +391,12 @@ def test_the_rules_validate_their_settings_and_need_the_context_for_the_floor() 
     assert rules.active("financials") and not rules.active("narrative")
     with pytest.raises(ValueError, match="retained source_context review"):
         rules.issues("financials", "{}", seen=Seen(), context=None)
-    assert rules.to_record() == {
+    record = rules.to_record()
+    assert {k: record[k] for k in ("completeness_floor_lines", "completeness_floor_reason")} == {
         "completeness_floor_lines": 2,
         "completeness_floor_reason": None,
-        "checked": [],
     }
+    assert record["checked"] == [] and record["extracted_coverage_min"] is None
 
 
 # Task 8.9: the rules each tool-loop step checks. CP-1's four keep 8.0d's (both; vacuous for
@@ -563,6 +564,43 @@ def test_the_effort_table_floor_and_flag_are_read_and_checked(tmp_path: Path) ->
             load_settings(settings_file(tmp_path / str(number), bad), root=tmp_path)
 
 
+def test_the_extracted_coverage_floor_is_read_as_a_decimal_string(tmp_path: Path) -> None:
+    """Task 8.12 item 3: `extracted_coverage_min`, a Decimal string from 0 to 1 with at most
+    four places, in the floor's table, alone or beside `min_statement_lines`; absent: off."""
+    table = "[model_tests.completeness_floor]\n"
+    alone = load_settings(
+        settings_file(tmp_path / "a", table + 'extracted_coverage_min = "0.70"\n'), root=tmp_path
+    )
+    assert (alone.extracted_coverage_min, alone.completeness_floor) == (Decimal("0.70"), None)
+    both = load_settings(
+        settings_file(
+            tmp_path / "b",
+            table + 'min_statement_lines = 2\nextracted_coverage_min = "1"\n',
+        ),
+        root=tmp_path,
+    )
+    assert (both.extracted_coverage_min, both.completeness_floor) == (Decimal("1"), 2)
+    assert ToolRules.from_settings(both) == ToolRules(floor=2, coverage_min=Decimal("1"))
+    off = load_settings(settings_file(tmp_path / "c", ""), root=tmp_path)
+    assert (off.extracted_coverage_min, off.completeness_floor) == (None, None)
+    assert ToolRules.from_settings(off) == ToolRules()
+    reason = "extracted_coverage_min must be a decimal string from 0 to 1"
+    for number, (bad, why) in enumerate(
+        [
+            ('extracted_coverage_min = "abc"\n', reason),
+            ('extracted_coverage_min = "-0.1"\n', reason),
+            ('extracted_coverage_min = "1.5"\n', reason),
+            ('extracted_coverage_min = "NaN"\n', reason),
+            ('extracted_coverage_min = "0.12345"\n', reason),
+            ("extracted_coverage_min = 0.7\n", reason),
+            ('min_lines = 2\nextracted_coverage_min = "0.7"\n', "unknown key min_lines"),
+            ("", "needs min_statement_lines or extracted_coverage_min"),
+        ]
+    ):
+        with pytest.raises(SettingsError, match=why):
+            load_settings(settings_file(tmp_path / f"bad{number}", table + bad), root=tmp_path)
+
+
 def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling() -> None:
     """Task 8.9 item 4: a row per tool-loop step, each with its reason as a comment; Sol at
     medium (decision 0005, 24 Oct 2026) and one escalation to high at most. The floor stays
@@ -570,6 +608,7 @@ def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling
     path = Path("settings/project.toml")
     loaded = load_settings(path)
     assert loaded.tool_loop and loaded.completeness_floor is None
+    assert loaded.extracted_coverage_min is None  # task 8.12: off (user decision "C")
     assert set(loaded.step_efforts) == tool_loop_steps()
     assert set(loaded.step_efforts.values()) == {StepEffort("medium", "high")}
     table = path.read_text(encoding="utf-8").split("[model_tests.step_effort]\n", 1)[1]
@@ -1534,3 +1573,100 @@ def test_a_step_other_than_financials_records_no_coverage(tmp_path: Path) -> Non
     result = rig.run(script, step_id="business_context", rules=ToolRules(checked=()))
     (record, *_) = result.submits
     assert "extracted_coverage" not in record and "completeness" not in record
+
+
+def _half(case: PagedCase) -> str:
+    """The built payload with three FY CFS lines renamed: 3 of the 6 extracted lines covered."""
+    document = built(case)
+    for line_id in ("cfo", "cfi", "cff"):
+        rename(cfs_line(document, line_id, "FY"))
+    return json.dumps(document)
+
+
+HALF_ISSUE = (
+    f"{INCOMPLETE}: coverage 0.5000 of {CFS_FY} below the floor 0.70 (3 of 6 extracted lines "
+    "covered)"
+)
+
+
+def test_the_coverage_floor_rejects_each_measured_cell_below_it(paged_case: PagedCase) -> None:
+    """Item 3: with `coverage_min` set, a financials submit fails per cell whose coverage is
+    below the floor (exactly: covered < floor x extracted); a cell with nothing extracted is
+    not judged (the line-count floor judges a cell's lines); the old floor stays apart."""
+    rules = ToolRules(coverage_min=Decimal("0.70"), checked=())
+    assert rules.active("financials") and not rules.active("narrative")
+    context, tables = paged_case.context, (CFS_TABLE,)
+
+    def found(rule: ToolRules, payload: str) -> tuple[str, ...]:
+        return rule.issues("financials", payload, seen=Seen(), context=context, tables=tables)
+
+    assert found(rules, _half(paged_case)) == (HALF_ISSUE,)
+    assert found(rules, json.dumps(built(paged_case))) == ()
+    assert found(ToolRules(coverage_min=Decimal("0.5"), checked=()), _half(paged_case)) == ()
+    assert found(rules, paged_case.payload) == ()  # every cell unmeasured: none judged
+    assert found(rules, "not json") == ()
+    both = ToolRules(floor=31, coverage_min=Decimal("0.70"), checked=())
+    lines = completeness_issues(_half(paged_case), context, 31)
+    assert len(lines) == 2 and found(both, _half(paged_case)) == (*lines, HALF_ISSUE)
+    with pytest.raises(ValueError, match="needs the extracted tables"):
+        rules.issues("financials", "{}", seen=Seen(), context=context)
+    with pytest.raises(ValueError, match="retained source_context review"):
+        rules.issues("financials", "{}", seen=Seen(), context=None, tables=tables)
+
+
+@pytest.mark.parametrize(
+    "bad", [Decimal("-0.01"), Decimal("1.0001"), Decimal("0.12345"), Decimal("NaN"), 0.7, "0.7"]
+)
+def test_the_coverage_floor_is_a_decimal_from_zero_to_one_of_four_places(bad: object) -> None:
+    with pytest.raises(ValueError, match="extracted-coverage floor"):
+        ToolRules(coverage_min=cast(Decimal, bad))
+
+
+def test_the_rules_record_both_floors_and_why_each_is_off() -> None:
+    unmeasured = (
+        "a cell with no extracted lines is not judged by this floor (its reason is in "
+        "extracted_coverage); min_statement_lines judges a cell's line count"
+    )
+    assert ToolRules(checked=()).to_record() == {
+        "completeness_floor_lines": None,
+        "completeness_floor_reason": "no [model_tests.completeness_floor] in settings",
+        "extracted_coverage_min": None,
+        "extracted_coverage_min_reason": (
+            "no [model_tests.completeness_floor] extracted_coverage_min in settings"
+        ),
+        "extracted_coverage_unmeasured": unmeasured,
+        "checked": [],
+    }
+    record = ToolRules(coverage_min=Decimal("0.70"), checked=()).to_record()
+    assert (record["extracted_coverage_min"], record["extracted_coverage_min_reason"]) == (
+        "0.70",
+        None,
+    )
+
+
+def test_a_loop_submit_below_the_coverage_floor_is_rejected_and_escalates(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """The loop judges the floor on the pages shown by the submit (scratch and live journal
+    alike: the live journal's judgement of the last submit must equal the scratch one), and a
+    coverage rejection is a completeness-floor rejection for escalation. (`_half`'s renamed
+    labels fail the stage too; the floor alone rejecting an accepted payload is the recorded
+    transcripts' differential.)"""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    extract = ("c-e", EXTRACT, json.dumps({"source_id": "S1", "locators": ["page:1"]}))
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(
+        tool_reply(search, extract),
+        tool_reply(("c-1", "submit_financials", _half(paged_case))),
+        tool_reply(("c-2", "submit_financials", json.dumps(built(paged_case)))),
+    )
+    rules = ToolRules(coverage_min=Decimal("0.70"))
+    result = rig.run(script, step_id="financials", rules=rules)
+    assert [s["outcome"] for s in result.submits] == ["rejected", "accepted"]
+    assert result.submits[0]["issues"][-1] == HALF_ISSUE
+    assert not any(i.startswith(INCOMPLETE) for i in result.submits[0]["issues"][:-1])
+    assert result.submits[0]["completeness_floor_failed"] is True
+    events = (rig.directory(result.submits[0]["attempt_id"]) / "events.jsonl").read_text()
+    assert '"reason": "a completeness-floor rejection"' in events
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["rules"]["extracted_coverage_min"] == "0.70"

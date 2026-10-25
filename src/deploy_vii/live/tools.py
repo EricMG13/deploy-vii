@@ -64,6 +64,7 @@ from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.financial_contracts import FinancialBook, StatementLine
 from deploy_vii.live.prompts import block, span_line
 from deploy_vii.live.schema import strict_schema
+from deploy_vii.live.settings import COVERAGE_FLOOR_PLACES, LiveSettings, valid_coverage_floor
 from deploy_vii.live.submission import STEPS
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import SUBMIT_ONLY, ToolSet, extract_tool_steps, step_chain, tool_set
@@ -100,6 +101,12 @@ RULES = (ABSENCE, UNREAD)  # the floor is configured apart (`ToolRules.floor`)
 # as the exact ones do. Agreement lists at most this many disagreements.
 COVERAGE_PLACES = Decimal("0.0001")
 MAX_DISAGREEMENTS = 5
+# A fail-open of the coverage floor, stated in every rules record (task 8.12): a cell with
+# nothing extracted has no coverage to judge.
+UNMEASURED_CELLS = (
+    "a cell with no extracted lines is not judged by this floor (its reason is in "
+    "extracted_coverage); min_statement_lines judges a cell's line count"
+)
 # Task 8.9 fix round 1 (user decision, 24 Oct 2026): the (field, value) pairs by which a row
 # says the sources do not disclose something: CP-1A's `DisclosureItem.available` "No" and
 # `OperatingDriver.status` "Not disclosed", CP-4's `Covenant.threshold_unit` "not stated". A
@@ -901,6 +908,25 @@ def extracted_coverage(
     }
 
 
+def coverage_issues(
+    payload: str, context: SourceContextReview, tables: Sequence[ExtractedTable], floor: Decimal
+) -> tuple[str, ...]:
+    """The coverage floor's issues (task 8.12): one per expected cell with extracted lines whose
+    coverage is below `floor`, compared exactly (covered < floor x extracted; the shown
+    four-place ratio agrees, `_ratio`). A cell with nothing extracted is not judged
+    (`UNMEASURED_CELLS`), and a payload that does not parse has none (the stage validator
+    rejects it with its own issues)."""
+    measured = extracted_coverage(payload, context, tables)
+    if measured is None:
+        return ()
+    return tuple(
+        f"{INCOMPLETE}: coverage {item['coverage']} of {key} below the floor {floor} "
+        f"({item['covered']} of {item['extracted']} extracted lines covered)"
+        for key, item in measured["cells"].items()
+        if item["extracted"] and Decimal(item["covered"]) < floor * item["extracted"]
+    )
+
+
 def seen_tables(
     tools: PackTools, seen: Seen, context: SourceContextReview
 ) -> tuple[ExtractedTable, ...]:
@@ -1052,26 +1078,43 @@ def applicable_rules(step_id: str) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class ToolRules:
     """The evidence rules of the tool-loop steps. `floor`: the completeness floor's lines per
-    statement and source scope for `financials` (settings; None: no floor). `checked`: the
-    rules turned on; each step applies those of them its contract can fail
-    (`applicable_rules`)."""
+    statement and source scope for `financials` (settings; None: no floor). `coverage_min`
+    (task 8.12, user decision "C"): the extracted-coverage floor for `financials`, a Decimal
+    from 0 to 1 of at most four places (settings `extracted_coverage_min`; None: no floor;
+    `coverage_issues`). Both floors may be set. `checked`: the rules turned on; each step
+    applies those of them its contract can fail (`applicable_rules`)."""
 
     floor: int | None = None
     checked: tuple[str, ...] = RULES
+    coverage_min: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.floor is not None and self.floor < 1:
             raise ValueError("the completeness floor is at least one line")
+        if self.coverage_min is not None and not valid_coverage_floor(self.coverage_min):
+            raise ValueError(
+                "the extracted-coverage floor is a Decimal from 0 to 1 with at most "
+                f"{COVERAGE_FLOOR_PLACES} decimal places, not {self.coverage_min!r}"
+            )
         if unknown := sorted(set(self.checked) - set(RULES)):
             raise ValueError(f"unknown tool-loop rules {unknown}")
+
+    @classmethod
+    def from_settings(cls, settings: LiveSettings) -> "ToolRules":
+        """The rules the settings turn on: both `[model_tests.completeness_floor]` floors."""
+        return cls(floor=settings.completeness_floor, coverage_min=settings.extracted_coverage_min)
 
     def applied(self, step_id: str) -> tuple[str, ...]:
         """The rules turned on that `step_id` applies, in rule order."""
         return tuple(rule for rule in applicable_rules(step_id) if rule in self.checked)
 
+    def floors(self, step_id: str) -> bool:
+        """Whether a `financials` floor (line count or extracted coverage) judges `step_id`."""
+        return step_id == "financials" and (self.floor, self.coverage_min) != (None, None)
+
     def active(self, step_id: str) -> bool:
         """Whether any rule can add an issue to `step_id`'s submits."""
-        return bool(self.applied(step_id)) or (step_id == "financials" and self.floor is not None)
+        return bool(self.applied(step_id)) or self.floors(step_id)
 
     def issues(
         self,
@@ -1080,17 +1123,25 @@ class ToolRules:
         *,
         seen: Seen,
         context: SourceContextReview | None,
+        tables: Sequence[ExtractedTable] | None = None,
     ) -> tuple[str, ...]:
-        """The rule issues of one submit, in rule order. The floor needs the retained
-        `source_context` review (`context`); a `financials` submit without one raises, as does
-        a submit-only step's (no rule is defined for it)."""
+        """The rule issues of one submit, in rule order: the line-count floor's, the coverage
+        floor's, then the absence and cited-page rules'. Either floor needs the retained
+        `source_context` review (`context`), and the coverage floor the submit's extracted
+        tables (`tables`, `seen_tables`); a `financials` submit without them raises, as does a
+        submit-only step's (no rule is defined for it)."""
         if tool_set(step_id) == SUBMIT_ONLY:
             raise ValueError(f"{step_id} is submit-only: it checks no tool-loop rule")
         found: list[str] = []
-        if step_id == "financials" and self.floor is not None:
+        if self.floors(step_id):
             if context is None:
                 raise ValueError("the completeness floor needs the retained source_context review")
-            found += completeness_issues(payload, context, self.floor)
+            if self.floor is not None:
+                found += completeness_issues(payload, context, self.floor)
+            if self.coverage_min is not None:
+                if tables is None:
+                    raise ValueError("the extracted-coverage floor needs the extracted tables")
+                found += coverage_issues(payload, context, tables, self.coverage_min)
         applied = self.applied(step_id)
         if ABSENCE in applied:
             found += absence_issues(step_id, payload, seen)
@@ -1100,11 +1151,17 @@ class ToolRules:
 
     def to_record(self, step_id: str | None = None) -> dict[str, Any]:
         """The settings, and with `step_id` the rules that step applies."""
+        coverage = self.coverage_min
         record: dict[str, Any] = {
             "completeness_floor_lines": self.floor,
             "completeness_floor_reason": None
             if self.floor is not None
             else "no [model_tests.completeness_floor] in settings",
+            "extracted_coverage_min": None if coverage is None else str(coverage),
+            "extracted_coverage_min_reason": None
+            if coverage is not None
+            else "no [model_tests.completeness_floor] extracted_coverage_min in settings",
+            "extracted_coverage_unmeasured": UNMEASURED_CELLS,
             "checked": list(self.checked),
         }
         if step_id is not None:

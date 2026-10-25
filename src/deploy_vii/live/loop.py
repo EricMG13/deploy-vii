@@ -825,10 +825,14 @@ def _execute(
     return "rejected", f"rejected ({left} submits left):\n{listed}", verdict
 
 
-def _rules(step: _Step, seen: Seen) -> Callable[[str], tuple[str, ...]] | None:
+def _rules(
+    step: _Step, seen: Seen, tables: tuple[ExtractedTable, ...]
+) -> Callable[[str], tuple[str, ...]] | None:
+    """The step's rules as of one submit: what it had been shown (`seen`) and, for the
+    coverage floor (task 8.12), those pages' extracted tables."""
     if not step.rules.active(step.step_id):
         return None
-    return partial(step.rules.issues, step.step_id, seen=seen, context=step.context)
+    return partial(step.rules.issues, step.step_id, seen=seen, context=step.context, tables=tables)
 
 
 def _tables(step: _Step, seen: Seen) -> tuple[ExtractedTable, ...]:
@@ -849,7 +853,7 @@ def _judge(step: _Step, call: Call, payload: str) -> Submit:
         shutil.copytree(step.store.directory, copy)
         store = Execution(copy)
         submitted = submit_model_payload(
-            store, step.attempt.ticket_id, step.step_id, payload, rules=_rules(step, seen)
+            store, step.attempt.ticket_id, step.step_id, payload, rules=_rules(step, seen, tables)
         )
         outcome, issues = journal_outcome(store, step.step_id, submitted.journal)
     coverage = (
@@ -922,7 +926,7 @@ def _after(step: _Step, call: Call, ctx: _Context) -> None:
         step.step_id,
         last.payload,
         on_normalised=resolved,
-        rules=_rules(step, last.seen),
+        rules=_rules(step, last.seen, last.tables),
     )
     composed_event(call.event, submitted)
     outcome, issues = journal_outcome(step.store, step.step_id, submitted.journal)

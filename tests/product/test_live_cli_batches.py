@@ -2302,3 +2302,14 @@ def test_the_tool_loop_line_states_a_set_completeness_floor() -> None:
     # Task 8.9 fix round 1: the call limit is the tool set's.
     assert "; per step at most 30 calls on pack-tool steps and 6 on submit-only steps, " in line
     assert cli._tool_loop_lines(None) == []
+
+
+def test_the_tool_loop_line_states_a_set_extracted_coverage_floor() -> None:
+    """Task 8.12: a set coverage floor follows the line-count floor's text; off, nothing is
+    added (the line ends as before)."""
+    rules = ToolRules(coverage_min=Decimal("0.70"))
+    (line,) = cli._tool_loop_lines(cli.ToolLoop({"financials": StepEffort.of("high")}, rules))
+    assert line.endswith(
+        "; completeness floor: off (user decision 24 Oct 2026); extracted-coverage floor: 0.70 "
+        "of each expected cell's extracted statement lines"
+    )

@@ -4,12 +4,17 @@ Task 8.0d adds three user-owned entries, each optional (absent: the earlier beha
 `tool_loop` (run the registry's tool-loop steps through `live.loop`), the per-step effort table
 `[model_tests.step_effort]` (`<step> = { effort = "...", ceiling = "..." }`; without a row a
 step uses `default_effort`) and `[model_tests.completeness_floor] min_statement_lines`.
+
+Task 8.12 (user decision "C", 24 Oct 2026) adds `extracted_coverage_min` to that table: the
+`financials` extracted-coverage floor (`live.tools.extracted_coverage`), a Decimal string from 0
+to 1 with at most four decimal places (`valid_coverage_floor`); absent, the floor is off. The
+table may hold either key or both, and no other.
 """
 
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +27,9 @@ EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_CEILING = "high"
 
 DEFAULT_SETTINGS = Path("settings/project.toml")
+FLOOR_KEYS = ("min_statement_lines", "extracted_coverage_min")
+# Task 8.12: the coverage a cell shows has four places (`live.tools.COVERAGE_PLACES`).
+COVERAGE_FLOOR_PLACES = 4
 
 
 class SettingsError(ValueError):
@@ -86,6 +94,8 @@ class LiveSettings:
     tool_loop: bool = False
     step_efforts: Mapping[str, StepEffort] = field(default_factory=dict)
     completeness_floor: int | None = None  # statement lines per expected cell; None: no floor
+    # Task 8.12: the least coverage of a cell's extracted statement lines; None: no floor.
+    extracted_coverage_min: Decimal | None = None
 
     def step_effort(self, step_id: str) -> StepEffort:
         """The step's row of the effort table, else `default_effort` (`StepEffort.of`)."""
@@ -151,11 +161,51 @@ def _step_efforts(tests: dict[str, Any]) -> dict[str, StepEffort]:
     return rows
 
 
-def _floor(tests: dict[str, Any]) -> int | None:
+def valid_coverage_floor(value: object) -> bool:
+    """Whether `value` is a usable extracted-coverage floor: a finite Decimal from 0 to 1 with
+    at most `COVERAGE_FLOOR_PLACES` decimal places (task 8.12)."""
+    if not isinstance(value, Decimal) or not value.is_finite():
+        return False
+    exponent = value.as_tuple().exponent
+    return isinstance(exponent, int) and exponent >= -COVERAGE_FLOOR_PLACES and 0 <= value <= 1
+
+
+def _floor_table(tests: dict[str, Any]) -> dict[str, Any] | None:
     table = tests.get("completeness_floor")
     if table is None:
         return None
-    value = table.get("min_statement_lines") if isinstance(table, dict) else None
+    name = "settings [model_tests.completeness_floor]"
+    if not isinstance(table, dict):
+        raise SettingsError(f"{name} must be a table")
+    if unknown := sorted(set(table) - set(FLOOR_KEYS)):
+        raise SettingsError(f"{name} has an unknown key {', '.join(unknown)}")
+    if not table:
+        raise SettingsError(f"{name} needs min_statement_lines or extracted_coverage_min")
+    return table
+
+
+def _coverage_min(tests: dict[str, Any]) -> Decimal | None:
+    table = _floor_table(tests)
+    if table is None or "extracted_coverage_min" not in table:
+        return None
+    value = table["extracted_coverage_min"]
+    try:
+        floor = Decimal(value) if isinstance(value, str) else None
+    except InvalidOperation:
+        floor = None
+    if not valid_coverage_floor(floor):
+        raise SettingsError(
+            "settings [model_tests.completeness_floor] extracted_coverage_min must be a decimal "
+            f"string from 0 to 1 with at most {COVERAGE_FLOOR_PLACES} decimal places"
+        )
+    return floor
+
+
+def _floor(tests: dict[str, Any]) -> int | None:
+    table = _floor_table(tests)
+    if table is None or "min_statement_lines" not in table:
+        return None
+    value = table["min_statement_lines"]
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise SettingsError(
             "settings [model_tests.completeness_floor] min_statement_lines must be an integer >= 1"
@@ -202,6 +252,7 @@ def load_settings(path: Path = DEFAULT_SETTINGS, *, root: Path | None = None) ->
         tool_loop=_flag(tests, "tool_loop"),
         step_efforts=_step_efforts(tests),
         completeness_floor=_floor(tests),
+        extracted_coverage_min=_coverage_min(tests),
     )
 
 
