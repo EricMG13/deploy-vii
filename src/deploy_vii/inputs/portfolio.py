@@ -138,6 +138,8 @@ RULE_FIX: Mapping[str, str] = {
     ),
     "watch": "enter Pass: Watch is for headroom under 10 % of the limit",
     "percent": "format the cell as General and enter 2.5 for 2.5 % NAV",
+    "error_cell": "enter the real value in place of the error, or leave an optional cell empty",
+    "boolean_cell": "enter text or a plain number, not TRUE or FALSE",
 }
 REQUIRED_FIELDS: Mapping[tuple[str, str], str] = {
     ("Strategy", "fund_name"): (
@@ -751,6 +753,17 @@ def parse_row(
                 "recalculates"
             )
             findings.add(sheet.name, cell, message, RULE_FIX["formula"])
+            row.flagged.add(column.name)
+            continue
+        if span is not None and span.data_type in ("e", "b"):
+            # An Excel error (`t="e"`, e.g. #N/A) or a TRUE/FALSE cell (`t="b"`, stored 1 or
+            # 0) is not a value in any column.
+            if span.data_type == "e":
+                message = f"{column.name} holds the Excel error '{echo(value)}'"
+                findings.add(sheet.name, cell, message, RULE_FIX["error_cell"])
+            else:
+                message = f"{column.name} holds a TRUE/FALSE cell"
+                findings.add(sheet.name, cell, message, RULE_FIX["boolean_cell"])
             row.flagged.add(column.name)
             continue
         if not value:

@@ -157,6 +157,8 @@ Every column is required unless the tables below say optional. Rules that apply 
 - **Dates** are text `YYYY-MM-DD` and real calendar dates. The template formats these columns
   as Text. A date Excel has turned into a serial number (such as `46171`) is rejected.
 - **Values, not formulas**: `prepare` freezes the stored values and never recalculates.
+  Excel error cells (`#N/A`, `#DIV/0!` and the like) and TRUE/FALSE cells are refused in
+  every column.
 - **No total rows** in `Rating_Distribution`, `Sector_Exposure` or `Maturity_Profile` (a label
   containing the word `total` or `subtotal`, such as `Total` or `Top 20 Subtotal`). Python adds
   the rows up.
@@ -304,6 +306,8 @@ has an issue. These are the fixes it can print:
 | Header but no rows | add one row per `<one row per>`, starting in row 2 |
 | Two rows share the sheet's key (reported on the later row) | keep one row per `<key>`, or correct the repeated value |
 | A cell holds a formula | replace the formula with its value (Paste Special, Values) |
+| A cell holds an Excel error such as `#N/A` | enter the real value in place of the error, or leave an optional cell empty |
+| A cell holds TRUE or FALSE | enter text or a plain number, not TRUE or FALSE |
 | A number that is not a plain number | enter a plain number: digits, an optional sign and one decimal point (no %, units, spaces or thousands separators) |
 | A number longer than 40 characters | enter the number with at most 40 characters (Excel keeps 15 significant digits) |
 | A number cell formatted as a percentage in a percent-of-NAV column | format the cell as General and enter 2.5 for 2.5 % NAV |

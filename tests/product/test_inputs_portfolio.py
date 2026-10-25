@@ -1728,3 +1728,52 @@ def test_percent_format_is_judged_only_in_percent_columns() -> None:
     data = changed("Compliance_Monitor", 0, row | {"status": "Pass"})
     cells = {("Compliance_Monitor", "D2"): "0%", ("Rating_Distribution", "C2"): "0%"}
     assert rendered(validate_portfolio_bytes(FILE, formatted(data, cells))) == []
+
+
+# Fix round 1 (review F2): Excel error cells (`t="e"`) and TRUE/FALSE cells (`t="b"`, stored
+# 1 or 0) are not values, in any column.
+
+ERROR_FIX = "enter the real value in place of the error, or leave an optional cell empty"
+BOOLEAN_FIX = "enter text or a plain number, not TRUE or FALSE"
+
+
+@pytest.mark.parametrize(
+    "sheet, index, change, cell, problem, fix",
+    [
+        (
+            "Top_Holdings",
+            0,
+            {"issuer": "#N/A"},
+            "B2",
+            "issuer holds the Excel error '#N/A'",
+            ERROR_FIX,
+        ),
+        (
+            "Compliance_Monitor",
+            0,
+            {"current_value": "#DIV/0!"},
+            "I2",
+            "current_value holds the Excel error '#DIV/0!'",
+            ERROR_FIX,
+        ),
+        ("Mandate", 5, {"notes": "#REF!"}, "D7", "notes holds the Excel error '#REF!'", ERROR_FIX),
+        (
+            "Rating_Distribution",
+            0,
+            {"pct_nav": True},
+            "B2",
+            "pct_nav holds a TRUE/FALSE cell",
+            BOOLEAN_FIX,
+        ),
+        ("Top_Holdings", 1, {"rating": False}, "E3", "rating holds a TRUE/FALSE cell", BOOLEAN_FIX),
+    ],
+)
+def test_error_and_boolean_cells_are_one_issue_each(
+    sheet: str, index: int, change: dict[str, Any], cell: str, problem: str, fix: str
+) -> None:
+    raw = workbook(changed(sheet, index, change))
+    kinds = {span.data_type for span in source(raw).spans}
+    assert kinds >= {"e"} or kinds >= {"b"}  # openpyxl wrote a real error or boolean cell
+    assert rendered(validate_portfolio_bytes(FILE, raw)) == [
+        f"{FILE}:{sheet}!{cell}: {problem} — fix: {fix}"
+    ]
