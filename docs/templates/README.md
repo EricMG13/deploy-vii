@@ -255,7 +255,9 @@ headroom (limit minus current value, computed by the validator) is under 10 % of
 Every limit is a maximum. A minimum (for example a minimum share of first-lien loans) is
 entered as the maximum of its complement (a maximum share of second-lien and unsecured), or
 as a metric on `Exposure_Summary`. Limits in other units (years, counts, rating notches) and
-information-only rows belong on `Exposure_Summary` as metrics.
+information-only rows belong on `Exposure_Summary` as metrics. Known limitation:
+`Compliance_Monitor` has no direction field, so every limit is a maximum and minimum rows go on
+`Exposure_Summary`.
 
 #### `Holdings_Detail` (optional)
 
