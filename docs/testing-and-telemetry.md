@@ -199,6 +199,22 @@ Measured on the recorded `financials` payloads (25 Oct 2026):
   page:61.
 - synthetic-search-accept: no page read, so every cell is null with its reason.
 
+**Per-statement submits (task 8.11, user decision "B").** The `financials` loop takes its
+submission in parts (`submit_financials_part`) and judges their assembly
+(`submit_financials {}`; docs/development/live-runner.md, "Per-statement submits"). Its
+`limits` hold 40 calls. Added fields, null (or absent, as stated) on every other step:
+
+- **Step block.** `parts_submitted`: per part kind (`frame`, `IS`, `CFS`, `BS`, `other`), the
+  part calls `accepted` and `rejected`. `assemblies`: the submits judged from the parts held.
+- **Submit record.** `assembled_from`: per part held at that submit, its size (statement lines
+  for `IS`, `CFS`, `BS`; list entries for `frame` and `other`), or null when a whole payload
+  was sent; absent on other steps. Coverage, completeness and the rest are measured on the
+  assembled, prefilled payload as on a whole one.
+- **`tool-calls.jsonl`.** A part call's entry holds `part`, `outcome` and `issues`; an accepted
+  part's adds `nulls_resolved`, the paths of the nulls resolved on arrival, relative to that
+  part's payload (as `payload_nulls_resolved` records a whole payload's). An assembly resolves
+  none: its parts arrived resolved.
+
 The last call's block is the step's. `manifest.json` records the tools offered, `tool_choice`,
 the previous call and the retried call, and its `hashes` include `tool-calls.jsonl`
 (`tool_transcript_sha256`). In the batch report a tool-loop step's USD cell is the step's total

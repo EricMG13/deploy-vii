@@ -81,6 +81,7 @@ Probe-2 ([batch report](../development/tasks/implementation/live-probe-2.md),
    per-step budget is reconsidered when a module-wide budget is observed exhausted.
 3. **`FinancialSubmission` split: deferred (evidence insufficient).** `financials` has not run.
    Revisit when its first-pass validity on the rerun is below 2 of 3 draws for any model.
+   (Closed 25 Oct 2026: amendment "task 8.11".)
 4. **Prompt-token bound (MC-10), the measured basis.** The reservation's prompt bound is
    `ceil(request bytes / prompt_bytes_per_token_lower_bound) + 64`, with
    `prompt_bytes_per_token_lower_bound = 3.0` in `settings/project.toml` (required, no default).
@@ -537,3 +538,26 @@ issues to a submit's verdict.
 
 Not verified: live use; other issuers' layouts; the floor's effect on Sol's rejection and
 escalation rates.
+
+## Amendment, 25 Oct 2026 (task 8.11)
+
+Item 3 is closed by user decision "B" (24 Oct 2026). Its trigger was met on 23 Oct 2026 (task
+7.0h): E1 batch 5 truncated `financials` three times. The fix splits the model-facing shape
+only. The `financials` loop's model sends the submission in five parts with
+`submit_financials_part`: `frame`, `IS`, `CFS`, `BS` and `other`. Each part's schema is
+derived from the contract's own field types. `submit_financials {}` has Python assemble the
+parts held into one payload (docs/development/live-runner.md, "Per-statement submits").
+
+That payload takes the unchanged path:
+- the stored contract (`FinancialSubmission`, `cp1-financial-submission/1`);
+- the 7.13/7.16 prefill;
+- the validators and the 8.0d/8.9/8.12 loop rules;
+- the journal rules and acceptance.
+
+None of these moves. An absent part contributes nothing, so the validators report the gap in
+their own words. The call limit on `financials` is 40. A differential pins the assembly as
+judged exactly as the one-shot payload. Only the two financial-review hashes, which cover line
+order, may differ.
+
+Not verified: live use; whether Sol finishes each part under the completion budget; provider
+acceptance of two submit tools in one request.
