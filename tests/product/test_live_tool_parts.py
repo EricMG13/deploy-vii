@@ -1,6 +1,7 @@
 """Task 8.0d: the tool loop's parts: pack tools, evidence rules, requests, settings, ledgers."""
 
 import json
+import random
 import re
 import shutil
 from collections.abc import Iterator
@@ -52,6 +53,7 @@ from deploy_vii.live.tools import (
     applicable_rules,
     completeness_issues,
     expected_cells,
+    extracted_coverage,
     fiscal_year,
     tool_specs,
     unread_citation_issues,
@@ -1144,3 +1146,301 @@ def test_a_submit_only_step_reports_no_pages_extracted(tmp_path: Path) -> None:
     result = rig.run(script, step_id="quality")
     step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
     assert step["tool_set"] == SUBMIT_ONLY and step["pages_extracted"] is None
+
+
+# --- extracted coverage (task 8.12, user decision "C") -----------------------------------------
+
+CFS_FY = "CFS S1 scope FY (2025-01-01 to 2025-12-31)"
+IS_FY = "IS S1 scope FY (2025-01-01 to 2025-12-31)"
+CFS_TABLE = extract_statement_lines(CFS_PAGE, "page:1", source_id="S1")
+FY_LINES = ("profit", "noncash", "cfo", "cfi", "cff", "ncf")
+
+
+def built(case: PagedCase) -> dict[str, Any]:
+    """The paged case's payload built from the extracted CFS page (every CFS line cites page:1
+    with its label as the quote), as a document to edit."""
+    document: dict[str, Any] = json.loads(
+        from_extracted(case.payload, PackTools(case.store.pack()))
+    )
+    return document
+
+
+def cfs_line(document: dict[str, Any], line_id: str, period_id: str) -> dict[str, Any]:
+    line: dict[str, Any] = next(
+        item
+        for item in document["financial"]["books"][0]["statement_lines"]
+        if (item["line_id"], item["period_id"]) == (line_id, period_id)
+    )
+    return line
+
+
+def rename(line: dict[str, Any]) -> None:
+    """The line keeps citing its page, with a label and quote that cover nothing there."""
+    line["label"] = line["value"]["citations"][0]["quote"] = "Renamed"
+
+
+def cell(measured: dict[str, Any] | None, key: str = CFS_FY) -> dict[str, Any]:
+    assert measured is not None
+    found: dict[str, Any] = measured["cells"][key]
+    return found
+
+
+def test_coverage_counts_each_cells_cited_statement_pages(paged_case: PagedCase) -> None:
+    """Task 8.12 item 1: a cell's extracted lines are those of the pages its statement's lines
+    cite; each is covered by a line of a period in the cell's scope citing that page."""
+    payload = json.dumps(built(paged_case))
+    measured = extracted_coverage(payload, paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    assert measured["cells"] == {
+        IS_FY: {
+            "extracted": 0,
+            "covered": 0,
+            "coverage": None,
+            "reason": "no IS line of a book bound to issuer cites a page of S1",
+            "pages": [],
+        },
+        CFS_FY: {
+            "extracted": 6,
+            "covered": 6,
+            "coverage": "1.0000",
+            "reason": None,
+            "pages": ["page:1"],
+        },
+    }
+    assert measured["overall"] == {
+        "extracted": 6,
+        "covered": 6,
+        "coverage": "1.0000",
+        "reason": None,
+    }
+    # The case's own payload cites no page: nothing is extracted for any cell.
+    plain = extracted_coverage(paged_case.payload, paged_case.context, (CFS_TABLE,))
+    assert plain is not None and plain["overall"] == {
+        "extracted": 0,
+        "covered": 0,
+        "coverage": None,
+        "reason": "no expected cell has extracted lines",
+    }
+    # A cited page without a table (not read or extracted), or a table without lines.
+    unread = extracted_coverage(payload, paged_case.context, ())
+    assert cell(unread)["reason"] == (
+        "no page of S1 the CFS lines cite has an extracted table (read or extracted)"
+    )
+    empty = replace(CFS_TABLE, lines=())
+    assert cell(extracted_coverage(payload, paged_case.context, (empty,)))["reason"] == (
+        "the cited pages page:1 hold no extracted statement lines"
+    )
+    assert extracted_coverage("not json", paged_case.context, (CFS_TABLE,)) is None
+    assert extracted_coverage("{}", paged_case.context, (CFS_TABLE,)) is None
+
+
+def test_coverage_is_a_decimal_ratio_rounded_down_to_four_places(paged_case: PagedCase) -> None:
+    document = built(paged_case)
+    for line_id in ("cfo", "cfi", "cff"):  # three FY lines no longer cover theirs
+        rename(cfs_line(document, line_id, "FY"))
+    found = cell(extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,)))
+    assert (found["extracted"], found["covered"], found["coverage"]) == (6, 3, "0.5000")
+    rename(cfs_line(document, "ncf", "FY"))
+    # 2 of 6 is 0.3333...: shown rounded down, so a shown coverage never passes a floor above it.
+    found = cell(extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,)))
+    assert (found["covered"], found["coverage"]) == (2, "0.3333")
+
+
+def _covering(document: dict[str, Any], rule: str) -> dict[str, Any]:
+    """Every FY CFS line renamed (covering nothing), then one changed by `rule`: so that it
+    covers its extracted line by that rule alone, or so that it cannot."""
+    for line_id in FY_LINES:
+        rename(cfs_line(document, line_id, "FY"))
+    line = cfs_line(document, "cfo" if rule == "near-number" else "cfi", "FY")
+    citation = line["value"]["citations"][0]
+    if rule == "quote":  # the quote holds the printed (40), the label differs
+        line["label"], citation["quote"] = "Investing", "Synthetic cfi (40)"
+    elif rule == "label":  # the label matches; the quote holds none of its values
+        line["label"], citation["quote"] = "Synthetic  cfi", "Synthetic"
+    elif rule == "near-number":  # 240 in 1,240 or 2400, 60 in 60.5 or (60): not cfo's values
+        line["label"], citation["quote"] = "Operating", "1,240 and 2400 and 60.5 and (60)"
+    elif rule == "wrong-statement":  # the label matches but the line is an IS line
+        line["label"], line["statement"] = "Synthetic cfi", "IS"
+    elif rule == "uncited-page":  # the label matches but the citation names another page
+        line["label"], citation["locator"] = "Synthetic cfi", "page:2"
+    # "wrong-period": the Q1-Q4 lines still cite page:1 with the printed labels.
+    return document
+
+
+@pytest.mark.parametrize(
+    ("rule", "covered"),
+    [
+        ("quote", 1),
+        ("label", 1),
+        ("near-number", 0),
+        ("wrong-statement", 0),
+        ("wrong-period", 0),
+        ("uncited-page", 0),
+    ],
+)
+def test_each_covering_rule(paged_case: PagedCase, rule: str, covered: int) -> None:
+    """A line is covered by a payload line of its statement, of a period in the cell's scope,
+    citing its page with a quote holding one of its printed values (as a whole number) or with
+    its label (whitespace normalised); a wrong statement, period or page never covers it."""
+    document = _covering(built(paged_case), rule)
+    page_two = replace(CFS_TABLE, locator="page:2", lines=())
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE, page_two))
+    assert (cell(measured)["extracted"], cell(measured)["covered"]) == (6, covered)
+
+
+def test_agreement_compares_each_cited_lines_amount_with_its_labels_values(
+    paged_case: PagedCase,
+) -> None:
+    """Agreement (telemetry): a payload line on an extracted page agrees when its amount is one
+    of the values of the extracted line of its label there; a retyped -100 for the printed
+    (10) disagrees; a flipped sign is a sign difference (Python cannot tell it from a `signed`
+    expense printed as a magnitude); a label the page does not print is unmatched."""
+    document = built(paged_case)
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    assert measured["agreement"] == {
+        "agreed": 30,
+        "sign_differs": 0,
+        "disagreed": 0,
+        "unmatched": 0,
+        "not_on_an_extracted_page": 11,  # the BS and IS lines cite no page
+        "without_amount": 0,
+        "disagreements": [],
+        "sign_differences": [],
+    }
+    cfs_line(document, "cfi", "Q1")["value"]["amount"] = -100
+    cfs_line(document, "cff", "Q2")["value"]["amount"] = 30
+    cfs_line(document, "ncf", "FY")["label"] = "Net change"
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    agreement = measured["agreement"]
+    counts = [agreement[k] for k in ("agreed", "sign_differs", "disagreed", "unmatched")]
+    assert counts == [27, 1, 1, 1]
+    assert agreement["disagreements"] == [
+        {
+            "pages": [["S1", "page:1"]],
+            "line_id": "cfi",
+            "period_id": "Q1",
+            "label": "Synthetic cfi",
+            "payload_value": "-100",
+            "sign_convention": "signed",
+            "extracted_values": [["-10", "-10", "-10", "-10", "-40"]],
+        }
+    ]
+    assert agreement["sign_differences"] == [
+        {
+            "pages": [["S1", "page:1"]],
+            "line_id": "cff",
+            "period_id": "Q2",
+            "label": "Synthetic cff",
+            "payload_value": "30",
+            "sign_convention": "signed",
+            "extracted_values": [["-30", "-30", "-30", "-30", "-120"]],
+        }
+    ]
+
+
+def test_a_payload_zero_agrees_with_a_printed_nil_dash(paged_case: PagedCase) -> None:
+    dashed = CFS_PAGE.replace("Synthetic ncf          20", "Synthetic ncf          —")
+    table = extract_statement_lines(dashed, "page:1", source_id="S1")
+    document = built(paged_case)
+    cfs_line(document, "ncf", "Q1")["value"]["amount"] = 0
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (table,))
+    assert measured is not None
+    assert (measured["agreement"]["agreed"], measured["agreement"]["disagreed"]) == (30, 0)
+    cfs_line(document, "ncf", "Q1")["value"]["amount"] = 5  # not zero: no printed value holds it
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (table,))
+    assert measured is not None
+    assert (measured["agreement"]["agreed"], measured["agreement"]["disagreed"]) == (29, 1)
+
+
+def test_agreement_lists_the_first_five_disagreements(paged_case: PagedCase) -> None:
+    document = built(paged_case)
+    for period in ("Q1", "Q2", "Q3", "Q4", "FY"):
+        for line_id in ("cfo", "cfi"):
+            cfs_line(document, line_id, period)["value"]["amount"] = 7
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    assert measured["agreement"]["disagreed"] == 10
+    assert [(d["line_id"], d["period_id"]) for d in measured["agreement"]["disagreements"]] == [
+        ("cfo", "Q1"),
+        ("cfi", "Q1"),
+        ("cfo", "Q2"),
+        ("cfi", "Q2"),
+        ("cfo", "Q3"),
+    ]
+
+
+def test_coverage_refuses_ambiguous_tables(paged_case: PagedCase) -> None:
+    nameless = replace(CFS_TABLE, source_id=None)
+    with pytest.raises(ValueError, match="names no source"):
+        extracted_coverage(paged_case.payload, paged_case.context, (nameless,))
+    with pytest.raises(ValueError, match="two extracted tables"):
+        extracted_coverage(paged_case.payload, paged_case.context, (CFS_TABLE, CFS_TABLE))
+
+
+def _states(document: dict[str, Any], states: list[str]) -> dict[str, Any]:
+    """Each of the 30 CFS lines as `none` (a non-page citation), `cover` (page:1 with its
+    label) or `miss` (page:1 with a label and quote that cover nothing)."""
+    lines = [
+        line
+        for line in document["financial"]["books"][0]["statement_lines"]
+        if line["statement"] == "CFS"
+    ]
+    assert len(lines) == len(states) == 30
+    for line, state in zip(lines, states, strict=True):
+        if state == "none":
+            line["value"]["citations"][0]["locator"] = f"{line['line_id']}.{line['period_id']}"
+        elif state == "miss":
+            rename(line)
+    return document
+
+
+@settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    states=st.lists(st.sampled_from(("none", "cover", "miss")), min_size=30, max_size=30),
+    flip=st.integers(0, 29),
+    order=st.randoms(use_true_random=False),
+)
+def test_coverage_properties(
+    paged_case: PagedCase, states: list[str], flip: int, order: random.Random
+) -> None:
+    """Properties (decision 0012): coverage is in [0, 1] and None iff nothing is extracted;
+    unchanged by the order of the payload's lines and of the extracted lines; and never lower
+    once a line is made to cover its extracted line while page:1 is already counted (a line
+    citing a page not yet counted adds that page's lines, so it may lower the ratio)."""
+    base = built(paged_case)
+    payload = json.dumps(_states(json.loads(json.dumps(base)), states))
+    measured = extracted_coverage(payload, paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    for found in [*measured["cells"].values(), measured["overall"]]:
+        assert (found["coverage"] is None) == (found["extracted"] == 0)
+        assert 0 <= found["covered"] <= found["extracted"]
+        if found["coverage"] is not None:
+            assert Decimal(0) <= Decimal(found["coverage"]) <= Decimal(1)
+    shuffled = json.loads(payload)
+    order.shuffle(shuffled["financial"]["books"][0]["statement_lines"])
+    lines = list(CFS_TABLE.lines)
+    order.shuffle(lines)
+    again = extracted_coverage(
+        json.dumps(shuffled), paged_case.context, (replace(CFS_TABLE, lines=tuple(lines)),)
+    )
+    assert again is not None
+    assert (again["cells"], again["overall"]) == (measured["cells"], measured["overall"])
+    agreement = {k: v for k, v in again["agreement"].items() if k != "disagreements"}
+    assert agreement == {k: v for k, v in measured["agreement"].items() if k != "disagreements"}
+    if all(state == "none" for state in states):
+        assert cell(measured)["coverage"] is None
+        return
+    more = [*states[:flip], "cover", *states[flip + 1 :]]
+    after = cell(
+        extracted_coverage(
+            json.dumps(_states(json.loads(json.dumps(base)), more)),
+            paged_case.context,
+            (CFS_TABLE,),
+        )
+    )
+    before = cell(measured)
+    assert after["extracted"] == before["extracted"] == 6
+    assert after["covered"] >= before["covered"]
+    assert Decimal(after["coverage"]) >= Decimal(before["coverage"])

@@ -54,19 +54,21 @@ from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from pydantic import ValidationError
 
 from deploy_vii.contracts import Span
 from deploy_vii.cp1_workflow import FinancialSubmission
+from deploy_vii.financial_contracts import FinancialBook, StatementLine
 from deploy_vii.live.prompts import block, span_line
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.submission import STEPS
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import SUBMIT_ONLY, ToolSet, extract_tool_steps, step_chain, tool_set
 from deploy_vii.source_context import ReportingScope, SourceContextReview, scope_matches_period
-from deploy_vii.statement_extract import ExtractedTable, extract_statement_lines
+from deploy_vii.statement_extract import ExtractedLine, ExtractedTable, extract_statement_lines
 
 MAX_PAGES_PER_READ = 5
 # Task 8.10b: an extracted page is compact (one row per printed data line), so a call may name
@@ -93,6 +95,11 @@ UNREAD_PAGE = "Cited page not read through read_pages"
 RULE_PREFIXES = (INCOMPLETE, UNBACKED_ABSENCE, UNREAD_PAGE)
 ABSENCE, UNREAD = "absence", "unread-citations"
 RULES = (ABSENCE, UNREAD)  # the floor is configured apart (`ToolRules.floor`)
+# Task 8.12: `extracted_coverage` shows a ratio to four places, rounded down; the coverage floor
+# (`ToolRules.coverage_min`) has at most four places, so the shown ratio and the floor compare
+# as the exact ones do. Agreement lists at most this many disagreements.
+COVERAGE_PLACES = Decimal("0.0001")
+MAX_DISAGREEMENTS = 5
 # Task 8.9 fix round 1 (user decision, 24 Oct 2026): the (field, value) pairs by which a row
 # says the sources do not disclose something: CP-1A's `DisclosureItem.available` "No" and
 # `OperatingDriver.status` "Not disclosed", CP-4's `Covenant.threshold_unit` "not stated". A
@@ -664,6 +671,229 @@ def completeness_issues(
                 f"{min_lines} per statement and source scope"
             )
     return tuple(issues)
+
+
+# --- extracted coverage (task 8.12, user decision "C") ------------------------------------------
+
+
+def cell_key(cell: Cell) -> str:
+    """A cell's name in `extracted_coverage` and the coverage floor's issues: its statement
+    and label (an IS and a CFS cell share a scope, so the label alone is not unique)."""
+    return f"{cell.statement} {cell.label()}"
+
+
+def _normal(label: str) -> str:
+    return " ".join(label.split())
+
+
+def _quotes_value(quote: str, raw: str) -> bool:
+    """Whether the printed numeric cell `raw` appears in `quote` verbatim as a whole number:
+    not inside a longer one (`40` is not in `140`, `4,000` or `40.5`), and a bare number not
+    inside parentheses (`40` is not in `(40)`, which prints -40)."""
+    before, after = ("[0-9.,]", "[0-9]|[.,][0-9]")
+    if not raw.startswith("("):
+        before, after = "[0-9.,(]", "[0-9)]|[.,][0-9]"
+    return re.search(rf"(?<!{before}){re.escape(raw)}(?!{after})", quote) is not None
+
+
+def _ratio(covered: int, extracted: int) -> str | None:
+    """covered / extracted as a Decimal string rounded down to `COVERAGE_PLACES` (None: nothing
+    extracted). Rounded down, a shown ratio is never above the exact one, so with a floor of at
+    most four places the shown ratio is below the floor exactly when the exact one is. (With
+    fewer than 10**6 lines the exact ratio is at least 10**-10 from a four-place step, far above
+    the default context's 28-digit rounding of the division.)"""
+    if not extracted:
+        return None
+    quotient = Decimal(covered) / Decimal(extracted)
+    return str(quotient.quantize(COVERAGE_PLACES, rounding=ROUND_FLOOR))
+
+
+def _tables_by_page(tables: Sequence[ExtractedTable]) -> dict[tuple[str, str], ExtractedTable]:
+    found: dict[tuple[str, str], ExtractedTable] = {}
+    for table in tables:
+        if table.source_id is None:
+            raise ValueError(f"the extracted table {table.locator} names no source")
+        key = (table.source_id, table.locator)
+        if key in found:
+            raise ValueError(f"two extracted tables for {table.source_id} {table.locator}")
+        found[key] = table
+    return found
+
+
+def _page_order(locator: str) -> tuple[int, str]:
+    match = _PAGE.fullmatch(locator)
+    return (int(match.group(1)) if match else -1, locator)
+
+
+def _covered(line: ExtractedLine, cited: Sequence[StatementLine], source_id: str) -> bool:
+    """Whether a payload line of the cell (`cited`: its statement, its scope's periods) cites
+    the extracted line's page with one of its printed values in the quote, or with its label."""
+    raws = [
+        raw for raw, value in zip(line.raw_values, line.values, strict=True) if value is not None
+    ]
+    label = _normal(line.label)
+    return any(
+        citation.source_id == source_id
+        and citation.locator == line.locator
+        and (_normal(item.label) == label or any(_quotes_value(citation.quote, r) for r in raws))
+        for item in cited
+        for citation in item.value.citations
+    )
+
+
+def _cell_coverage(
+    cell: Cell, books: Sequence[FinancialBook], pages: Mapping[tuple[str, str], ExtractedTable]
+) -> dict[str, Any]:
+    statement, source_id = cell.statement, cell.source_id
+    lines = [line for book in books for line in book.statement_lines if line.statement == statement]
+    cited = {
+        citation.locator
+        for line in lines
+        for citation in line.value.citations
+        if citation.source_id == source_id and _PAGE.fullmatch(citation.locator)
+    }
+    shown = sorted((loc for loc in cited if (source_id, loc) in pages), key=_page_order)
+    extracted = [item for loc in shown for item in pages[(source_id, loc)].lines]
+    in_scope = [
+        line
+        for book in books
+        for periods in [
+            {
+                p.period_id
+                for p in book.periods
+                if _covers(cell, p.period_type, p.start_date, p.end_date)
+            }
+        ]
+        for line in book.statement_lines
+        if line.statement == statement and line.period_id in periods
+    ]
+    covered = sum(1 for item in extracted if _covered(item, in_scope, source_id))
+    reason = None
+    if not cited:
+        entity = cell.scope.entity_id
+        reason = f"no {statement} line of a book bound to {entity} cites a page of {source_id}"
+    elif not shown:
+        reason = (
+            f"no page of {source_id} the {statement} lines cite has an extracted table "
+            "(read or extracted)"
+        )
+    elif not extracted:
+        reason = f"the cited pages {', '.join(shown)} hold no extracted statement lines"
+    return {
+        "extracted": len(extracted),
+        "covered": covered,
+        "coverage": _ratio(covered, len(extracted)),
+        "reason": reason,
+        "pages": shown,
+    }
+
+
+def _printed(amount: Decimal, values: Sequence[Decimal | None]) -> bool:
+    """Whether `amount` is one of a line's printed values; a nil dash (None) prints a zero."""
+    return amount in values or (amount == 0 and None in values)
+
+
+def _agreement_kind(amount: Decimal, matched: Sequence[ExtractedLine]) -> str:
+    if not matched:
+        return "unmatched"
+    if any(_printed(amount, item.values) for item in matched):
+        return "agreed"
+    if any(_printed(-amount, item.values) for item in matched):
+        return "sign_differs"
+    return "disagreed"
+
+
+def _agreement(
+    books: Sequence[FinancialBook], pages: Mapping[tuple[str, str], ExtractedTable]
+) -> dict[str, Any]:
+    """Each payload statement line with an amount, on the extracted pages it cites (those with
+    lines), against the extracted lines of its label (whitespace normalised) there: `agreed`
+    when its amount is one of their `values` (a payload zero agrees with a printed nil dash),
+    `sign_differs` when only its negation is (a `signed` expense the page prints as a magnitude,
+    or a flipped sign: Python cannot tell which), `disagreed` otherwise, and `unmatched` when no
+    extracted line there has its label. The first `MAX_DISAGREEMENTS` of the disagreements and
+    of the sign differences are listed, in payload order."""
+    kinds = ("agreed", "sign_differs", "disagreed", "unmatched")
+    counts = dict.fromkeys((*kinds, "not_on_an_extracted_page", "without_amount"), 0)
+    listed: dict[str, list[dict[str, Any]]] = {"disagreed": [], "sign_differs": []}
+    for book in books:
+        for line in book.statement_lines:
+            amount = line.value.amount
+            keys = dict.fromkeys((c.source_id, c.locator) for c in line.value.citations)
+            on = [key for key in keys if key in pages and pages[key].lines]
+            if amount is None or not on:
+                counts["without_amount" if amount is None else "not_on_an_extracted_page"] += 1
+                continue
+            label = _normal(line.label)
+            matched = [
+                item for key in on for item in pages[key].lines if _normal(item.label) == label
+            ]
+            kind = _agreement_kind(amount, matched)
+            counts[kind] += 1
+            if kind in listed and len(listed[kind]) < MAX_DISAGREEMENTS:
+                listed[kind].append(
+                    {
+                        "pages": [list(key) for key in on],
+                        "line_id": line.line_id,
+                        "period_id": line.period_id,
+                        "label": line.label,
+                        "payload_value": str(amount),
+                        "sign_convention": line.sign_convention,
+                        "extracted_values": [
+                            [None if v is None else str(v) for v in item.values] for item in matched
+                        ],
+                    }
+                )
+    return {
+        **counts,
+        "disagreements": listed["disagreed"],
+        "sign_differences": listed["sign_differs"],
+    }
+
+
+def extracted_coverage(
+    payload: str, context: SourceContextReview, tables: Sequence[ExtractedTable]
+) -> dict[str, Any] | None:
+    """How much of the extracted statement lines a financials payload covers (task 8.12, user
+    decision "C"; docs/testing-and-telemetry.md states the definition), and whether its amounts
+    agree with them. Pure: `tables` are the extracted pages (each naming its source), the cells
+    are `expected_cells(context)`. None for a payload that does not parse (the stage validator
+    rejects it).
+
+    Per cell (`cell_key`): the cell's extracted lines are every line of the tables of the
+    `page:N` pages of the cell's source that the payload's lines of the cell's statement cite
+    (in books bound to the scope's entity, any period). An extracted line is covered when a
+    payload line of that statement, in a period the scope matches (`completeness_issues`'
+    rule), cites its page with a quote holding one of its printed non-nil values as a whole
+    number, or with its label equal after whitespace normalisation. Flagged lines count.
+    `coverage` is covered / extracted (`_ratio`; None with the reason when nothing is
+    extracted). `overall` sums every cell's counts (a line counts once per cell)."""
+    try:
+        submission = FinancialSubmission.model_validate_json(payload)
+    except ValidationError:
+        return None
+    pages = _tables_by_page(tables)
+    entities = {item.book_id: item.entity_id for item in submission.binding.books}
+    cells: dict[str, dict[str, Any]] = {}
+    for cell in expected_cells(context):
+        books = [
+            book
+            for book in submission.financial.books
+            if entities.get(book.book_id) == cell.scope.entity_id
+        ]
+        cells[cell_key(cell)] = _cell_coverage(cell, books, pages)
+    extracted = sum(item["extracted"] for item in cells.values())
+    covered = sum(item["covered"] for item in cells.values())
+    return {
+        "cells": cells,
+        "overall": {
+            "extracted": extracted,
+            "covered": covered,
+            "coverage": _ratio(covered, extracted),
+            "reason": None if extracted else "no expected cell has extracted lines",
+        },
+        "agreement": _agreement(submission.financial.books, pages),
+    }
 
 
 def _walk(node: object, path: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
