@@ -77,10 +77,12 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from functools import cached_property, partial
-from typing import Any
+from functools import cached_property, partial, reduce
+from operator import or_
+from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, create_model
+from pydantic.fields import FieldInfo
 
 from deploy_vii import business_context, cp3_relative_value, cp4_legal
 from deploy_vii.business_context import BusinessContextSubmission, submit_cp1a_step
@@ -122,6 +124,7 @@ from deploy_vii.readiness import (
 from deploy_vii.registry import (
     bound_steps,
     pack_tool_steps,
+    part_submit_steps,
     prefilled_kinds,
     step_chain,
     step_modules,
@@ -1017,3 +1020,309 @@ def submit_model_payload(
         ticket_id, "CP-0", ("source_readiness",), "source_readiness", normalised, uncomposable
     )
     return Submitted(journal, normalised, resolved, (), (), composition)
+
+
+# --- task 8.11 (user decision "B", 24 Oct 2026): the financials submit in parts ---------------
+#
+# One `financials` payload of hundreds of objects was cut off at the completion budget three
+# times in E1 batch 5 (decision 0008 item 3). The model-facing submit is split into five parts
+# the model can finish; Python assembles them into one payload of the stored contract
+# (`FinancialSubmission`, `cp1-financial-submission/1`), which then takes the unchanged path
+# above (`submit_model_payload`: null resolution, pre-fill, validators, journal rules). Nothing
+# here judges a submission: a part's check is its shape only, and every validator runs on the
+# assembled whole.
+#
+# Each part is a Pydantic model built from the stored contract's own fields (`FieldInfo`
+# reused, nothing retyped). `frame` is the submission's and the review's own fields with each
+# book's frame fields; IS, CFS and BS are `{"books": [...]}` with that statement's lines and the
+# identities whose target line (`target_line_id`, `period_id`) is one of them, plus CFS's cash
+# and BS's balance-movement registers; `other` is the rest of each book. `book_id` names the
+# book in every part. A part is checked on arrival (`check_part`): its shape, in the contract's
+# wording, less the "Field required" of a field Python fills (hashes, scope dimensions: the sent
+# schema never offers them); each line in its own statement's part; each identity with its
+# target line; each book once. As the shape check stops at a field that fails, a nested model's
+# cross-field rules (a period's dates, an observation's state) run on the assembled whole only.
+
+PartKind = Literal["frame", "IS", "CFS", "BS", "other"]
+PART_KINDS: tuple[PartKind, ...] = get_args(PartKind)
+STATEMENT_PARTS = ("IS", "CFS", "BS")
+# The two registers split by statement over IS, CFS and BS; every other book field is in one part.
+SPLIT_FIELDS = ("statement_lines", "statement_identities")
+BOOK_PARTS: Mapping[str, tuple[str, ...]] = {
+    "frame": (
+        "entity_perimeter",
+        "accounting_basis",
+        "currency",
+        "unit",
+        "periods",
+        "statement_disclosures",
+        "addback_disclosure",
+        "segment_disclosure",
+    ),
+    "IS": SPLIT_FIELDS,
+    "CFS": (*SPLIT_FIELDS, "cash_movement_bridges"),
+    "BS": (*SPLIT_FIELDS, "balance_movements", "balance_movement_bridges"),
+    "other": (
+        "accounts",
+        "addbacks",
+        "segments",
+        "kpis",
+        "facilities",
+        "facility_fx_conversions",
+        "pro_forma",
+        "audit_basis_explanations",
+        "segment_allocation",
+        "limitations",
+    ),
+}
+_PART_NAMES = {"frame": "Frame", "IS": "IS", "CFS": "CFS", "BS": "BS", "other": "Other"}
+if extra_parts := sorted(part_submit_steps() - {"financials"}):
+    raise ValueError(f"no part assembly is defined for {', '.join(extra_parts)}")
+
+
+def _fields(model: type[BaseModel], names: Sequence[str]) -> dict[str, Any]:
+    """`create_model` definitions of `model`'s own fields `names` (its `FieldInfo`, reused)."""
+    return {name: (model.model_fields[name].annotation, model.model_fields[name]) for name in names}
+
+
+def _books(book: type[BaseModel]) -> tuple[Any, FieldInfo]:
+    """A part's `books`: `book` rows within `FinancialReview.books`' own bounds."""
+    return tuple.__class_getitem__((book, ...)), FinancialReview.model_fields["books"]
+
+
+def _part_models() -> dict[str, type[BaseModel]]:
+    models: dict[str, type[BaseModel]] = {}
+    for kind in PART_KINDS:
+        name = f"Financials{_PART_NAMES[kind]}"
+        book = create_model(
+            f"{name}PartBook",
+            __base__=Contract,
+            **_fields(
+                FinancialBook,
+                [n for n in FinancialBook.model_fields if n == "book_id" or n in BOOK_PARTS[kind]],
+            ),
+        )
+        if kind != "frame":
+            models[kind] = create_model(f"{name}Part", __base__=Contract, books=_books(book))
+            continue
+        review = create_model(
+            f"{name}PartReview",
+            __base__=Contract,
+            **{
+                **_fields(FinancialReview, list(FinancialReview.model_fields)),
+                "books": _books(book),
+            },
+        )
+        models[kind] = create_model(
+            f"{name}Part",
+            __base__=Contract,
+            **{
+                **_fields(FinancialSubmission, list(FinancialSubmission.model_fields)),
+                "financial": (review, FinancialSubmission.model_fields["financial"]),
+            },
+        )
+    return models
+
+
+PART_MODELS: Mapping[str, type[BaseModel]] = _part_models()
+# The arguments of a `submit_financials_part` call, for its sent schema (`live.tools.part_spec`):
+# the part's kind and a payload of one of the five partial schemas (Python checks the one the
+# kind names; the union only shows the model each shape).
+PART_CALL: type[BaseModel] = create_model(
+    "FinancialsPartCall",
+    __base__=Contract,
+    part=(PartKind, ...),
+    payload=(reduce(or_, (PART_MODELS[kind] for kind in PART_KINDS)), ...),
+)
+
+
+def partial_schema(kind: str) -> type[BaseModel]:
+    """The Pydantic model a part of `kind` is checked against (`strict_schema` of it is what is
+    sent); an unknown kind raises ValueError."""
+    if kind not in PART_MODELS:
+        raise ValueError(f"unknown part {kind!r}; parts: {', '.join(PART_KINDS)}")
+    return PART_MODELS[kind]
+
+
+def _part_books(kind: str, document: Mapping[str, Any]) -> tuple[str, list[Any]]:
+    """(JSON path, rows) of a part's books, as far as they are a list."""
+    holder = document.get("financial") if kind == "frame" else document
+    rows = holder.get("books") if isinstance(holder, dict) else None
+    return ("financial.books" if kind == "frame" else "books"), (
+        rows if isinstance(rows, list) else []
+    )
+
+
+def _rows(book: Mapping[str, Any], name: str) -> list[tuple[int, dict[str, Any]]]:
+    rows = book.get(name)
+    return (
+        [(i, row) for i, row in enumerate(rows) if isinstance(row, dict)]
+        if isinstance(rows, list)
+        else []
+    )
+
+
+def _split_issues(kind: str, document: Mapping[str, Any]) -> list[str]:
+    """What the parts' split needs beyond their shape: each book once in a part; in a statement
+    part, each line of that statement and each identity's target line (`target_line_id` and
+    `period_id`) a line of the same book in the part."""
+    where, books = _part_books(kind, document)
+    issues: list[str] = []
+    first: dict[str, int] = {}
+    for index, book in enumerate(books):
+        if not isinstance(book, dict):
+            continue
+        book_id = book.get("book_id")
+        if isinstance(book_id, str):
+            if book_id in first:
+                issues.append(
+                    f"{where}.{index}.book_id: {book_id} repeats {where}.{first[book_id]}; a "
+                    "part holds each book once"
+                )
+            first.setdefault(book_id, index)
+        if kind not in STATEMENT_PARTS:
+            continue
+        lines = _rows(book, "statement_lines")
+        for number, line in lines:
+            statement = line.get("statement")
+            if isinstance(statement, str) and statement != kind:
+                issues.append(
+                    f"{where}.{index}.statement_lines.{number}.statement: a {statement} line "
+                    f"({line.get('line_id')} {line.get('period_id')}) in the {kind} part; send it "
+                    f"in the {statement} part"
+                )
+        keys = {(line.get("line_id"), line.get("period_id")) for _, line in lines}
+        for number, identity in _rows(book, "statement_identities"):
+            target = identity.get("target_line_id"), identity.get("period_id")
+            if all(isinstance(item, str) for item in target) and target not in keys:
+                issues.append(
+                    f"{where}.{index}.statement_identities.{number}.target_line_id: "
+                    f"{target[0]} {target[1]} is not a line of book {book_id} in this {kind} part"
+                )
+    return issues
+
+
+@dataclass(frozen=True)
+class _Checked:
+    issues: tuple[str, ...]
+    document: dict[str, Any] | None  # the part null-resolved, when it has no issue
+    resolved: tuple[str, ...]  # the paths of the nulls resolved (`live.schema.normalise`)
+
+
+def _checked(kind: str, payload: str) -> _Checked:
+    model = partial_schema(kind)
+    normalised, resolved = normalise(model, payload)
+    document = json_object(normalised)
+    issues: list[str] = []
+    try:
+        model.model_validate_json(normalised)
+    except ValidationError as error:
+        unset = (
+            {
+                f"{item.path}: Field required"
+                for item in marked_fields(model, document)
+                if item.name not in item.holder
+            }
+            if document is not None
+            else set()
+        )
+        issues = [issue for issue in shape_issues(error) if issue not in unset]
+    if document is None or issues:  # split references need shape-valid identifiers
+        return _Checked(tuple(issues), None, resolved)
+    issues += _split_issues(kind, document)
+    found = tuple(dict.fromkeys(issues))
+    return _Checked(found, None if found else document, resolved)
+
+
+def check_part(kind: str, payload: str) -> tuple[str, ...]:
+    """The issues of one part of `kind` as it arrives (empty: the part is accepted); see the
+    section comment above. An unknown kind raises ValueError."""
+    return _checked(kind, payload).issues
+
+
+def _size(kind: str, document: Mapping[str, Any]) -> int:
+    """A held part's size: a statement part's lines, else the entries of its books' lists."""
+    names = ("statement_lines",) if kind in STATEMENT_PARTS else BOOK_PARTS[kind]
+    return sum(
+        len(book.get(name) or ())
+        for book in _part_books(kind, document)[1]
+        for name in names
+        if isinstance(book.get(name), list)
+    )
+
+
+class Parts:
+    """The parts of one financials submission a tool loop holds: the last accepted part of each
+    kind. A part of a kind already held replaces it; a rejected part changes nothing. A part is
+    held null-resolved against its own schema, as `submit_model_payload` resolves a payload sent
+    whole; `resolved` keeps each held part's resolved paths (the loop records them)."""
+
+    def __init__(self) -> None:
+        self.held: dict[str, dict[str, Any]] = {}
+        self.resolved: dict[str, tuple[str, ...]] = {}
+
+    def submit(self, kind: str, payload: str) -> tuple[str, ...]:
+        """Check one part (`check_part`) and hold it when it has no issue; its issues."""
+        checked = _checked(kind, payload)
+        if checked.document is not None:
+            self.held[kind] = checked.document
+            self.resolved[kind] = checked.resolved
+        return checked.issues
+
+    def size(self, kind: str) -> int:
+        return _size(kind, self.held[kind])
+
+    def unit(self, kind: str) -> str:
+        return "lines" if kind in STATEMENT_PARTS else "entries"
+
+    def sizes(self) -> dict[str, int]:
+        """Each held part's size, in part order."""
+        return {kind: self.size(kind) for kind in PART_KINDS if kind in self.held}
+
+    def listing(self) -> str:
+        """The parts held and those not held (never sent, or only rejected), for the model."""
+        held = [f"{k} ({n} {self.unit(k)})" for k, n in self.sizes().items()]
+        missing = [kind for kind in PART_KINDS if kind not in self.held]
+        return (
+            f"parts held: {', '.join(held) or 'none'}; parts not held: "
+            f"{', '.join(missing) or 'none'}"
+        )
+
+
+def _ordered(document: Mapping[str, Any], model: type[BaseModel]) -> dict[str, Any]:
+    """`document`'s keys in `model`'s field order (a held part has no other key)."""
+    return {name: document[name] for name in model.model_fields if name in document}
+
+
+def assemble(parts: Parts) -> str:
+    """The one-shot payload of the held parts (canonical JSON, numbers with their sent digits).
+
+    The submission's and the review's fields come from the frame, the books from every part by
+    `book_id`: the frame's books first, then any other in part order (IS, CFS, BS, other) of
+    first appearance. Python owns the order: each object Python builds has its contract's field
+    order, a book's statement lines and identities are its IS part's, then its CFS part's, then
+    its BS part's, and every object a part holds is kept as sent. An absent part contributes
+    nothing: its fields are absent, so the contract's default (an empty register) or its "Field
+    required" stands, and the validators report the gap in their own words. No parts: `{}`."""
+    frame = parts.held.get("frame")
+    top = {k: v for k, v in frame.items() if k != "financial"} if frame is not None else {}
+    review = (
+        {k: v for k, v in frame["financial"].items() if k != "books"} if frame is not None else {}
+    )
+    books: dict[str, dict[str, Any]] = {}
+    for kind in PART_KINDS:
+        if kind not in parts.held:
+            continue
+        for row in _part_books(kind, parts.held[kind])[1]:
+            book = books.setdefault(row["book_id"], {"book_id": row["book_id"]})
+            for name, value in row.items():
+                if name in SPLIT_FIELDS:
+                    book[name] = [*book.get(name, ()), *value]
+                elif name != "book_id":
+                    book[name] = value
+    if frame is None and not books:
+        return "{}"
+    review["books"] = [_ordered(book, FinancialBook) for book in books.values()]
+    return exact_json(
+        _ordered({**top, "financial": _ordered(review, FinancialReview)}, FinancialSubmission)
+    )

@@ -122,13 +122,18 @@
  "start_journal": "artifacts/model-tests/hybrid-cp1-6/sol-medium/source_context/journal-submit-1",
  "step_id": "financials",
  "system_prompt": {
-  "changed_by": "task 7.19 (QUOTE_PAGE_RULE); task 8.10b (25 Oct 2026; EXTRACT_RULE, financials rule k; fix round 1 wording, B1)",
-  "now_sha256": "fd550f847ecffb23d781c9a606b04327cf5b8a9c5a9c6e9a1f6fe3a94707b3a6",
+  "changed_by": "task 7.19 (QUOTE_PAGE_RULE); task 8.10b (25 Oct 2026; EXTRACT_RULE, financials rule k; fix round 1 wording, B1); task 8.11 (25 Oct 2026; FINANCIAL_PARTS_RULE, financials rule l; rule 5 parts_tools_rule; review wording: a part holds every book's objects)",
+  "now_sha256": "f5fcd3c8563acb277180c8f8b15a721ab7f0eebd7c07799e6747d2f571b96bec",
   "recorded_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
  },
  "tools_added": [
-  "extract_statements"
+  "extract_statements",
+  "submit_financials_part"
  ],
- "tools_added_by": "task 8.10b (25 Oct 2026): extract_statements, the financials loop's fourth tool (user decision \"A\" phase 2), offered after this recording; no reply or verdict used it",
+ "tools_added_by": "task 8.10b (25 Oct 2026): extract_statements, the financials loop's fourth tool (user decision \"A\" phase 2), offered after this recording; no reply or verdict used it; task 8.11 (25 Oct 2026): submit_financials_part, the financials submit in parts (user decision \"B\"), offered after this recording; no reply used it",
+ "tools_changed": [
+  "submit_financials"
+ ],
+ "tools_changed_by": "task 8.11 (25 Oct 2026): submit_financials takes {} and assembles the parts held (user decision \"B\"); recorded as the one-shot submit_spec(financials), which the check puts back; the recorded replies send it a whole payload, still judged whole",
  "transcript": "artifacts/model-tests/hybrid-cp1-6/sol-medium/financials"
 }

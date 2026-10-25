@@ -157,7 +157,8 @@ off) and is the reference of the differential in `tests/devtools/test_loop_diffe
   the tools may read (decision 0005 row of 24 Oct 2026).
 - **Limits.** 8.0d's per step, except the call limit, which follows the tool set
   (`loop.limits_for`; user decision, 24 Oct 2026): 30 calls on a pack-tool step and 6 on a
-  submit-only step, so a model that keeps calling a refused tool stops early.
+  submit-only step, so a model that keeps calling a refused tool stops early. Task 8.11:
+  40 on `financials`, which submits in parts ("Per-statement submits").
 - **Rules.** `tools.applicable_rules`: CP-1's four stages keep both 8.0d rules; CP-0, CP-1A, CP-3
   and CP-4 apply the cited-page rule (their schemas carry `locator`). CP-1A and CP-4 also apply
   the absence rule (user decision, 24 Oct 2026). It covers each value their sent schema's enums
@@ -1463,8 +1464,9 @@ phase 2 (task 8.10b) wires it into the `financials` tool loop.
 
 - **Who gets it.** Registry `StepChain.extract_tools` (CP-1: `financials`; it must lie within
   the chain's `pack_sources`) and `extract_tool_steps()`. `tools.tool_specs("financials")` is
-  `search_pack`, `read_pages`, `extract_statements`, `submit_financials`; no other step is
-  offered it, and the loop answers any other step's call to it `error: unknown tool ...`.
+  `search_pack`, `read_pages`, `extract_statements`, `submit_financials` (task 8.11 adds
+  `submit_financials_part`; "Per-statement submits"); no other step is offered it, and the
+  loop answers any other step's call to it `error: unknown tool ...`.
 - **The call.** `extract_statements {source_id, locators: ["page:N", ...]}`, at most eight
   pages (`MAX_PAGES_PER_EXTRACT`; `read_pages` keeps five). A source outside the step's
   declared sources, a locator the source does not hold (exactly as written: `page:02` is not
@@ -1553,11 +1555,78 @@ chain, a step that is not the ticket's next, or a prompt `build` refuses is a on
 The same task made `cp0-submit`, `cp1-submit` and `cp1-promote` exit 1 on a rejected review, as
 `module-submit` does. The runner is unchanged.
 
+## Per-statement submits
+
+25 Oct 2026 (task 8.11, user decision "B"; decision 0008 item 3): the `financials` loop's model
+sends its submission in parts that Python assembles, so no single tool call has to carry the
+whole object (E1 batch 5 was cut at the completion budget three times). The stored contract
+(`FinancialSubmission`, `cp1-financial-submission/1`), the validators, the 7.13/7.16 prefill,
+the 8.0d/8.9/8.12 rules, the journal rules and acceptance are unchanged: they judge the
+assembled payload exactly as a payload sent whole.
+
+- **Who.** Registry `StepChain.part_submits` (CP-1: `financials`; it must lie within the
+  chain's `pack_sources`) and `part_submit_steps()`. `tools.tool_specs("financials")` is
+  `search_pack`, `read_pages`, `extract_statements`, `submit_financials_part` and
+  `submit_financials`; every other step keeps its one `submit_<step>` (submit-only steps too).
+- **The part call.** `submit_financials_part {part, payload}`, `part` one of `frame`, `IS`,
+  `CFS`, `BS`, `other`. Each part's schema is derived from the contract's own field types
+  (`submission.partial_schema`, nothing retyped; every `FinancialBook` field is in exactly one
+  part, pinned):
+
+  | Part | Holds |
+  | --- | --- |
+  | `frame` | every submission field outside the books (`schema_version`, `context_step_sha256`, `definition`, `binding`, `quarter_ids`) and the `financial` review's own fields (`analysis`, `limitations` and the identity fields), with each book's `entity_perimeter`, `accounting_basis`, `currency`, `unit` (prefilled, rule i), `periods`, `statement_disclosures`, `addback_disclosure` and `segment_disclosure` |
+  | `IS`, `CFS`, `BS` | that statement's `statement_lines`, and the `statement_identities` whose target line is one of them; `CFS` also `cash_movement_bridges`, `BS` also `balance_movements` and `balance_movement_bridges` |
+  | `other` | each book's `accounts`, `addbacks`, `segments`, `kpis`, `facilities`, `facility_fx_conversions`, `pro_forma`, `audit_basis_explanations`, `segment_allocation`, `limitations` |
+
+  A part is checked on arrival (`check_part`): its schema (nulls resolved as a whole payload's
+  are; a prefilled field may be left out), a book named twice, a line of another statement, an
+  identity whose target is not a line of the part. It is answered `accepted part <kind> (<n>
+  lines)` (`entries` for `frame` and `other`) or `rejected part <kind>:` with its issues and
+  the parts held. A rejected part changes nothing; an accepted one replaces the part of its kind
+  held, every book's, and its answer then adds `; it replaces the <kind> part held, <m> lines`,
+  so a model sending one book per part sees the loss (rule l says a part holds every book's
+  objects). A part call is not a submit and never ends the step.
+- **The submit.** `submit_financials {}` assembles the parts held (`submission.assemble`): the
+  frame's fields, the books by `book_id` (the frame's first), each book's lines and identities
+  IS then CFS then BS, keys in contract field order. That payload takes the unchanged
+  `submit_model_payload` path and counts as a submit (at most three). A rejected assembly's
+  issues are the validators' own, followed by the parts held and not held. An absent part
+  contributes nothing (its fields are absent, so the contract's default or its `Field
+  required` stands); no value is invented. A non-empty payload sent to `submit_financials` is
+  judged whole as before (the recorded transcripts do this).
+- **Order.** The assembly holds the same objects as the payload sent whole, but Python's line
+  order can differ from the model's, so the two financial-review hashes (`definition.` and
+  `binding.financial_review_sha256`, which cover line order) can differ; every other binding,
+  issue, prefill and coverage figure is the same (the differential in
+  `tests/product/test_live_tool_parts.py`).
+- **Completeness.** Nothing requires a part as such: an assembly without a part the validators
+  do not need (IS lines, on a case whose validators and off floors need none) is accepted as the
+  same payload sent whole without them would be. The completeness floors stay off.
+- **Limits.** 40 calls on `financials` (`loop.PART_LIMITS`, from `limits_for`; five parts,
+  three assemblies and the reads); 30 on every other pack-tool step, 6 on submit-only steps.
+  The prompt bound stays per request. On the hybrid-cp1-6 first request the parts add 5,242 B
+  (108,654 to 113,896 B: tools 34,144 to 38,047 B, rule l and rule 5 the rest) and 2,097 bound
+  tokens at 2.5 B/token (43,526 to 45,623), about US$0.008 per call. Worst case in the 8.9 table's units (Sol, US$4/M prompt and US$15/M
+  completion, 128,000 completion tokens a call, each prompt growing by 128,000 up to 922,000):
+  first call US$2.09 to 2.10, three calls 7.82 to 7.84, all calls 154.39 (30) to 210.53 (40).
+- **Prompt.** `financials` rule l (`prompts.FINANCIAL_PARTS_RULE`) says what each part holds,
+  that a resent part replaces the held one and that `submit_financials {}` assembles; rule 5
+  (`prompts.parts_tools_rule`) names the five tools. The one-shot `financials` prompt is
+  unchanged.
+- **I2.** The two `financials` transcripts' recorded requests carry the full-schema
+  `submit_financials` and their replies send whole payloads. Each entry names
+  `submit_financials_part` under `tools_added` and `submit_financials` under `tools_changed`
+  (with `tools_changed_by`, dated): the check restores the recorded `submit_spec` in place of a
+  changed spec before hashing, and fails if a named spec is unchanged or not sent exactly once.
+  Rule l and rule 5 are named through `system_prompt.changed_by`. Verdicts, tool results and
+  costs replay as recorded; nothing was re-recorded.
+
 ## Not covered here
 
-Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep
-their stored contracts until their own MC-1 skeletons); a `FinancialSubmission` split
-(deferred by decision 0008); a per-step repair of CP-0 or of CP-1's `quality` step (task 7.0g
+Model-facing submissions for `source_context` and the narrative steps (they keep their stored
+contracts until their own MC-1 skeletons); `financials` in parts is above (task 8.11); a
+per-step repair of CP-0 or of CP-1's `quality` step (task 7.0g
 covers CP-1's four stage steps); provider acceptance of the
 `ReadinessSubmission` schema and first-pass validity after MC-1 (the rerun); provider
 acceptance of the `quality` sent schema and a live or proxy QA review on the real pack (task

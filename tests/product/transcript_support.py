@@ -29,6 +29,14 @@ lists the added tools' names and `tools_added_by` the dated reason. The check re
 named tool exactly once in every replayed request, strips only those specs, and the rest must
 then hash exactly as recorded, so any other change to the tool list (or a tool named but not
 sent) still fails.
+
+A submit tool whose spec changed after the recording (task 8.11: `submit_financials` takes `{}`
+and assembles the parts) is named in `tools_changed` with a dated `tools_changed_by`. Only the
+step's own submit can be named; the check requires it once in every replayed request, puts back
+the one-shot spec it was recorded with (`live.tools.submit_spec`) in its place, and the request
+must then hash exactly as recorded. The recorded replies send that submit a whole payload,
+which the loop still judges whole, so their verdicts, tool results and cost are compared as
+before.
 """
 
 import hashlib
@@ -50,7 +58,7 @@ from deploy_vii.live.retention import TOOL_TRANSCRIPT, AttemptWriter
 from deploy_vii.live.runner import StepSpec
 from deploy_vii.live.settings import StepEffort
 from deploy_vii.live.submission import submit_model_payload
-from deploy_vii.live.tools import ToolRules
+from deploy_vii.live.tools import ToolRules, submit_name, submit_spec
 from tests.product.live_support import catalog_of, catalog_row, make_rtf_key
 from tests.product.test_workflow import cp1_case
 
@@ -208,22 +216,31 @@ def replay(
     )
 
 
-def _without_added_tools(
-    replayed: Replayed, added: list[str]
+def _as_recorded_tools(
+    replayed: Replayed, added: list[str], changed: list[str], step_id: str
 ) -> tuple[list[dict[str, str]], str | None]:
-    """The request records with the named added tools stripped, or the first call that does
-    not carry each named tool exactly once (as a reason)."""
+    """The request records with the named added tools stripped and each named changed spec
+    replaced in place by the one-shot `submit_spec(step_id)` it was recorded with, or the
+    first call that does not carry each named tool exactly once (as a reason)."""
     records: list[dict[str, str]] = []
     for number, body in enumerate(replayed.bodies, 1):
         tools = body.get("tools", [])
         sent = [spec["function"]["name"] for spec in tools]
-        for name in added:
-            if sent.count(name) != 1:
-                return [], (
-                    f"call {number}: tools_added names {name}, which the request carries "
-                    f"{sent.count(name)} times"
-                )
-        kept = [spec for spec in tools if spec["function"]["name"] not in added]
+        for key, names in (("tools_added", added), ("tools_changed", changed)):
+            for name in names:
+                if sent.count(name) != 1:
+                    return [], (
+                        f"call {number}: {key} names {name}, which the request carries "
+                        f"{sent.count(name)} times"
+                    )
+        recorded = submit_spec(step_id)
+        kept = [
+            recorded if spec["function"]["name"] in changed else spec
+            for spec in tools
+            if spec["function"]["name"] not in added
+        ]
+        if any(spec == recorded for spec in tools if spec["function"]["name"] in changed):
+            return [], f"call {number}: tools_changed names a spec that is unchanged"
         records.append(request_record({**body, "tools": kept}))
     return records, None
 
@@ -263,13 +280,17 @@ def check(entry: dict[str, Any], work: Path, repository: Path = REPOSITORY_ROOT)
                 return "evidence-changed", f"{entry['transcript']}/{name} does not hash as recorded"
         if Execution(start).pack().content_hash() != entry["pack_sha256"]:
             return "evidence-changed", "the starting journal's pack does not hash as recorded"
-    added = entry.get("tools_added")
+    added, changed = entry.get("tools_added"), entry.get("tools_changed")
     if added is not None and not entry.get("tools_added_by"):
         return "entry-invalid", "tools_added needs tools_added_by"
+    if changed is not None and not entry.get("tools_changed_by"):
+        return "entry-invalid", "tools_changed needs tools_changed_by"
+    if changed is not None and changed != [submit_name(entry["step_id"])]:
+        return "entry-invalid", "tools_changed names only the step's own submit tool"
     plain = replay(entry, start, work / "plain", repository=repository)
     replayed = plain.record()
-    if added is not None:
-        stripped, problem = _without_added_tools(plain, added)
+    if added is not None or changed is not None:
+        stripped, problem = _as_recorded_tools(plain, added or [], changed or [], entry["step_id"])
         if problem is not None:
             return "request-changed", problem
         replayed["requests"] = stripped

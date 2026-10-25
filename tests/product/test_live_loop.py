@@ -30,6 +30,7 @@ from deploy_vii.live.loop import (
     LIMIT,
     LIMITS,
     NO_SUBMIT,
+    PART_LIMITS,
     TOOL_SET_LIMITS,
     ToolLimits,
     ToolStepResult,
@@ -1050,13 +1051,16 @@ def test_a_cp3_none_market_row_needs_no_search(tmp_path: Path) -> None:
 
 def test_the_call_limit_is_the_tool_sets_six_or_thirty_from_the_registry() -> None:
     """Fix round 1 (user decision, 24 Oct 2026): a submit-only step has 6 calls, a pack-tool
-    step 30; the limit follows the registry's tool set, never a per-step list."""
+    step 30; the limit follows the registry's tool set, and (task 8.11) a step whose submit is
+    sent in parts (`registry.part_submit_steps`: financials) has 40, its other limits unchanged."""
     assert {kind: limits.max_calls for kind, limits in TOOL_SET_LIMITS.items()} == {
         PACK_TOOLS: 30,
         SUBMIT_ONLY: 6,
     }
+    assert PART_LIMITS == replace(LIMITS, max_calls=40)
     for step_id, kind in tool_sets().items():
-        assert limits_for(step_id) == replace(LIMITS, max_calls=30 if kind == PACK_TOOLS else 6)
+        calls = 40 if step_id == "financials" else 30 if kind == PACK_TOOLS else 6
+        assert limits_for(step_id) == replace(LIMITS, max_calls=calls), step_id
 
 
 @pytest.mark.parametrize("step_id", sorted(s for s in STARTS if tool_set(s) == SUBMIT_ONLY))

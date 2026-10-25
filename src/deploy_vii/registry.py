@@ -159,7 +159,9 @@ class StepChain:
     (`search_pack`, `read_pages`) iff the step is in `pack_sources` or `pack_reads`, else
     submit-only. `extract_tools` (task 8.10b, user decision "A" phase 2): the quoting steps
     (`pack_sources`) also offered `extract_statements`, the Python-extracted statement lines of
-    the pages they cite. A record breaking any of these raises ValueError.
+    the pages they cite. `part_submits` (task 8.11, user decision "B"): the quoting steps whose
+    model-facing submit is split into parts Python assembles (`live.submission.assemble`; CP-1's
+    `financials` only). A record breaking any of these raises ValueError.
     """
 
     module_id: str
@@ -172,6 +174,7 @@ class StepChain:
     one_shot: frozenset[str] = frozenset()
     pack_reads: frozenset[str] = frozenset()
     extract_tools: frozenset[str] = frozenset()
+    part_submits: frozenset[str] = frozenset()
 
     @property
     def settling(self) -> str:
@@ -221,6 +224,11 @@ class StepChain:
             raise ValueError(
                 f"{name} extracts statements in {', '.join(extra)}, not one of its steps that "
                 "quote the pack (pack_sources)"
+            )
+        if extra := sorted(self.part_submits - self.pack_sources):
+            raise ValueError(
+                f"{name} submits {', '.join(extra)} in parts, not one of its steps that quote "
+                "the pack (pack_sources)"
             )
         if extra := sorted(self.pack_reads & self.one_shot):
             raise ValueError(
@@ -329,6 +337,10 @@ STEP_CHAINS = checked_chains(
             # Task 8.10b (user decision "A", 24 Oct 2026): the financials stage maps and cites
             # Python-extracted statement lines instead of retyping them.
             extract_tools=frozenset({"financials"}),
+            # Task 8.11 (user decision "B", 24 Oct 2026): one financials payload of hundreds of
+            # objects was cut off at the completion budget three times in E1 batch 5; the model
+            # sends it in parts and Python assembles the stored submission.
+            part_submits=frozenset({"financials"}),
         ),
         # Task 7.2: CP-1A's one step; Python composes the registers as its output.
         StepChain(
@@ -447,6 +459,11 @@ def pack_tool_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]
 def extract_tool_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]:
     """The pack-tool steps also offered `extract_statements` (task 8.10b): `extract_tools`."""
     return frozenset(step_id for chain in chains for step_id in chain.extract_tools)
+
+
+def part_submit_steps(chains: Sequence[StepChain] = STEP_CHAINS) -> frozenset[str]:
+    """The pack-tool steps whose submit is sent in parts (task 8.11): `part_submits`."""
+    return frozenset(step_id for chain in chains for step_id in chain.part_submits)
 
 
 def module_route(module_id: str, chains: Sequence[StepChain] = STEP_CHAINS) -> tuple[str, ...]:

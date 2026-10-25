@@ -46,6 +46,12 @@ lines, then `line_no | label | caption | raw_values | flags`. A page it returns 
 for the cited-page rule (the model saw its printed lines), as `read_pages` does. A source
 outside the step's declared sources, a locator the source does not hold, more than
 `MAX_PAGES_PER_EXTRACT` pages or malformed locators are a refused call (`ToolError`).
+
+Task 8.11 (user decision "B"): a step in the registry's `part_submit_steps()` (`financials`
+only) sends its JSON object in parts. In place of the one-shot `submit_<step>` it is offered
+`submit_<step>_part` (`{part, payload}`, `part_spec`) and a `submit_<step>` of no arguments
+(`assemble_spec`), which assembles the parts held (`live.submission`) and is judged as a
+submit. The loop (`live.loop`) runs them.
 """
 
 import json
@@ -65,9 +71,16 @@ from deploy_vii.financial_contracts import FinancialBook, StatementLine
 from deploy_vii.live.prompts import block, span_line
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import COVERAGE_FLOOR_PLACES, LiveSettings, valid_coverage_floor
-from deploy_vii.live.submission import STEPS
+from deploy_vii.live.submission import PART_CALL, PART_KINDS, STEPS
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.registry import SUBMIT_ONLY, ToolSet, extract_tool_steps, step_chain, tool_set
+from deploy_vii.registry import (
+    SUBMIT_ONLY,
+    ToolSet,
+    extract_tool_steps,
+    part_submit_steps,
+    step_chain,
+    tool_set,
+)
 from deploy_vii.source_context import ReportingScope, SourceContextReview, scope_matches_period
 from deploy_vii.statement_extract import ExtractedLine, ExtractedTable, extract_statement_lines
 
@@ -144,6 +157,42 @@ def submit_spec(step_id: str) -> dict[str, Any]:
     )
 
 
+def part_name(step_id: str) -> str:
+    return f"submit_{step_id}_part"
+
+
+def part_spec(step_id: str) -> dict[str, Any]:
+    """Task 8.11: the tool a `part_submit_steps()` step sends one part of its JSON object with
+    (`live.submission.PART_CALL`: the part's kind and its partial schema)."""
+    return _function(
+        part_name(step_id),
+        f"Send one part of the {step_id} JSON object: `part` names it ({', '.join(PART_KINDS)}) "
+        "and `payload` holds it, in that part's schema. Answers `accepted part <part>` or "
+        "`rejected part <part>` with the issues; a part sent again replaces the one held.",
+        strict_schema(PART_CALL),
+    )
+
+
+def assemble_spec(step_id: str) -> dict[str, Any]:
+    """Task 8.11: a part step's submit, called with no arguments: Python assembles the parts
+    held into the step's JSON object (`live.submission.assemble`) and judges it."""
+    return _function(
+        submit_name(step_id),
+        f"Assemble the parts sent with {part_name(step_id)} into the {step_id} JSON object and "
+        "submit it; call it with {}. Answers `accepted` or the validator's issues and the parts "
+        "held.",
+        {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+    )
+
+
+def part_kind(raw: Mapping[str, Any]) -> str:
+    """The `part` of a part call's arguments (`{part, payload}`); else ToolError."""
+    _arguments(raw, ("part", "payload"))
+    if raw["part"] not in PART_KINDS:
+        raise ToolError(f"bad arguments: part must be one of {', '.join(PART_KINDS)}")
+    return str(raw["part"])
+
+
 def extract_spec() -> dict[str, Any]:
     return _function(
         EXTRACT,
@@ -172,11 +221,18 @@ def tool_specs(step_id: str, kind: ToolSet | None = None) -> tuple[dict[str, Any
     """The tools a tool-loop step is offered, by its tool set (`kind`, default the registry's,
     task 8.9): `pack` is `search_pack`, `read_pages` and `submit_<step_id>`, as the harness
     offers them, with `extract_statements` before the submit for an `extract_tool_steps()`
-    step (task 8.10b); `submit-only` is `submit_<step_id>` alone."""
+    step (task 8.10b); `submit-only` is `submit_<step_id>` alone. A `part_submit_steps()` step
+    (task 8.11) is offered `submit_<step_id>_part` and its submit of no arguments in place of
+    the one-shot submit."""
     kind = tool_set(step_id) if kind is None else kind
     if kind == SUBMIT_ONLY:
         return (submit_spec(step_id),)
     extract = (extract_spec(),) if step_id in extract_tool_steps() else ()
+    submits = (
+        (part_spec(step_id), assemble_spec(step_id))
+        if step_id in part_submit_steps()
+        else (submit_spec(step_id),)
+    )
     return (
         _function(
             SEARCH,
@@ -210,7 +266,7 @@ def tool_specs(step_id: str, kind: ToolSet | None = None) -> tuple[dict[str, Any
             },
         ),
         *extract,
-        submit_spec(step_id),
+        *submits,
     )
 
 

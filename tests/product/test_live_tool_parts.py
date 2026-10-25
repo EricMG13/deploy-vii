@@ -4,15 +4,18 @@ import json
 import random
 import re
 import shutil
-from collections.abc import Iterator
+import tempfile
+from collections import Counter
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
-from hypothesis import HealthCheck, example, given, settings
+from hypothesis import HealthCheck, event, example, given, settings
 from hypothesis import strategies as st
+from pydantic import BaseModel, ValidationError
 
 from deploy_vii.contracts import Source, Span
 from deploy_vii.cp1_workflow import FinancialSubmission
@@ -21,6 +24,7 @@ from deploy_vii.financial_contracts import FinancialBook, FinancialReview
 from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient, ChatRequest, Response
 from deploy_vii.live.ledger import OPENROUTER, Ledger, LedgerError, opening_provider
+from deploy_vii.live.loop import ToolStepResult
 from deploy_vii.live.prompts import (
     EXTRACT_RULE,
     NO_TOOLS_RULE,
@@ -32,9 +36,19 @@ from deploy_vii.live.prompts import (
 )
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import journal_outcome
-from deploy_vii.live.schema import strict_schema
+from deploy_vii.live.schema import exact_json, json_object, normalise, strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
-from deploy_vii.live.submission import STEPS, submit_model_payload
+from deploy_vii.live.submission import (
+    BOOK_PARTS,
+    PART_CALL,
+    PART_KINDS,
+    STEPS,
+    Parts,
+    assemble,
+    check_part,
+    partial_schema,
+    submit_model_payload,
+)
 from deploy_vii.live.tools import (
     ABSENCE,
     ABSENCE_MARKERS,
@@ -56,10 +70,12 @@ from deploy_vii.live.tools import (
     extracted_coverage,
     fiscal_year,
     seen_tables,
+    submit_spec,
     tool_specs,
     unread_citation_issues,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.readiness import shape_issues
 from deploy_vii.registry import (
     PACK_TOOLS,
     STEP_CHAINS,
@@ -67,6 +83,7 @@ from deploy_vii.registry import (
     StepChain,
     extract_tool_steps,
     pack_tool_steps,
+    part_submit_steps,
     step_modules,
     tool_loop_steps,
     tool_set,
@@ -76,9 +93,18 @@ from deploy_vii.source_context import SourceContextReview
 from deploy_vii.statement_extract import ExtractedTable, extract_statement_lines
 from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_source_context as source_context_tests
+from tests.product import transcript_support
 from tests.product.live_support import FAKE_KEY, make_rtf_key
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
-from tests.product.test_live_loop import Rig, step_rig, tool_pool, tool_reply
+from tests.product.test_live_loop import (
+    HYBRID_QUOTE_ISSUE,
+    Rig,
+    _financials_entry,
+    step_rig,
+    tool_messages,
+    tool_pool,
+    tool_reply,
+)
 from tests.product.test_statement_extract import _FILLER, _row
 from tests.product.test_workflow import cp1_case
 
@@ -197,7 +223,7 @@ def test_a_request_with_tools_drops_the_response_format_and_copies_the_conversat
     body = request.body()
     assert "response_format" not in body and body["tool_choice"] == "required"
     assert body["messages"][1] == turn and body["messages"][1] is not turn
-    assert body["tools"][3]["function"]["name"] == "submit_financials"
+    assert body["tools"][4]["function"]["name"] == "submit_financials"
     with pytest.raises(ValueError, match="together"):
         replace(request, tool_choice=None)
     with pytest.raises(ValueError, match="together"):
@@ -725,6 +751,7 @@ def test_only_financials_is_offered_extract_statements() -> None:
         "search_pack",
         "read_pages",
         EXTRACT,
+        "submit_financials_part",
         "submit_financials",
     ]
     for step in tool_sets():
@@ -1143,7 +1170,7 @@ def test_the_financials_loop_extracts_then_submits_to_the_same_accepted_state(
         bodies = script.bodies()
         assert all(
             [t["function"]["name"] for t in body["tools"]]
-            == ["search_pack", "read_pages", EXTRACT, "submit_financials"]
+            == ["search_pack", "read_pages", EXTRACT, "submit_financials_part", "submit_financials"]
             for body in bodies
         )
         if name == "extract":
@@ -1710,3 +1737,1078 @@ def test_a_loop_submit_below_the_coverage_floor_is_rejected_and_escalates(
     assert '"reason": "a completeness-floor rejection"' in events
     step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
     assert step["rules"]["extracted_coverage_min"] == "0.70"
+
+
+# --- task 8.11 (user decision "B"): the financials submit in parts ------------------------------
+
+# The brief's table: what each part holds of a `FinancialBook` (`book_id` names the book in each).
+# `statement_lines` and `statement_identities` are split by statement over IS, CFS and BS.
+PART_TABLE = {
+    "frame": {
+        "entity_perimeter",
+        "accounting_basis",
+        "currency",
+        "unit",
+        "periods",
+        "statement_disclosures",
+        "addback_disclosure",
+        "segment_disclosure",
+    },
+    "IS": {"statement_lines", "statement_identities"},
+    "CFS": {"statement_lines", "statement_identities", "cash_movement_bridges"},
+    "BS": {
+        "statement_lines",
+        "statement_identities",
+        "balance_movements",
+        "balance_movement_bridges",
+    },
+    "other": {
+        "accounts",
+        "addbacks",
+        "segments",
+        "kpis",
+        "facilities",
+        "facility_fx_conversions",
+        "pro_forma",
+        "audit_basis_explanations",
+        "segment_allocation",
+        "limitations",
+    },
+}
+SPLIT_BY_STATEMENT = {"statement_lines", "statement_identities"}
+STATEMENTS = ("IS", "CFS", "BS")
+
+
+def test_every_book_field_belongs_to_exactly_one_part() -> None:
+    """Pin (item 1): the parts' book fields are the brief's table; every `FinancialBook` field
+    but `book_id` is in exactly one part, the two statement registers in IS, CFS and BS split
+    by statement; the frame holds every top-level field of the submission and the review."""
+    assert PART_KINDS == ("frame", "IS", "CFS", "BS", "other")
+    assert {kind: set(fields) for kind, fields in BOOK_PARTS.items()} == PART_TABLE
+    owners: dict[str, set[str]] = {}
+    for kind, fields in PART_TABLE.items():
+        for name in fields:
+            owners.setdefault(name, set()).add(kind)
+    assert set(owners) == set(FinancialBook.model_fields) - {"book_id"}
+    for name, kinds in owners.items():
+        assert kinds == set(STATEMENTS) if name in SPLIT_BY_STATEMENT else len(kinds) == 1, name
+    frame = partial_schema("frame")
+    assert list(frame.model_fields) == list(FinancialSubmission.model_fields)
+    review = frame.model_fields["financial"].annotation
+    assert isinstance(review, type) and issubclass(review, BaseModel)
+    assert list(review.model_fields) == list(FinancialReview.model_fields)
+    for kind in (*STATEMENTS, "other"):
+        assert list(partial_schema(kind).model_fields) == ["books"]
+
+
+def _book_model(kind: str) -> type[BaseModel]:
+    model = partial_schema(kind)
+    holder = model.model_fields["financial"].annotation if kind == "frame" else model
+    assert isinstance(holder, type) and issubclass(holder, BaseModel)
+    book = get_args(holder.model_fields["books"].annotation)[0]
+    assert isinstance(book, type) and issubclass(book, BaseModel)
+    return book
+
+
+@pytest.mark.parametrize("kind", ["frame", "IS", "CFS", "BS", "other"])
+def test_each_partial_schema_is_the_contracts_own_fields(kind: str) -> None:
+    """Nothing retyped: each part's fields have the stored contract's own JSON schema (types,
+    bounds, defaults, markers), and its `books` keep `FinancialReview.books`' bounds."""
+    full = FinancialBook.model_json_schema()["properties"]
+    book = _book_model(kind)
+    assert list(book.model_fields) == [
+        name for name in FinancialBook.model_fields if name == "book_id" or name in PART_TABLE[kind]
+    ]
+    own = book.model_json_schema()["properties"]
+    assert own == {name: full[name] for name in own}
+    holder: type[BaseModel] = partial_schema(kind)
+    if kind == "frame":
+        top = FinancialSubmission.model_json_schema()["properties"]
+        mine = holder.model_json_schema()["properties"]
+        assert {k: v for k, v in mine.items() if k != "financial"} == {
+            k: v for k, v in top.items() if k != "financial"
+        }
+        holder = cast(type[BaseModel], holder.model_fields["financial"].annotation)
+        review = FinancialReview.model_json_schema()["properties"]
+        mine = holder.model_json_schema()["properties"]
+        assert {k: v for k, v in mine.items() if k != "books"} == {
+            k: v for k, v in review.items() if k != "books"
+        }
+    books = holder.model_json_schema()["properties"]["books"]
+    wanted = FinancialReview.model_json_schema()["properties"]["books"]
+    assert {k: v for k, v in books.items() if k != "items"} == {
+        k: v for k, v in wanted.items() if k != "items"
+    }
+
+
+def split(payload: str) -> dict[str, str]:
+    """The five parts of a one-shot payload (the property's reference, apart from the code under
+    test): the frame is every field but each book's part fields, a statement line goes to its
+    statement's part and an identity to its target line's (same `line_id` and `period_id`)."""
+    document = json_object(payload)
+    assert document is not None
+    financial = document["financial"]
+    frame = {key: value for key, value in document.items() if key != "financial"}
+    frame["financial"] = {key: value for key, value in financial.items() if key != "books"}
+    frame["financial"]["books"] = [
+        {
+            key: value
+            for key, value in book.items()
+            if key == "book_id" or key in PART_TABLE["frame"]
+        }
+        for book in financial["books"]
+    ]
+    parts = {"frame": frame}
+    for kind in (*STATEMENTS, "other"):
+        books = []
+        for book in financial["books"]:
+            row = {
+                key: value
+                for key, value in book.items()
+                if key in PART_TABLE[kind] - SPLIT_BY_STATEMENT
+            }
+            if kind in STATEMENTS:
+                lines = [x for x in book.get("statement_lines", []) if x["statement"] == kind]
+                keys = {(x["line_id"], x["period_id"]) for x in lines}
+                row["statement_lines"] = lines
+                row["statement_identities"] = [
+                    x
+                    for x in book.get("statement_identities", [])
+                    if (x["target_line_id"], x["period_id"]) in keys
+                ]
+            books.append({"book_id": book["book_id"], **row})
+        parts[kind] = {"books": books}
+    return {kind: exact_json(part) for kind, part in parts.items()}
+
+
+def grouped(payload: str) -> dict[str, Any]:
+    """`payload` with each book's statement lines grouped IS, CFS, BS and its identities by their
+    target line's statement, each group in payload order (the order Python assembles)."""
+    document = json_object(payload)
+    assert document is not None
+    for book in document["financial"]["books"]:
+        lines = book.get("statement_lines", [])
+        of = {(x["line_id"], x["period_id"]): x["statement"] for x in lines}
+        book["statement_lines"] = sorted(lines, key=lambda x: STATEMENTS.index(x["statement"]))
+        identities = book.get("statement_identities", [])
+        book["statement_identities"] = sorted(
+            identities,
+            key=lambda x: STATEMENTS.index(of[(x["target_line_id"], x["period_id"])]),
+        )
+    return document
+
+
+@st.composite
+def submissions(draw: st.DrawFn, base: str) -> str:
+    """A `FinancialSubmission` generated from `base` (the synthetic case's): its statement lines
+    reordered, thinned and moved between statements (one statement per line id), identities kept
+    for the lines left, some other registers emptied, and sometimes a second book."""
+    document = json_object(base)
+    assert document is not None
+    book = document["financial"]["books"][0]
+    lines = draw(st.permutations(book["statement_lines"]))
+    kept = [line for line in lines if draw(st.booleans()) or draw(st.booleans())]
+    statements = {
+        line_id: draw(st.sampled_from(STATEMENTS))
+        for line_id in sorted({line["line_id"] for line in kept})
+    }
+    book["statement_lines"] = [{**line, "statement": statements[line["line_id"]]} for line in kept]
+    keys = {(line["line_id"], line["period_id"]) for line in kept}
+    book["statement_identities"] = [
+        x
+        for x in draw(st.permutations(book["statement_identities"]))
+        if (x["target_line_id"], x["period_id"]) in keys and draw(st.booleans())
+    ]
+    for name in ("accounts", "facilities", "balance_movement_bridges", "statement_disclosures"):
+        if draw(st.booleans()):
+            book[name] = []
+    if draw(st.booleans()):
+        second = json_object(exact_json(book))
+        assert second is not None
+        document["financial"]["books"].append({**second, "book_id": "second"})
+    payload = exact_json(document)
+    FinancialSubmission.model_validate_json(payload)  # a contract-valid submission
+    return payload
+
+
+def held_parts(parts: dict[str, str], order: Sequence[str]) -> Parts:
+    held = Parts()
+    for kind in order:
+        assert held.submit(kind, parts[kind]) == (), kind
+    return held
+
+
+@settings(
+    max_examples=60, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(data=st.data(), order=st.permutations(["frame", "IS", "CFS", "BS", "other"]))
+def test_split_then_assemble_round_trips_in_any_order_of_arrival(
+    case: Case, data: st.DataObject, order: list[str]
+) -> None:
+    """Property (item 1, decision 0012): for a generated submission, its parts accepted in any
+    order assemble to the one-shot payload of the same objects byte for byte (Python's order:
+    contract field order, statement lines IS, CFS, BS), which parses to the same model; a part
+    re-sent replaces the earlier one of its kind."""
+    payload = data.draw(submissions(case.payload))
+    parts = split(payload)
+    assembled = assemble(held_parts(parts, order))
+    expected = grouped(payload)
+    assert assembled == exact_json(expected)
+    assert FinancialSubmission.model_validate_json(assembled) == (
+        FinancialSubmission.model_validate_json(exact_json(expected))
+    )
+    # Replace semantics: an earlier part of each kind (another generated submission's) is
+    # replaced by the later one, whatever the order.
+    other = split(data.draw(submissions(case.payload)))
+    held = held_parts(other, order)
+    for kind in order:
+        assert held.submit(kind, parts[kind]) == ()
+    assert assemble(held) == assembled
+
+
+def test_a_one_shot_payload_in_contract_order_assembles_byte_for_byte(case: Case) -> None:
+    """The synthetic case's payload, whose lines interleave BS, IS and CFS per period, assembles
+    to its own bytes once its lines are grouped; grouped as Python groups them, it is already
+    canonical (assembling it again changes nothing)."""
+    assembled = assemble(held_parts(split(case.payload), PART_KINDS))
+    assert assembled == exact_json(grouped(case.payload))
+    assert assembled != exact_json(json_object(case.payload))  # the interleave is regrouped
+    assert assemble(held_parts(split(assembled), PART_KINDS)) == assembled
+
+
+def _part(kind: str, payload: str) -> dict[str, Any]:
+    document = json_object(split(payload)[kind])
+    assert document is not None
+    return document
+
+
+def test_a_part_is_checked_on_arrival_against_its_partial_schema(case: Case) -> None:
+    """A part answers its own shape issues (in the stored contract's wording) and the checks a
+    split needs: each line in its statement's part, each identity with its target line, each
+    book once. A field Python fills (a hash, a scope dimension) is never asked for."""
+    frame = _part("frame", case.payload)
+    for book in frame["financial"]["books"]:
+        for name in ("currency", "unit", "accounting_basis", "entity_perimeter"):
+            del book[name]
+            for period in book["periods"]:
+                del period[name]
+    del frame["context_step_sha256"]
+    del frame["binding"]["financial_review_sha256"]
+    for period in frame["financial"]["books"][0]["periods"]:
+        for citation in period["citations"]:
+            del citation["source_sha256"]
+    assert check_part("frame", exact_json(frame)) == ()
+    frame["financial"]["run_id"] = 7
+    frame["surplus"] = 1
+    assert check_part("frame", exact_json(frame)) == (
+        "surplus: Extra inputs are not permitted",
+        "financial.run_id: Input should be a valid string",
+    )
+    cfs = _part("CFS", case.payload)
+    book = cfs["books"][0]
+    assert check_part("CFS", exact_json(cfs)) == ()
+    assert check_part("IS", exact_json(cfs))[0] == (
+        "books.0.cash_movement_bridges: Extra inputs are not permitted"
+    )
+    del book["cash_movement_bridges"]
+    first = book["statement_lines"][0]
+    assert check_part("IS", exact_json(cfs))[0] == (
+        f"books.0.statement_lines.0.statement: a CFS line ({first['line_id']} "
+        f"{first['period_id']}) in the IS part; send it in the CFS part"
+    )
+    target = book["statement_identities"][0]
+    book["statement_lines"] = [
+        x
+        for x in book["statement_lines"]
+        if (x["line_id"], x["period_id"]) != (target["target_line_id"], target["period_id"])
+    ]
+    assert check_part("CFS", exact_json(cfs)) == (
+        f"books.0.statement_identities.0.target_line_id: {target['target_line_id']} "
+        f"{target['period_id']} is not a line of book consolidated in this CFS part",
+    )
+    twice = {"books": [_part("IS", case.payload)["books"][0]] * 2}
+    assert check_part("IS", exact_json(twice)) == (
+        "books.1.book_id: consolidated repeats books.0; a part holds each book once",
+    )
+    assert check_part("other", "[1]") == ("(root): Input should be an object",)
+    assert check_part("BS", '{"books": []}') == (
+        "books: Tuple should have at least 1 item after validation, not 0",
+    )
+    with pytest.raises(ValueError, match="unknown part"):
+        check_part("KPI", "{}")
+
+
+def test_a_rejected_part_changes_nothing_held_and_a_resent_one_replaces_it(case: Case) -> None:
+    parts = split(case.payload)
+    held = held_parts(parts, ["frame", "IS"])
+    wrong = _part("CFS", case.payload)
+    assert held.submit("IS", exact_json(wrong)) != ()
+    assert held.held["IS"] == json_object(parts["IS"])
+    fewer = _part("IS", case.payload)
+    fewer["books"][0]["statement_lines"] = fewer["books"][0]["statement_lines"][:2]
+    fewer["books"][0]["statement_identities"] = []
+    assert held.submit("IS", exact_json(fewer)) == ()
+    assert held.held["IS"] == fewer
+    assert held.listing() == (
+        "parts held: frame (11 entries), IS (2 lines); parts not held: CFS, BS, other"
+    )
+
+
+def test_a_part_with_a_null_for_a_defaulted_field_is_held_with_the_default(case: Case) -> None:
+    """The sent schema makes a defaulted field nullable (`live.schema`); the part is held
+    null-resolved against its own schema, as `normalise` resolves a one-shot payload."""
+    bs = _part("BS", case.payload)
+    bs["books"][0]["balance_movements"] = None
+    held = Parts()
+    assert held.submit("BS", exact_json(bs)) == ()
+    assert held.held["BS"]["books"][0]["balance_movements"] == []
+
+
+@settings(max_examples=24, deadline=None)
+@given(
+    field=st.sampled_from(("line_id", "period_id")),
+    value=st.one_of(
+        st.none(),
+        st.booleans(),
+        st.integers(),
+        st.floats(allow_nan=False, allow_infinity=False),
+        st.lists(st.integers(), max_size=2),
+        st.dictionaries(st.text(max_size=2), st.integers(), max_size=2),
+    ),
+)
+@example(field="line_id", value=[])
+@example(field="period_id", value={})
+def test_malformed_statement_identifiers_reject_without_replacing_held_parts(
+    case: Case, field: str, value: object
+) -> None:
+    payload = split(case.payload)["IS"]
+    held = Parts()
+    assert held.submit("IS", payload) == ()
+    before = assemble(held)
+    malformed = json.loads(payload)
+    malformed["books"][0]["statement_lines"][0][field] = value
+    issues = held.submit("IS", json.dumps(malformed))
+    assert any(issue.startswith(f"books.0.statement_lines.0.{field}:") for issue in issues)
+    assert assemble(held) == before
+    assert held.submit("IS", payload) == ()
+
+
+def contract_issues(document: dict[str, Any]) -> tuple[str, ...]:
+    """The stored contract's own shape issues of an assembled payload."""
+    try:
+        FinancialSubmission.model_validate_json(exact_json(document))
+    except ValidationError as error:
+        return shape_issues(error)
+    return ()
+
+
+def test_missing_parts_contribute_nothing_and_no_value_is_invented(case: Case) -> None:
+    """An assembly holds what was sent: an absent part's fields are absent (the contract's own
+    default, or its "Field required"), never filled; with nothing sent it is `{}`."""
+    parts = split(case.payload)
+    assert assemble(Parts()) == "{}"
+    only = json_object(assemble(held_parts(parts, ["IS"])))
+    assert only is not None
+    assert list(only) == ["financial"] and list(only["financial"]) == ["books"]
+    (book,) = only["financial"]["books"]
+    assert list(book) == ["book_id", "statement_lines", "statement_identities"]
+    assert {x["statement"] for x in book["statement_lines"]} == {"IS"}
+    no_other = json_object(assemble(held_parts(parts, ["frame", "IS", "CFS", "BS"])))
+    assert no_other is not None
+    (book,) = no_other["financial"]["books"]
+    assert not set(book) & PART_TABLE["other"]
+    issues = contract_issues(no_other)
+    assert "financial.books.0.accounts: Field required" in issues
+    assert "financial.books.0.segment_allocation: Field required" in issues
+
+
+def test_the_part_submit_steps_are_financials_and_quote_the_pack() -> None:
+    cp1 = next(chain for chain in STEP_CHAINS if chain.module_id == "CP-1")
+    assert part_submit_steps() == cp1.part_submits == {"financials"}
+    assert all(not chain.part_submits for chain in STEP_CHAINS if chain.module_id != "CP-1")
+    with pytest.raises(ValueError, match="submits narrative in parts, not one of its steps"):
+        StepChain(**{**cp1.__dict__, "part_submits": frozenset({"narrative"})})
+
+
+# --- item 2: the two tools in the financials loop ----------------------------------------------
+
+ASSEMBLE_PARAMETERS = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+def test_only_financials_is_offered_the_part_tool_and_its_submit_takes_no_payload() -> None:
+    """Pin (item 2): `financials` alone is offered `submit_financials_part` (the five partial
+    schemas, one per `part`) and a `submit_financials` of no arguments; every other step keeps
+    its one-shot `submit_<step>` spec, unchanged."""
+    specs = {spec["function"]["name"]: spec["function"] for spec in tool_specs("financials")}
+    part = specs["submit_financials_part"]["parameters"]
+    assert part == strict_schema(PART_CALL)
+    assert part["required"] == ["part", "payload"] and part["additionalProperties"] is False
+    assert part["properties"]["part"]["enum"] == list(PART_KINDS)
+    refs = [branch["$ref"].rsplit("/", 1)[1] for branch in part["properties"]["payload"]["anyOf"]]
+    assert refs == [partial_schema(kind).__name__ for kind in PART_KINDS]
+    assert specs["submit_financials"]["parameters"] == ASSEMBLE_PARAMETERS
+    for step in tool_sets():
+        if step in part_submit_steps():
+            continue
+        assert not any(name.endswith("_part") for name in names(tool_specs(step))), step
+        assert tool_specs(step)[-1] == submit_spec(step), step
+    assert tool_specs("financials", SUBMIT_ONLY) == (submit_spec("financials"),)
+
+
+def part_call(ident: str, kind: str, payload: str) -> tuple[str, str, str]:
+    return ident, "submit_financials_part", f'{{"part": {json.dumps(kind)}, "payload": {payload}}}'
+
+
+def transcript(rig: Rig, result: ToolStepResult) -> list[dict[str, Any]]:
+    """Every tool call the step ran, in order, from each call's `tool-calls.jsonl`."""
+    return [
+        json.loads(line)
+        for attempt in result.attempt_ids
+        for line in (rig.directory(attempt) / "tool-calls.jsonl").read_text().splitlines()
+    ]
+
+
+def results(rig: Rig, result: ToolStepResult) -> list[str]:
+    return [entry["result"] for entry in transcript(rig, result) if "result" in entry]
+
+
+def test_the_loop_holds_each_part_on_arrival_and_judges_the_assembly_as_a_submit(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 2: a part is answered on arrival and never counts as a submit or ends the step; a
+    rejected one holds nothing; `submit_financials` with `{}` assembles the held parts and is
+    the step's one judged submit; telemetry counts the parts and assemblies."""
+    parts = split(paged_case.payload)
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(
+        tool_reply(
+            search, part_call("p-1", "frame", parts["frame"]), part_call("p-2", "IS", parts["CFS"])
+        ),
+        tool_reply(
+            part_call("p-3", "IS", parts["IS"]),
+            part_call("p-4", "CFS", parts["CFS"]),
+            part_call("p-5", "BS", parts["BS"]),
+            part_call("p-6", "other", parts["other"]),
+            part_call("p-7", "KPI", "{}"),
+            ("p-8", "submit_financials_part", '{"part": "IS"}'),
+            ("c-1", "submit_financials", "{}"),
+        ),
+    )
+    result = rig.run(script, step_id="financials")
+    assert (result.status, result.verdict) == ("accepted", "accepted")
+    assert [s["outcome"] for s in result.submits] == ["accepted"]
+    held = {"frame": 11, "IS": 5, "CFS": 30, "BS": 6, "other": 195}
+    assert result.submits[0]["assembled_from"] == held
+    texts = results(rig, result)
+    rejected = texts[2]
+    assert texts[1] == "accepted part frame (11 entries)"
+    assert rejected.startswith("rejected part IS:\n- books.0.cash_movement_bridges: Extra inputs")
+    assert rejected.endswith("\nparts held: frame (11 entries); parts not held: IS, CFS, BS, other")
+    assert texts[3:] == [
+        "accepted part IS (5 lines)",
+        "accepted part CFS (30 lines)",
+        "accepted part BS (6 lines)",
+        "accepted part other (195 entries)",
+        "error: bad arguments: part must be one of frame, IS, CFS, BS, other",
+        "error: bad arguments: missing ['payload'], unexpected []",
+        "accepted",
+    ]
+    assembled = assemble(held_parts(parts, PART_KINDS))
+    assert (rig.directory(result.attempt_id) / "output.md").read_text() == assembled
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["parts_submitted"] == {
+        "frame": {"accepted": 1, "rejected": 0},
+        "IS": {"accepted": 1, "rejected": 1},
+        "CFS": {"accepted": 1, "rejected": 0},
+        "BS": {"accepted": 1, "rejected": 0},
+        "other": {"accepted": 1, "rejected": 0},
+    }
+    assert step["assemblies"] == 1 and step["tool_calls"]["invalid"] == 2
+    assert step["tool_calls"]["submit_financials_part"] == 6
+    assert step["limits"]["max_calls"] == 40
+    statuses = [(e["name"], e["status"], e.get("outcome")) for e in transcript(rig, result)]
+    assert statuses == [
+        ("search_pack", "ok", None),
+        ("submit_financials_part", "part accepted", "accepted"),
+        ("submit_financials_part", "part rejected", "rejected"),
+        *[("submit_financials_part", "part accepted", "accepted")] * 4,
+        ("submit_financials_part", "error", None),
+        ("submit_financials_part", "error", None),
+        ("submit_financials", "accepted", "accepted"),
+    ]
+    assert _state(rig) == [("source_context", "valid", ()), ("financials", "valid", ())]
+
+
+def test_an_assembly_the_validators_reject_lists_the_parts_held(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """A rejected assembly answers as any rejected submit, then names the parts held and those
+    not sent; a whole payload sent to `submit_financials` is judged whole, as before 8.11, and
+    its rejection names no part."""
+    parts = split(paged_case.payload)
+    rig = paged_rig(tmp_path, paged_case)
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    script = rig.script(
+        tool_reply(
+            search, part_call("p-1", "frame", parts["frame"]), ("c-1", "submit_financials", "{}")
+        ),
+        tool_reply(("c-2", "submit_financials", json.dumps({"financial": 1}))),
+        tool_reply(("c-3", "submit_financials", paged_case.payload)),
+    )
+    result = rig.run(script, step_id="financials")
+    assert [s["outcome"] for s in result.submits] == ["rejected", "rejected", "accepted"]
+    assert [s["assembled_from"] for s in result.submits] == [{"frame": 11}, None, None]
+    texts = results(rig, result)
+    assert texts[2].startswith("rejected (2 submits left):\n- ")
+    assert texts[2].endswith("\nparts held: frame (11 entries); parts not held: IS, CFS, BS, other")
+    assert "parts held" not in texts[3] and texts[3].startswith("rejected (1 submits left):\n- ")
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["assemblies"] == 1
+
+
+def test_malformed_part_identifiers_can_be_repaired_without_spending_a_submit(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    parts = split(paged_case.payload)
+    malformed = []
+    for field, value in (("line_id", []), ("period_id", {})):
+        document = json.loads(parts["IS"])
+        document["books"][0]["statement_lines"][0][field] = value
+        malformed.append(exact_json(document))
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(
+        tool_reply(
+            ("search", "search_pack", json.dumps({"query": "cash"})),
+            *[part_call(kind, kind, parts[kind]) for kind in ("frame", "IS", "CFS", "BS")],
+            *[part_call(f"bad-{i}", "IS", payload) for i, payload in enumerate(malformed)],
+            ("first", "submit_financials", "{}"),
+        ),
+        tool_reply(
+            part_call("repair", "IS", parts["IS"]),
+            part_call("other", "other", parts["other"]),
+            ("final", "submit_financials", "{}"),
+        ),
+    )
+    result = rig.run(script, step_id="financials")
+    assert (result.status, result.verdict) == ("accepted", "accepted")
+    assert [submit["outcome"] for submit in result.submits] == ["rejected", "accepted"]
+    first = json.loads((rig.directory(result.attempt_ids[0]) / "output.md").read_text())
+    assert [
+        line
+        for line in first["financial"]["books"][0]["statement_lines"]
+        if line["statement"] == "IS"
+    ] == json.loads(parts["IS"])["books"][0]["statement_lines"]
+    records = {entry["call_id"]: entry for entry in transcript(rig, result) if "call_id" in entry}
+    for index, field in enumerate(("line_id", "period_id")):
+        entry = records[f"bad-{index}"]
+        assert entry["status"] == "part rejected"
+        assert (
+            f"books.0.statement_lines.0.{field}: Input should be a valid string" in entry["issues"]
+        )
+    assert records["repair"]["status"] == "part accepted"
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["assemblies"] == 2
+    assert step["parts_submitted"]["IS"] == {"accepted": 2, "rejected": 2}
+
+
+def test_a_step_without_parts_is_refused_the_part_tool(tmp_path: Path) -> None:
+    rig = step_rig(tmp_path, "business_context")
+    call = ("c-p", "submit_business_context_part", json.dumps({"part": "frame", "payload": {}}))
+    script = rig.script(tool_reply(call, ("c-f", "submit_financials_part", "{}")), tool_reply())
+    result = rig.run(script, step_id="business_context", rules=ToolRules(checked=()))
+    assert not result.submits
+    assert tool_messages(script) == [
+        "error: unknown tool 'submit_business_context_part'",
+        "error: unknown tool 'submit_financials_part'",
+    ]
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert (step["parts_submitted"], step["assemblies"]) == (None, None)
+
+
+# --- item 4: the differential (decision 0012) -------------------------------------------------
+
+_INDEXED = re.compile(r"\b(financial\.books\.(\d+)\.(statement_lines|statement_identities))\.(\d+)")
+_NOT_LISTED = re.compile(r"[0-9]+ further issues not listed")
+
+
+def regrouping(payload: str) -> dict[tuple[int, str], dict[int, int]]:
+    """Per (book index, register): each one-shot index's index once lines are grouped IS, CFS,
+    BS and identities by their target line's statement (the order `assemble` writes)."""
+    document = json_object(payload)
+    assert document is not None
+    moved: dict[tuple[int, str], dict[int, int]] = {}
+    for number, book in enumerate(document["financial"]["books"]):
+        lines = book.get("statement_lines", [])
+        of = {(x["line_id"], x["period_id"]): x["statement"] for x in lines}
+        keys = {
+            "statement_lines": [STATEMENTS.index(x["statement"]) for x in lines],
+            "statement_identities": [
+                STATEMENTS.index(of[(x["target_line_id"], x["period_id"])])
+                for x in book.get("statement_identities", [])
+            ],
+        }
+        for register, order in keys.items():
+            ranked = sorted(range(len(order)), key=lambda i, order=order: order[i])
+            moved[(number, register)] = {old: new for new, old in enumerate(ranked)}
+    return moved
+
+
+def renumbered(text: str, moved: dict[tuple[int, str], dict[int, int]]) -> str:
+    """`text` with each one-shot statement line or identity index as the assembled one."""
+
+    def swap(match: re.Match[str]) -> str:
+        new = moved[(int(match[2]), match[3])][int(match[4])]
+        return f"{match[1]}.{new}"
+
+    return _INDEXED.sub(swap, text)
+
+
+@dataclass(frozen=True)
+class Judged:
+    outcome: str
+    issues: tuple[str, ...]
+    retained: str
+    prefilled: tuple[tuple[str, str], ...]  # (path, kind), in the order Python set them
+    nulls: tuple[str, ...]
+    coverage: dict[str, Any] | None
+
+
+def judge(
+    start: Path,
+    root: Path,
+    payload: str,
+    seen: Seen,
+    context: SourceContextReview,
+    tables: tuple[ExtractedTable, ...],
+) -> Judged:
+    """`payload` through the unchanged trusted path (`submit_model_payload` with the loop's
+    rules as of `seen`, then `journal_outcome`) on a copy of the `start` journal, whose pending
+    ticket expects `financials`, with the 8.12 coverage of the retained payload over `tables`."""
+    shutil.copytree(start, root)
+    journal = Execution(root)
+    ticket = next(a for a in journal.read().attempts if a.status == "pending").ticket_id
+    rules = ToolRules()
+    submitted = submit_model_payload(
+        journal,
+        ticket,
+        "financials",
+        payload,
+        rules=lambda text: rules.issues(
+            "financials", text, seen=seen, context=context, tables=tables
+        ),
+    )
+    outcome, issues = journal_outcome(journal, "financials", submitted.journal)
+    return Judged(
+        outcome,
+        issues,
+        submitted.payload,
+        tuple(zip(submitted.prefilled, submitted.prefilled_kinds, strict=True)),
+        submitted.nulls_resolved,
+        extracted_coverage(submitted.payload, context, tables),
+    )
+
+
+def judged(case: PagedCase, root: Path, payload: str, seen: Seen) -> Judged:
+    """`judge` on the paged case, over its CFS page."""
+    return judge(case.store.directory, root, payload, seen, case.context, (CFS_TABLE,))
+
+
+def value_at(document: dict[str, Any], path: str) -> object:
+    found: Any = document
+    for key in path.split("."):
+        found = found[int(key)] if isinstance(found, list) else found[key]
+    return cast(object, found)
+
+
+REVIEW_HASHES = ("definition.financial_review_sha256", "binding.financial_review_sha256")
+
+
+def assert_same_judgement(one_shot: Judged, assembled: Judged, payload: str) -> None:
+    """The differential's claim: the assembly of a one-shot payload's parts is judged exactly as
+    the one-shot payload, its line and identity indices renumbered to the assembled order; the
+    retained objects are the same objects, and every binding Python set has the same value but
+    the two hashes of the financial review, which covers the order of its lines."""
+    moved = regrouping(payload)
+    assert assembled.outcome == one_shot.outcome
+    # The same issues; the validators list them in line order, so their order follows the
+    # assembled order where lines moved.
+    issues = tuple(renumbered(i, moved) for i in one_shot.issues)
+    reordered = any(old != new for moves in moved.values() for old, new in moves.items())
+    assert assembled.issues == issues or reordered
+    if issues and _NOT_LISTED.fullmatch(issues[-1]):
+        # Over 20, the journal lists the first 20 found (`execution.bounded_issues`, unchanged)
+        # and counts the rest: which 20 follows line order; the total is the same.
+        assert (len(assembled.issues), assembled.issues[-1]) == (len(issues), issues[-1])
+    else:
+        assert Counter(assembled.issues) == Counter(issues)
+    # A part is held null-resolved (its nulls are resolved, and recorded, when it arrives), so
+    # the assembly has none left to resolve.
+    assert assembled.nulls == ()
+    assert sorted(assembled.prefilled) == sorted(
+        (renumbered(path, moved), kind) for path, kind in one_shot.prefilled
+    )
+    assert assembled.coverage == one_shot.coverage
+    whole, parts = json_object(one_shot.retained), json_object(assembled.retained)
+    assert whole is not None and parts is not None
+    changed = {
+        path
+        for path, _ in one_shot.prefilled
+        if value_at(whole, path) != value_at(parts, renumbered(path, moved))
+    }
+    assert changed == (set(REVIEW_HASHES) if reordered else set())
+    for document in (whole, parts):
+        for holder in ("definition", "binding"):  # REVIEW_HASHES
+            del document[holder]["financial_review_sha256"]
+    assert grouped(exact_json(whole)) == parts  # the same objects (keys in any order)
+
+
+SEEN_CFS = Seen(read=frozenset({("S1", "page:1")}), searched=(None,))
+
+
+def test_the_case_payload_in_parts_is_judged_as_the_one_shot_payload(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Differential (item 4): the built paged-case payload, whose lines interleave BS, IS and
+    CFS, judged whole and as the assembly of its five parts: the same verdict (accepted), issues,
+    bindings, prefill and coverage/agreement."""
+    payload = exact_json(built(paged_case))
+    assembled = assemble(held_parts(split(payload), PART_KINDS))
+    one_shot = judged(paged_case, tmp_path / "whole", payload, SEEN_CFS)
+    parts = judged(paged_case, tmp_path / "parts", assembled, SEEN_CFS)
+    assert (one_shot.outcome, one_shot.issues) == ("accepted", ())
+    assert one_shot.coverage is not None and one_shot.coverage["overall"]["covered"] == 6
+    assert_same_judgement(one_shot, parts, payload)
+
+
+@settings(
+    max_examples=12,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(data=st.data())
+def test_generated_submissions_in_parts_are_judged_as_their_one_shot_payloads(
+    paged_case: PagedCase, data: st.DataObject
+) -> None:
+    """Differential (item 4) over generated submissions (lines moved between statements,
+    thinned, reordered; registers emptied; a second book): the assembly of the parts is judged
+    as the one-shot payload, rejections included."""
+    payload = data.draw(submissions(exact_json(built(paged_case))))
+    assembled = assemble(held_parts(split(payload), PART_KINDS))
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        one_shot = judged(paged_case, root / "whole", payload, SEEN_CFS)
+        parts = judged(paged_case, root / "parts", assembled, SEEN_CFS)
+    over = bool(one_shot.issues) and bool(_NOT_LISTED.fullmatch(one_shot.issues[-1]))
+    event(f"{one_shot.outcome}, {'over 20 issues' if over else 'every issue listed'}")
+    assert_same_judgement(one_shot, parts, payload)
+
+
+# The recorded hybrid-cp1-6 Sol medium financials step (artifacts under `artifacts/`; skipped,
+# never passed, where they are absent).
+HYBRID = "hybrid-cp1-6-sol-medium"
+
+
+def hybrid_bodies(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    directory = transcript_support.REPOSITORY_ROOT / entry["transcript"]
+    return [json.loads((directory / name).read_bytes()) for name in entry["reply_files"]]
+
+
+def hybrid_calls(entry: dict[str, Any], name: str) -> list[str]:
+    """The arguments of each recorded call of tool `name`, in order."""
+    return [
+        call["function"]["arguments"]
+        for body in hybrid_bodies(entry)
+        for call in body["choices"][0]["message"].get("tool_calls", [])
+        if call["function"]["name"] == name
+    ]
+
+
+def hybrid_seen(entry: dict[str, Any]) -> Seen:
+    """What the recorded step had been shown by its submits: its reads and its searches."""
+    read = set()
+    for arguments in hybrid_calls(entry, "read_pages"):
+        raw = json.loads(arguments)
+        for page in range(raw["first_page"], raw["last_page"] + 1):
+            read.add((raw["source_id"], f"page:{page}"))
+    searched = tuple(json.loads(a).get("source_id") for a in hybrid_calls(entry, "search_pack"))
+    return Seen(read=frozenset(read), searched=searched)
+
+
+def test_the_recorded_hybrid_payloads_in_parts_are_judged_as_sent_whole(tmp_path: Path) -> None:
+    """Differential (item 4, the key one): each recorded hybrid-cp1-6 `financials` payload (the
+    rejected first submit and the accepted second), sent as the assembly of its five parts, is
+    judged as the payload Sol sent whole: verdict, issues, prefill, bindings (but the review's
+    two hashes, which cover its line order: Sol wrote IS, BS, CFS, Python assembles IS, CFS,
+    BS) and coverage/agreement over the pages Sol read."""
+    entry, start = _financials_entry(HYBRID, tmp_path)
+    store = Execution(start)
+    context = SourceContextReview.model_validate_json(
+        store.payload(
+            next(a for a in store.read().attempts if a.status == "pending").steps[0].payload_sha256
+        )
+    )
+    seen = hybrid_seen(entry)
+    assert len(seen.read) == 19
+    tables = seen_tables(PackTools(store.pack()), seen, context)
+    outcomes = []
+    for number, payload in enumerate(hybrid_calls(entry, "submit_financials")):
+        held = held_parts(split(payload), PART_KINDS)
+        assembled = assemble(held)
+        # The one-shot payload of the same objects, null-resolved as `submit_model_payload`
+        # resolves it (Sol sent `component_period_ids: null`), in Python's order; the parts
+        # resolved the same nulls on arrival.
+        resolved, nulls = normalise(FinancialSubmission, payload)
+        assert assembled == exact_json(contract_ordered(grouped(resolved))) and nulls
+        # (the frame's and other's paths are the whole payload's, `financial.` aside; a
+        # statement part's index its own lines, so only their count is compared)
+        on_arrival = [*held.resolved["frame"], *(f"financial.{p}" for p in held.resolved["other"])]
+        assert set(on_arrival) <= set(nulls)
+        assert sum(len(paths) for paths in held.resolved.values()) == len(nulls)
+        whole = judge(start, tmp_path / f"whole-{number}", payload, seen, context, tables)
+        parts = judge(start, tmp_path / f"parts-{number}", assembled, seen, context, tables)
+        assert whole.nulls == nulls
+        assert_same_judgement(whole, parts, payload)
+        outcomes.append((whole.outcome, whole.issues))
+    assert outcomes == [
+        ("rejected", (HYBRID_QUOTE_ISSUE,)),
+        ("accepted", ()),
+    ]
+
+
+def contract_ordered(document: dict[str, Any]) -> dict[str, Any]:
+    """`document` with the keys Python writes (the submission's, the review's, each book's) in
+    their contract's field order; every other object as it is."""
+
+    def ordered(value: dict[str, Any], model: type[BaseModel]) -> dict[str, Any]:
+        return {name: value[name] for name in model.model_fields if name in value}
+
+    financial = ordered(document["financial"], FinancialReview)
+    financial["books"] = [ordered(book, FinancialBook) for book in financial["books"]]
+    return ordered({**document, "financial": financial}, FinancialSubmission)
+
+
+def in_parts(entry: dict[str, Any]) -> dict[str, Any]:
+    """The entry with each recorded whole `submit_financials` call replaced, in its turn, by the
+    payload's five parts and then `submit_financials` with `{}` (a synthetic entry of the same
+    replies otherwise: the same usage, so the same cost)."""
+    bodies = hybrid_bodies(entry)
+    for body in bodies:
+        message = body["choices"][0]["message"]
+        calls = []
+        for call in message.get("tool_calls", []):
+            if call["function"]["name"] != "submit_financials":
+                calls.append(call)
+                continue
+            parts = split(call["function"]["arguments"])
+            calls += [
+                {
+                    "id": f"{call['id']}-{kind}",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_financials_part",
+                        "arguments": f'{{"part": "{kind}", "payload": {parts[kind]}}}',
+                    },
+                }
+                for kind in PART_KINDS
+            ]
+            calls.append({**call, "function": {"name": "submit_financials", "arguments": "{}"}})
+        if "tool_calls" in message:
+            message["tool_calls"] = calls
+    return {**entry, "kind": "synthetic", "replies": bodies}
+
+
+def test_the_recorded_hybrid_step_sent_in_parts_reaches_the_same_journal(tmp_path: Path) -> None:
+    """Differential (item 4) through the loop: the recorded step with each whole submit sent as
+    its parts, under the default rules, makes the same submits (outcome, issues, completeness,
+    extracted coverage and agreement), the same verdict and cost, and leaves the live journal
+    with the same step states and the same objects retained."""
+    entry, start = _financials_entry(HYBRID, tmp_path)
+    whole = transcript_support.replay(entry, start, tmp_path / "whole", rules=ToolRules())
+    parts = transcript_support.replay(in_parts(entry), start, tmp_path / "parts", rules=ToolRules())
+    for key in ("outcome", "issues", "completeness", "extracted_coverage", "counts"):
+        assert [s[key] for s in parts.result.submits] == [s[key] for s in whole.result.submits], key
+    assert [s["outcome"] for s in whole.result.submits] == ["rejected", "accepted"]
+    assert [s["assembled_from"] for s in whole.result.submits] == [None, None]
+    held = [s["assembled_from"] for s in parts.result.submits]
+    assert held[0] == held[1] and held[0] is not None and set(held[0]) == set(PART_KINDS)
+    # 99 statement lines; the frame's 3 periods and 9 disclosures; other's 96 entries.
+    assert sum(held[0][kind] for kind in STATEMENTS) == 99
+    assert (held[0]["frame"], held[0]["other"]) == (12, 96)
+    assert parts.result.verdict == whole.result.verdict == "accepted"
+    assert parts.result.cost_usd == whole.result.cost_usd
+    # Each part call's record keeps the nulls that part resolved on arrival.
+    root = tmp_path / "parts" / "artifacts"
+    recorded = [
+        (entry["part"], entry["outcome"], entry["nulls_resolved"])
+        for attempt in parts.result.attempt_ids
+        for path in root.rglob(f"{attempt}/tool-calls.jsonl")
+        for entry in map(json.loads, path.read_text().splitlines())
+        if "part" in entry
+    ]
+    expected = []
+    for payload in hybrid_calls(entry, "submit_financials"):
+        resolved = held_parts(split(payload), PART_KINDS).resolved
+        expected += [(kind, "accepted", list(resolved[kind])) for kind in PART_KINDS]
+    assert recorded == expected and any(paths for _, _, paths in recorded)
+    journals = {name: Execution(tmp_path / name / "journal") for name in ("whole", "parts")}
+    steps = {
+        name: next(a for a in store.read().attempts if a.module_id == "CP-1").steps
+        for name, store in journals.items()
+    }
+    assert [(s.step_id, s.status, s.issues) for s in steps["whole"]] == [
+        (s.step_id, s.status, s.issues) for s in steps["parts"]
+    ]
+    retained = {
+        name: json_object(journals[name].payload(steps[name][1].payload_sha256))
+        for name in journals
+    }
+    for document in retained.values():
+        assert document is not None
+        for holder in ("definition", "binding"):
+            del document[holder]["financial_review_sha256"]
+    whole_document, parts_document = retained["whole"], retained["parts"]
+    assert whole_document is not None and parts_document is not None
+    assert grouped(exact_json(whole_document)) == parts_document
+
+
+def retained_step(rig: Rig) -> tuple[str, str | None]:
+    """(payload hash, output hash) of the live journal's financials step."""
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    step = attempt.steps[1]
+    assert step.step_id == "financials"
+    return step.payload_sha256, step.output_sha256
+
+
+def test_a_model_sending_five_parts_reaches_the_one_shot_replys_accepted_journal(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 4: scripted replies frame, IS, CFS, BS, other, then `submit_financials {}` reach
+    8.0d's accepted state (search, one whole submit); against the same objects sent whole in
+    Python's order, the live journal retains the same payload and the same stage output, byte
+    for byte."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    parts = split(paged_case.payload)
+    sent = [part_call(f"p-{n}", kind, parts[kind]) for n, kind in enumerate(PART_KINDS)]
+    runs = {
+        "8.0d": [tool_reply(search), tool_reply(("c-1", "submit_financials", paged_case.payload))],
+        "grouped": [
+            tool_reply(search),
+            tool_reply(("c-1", "submit_financials", exact_json(grouped(paged_case.payload)))),
+        ],
+        "parts": [
+            tool_reply(search),
+            tool_reply(*sent[:2]),
+            tool_reply(*sent[2:]),
+            tool_reply(("c-1", "submit_financials", "{}")),
+        ],
+    }
+    states, kept = {}, {}
+    for name, replies in runs.items():
+        rig = paged_rig(tmp_path / name, paged_case)
+        result = rig.run(rig.script(*replies), step_id="financials")
+        assert (result.status, result.verdict) == ("accepted", "accepted"), name
+        states[name], kept[name] = _state(rig), retained_step(rig)
+    assert (
+        states["parts"]
+        == states["8.0d"]
+        == states["grouped"]
+        == [
+            ("source_context", "valid", ()),
+            ("financials", "valid", ()),
+        ]
+    )
+    assert kept["parts"] == kept["grouped"] != kept["8.0d"]  # the 8.0d lines interleave
+
+
+def test_a_missing_part_is_the_validators_gap_and_a_resent_part_replaces_the_held_one(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 4: an assembly without the other part (its one try was rejected: IS lines sent as
+    other) is judged by the validators, whose own issues name the gap and nothing is filled in;
+    the IS part sent with two of its five lines and then whole is held whole (the later accepted
+    part replaces the held one); other then sent, the assembly is accepted on the second submit."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    parts = split(paged_case.payload)
+    fewer = _part("IS", paged_case.payload)
+    fewer["books"][0]["statement_lines"] = fewer["books"][0]["statement_lines"][:2]
+    fewer["books"][0]["statement_identities"] = []
+    rig = paged_rig(tmp_path / "run", paged_case)
+    script = rig.script(
+        tool_reply(
+            search,
+            part_call("p-0", "frame", parts["frame"]),
+            part_call("p-1", "IS", exact_json(fewer)),
+            part_call("p-2", "IS", parts["IS"]),
+            part_call("p-3", "CFS", parts["CFS"]),
+            part_call("p-4", "BS", parts["BS"]),
+            part_call("p-x", "other", parts["IS"]),
+            ("c-1", "submit_financials", "{}"),
+        ),
+        tool_reply(
+            part_call("p-5", "other", parts["other"]),
+            ("c-2", "submit_financials", "{}"),
+        ),
+    )
+    result = rig.run(script, step_id="financials")
+    assert [s["outcome"] for s in result.submits] == ["rejected", "accepted"]
+    assert result.submits[0]["assembled_from"] == {"frame": 11, "IS": 5, "CFS": 30, "BS": 6}
+    assert result.submits[1]["assembled_from"]["other"] == 195
+    # The gap in the validators' own words: the payload Python assembled, judged directly.
+    without = held_parts(parts, ("frame", "IS", "CFS", "BS"))
+    direct = judged(paged_case, tmp_path / "direct", assemble(without), Seen(searched=(None,)))
+    assert tuple(result.submits[0]["issues"]) == direct.issues
+    assert direct.outcome == "rejected"
+    assert "financial.books.0.accounts: Field required" in direct.issues
+    assert not any("part" in issue for issue in direct.issues)
+    texts = results(rig, result)
+    # A replacement says what it replaced, so a model that sent one book's lines per part
+    # (each replacing the last) sees it.
+    assert texts[2:4] == [
+        "accepted part IS (2 lines)",
+        "accepted part IS (5 lines; it replaces the IS part held, 2 lines)",
+    ]
+    assert texts[6].startswith("rejected part other:\n- ")
+    assert texts[7].endswith(
+        "\nparts held: frame (11 entries), IS (5 lines), CFS (30 lines), BS (6 lines); "
+        "parts not held: other"
+    )
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["parts_submitted"]["IS"] == {"accepted": 2, "rejected": 0}
+    assert step["parts_submitted"]["other"] == {"accepted": 1, "rejected": 1}
+    assert step["assemblies"] == 2
+    assert _state(rig) == [("source_context", "valid", ()), ("financials", "valid", ())]
+
+
+def test_an_omitted_part_the_validators_do_not_require_is_judged_as_the_one_shot_without_it(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 4: nothing requires a part as such; an assembly without the IS part is judged
+    exactly as the one-shot payload without its IS lines and identities (here accepted: the
+    paged case's validators, with the completeness floor off, need no IS line). Python adds
+    no gate of its own."""
+    parts = split(paged_case.payload)
+    document = json_object(paged_case.payload)
+    assert document is not None
+    for book in document["financial"]["books"]:
+        book["statement_lines"] = [x for x in book["statement_lines"] if x["statement"] != "IS"]
+        kept = {(x["line_id"], x["period_id"]) for x in book["statement_lines"]}
+        book["statement_identities"] = [
+            x for x in book["statement_identities"] if (x["target_line_id"], x["period_id"]) in kept
+        ]
+    payload = exact_json(document)
+    seen = Seen(searched=(None,))
+    one_shot = judged(paged_case, tmp_path / "whole", payload, seen)
+    assembled = judged(
+        paged_case,
+        tmp_path / "parts",
+        assemble(held_parts(parts, ("frame", "CFS", "BS", "other"))),
+        seen,
+    )
+    assert one_shot.outcome == "accepted"
+    assert_same_judgement(one_shot, assembled, payload)

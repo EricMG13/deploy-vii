@@ -25,7 +25,12 @@ from deploy_vii.live.client import ChatClient
 from deploy_vii.live.cohort import accept_proxy_payload
 from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
 from deploy_vii.live.ledger import Ledger
-from deploy_vii.live.prompts import EXTRACT_RULE
+from deploy_vii.live.prompts import (
+    EXTRACT_RULE,
+    FINANCIAL_PARTS_RULE,
+    parts_tools_rule,
+    tools_rule,
+)
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import StepSpec
 from deploy_vii.live.schema import marked_fields
@@ -1018,12 +1023,15 @@ def test_only_the_financials_entries_name_an_added_tool() -> None:
         f"{path.parent.name}/{path.stem}": load_entry(path).get("tools_added")
         for path in TRANSCRIPTS
     }
+    added = ["extract_statements", "submit_financials_part"]
     assert {key: value for key, value in named.items() if value is not None} == {
-        "financials/hybrid-cp1-6-sol-medium": ["extract_statements"],
-        "financials/synthetic-search-accept": ["extract_statements"],
+        "financials/hybrid-cp1-6-sol-medium": added,
+        "financials/synthetic-search-accept": added,
     }
     for path in FINANCIALS_TRANSCRIPTS.glob("*.json"):
-        assert load_entry(path)["tools_added_by"].startswith("task 8.10b (25 Oct 2026)")
+        reason = load_entry(path)["tools_added_by"]
+        assert reason.startswith("task 8.10b (25 Oct 2026)")
+        assert "; task 8.11 (25 Oct 2026): submit_financials_part" in reason
 
 
 def test_a_changed_tool_list_without_a_named_tool_still_fails(tmp_path: Path) -> None:
@@ -1065,6 +1073,65 @@ def test_a_named_tool_needs_its_dated_reason(tmp_path: Path) -> None:
     assert (status, reason) == ("entry-invalid", "tools_added needs tools_added_by")
 
 
+# --- task 8.11: the financials submit's spec changed after the recording ----------------------
+
+
+def test_only_the_financials_entries_name_a_changed_submit() -> None:
+    named = {
+        f"{path.parent.name}/{path.stem}": load_entry(path).get("tools_changed")
+        for path in TRANSCRIPTS
+    }
+    assert {key: value for key, value in named.items() if value is not None} == {
+        "financials/hybrid-cp1-6-sol-medium": ["submit_financials"],
+        "financials/synthetic-search-accept": ["submit_financials"],
+    }
+    for path in FINANCIALS_TRANSCRIPTS.glob("*.json"):
+        assert load_entry(path)["tools_changed_by"].startswith("task 8.11 (25 Oct 2026)")
+
+
+def test_a_changed_submit_spec_without_its_name_still_fails(tmp_path: Path) -> None:
+    """Without `tools_changed` the new `submit_financials` spec (`{}`) is a request change,
+    even with the added tools stripped."""
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    for key in ("tools_changed", "tools_changed_by"):
+        del entry[key]
+    status, reason = transcript_support.check(entry, tmp_path)
+    assert (status, reason) == ("request-changed", "call 1: the conversation, tools or parameters")
+
+
+def test_a_changed_tool_is_the_steps_own_submit_and_needs_its_dated_reason(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    del entry["tools_changed_by"]
+    assert transcript_support.check(entry, tmp_path / "a") == (
+        "entry-invalid",
+        "tools_changed needs tools_changed_by",
+    )
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["tools_changed"] = ["read_pages"]
+    assert transcript_support.check(entry, tmp_path / "b") == (
+        "entry-invalid",
+        "tools_changed names only the step's own submit tool",
+    )
+
+
+def test_a_changed_submit_that_did_not_change_or_is_stripped_fails(tmp_path: Path) -> None:
+    """The named submit's spec must differ from the one-shot spec the check puts back (stale
+    metadata on a step whose submit is unchanged fails), and stripping it as an added tool
+    instead leaves the request unlike the recorded one."""
+    context = load_entry(SYNTHETIC_TRANSCRIPT / "synthetic-search-reject-accept.json")
+    context |= {"tools_changed": ["submit_source_context"], "tools_changed_by": "a test"}
+    assert transcript_support.check(context, tmp_path / "a") == (
+        "request-changed",
+        "call 1: tools_changed names a spec that is unchanged",
+    )
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["tools_added"] = [*entry["tools_added"], "submit_financials"]
+    assert transcript_support.check(entry, tmp_path / "b") == (
+        "request-changed",
+        "call 1: the conversation, tools or parameters",
+    )
+
+
 # The financials system prompt's hash after task 7.19 and before 8.10b's rule k: what the
 # synthetic entry recorded and what the harness entry named as its 7.19 change.
 FINANCIALS_PROMPT_BEFORE_8_10B = "1cd1555964246c8a660a7950ad1615fed1cb2100c77ca94473ddd2e194213a21"
@@ -1077,8 +1144,14 @@ def test_the_financials_prompt_change_is_exactly_the_named_rule(tmp_path: Path) 
     replayed = transcript_support.replay(entry, start, tmp_path / "replay")
     system = replayed.bodies[0]["messages"][0]["content"]
     rule = f"\nk. {EXTRACT_RULE}"
-    assert system.count(rule) == 1
-    before = transcript_support.sha256(system.replace(rule, ""))
+    # Task 8.11: the loop's rule l and its parts rule 5; with both undone and rule k removed,
+    # the prompt is the one recorded before 8.10b, byte for byte.
+    parts = f"\nl. {FINANCIAL_PARTS_RULE}"
+    rule5 = parts_tools_rule("submit_financials")
+    for added in (rule, parts, rule5):
+        assert system.count(added) == 1, added
+    undone = system.replace(parts, "").replace(rule5, tools_rule("submit_financials"))
+    before = transcript_support.sha256(undone.replace(rule, ""))
     assert before == FINANCIALS_PROMPT_BEFORE_8_10B
     assert {r["system_sha256"] for r in entry["expected"]["requests"]} == {before}
     hybrid = load_entry(FINANCIALS_TRANSCRIPTS / "hybrid-cp1-6-sol-medium.json")
@@ -1088,6 +1161,10 @@ def test_the_financials_prompt_change_is_exactly_the_named_rule(tmp_path: Path) 
         assert (
             "task 8.10b (25 Oct 2026" in prompt["changed_by"]
             and "EXTRACT_RULE" in (prompt["changed_by"])
+        )
+        assert prompt["changed_by"].endswith(
+            "; task 8.11 (25 Oct 2026; FINANCIAL_PARTS_RULE, financials rule l; rule 5 "
+            "parts_tools_rule; review wording: a part holds every book's objects)"
         )
     assert entry["system_prompt"]["recorded_sha256"] == FINANCIALS_PROMPT_BEFORE_8_10B
     assert hybrid["system_prompt"]["changed_by"].startswith("task 7.19 (QUOTE_PAGE_RULE); ")
