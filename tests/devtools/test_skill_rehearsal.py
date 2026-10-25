@@ -299,8 +299,8 @@ def test_a_single_cost_above_the_cap_exits_3_and_writes_no_ledger(
     code = rehearsal.main(cost_args(directory, "--final", tokens=(0, 1_000_000)))  # 15.25 > 12
     assert code == 3
     shown = capsys.readouterr().err
-    assert "15.25" in shown
-    assert "12" in shown
+    assert "cost above the cap: this report 15.25, earlier 0, cap 12" in shown
+    assert "reserving" not in shown
     assert not (directory / "ledger.jsonl").exists()
 
 
@@ -568,3 +568,12 @@ def test_summary_refuses_a_foreign_cohort(tmp_path: Path) -> None:
     directory.mkdir()
     (directory / "rehearsal.json").write_text(json.dumps({"cohort": "sol"}), encoding="utf-8")
     assert summarise(directory, settled_journal(tmp_path)) == 2
+
+
+def test_run_drives_the_real_cli_entry(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    directory = tmp_path / "r"
+    assert rehearsal.main(["run", "--rehearsal", str(directory), "--", "plan", "CP-0"]) == 0
+    assert capfd.readouterr().out.split() == ["CP-0"]
+    (entry,) = lines(directory)
+    assert entry["argv"][-2:] == ["plan", "CP-0"]
+    assert entry["exit_code"] == 0

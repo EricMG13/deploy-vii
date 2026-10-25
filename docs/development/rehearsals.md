@@ -27,7 +27,9 @@ directory that holds another cohort.
    - Exercise exactly one interruption: on one long step run the command with
      `--interrupt-after <seconds>` (before `--`), then follow `references/resume.md` and run the
      same command again. The harness records both runs; the first line carries
-     `interrupted: true`.
+     `interrupted: true`. This harness SIGINT stops a running command from outside; it is not
+     the CLI's `execution interrupt` command, which settles a pending attempt by ticket and
+     reason (the next `begin` is then the repair).
    - When the run ends, report the stand-in agent's token usage and run
      `python -m devtools.skill_rehearsal cost --rehearsal <dir> --model <id> --input-tokens N --output-tokens N --usd-per-m-input X --usd-per-m-output Y --price-source "<where the prices came from>" --final`.
      Earlier calls without `--final` add partial usage reports. The first call reserves the

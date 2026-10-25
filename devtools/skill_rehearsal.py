@@ -485,9 +485,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     except CapExceeded as over:
         print(
-            f"skill_rehearsal: cost above the cap: {over} "
-            f"(this report {format(over.requested, 'f')}, earlier {format(over.committed, 'f')}, "
-            f"cap {format(over.cap, 'f')})",
+            f"skill_rehearsal: cost above the cap: "
+            f"this report {format(over.requested, 'f')}, earlier {format(over.committed, 'f')}, "
+            f"cap {format(over.cap, 'f')}",
             file=sys.stderr,
         )
         return EXIT_CAP
