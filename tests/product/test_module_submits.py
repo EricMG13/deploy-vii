@@ -207,6 +207,26 @@ def test_a_step_with_no_context_entries_gets_none_as_the_runner_does(cli: Cli) -
     assert runner_context(cli.store, attempt, "source_readiness") == {}
 
 
+def test_begin_is_refused_with_one_line_while_pending_and_after_the_repair_is_spent(
+    cli: Cli, tmp_path: Path
+) -> None:
+    review = tmp_path / "review.json"
+    review.write_text("not json")
+    first = json.loads(cli("begin", "CP-2")[1])["ticket_id"]
+    code, out, err = cli("begin", "CP-2")  # the first attempt is still pending
+    assert (
+        code == 2 and out == "" and err.startswith("begin refused:") and len(err.splitlines()) == 1
+    )
+    submit = ("module-submit", "--module", "CP-2", "--step", "credit_synthesis")
+    assert cli(*submit, "--ticket", first, "--review", str(review))[0] == 1
+    repair = json.loads(cli("begin", "CP-2")[1])["ticket_id"]  # the one repair attempt
+    assert cli(*submit, "--ticket", repair, "--review", str(review))[0] == 1
+    code, out, err = cli("begin", "CP-2")  # the repair is spent
+    assert (
+        code == 2 and out == "" and err.startswith("begin refused:") and len(err.splitlines()) == 1
+    )
+
+
 # --- item 3: report ---
 
 

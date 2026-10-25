@@ -228,7 +228,10 @@ def execute(args: argparse.Namespace) -> str:
             raise refusal_exit(
                 f"begin refused: {args.module} is not a module; choose one of {valid}"
             ) from unknown
-        return attempt_json(store, store.begin(module_id))
+        try:
+            return attempt_json(store, store.begin(module_id))
+        except ValueError as refusal:
+            raise refusal_exit(f"begin refused: {refusal}") from refusal
     elif args.action == "report":
         return write_report(store, args.pathway, args.output)
     elif args.action == "module-submit":
