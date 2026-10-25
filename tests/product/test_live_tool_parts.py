@@ -1,13 +1,14 @@
 """Task 8.0d: the tool loop's parts: pack tools, evidence rules, requests, settings, ledgers."""
 
 import json
+import random
 import re
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from hypothesis import HealthCheck, example, given, settings
@@ -52,7 +53,9 @@ from deploy_vii.live.tools import (
     applicable_rules,
     completeness_issues,
     expected_cells,
+    extracted_coverage,
     fiscal_year,
+    seen_tables,
     tool_specs,
     unread_citation_issues,
 )
@@ -70,7 +73,7 @@ from deploy_vii.registry import (
     tool_sets,
 )
 from deploy_vii.source_context import SourceContextReview
-from deploy_vii.statement_extract import extract_statement_lines
+from deploy_vii.statement_extract import ExtractedTable, extract_statement_lines
 from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_source_context as source_context_tests
 from tests.product.live_support import FAKE_KEY, make_rtf_key
@@ -388,11 +391,12 @@ def test_the_rules_validate_their_settings_and_need_the_context_for_the_floor() 
     assert rules.active("financials") and not rules.active("narrative")
     with pytest.raises(ValueError, match="retained source_context review"):
         rules.issues("financials", "{}", seen=Seen(), context=None)
-    assert rules.to_record() == {
+    record = rules.to_record()
+    assert {k: record[k] for k in ("completeness_floor_lines", "completeness_floor_reason")} == {
         "completeness_floor_lines": 2,
         "completeness_floor_reason": None,
-        "checked": [],
     }
+    assert record["checked"] == [] and record["extracted_coverage_min"] is None
 
 
 # Task 8.9: the rules each tool-loop step checks. CP-1's four keep 8.0d's (both; vacuous for
@@ -560,6 +564,43 @@ def test_the_effort_table_floor_and_flag_are_read_and_checked(tmp_path: Path) ->
             load_settings(settings_file(tmp_path / str(number), bad), root=tmp_path)
 
 
+def test_the_extracted_coverage_floor_is_read_as_a_decimal_string(tmp_path: Path) -> None:
+    """Task 8.12 item 3: `extracted_coverage_min`, a Decimal string from 0 to 1 with at most
+    four places, in the floor's table, alone or beside `min_statement_lines`; absent: off."""
+    table = "[model_tests.completeness_floor]\n"
+    alone = load_settings(
+        settings_file(tmp_path / "a", table + 'extracted_coverage_min = "0.70"\n'), root=tmp_path
+    )
+    assert (alone.extracted_coverage_min, alone.completeness_floor) == (Decimal("0.70"), None)
+    both = load_settings(
+        settings_file(
+            tmp_path / "b",
+            table + 'min_statement_lines = 2\nextracted_coverage_min = "1"\n',
+        ),
+        root=tmp_path,
+    )
+    assert (both.extracted_coverage_min, both.completeness_floor) == (Decimal("1"), 2)
+    assert ToolRules.from_settings(both) == ToolRules(floor=2, coverage_min=Decimal("1"))
+    off = load_settings(settings_file(tmp_path / "c", ""), root=tmp_path)
+    assert (off.extracted_coverage_min, off.completeness_floor) == (None, None)
+    assert ToolRules.from_settings(off) == ToolRules()
+    reason = "extracted_coverage_min must be a decimal string from 0 to 1"
+    for number, (bad, why) in enumerate(
+        [
+            ('extracted_coverage_min = "abc"\n', reason),
+            ('extracted_coverage_min = "-0.1"\n', reason),
+            ('extracted_coverage_min = "1.5"\n', reason),
+            ('extracted_coverage_min = "NaN"\n', reason),
+            ('extracted_coverage_min = "0.12345"\n', reason),
+            ("extracted_coverage_min = 0.7\n", reason),
+            ('min_lines = 2\nextracted_coverage_min = "0.7"\n', "unknown key min_lines"),
+            ("", "needs min_statement_lines or extracted_coverage_min"),
+        ]
+    ):
+        with pytest.raises(SettingsError, match=why):
+            load_settings(settings_file(tmp_path / f"bad{number}", table + bad), root=tmp_path)
+
+
 def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling() -> None:
     """Task 8.9 item 4: a row per tool-loop step, each with its reason as a comment; Sol at
     medium (decision 0005, 24 Oct 2026) and one escalation to high at most. The floor stays
@@ -567,6 +608,11 @@ def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling
     path = Path("settings/project.toml")
     loaded = load_settings(path)
     assert loaded.tool_loop and loaded.completeness_floor is None
+    assert loaded.extracted_coverage_min is None  # task 8.12: off (user decision "C")
+    # Task 8.12 item 5: the suggested floor is the commented default; the floor stays off.
+    text = path.read_text(encoding="utf-8")
+    assert '\n# extracted_coverage_min = "0.50"\n' in text
+    assert "\nextracted_coverage_min" not in text
     assert set(loaded.step_efforts) == tool_loop_steps()
     assert set(loaded.step_efforts.values()) == {StepEffort("medium", "high")}
     table = path.read_text(encoding="utf-8").split("[model_tests.step_effort]\n", 1)[1]
@@ -1144,3 +1190,523 @@ def test_a_submit_only_step_reports_no_pages_extracted(tmp_path: Path) -> None:
     result = rig.run(script, step_id="quality")
     step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
     assert step["tool_set"] == SUBMIT_ONLY and step["pages_extracted"] is None
+
+
+# --- extracted coverage (task 8.12, user decision "C") -----------------------------------------
+
+CFS_FY = "CFS S1 scope FY (2025-01-01 to 2025-12-31)"
+IS_FY = "IS S1 scope FY (2025-01-01 to 2025-12-31)"
+CFS_TABLE = extract_statement_lines(CFS_PAGE, "page:1", source_id="S1")
+FY_LINES = ("profit", "noncash", "cfo", "cfi", "cff", "ncf")
+
+
+def built(case: PagedCase) -> dict[str, Any]:
+    """The paged case's payload built from the extracted CFS page (every CFS line cites page:1
+    with its label as the quote), as a document to edit."""
+    document: dict[str, Any] = json.loads(
+        from_extracted(case.payload, PackTools(case.store.pack()))
+    )
+    return document
+
+
+def cfs_line(document: dict[str, Any], line_id: str, period_id: str) -> dict[str, Any]:
+    line: dict[str, Any] = next(
+        item
+        for item in document["financial"]["books"][0]["statement_lines"]
+        if (item["line_id"], item["period_id"]) == (line_id, period_id)
+    )
+    return line
+
+
+def rename(line: dict[str, Any]) -> None:
+    """The line keeps citing its page, with a label and quote that cover nothing there."""
+    line["label"] = line["value"]["citations"][0]["quote"] = "Renamed"
+
+
+def cell(measured: dict[str, Any] | None, key: str = CFS_FY) -> dict[str, Any]:
+    assert measured is not None
+    found: dict[str, Any] = measured["cells"][key]
+    return found
+
+
+def test_coverage_counts_each_cells_cited_statement_pages(paged_case: PagedCase) -> None:
+    """Task 8.12 item 1: a cell's extracted lines are those of the pages its statement's lines
+    cite; each is covered by a line of a period in the cell's scope citing that page."""
+    payload = json.dumps(built(paged_case))
+    measured = extracted_coverage(payload, paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    assert measured["cells"] == {
+        IS_FY: {
+            "extracted": 0,
+            "covered": 0,
+            "coverage": None,
+            "reason": "no IS line of a book bound to issuer cites a page of S1",
+            "pages": [],
+        },
+        CFS_FY: {
+            "extracted": 6,
+            "covered": 6,
+            "coverage": "1.0000",
+            "reason": None,
+            "pages": ["page:1"],
+        },
+    }
+    assert measured["overall"] == {
+        "extracted": 6,
+        "covered": 6,
+        "coverage": "1.0000",
+        "reason": None,
+    }
+    # The case's own payload cites no page: nothing is extracted for any cell.
+    plain = extracted_coverage(paged_case.payload, paged_case.context, (CFS_TABLE,))
+    assert plain is not None and plain["overall"] == {
+        "extracted": 0,
+        "covered": 0,
+        "coverage": None,
+        "reason": "no expected cell has extracted lines",
+    }
+    # A cited page without a table (not read or extracted), or a table without lines.
+    unread = extracted_coverage(payload, paged_case.context, ())
+    assert cell(unread)["reason"] == (
+        "no page of S1 the CFS lines cite has an extracted table (read or extracted)"
+    )
+    empty = replace(CFS_TABLE, lines=())
+    assert cell(extracted_coverage(payload, paged_case.context, (empty,)))["reason"] == (
+        "the cited pages page:1 hold no extracted statement lines"
+    )
+    assert extracted_coverage("not json", paged_case.context, (CFS_TABLE,)) is None
+    assert extracted_coverage("{}", paged_case.context, (CFS_TABLE,)) is None
+
+
+def test_coverage_is_a_decimal_ratio_rounded_down_to_four_places(paged_case: PagedCase) -> None:
+    document = built(paged_case)
+    for line_id in ("cfo", "cfi", "cff"):  # three FY lines no longer cover theirs
+        rename(cfs_line(document, line_id, "FY"))
+    found = cell(extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,)))
+    assert (found["extracted"], found["covered"], found["coverage"]) == (6, 3, "0.5000")
+    rename(cfs_line(document, "ncf", "FY"))
+    # 2 of 6 is 0.3333...: shown rounded down, so a shown coverage never passes a floor above it.
+    found = cell(extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,)))
+    assert (found["covered"], found["coverage"]) == (2, "0.3333")
+
+
+def _covering(document: dict[str, Any], rule: str) -> dict[str, Any]:
+    """Every FY CFS line renamed (covering nothing), then one changed by `rule`: so that it
+    covers its extracted line by that rule alone, or so that it cannot."""
+    for line_id in FY_LINES:
+        rename(cfs_line(document, line_id, "FY"))
+    line = cfs_line(document, "cfo" if rule == "near-number" else "cfi", "FY")
+    citation = line["value"]["citations"][0]
+    if rule == "quote":  # the quote holds the printed (40), the label differs
+        line["label"], citation["quote"] = "Investing", "Synthetic cfi (40)"
+    elif rule == "label":  # the label matches; the quote holds none of its values
+        line["label"], citation["quote"] = "Synthetic  cfi", "Synthetic"
+    elif rule == "near-number":  # 240 in 1,240 or 2400, 60 in 60.5 or (60): not cfo's values
+        line["label"], citation["quote"] = "Operating", "1,240 and 2400 and 60.5 and (60)"
+    elif rule == "wrong-statement":  # the label matches but the line is an IS line
+        line["label"], line["statement"] = "Synthetic cfi", "IS"
+    elif rule == "uncited-page":  # the label matches but the citation names another page
+        line["label"], citation["locator"] = "Synthetic cfi", "page:2"
+    # "wrong-period": the Q1-Q4 lines still cite page:1 with the printed labels.
+    return document
+
+
+@pytest.mark.parametrize(
+    ("rule", "covered"),
+    [
+        ("quote", 1),
+        ("label", 1),
+        ("near-number", 0),
+        ("wrong-statement", 0),
+        ("wrong-period", 0),
+        ("uncited-page", 0),
+    ],
+)
+def test_each_covering_rule(paged_case: PagedCase, rule: str, covered: int) -> None:
+    """A line is covered by a payload line of its statement, of a period in the cell's scope,
+    citing its page with a quote holding one of its printed values (as a whole number) or with
+    its label (whitespace normalised); a wrong statement, period or page never covers it."""
+    document = _covering(built(paged_case), rule)
+    page_two = replace(CFS_TABLE, locator="page:2", lines=())
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE, page_two))
+    assert (cell(measured)["extracted"], cell(measured)["covered"]) == (6, covered)
+
+
+def test_agreement_compares_each_cited_lines_amount_with_its_labels_values(
+    paged_case: PagedCase,
+) -> None:
+    """Agreement (telemetry): a payload line on an extracted page agrees when its amount is one
+    of the values of the extracted line of its label there; a retyped -100 for the printed
+    (10) disagrees; a flipped sign is a sign difference (Python cannot tell it from a `signed`
+    expense printed as a magnitude); a label the page does not print is unmatched."""
+    document = built(paged_case)
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    assert measured["agreement"] == {
+        "agreed": 30,
+        "sign_differs": 0,
+        "disagreed": 0,
+        "unmatched": 0,
+        "not_on_an_extracted_page": 11,  # the BS and IS lines cite no page
+        "without_amount": 0,
+        "disagreements": [],
+        "sign_differences": [],
+    }
+    cfs_line(document, "cfi", "Q1")["value"]["amount"] = -100
+    cfs_line(document, "cff", "Q2")["value"]["amount"] = 30
+    cfs_line(document, "ncf", "FY")["label"] = "Net change"
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    agreement = measured["agreement"]
+    counts = [agreement[k] for k in ("agreed", "sign_differs", "disagreed", "unmatched")]
+    assert counts == [27, 1, 1, 1]
+    assert agreement["disagreements"] == [
+        {
+            "pages": [["S1", "page:1"]],
+            "line_id": "cfi",
+            "period_id": "Q1",
+            "label": "Synthetic cfi",
+            "payload_value": "-100",
+            "sign_convention": "signed",
+            "extracted_values": [["-10", "-10", "-10", "-10", "-40"]],
+        }
+    ]
+    assert agreement["sign_differences"] == [
+        {
+            "pages": [["S1", "page:1"]],
+            "line_id": "cff",
+            "period_id": "Q2",
+            "label": "Synthetic cff",
+            "payload_value": "30",
+            "sign_convention": "signed",
+            "extracted_values": [["-30", "-30", "-30", "-30", "-120"]],
+        }
+    ]
+
+
+def test_a_payload_zero_agrees_with_a_printed_nil_dash(paged_case: PagedCase) -> None:
+    dashed = CFS_PAGE.replace("Synthetic ncf          20", "Synthetic ncf          —")
+    table = extract_statement_lines(dashed, "page:1", source_id="S1")
+    document = built(paged_case)
+    cfs_line(document, "ncf", "Q1")["value"]["amount"] = 0
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (table,))
+    assert measured is not None
+    assert (measured["agreement"]["agreed"], measured["agreement"]["disagreed"]) == (30, 0)
+    cfs_line(document, "ncf", "Q1")["value"]["amount"] = 5  # not zero: no printed value holds it
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (table,))
+    assert measured is not None
+    assert (measured["agreement"]["agreed"], measured["agreement"]["disagreed"]) == (29, 1)
+
+
+def test_a_nil_dash_is_never_quote_matched_and_a_nil_only_line_needs_its_label(
+    paged_case: PagedCase,
+) -> None:
+    """Fix round 1 (review F4): a quote holding a printed dash covers no line by that dash, so a
+    line printing only nil dashes is covered by its label alone; a line printing a dash beside
+    numbers is still covered by a quote holding one of the numbers."""
+    row = "Synthetic ncf          20          20         20            20           80"
+    nil_only = "Synthetic ncf          —           —          —             —            —"
+    assert row in CFS_PAGE
+    table = extract_statement_lines(CFS_PAGE.replace(row, nil_only), "page:1", source_id="S1")
+    ncf = next(line for line in table.lines if line.label == "Synthetic ncf")
+    assert ncf.values == (None,) * 5 and ncf.raw_values == ("—",) * 5
+
+    def covered(label: str, quote: str, page: ExtractedTable = table) -> int:
+        document = built(paged_case)
+        for line_id in FY_LINES:  # nothing else covers anything
+            rename(cfs_line(document, line_id, "FY"))
+        line = cfs_line(document, "ncf", "FY")
+        line["label"], line["value"]["citations"][0]["quote"] = label, quote
+        found = cell(extracted_coverage(json.dumps(document), paged_case.context, (page,)))
+        assert found["extracted"] == 6
+        count: int = found["covered"]
+        return count
+
+    assert covered("Net change", "Synthetic ncf — —") == 0  # the dash is not quoted
+    assert covered("Net change", "—") == 0
+    assert covered("Synthetic ncf", "x") == 1  # by its label alone
+    mixed = CFS_PAGE.replace(
+        row, row.replace("          20           80", "          —            83")
+    )
+    with_dash = extract_statement_lines(mixed, "page:1", source_id="S1")
+    assert None in next(x for x in with_dash.lines if x.label == "Synthetic ncf").values
+    assert covered("Net change", "—", with_dash) == 0
+    assert covered("Net change", "ncf 83", with_dash) == 1  # 83: no other line prints it
+
+
+def test_agreement_lists_the_first_five_disagreements(paged_case: PagedCase) -> None:
+    document = built(paged_case)
+    for period in ("Q1", "Q2", "Q3", "Q4", "FY"):
+        for line_id in ("cfo", "cfi"):
+            cfs_line(document, line_id, period)["value"]["amount"] = 7
+    measured = extracted_coverage(json.dumps(document), paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    assert measured["agreement"]["disagreed"] == 10
+    assert [(d["line_id"], d["period_id"]) for d in measured["agreement"]["disagreements"]] == [
+        ("cfo", "Q1"),
+        ("cfi", "Q1"),
+        ("cfo", "Q2"),
+        ("cfi", "Q2"),
+        ("cfo", "Q3"),
+    ]
+
+
+def test_coverage_refuses_ambiguous_tables(paged_case: PagedCase) -> None:
+    nameless = replace(CFS_TABLE, source_id=None)
+    with pytest.raises(ValueError, match="names no source"):
+        extracted_coverage(paged_case.payload, paged_case.context, (nameless,))
+    with pytest.raises(ValueError, match="two extracted tables"):
+        extracted_coverage(paged_case.payload, paged_case.context, (CFS_TABLE, CFS_TABLE))
+
+
+def _states(document: dict[str, Any], states: list[str]) -> dict[str, Any]:
+    """Each of the 30 CFS lines as `none` (a non-page citation), `cover` (page:1 with its
+    label) or `miss` (page:1 with a label and quote that cover nothing)."""
+    lines = [
+        line
+        for line in document["financial"]["books"][0]["statement_lines"]
+        if line["statement"] == "CFS"
+    ]
+    assert len(lines) == len(states) == 30
+    for line, state in zip(lines, states, strict=True):
+        if state == "none":
+            line["value"]["citations"][0]["locator"] = f"{line['line_id']}.{line['period_id']}"
+        elif state == "miss":
+            rename(line)
+    return document
+
+
+@settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    states=st.lists(st.sampled_from(("none", "cover", "miss")), min_size=30, max_size=30),
+    flip=st.integers(0, 29),
+    order=st.randoms(use_true_random=False),
+)
+def test_coverage_properties(
+    paged_case: PagedCase, states: list[str], flip: int, order: random.Random
+) -> None:
+    """Properties (decision 0012): coverage is in [0, 1] and None iff nothing is extracted;
+    unchanged by the order of the payload's lines and of the extracted lines; and never lower
+    once a line is made to cover its extracted line while page:1 is already counted (a line
+    citing a page not yet counted adds that page's lines, so it may lower the ratio)."""
+    base = built(paged_case)
+    payload = json.dumps(_states(json.loads(json.dumps(base)), states))
+    measured = extracted_coverage(payload, paged_case.context, (CFS_TABLE,))
+    assert measured is not None
+    for found in [*measured["cells"].values(), measured["overall"]]:
+        assert (found["coverage"] is None) == (found["extracted"] == 0)
+        assert 0 <= found["covered"] <= found["extracted"]
+        if found["coverage"] is not None:
+            assert Decimal(0) <= Decimal(found["coverage"]) <= Decimal(1)
+    shuffled = json.loads(payload)
+    order.shuffle(shuffled["financial"]["books"][0]["statement_lines"])
+    lines = list(CFS_TABLE.lines)
+    order.shuffle(lines)
+    again = extracted_coverage(
+        json.dumps(shuffled), paged_case.context, (replace(CFS_TABLE, lines=tuple(lines)),)
+    )
+    assert again is not None
+    assert (again["cells"], again["overall"]) == (measured["cells"], measured["overall"])
+    agreement = {k: v for k, v in again["agreement"].items() if k != "disagreements"}
+    assert agreement == {k: v for k, v in measured["agreement"].items() if k != "disagreements"}
+    if all(state == "none" for state in states):
+        assert cell(measured)["coverage"] is None
+        return
+    more = [*states[:flip], "cover", *states[flip + 1 :]]
+    after = cell(
+        extracted_coverage(
+            json.dumps(_states(json.loads(json.dumps(base)), more)),
+            paged_case.context,
+            (CFS_TABLE,),
+        )
+    )
+    before = cell(measured)
+    assert after["extracted"] == before["extracted"] == 6
+    assert after["covered"] >= before["covered"]
+    assert Decimal(after["coverage"]) >= Decimal(before["coverage"])
+
+
+def test_the_coverage_tables_are_the_shown_pages_of_the_financial_sources(case: Case) -> None:
+    """Item 2: the loop extracts, per submit, only the page:N spans of the review's financial
+    sources the model had been shown (read or extracted), in page order; never another page."""
+    tools = PackTools(statement_pack(case.store))
+    assert [s.source_id for s in case.context.sources if s.classification == "financial"] == ["S1"]
+    seen = Seen(read=frozenset({("S1", "page:5"), ("S1", "page:2"), ("deck", "page:1")}))
+    tables = seen_tables(tools, seen, case.context)
+    assert [(t.source_id, t.locator, len(t.lines)) for t in tables] == [
+        ("S1", "page:2", 4),
+        ("S1", "page:5", 0),
+    ]
+    assert tables[0] == extract_statement_lines(STATEMENT_PAGE, "page:2", source_id="S1")
+    assert seen_tables(tools, Seen(), case.context) == ()
+
+
+def test_the_overall_reason_says_when_no_shown_page_holds_a_statement_line(
+    paged_case: PagedCase,
+) -> None:
+    payload = json.dumps(built(paged_case))
+    prose = replace(CFS_TABLE, lines=())
+    measured = extracted_coverage(payload, paged_case.context, (prose,))
+    assert measured is not None
+    assert measured["overall"]["reason"] == "none of the 1 extracted pages holds a statement line"
+    measured = extracted_coverage(payload, paged_case.context, ())
+    assert measured is not None
+    assert measured["overall"]["reason"] == "none of the 0 extracted pages holds a statement line"
+
+
+def test_every_financials_submit_records_its_extracted_coverage(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 2: next to `completeness`, every financials submit's record holds
+    `extracted_coverage` of the retained (pre-filled) payload over the pages shown by then;
+    the case's own payload cites no page (every cell None with its reason), the built one
+    covers the extracted page; the verdicts are those without the field."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    extract = ("c-e", EXTRACT, json.dumps({"source_id": "S1", "locators": ["page:1"]}))
+    built_payload = from_extracted(paged_case.payload, PackTools(paged_case.store.pack()))
+    rig = paged_rig(tmp_path, paged_case)
+    # The first submit (before the extract) cites page:1 unread: rejected by the cited-page rule.
+    script = rig.script(
+        tool_reply(search),
+        tool_reply(("c-0", "submit_financials", built_payload)),
+        tool_reply(extract),
+        tool_reply(("c-1", "submit_financials", built_payload)),
+    )
+    result = rig.run(script, step_id="financials")
+    assert [s["outcome"] for s in result.submits] == ["rejected", "accepted"]
+    first, second = (s["extracted_coverage"] for s in result.submits)
+    assert cell(first)["reason"] == (
+        "no page of S1 the CFS lines cite has an extracted table (read or extracted)"
+    )
+    assert first["overall"]["reason"] == "none of the 0 extracted pages holds a statement line"
+    assert cell(second) == {
+        "extracted": 6,
+        "covered": 6,
+        "coverage": "1.0000",
+        "reason": None,
+        "pages": ["page:1"],
+    }
+    assert second["agreement"]["agreed"] == 30
+    assert all(s["extracted_coverage_reason"] is None for s in result.submits)
+    recorded = rig.metrics(result.attempt_id)["tool_loop"]["step"]["submits"]
+    assert [s["extracted_coverage"] for s in recorded] == [first, second]
+    assert all("completeness" in s for s in recorded)
+
+
+def test_a_financials_submit_that_does_not_parse_records_no_coverage_with_the_reason(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(tool_reply(("c-1", "submit_financials", json.dumps({"financial": 1}))))
+    result = rig.run(script, step_id="financials", rules=ToolRules(checked=()))
+    (record, *_) = result.submits
+    assert record["outcome"] == "rejected" and record["extracted_coverage"] is None
+    assert record["extracted_coverage_reason"] == (
+        "the retained payload does not parse as a financials submission (the stage validator "
+        "rejects it)"
+    )
+
+
+def test_a_step_other_than_financials_records_no_coverage(tmp_path: Path) -> None:
+    rig = step_rig(tmp_path, "business_context")
+    script = rig.script(tool_reply(("c-1", "submit_business_context", "{}")))
+    result = rig.run(script, step_id="business_context", rules=ToolRules(checked=()))
+    (record, *_) = result.submits
+    assert "extracted_coverage" not in record and "completeness" not in record
+
+
+def _half(case: PagedCase) -> str:
+    """The built payload with three FY CFS lines renamed: 3 of the 6 extracted lines covered."""
+    document = built(case)
+    for line_id in ("cfo", "cfi", "cff"):
+        rename(cfs_line(document, line_id, "FY"))
+    return json.dumps(document)
+
+
+HALF_ISSUE = (
+    f"{INCOMPLETE}: coverage 0.5000 of {CFS_FY} below the floor 0.70 (3 of 6 extracted lines "
+    "covered)"
+)
+
+
+def test_the_coverage_floor_rejects_each_measured_cell_below_it(paged_case: PagedCase) -> None:
+    """Item 3: with `coverage_min` set, a financials submit fails per cell whose coverage is
+    below the floor (exactly: covered < floor x extracted); a cell with nothing extracted is
+    not judged (the line-count floor judges a cell's lines); the old floor stays apart."""
+    rules = ToolRules(coverage_min=Decimal("0.70"), checked=())
+    assert rules.active("financials") and not rules.active("narrative")
+    context, tables = paged_case.context, (CFS_TABLE,)
+
+    def found(rule: ToolRules, payload: str) -> tuple[str, ...]:
+        return rule.issues("financials", payload, seen=Seen(), context=context, tables=tables)
+
+    assert found(rules, _half(paged_case)) == (HALF_ISSUE,)
+    assert found(rules, json.dumps(built(paged_case))) == ()
+    assert found(ToolRules(coverage_min=Decimal("0.5"), checked=()), _half(paged_case)) == ()
+    assert found(rules, paged_case.payload) == ()  # every cell unmeasured: none judged
+    assert found(rules, "not json") == ()
+    both = ToolRules(floor=31, coverage_min=Decimal("0.70"), checked=())
+    lines = completeness_issues(_half(paged_case), context, 31)
+    assert len(lines) == 2 and found(both, _half(paged_case)) == (*lines, HALF_ISSUE)
+    with pytest.raises(ValueError, match="needs the extracted tables"):
+        rules.issues("financials", "{}", seen=Seen(), context=context)
+    with pytest.raises(ValueError, match="retained source_context review"):
+        rules.issues("financials", "{}", seen=Seen(), context=None, tables=tables)
+
+
+@pytest.mark.parametrize(
+    "bad", [Decimal("-0.01"), Decimal("1.0001"), Decimal("0.12345"), Decimal("NaN"), 0.7, "0.7"]
+)
+def test_the_coverage_floor_is_a_decimal_from_zero_to_one_of_four_places(bad: object) -> None:
+    with pytest.raises(ValueError, match="extracted-coverage floor"):
+        ToolRules(coverage_min=cast(Decimal, bad))
+
+
+def test_the_rules_record_both_floors_and_why_each_is_off() -> None:
+    unmeasured = (
+        "a cell with no extracted lines is not judged by this floor (its reason is in "
+        "extracted_coverage); min_statement_lines judges a cell's line count"
+    )
+    assert ToolRules(checked=()).to_record() == {
+        "completeness_floor_lines": None,
+        "completeness_floor_reason": "no [model_tests.completeness_floor] in settings",
+        "extracted_coverage_min": None,
+        "extracted_coverage_min_reason": (
+            "no [model_tests.completeness_floor] extracted_coverage_min in settings"
+        ),
+        "extracted_coverage_unmeasured": unmeasured,
+        "checked": [],
+    }
+    record = ToolRules(coverage_min=Decimal("0.70"), checked=()).to_record()
+    assert (record["extracted_coverage_min"], record["extracted_coverage_min_reason"]) == (
+        "0.70",
+        None,
+    )
+
+
+def test_a_loop_submit_below_the_coverage_floor_is_rejected_and_escalates(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """The loop judges the floor on the pages shown by the submit (scratch and live journal
+    alike: the live journal's judgement of the last submit must equal the scratch one), and a
+    coverage rejection is a completeness-floor rejection for escalation. (`_half`'s renamed
+    labels fail the stage too; the floor alone rejecting an accepted payload is the recorded
+    transcripts' differential.)"""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    extract = ("c-e", EXTRACT, json.dumps({"source_id": "S1", "locators": ["page:1"]}))
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(
+        tool_reply(search, extract),
+        tool_reply(("c-1", "submit_financials", _half(paged_case))),
+        tool_reply(("c-2", "submit_financials", json.dumps(built(paged_case)))),
+    )
+    rules = ToolRules(coverage_min=Decimal("0.70"))
+    result = rig.run(script, step_id="financials", rules=rules)
+    assert [s["outcome"] for s in result.submits] == ["rejected", "accepted"]
+    assert result.submits[0]["issues"][-1] == HALF_ISSUE
+    assert not any(i.startswith(INCOMPLETE) for i in result.submits[0]["issues"][:-1])
+    assert result.submits[0]["completeness_floor_failed"] is True
+    events = (rig.directory(result.submits[0]["attempt_id"]) / "events.jsonl").read_text()
+    assert '"reason": "a completeness-floor rejection"' in events
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["rules"]["extracted_coverage_min"] == "0.70"

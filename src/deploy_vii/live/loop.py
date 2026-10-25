@@ -125,6 +125,8 @@ from deploy_vii.live.tools import (
     completeness,
     completeness_drop,
     evidence_counts,
+    extracted_coverage,
+    seen_tables,
     shrinkage,
     submit_name,
     tool_specs,
@@ -138,8 +140,13 @@ from deploy_vii.registry import (
     tool_set,
 )
 from deploy_vii.source_context import SourceContextReview
+from deploy_vii.statement_extract import ExtractedTable
 
 TOOL_STEPS = tool_loop_steps()
+UNPARSED_COVERAGE = (
+    "the retained payload does not parse as a financials submission (the stage validator "
+    "rejects it)"
+)
 NOT_RUN = "not run"
 NO_SUBMIT = "no-submit"  # a step status: the step ended without a judged submit
 LIMIT = "rejected: limit"
@@ -208,7 +215,10 @@ def transient(result: ChatResult | None) -> bool:
 
 @dataclass(frozen=True)
 class Submit:
-    """One judged submit: where it was made, what the model had been shown, its verdict."""
+    """One judged submit: where it was made, what the model had been shown, its verdict.
+    `tables` and `coverage` (task 8.12, `financials` only, else empty and None): the pages
+    shown by then as extracted tables (`tools.seen_tables`) and the retained payload's
+    `tools.extracted_coverage` over them, computed once when the submit is judged."""
 
     number: int
     call: int
@@ -218,8 +228,11 @@ class Submit:
     outcome: str
     issues: tuple[str, ...]
     effort_sent: str | None
+    tables: tuple[ExtractedTable, ...]
+    coverage: dict[str, Any] | None
 
     def record(self, step_id: str) -> dict[str, Any]:
+        financials = step_id == "financials"
         return {
             "submit": self.number,
             "call": self.call,
@@ -231,7 +244,17 @@ class Submit:
             "counts": evidence_counts(self.payload),
             "payload_sha256": hashlib.sha256(self.payload.encode()).hexdigest(),
             "effort_sent": self.effort_sent,
-            **({"completeness": completeness(self.payload)} if step_id == "financials" else {}),
+            **({"completeness": completeness(self.payload)} if financials else {}),
+            **(
+                {
+                    "extracted_coverage": self.coverage,
+                    "extracted_coverage_reason": UNPARSED_COVERAGE
+                    if self.coverage is None
+                    else None,
+                }
+                if financials
+                else {}
+            ),
         }
 
 
@@ -802,26 +825,53 @@ def _execute(
     return "rejected", f"rejected ({left} submits left):\n{listed}", verdict
 
 
-def _rules(step: _Step, seen: Seen) -> Callable[[str], tuple[str, ...]] | None:
+def _rules(
+    step: _Step, seen: Seen, tables: tuple[ExtractedTable, ...]
+) -> Callable[[str], tuple[str, ...]] | None:
+    """The step's rules as of one submit: what it had been shown (`seen`) and, for the
+    coverage floor (task 8.12), those pages' extracted tables."""
     if not step.rules.active(step.step_id):
         return None
-    return partial(step.rules.issues, step.step_id, seen=seen, context=step.context)
+    return partial(step.rules.issues, step.step_id, seen=seen, context=step.context, tables=tables)
+
+
+def _tables(step: _Step, seen: Seen) -> tuple[ExtractedTable, ...]:
+    """Task 8.12: a `financials` submit's extracted tables, the pages of the review's financial
+    sources the model had been shown (`tools.seen_tables`); none for any other step."""
+    if step.step_id != "financials" or step.tools is None or step.context is None:
+        return ()
+    return seen_tables(step.tools, seen, step.context)
 
 
 def _judge(step: _Step, call: Call, payload: str) -> Submit:
     """Judge one submit as the step's current try, in a scratch copy of its starting journal."""
     number = len(step.submits) + 1
     seen = step.tools.seen() if step.tools is not None else Seen()
+    tables = _tables(step, seen)
     with tempfile.TemporaryDirectory(prefix="tool-submit-") as scratch:
         copy = Path(scratch) / "journal"
         shutil.copytree(step.store.directory, copy)
         store = Execution(copy)
         submitted = submit_model_payload(
-            store, step.attempt.ticket_id, step.step_id, payload, rules=_rules(step, seen)
+            store, step.attempt.ticket_id, step.step_id, payload, rules=_rules(step, seen, tables)
         )
         outcome, issues = journal_outcome(store, step.step_id, submitted.journal)
+    coverage = (
+        extracted_coverage(submitted.payload, step.context, tables)
+        if step.step_id == "financials" and step.context is not None
+        else None
+    )
     submit = Submit(
-        number, call.number, call.attempt_id, payload, seen, outcome, issues, call.effort.sent
+        number,
+        call.number,
+        call.attempt_id,
+        payload,
+        seen,
+        outcome,
+        issues,
+        call.effort.sent,
+        tables,
+        coverage,
     )
     step.submits.append(submit)
     call.status, call.output, call.issues = outcome, payload, issues
@@ -876,7 +926,7 @@ def _after(step: _Step, call: Call, ctx: _Context) -> None:
         step.step_id,
         last.payload,
         on_normalised=resolved,
-        rules=_rules(step, last.seen),
+        rules=_rules(step, last.seen, last.tables),
     )
     composed_event(call.event, submitted)
     outcome, issues = journal_outcome(step.store, step.step_id, submitted.journal)

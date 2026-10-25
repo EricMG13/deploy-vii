@@ -121,6 +121,17 @@ committee_challenge = { effort = "medium", ceiling = "high" }
 # CFS lines for FY2025 only and BS lines for 2025-12-31 only. To turn it on:
 # [model_tests.completeness_floor]
 # min_statement_lines = 1
+#
+# Task 8.12 (user decision "C", 24 Oct 2026): the extracted-coverage floor, off until the user
+# has seen measured ratios. It is the least share of each expected cell's extracted statement
+# lines (the lines on the cited pages the model read or extracted) the payload must cover: a
+# Decimal string from 0 to 1, at most four places. Measured on hybrid-cp1-6 Sol medium, the
+# current-year cells cover 0.5862 (IS), 0.8333 (CFS) and 0.9393 (BS), the five comparative
+# cells 0. The suggested floor is 0.50: the lowest current-year cell less a margin for printed
+# lines a payload may leave out (per-share data, supplemental cash flows). Like the line-count
+# floor, any floor above 0 rejects hybrid-cp1-6 for its missing comparatives. In the same table
+# as min_statement_lines (either key or both); to turn it on:
+# extracted_coverage_min = "0.50"
 
 # The catalog-rule pool (used when `--models` is absent) is the user-named set of decision 0005
 # (amendment, 22 Oct 2026): currently GPT-6.1 Sol alone, so the draw is trivial. The earlier

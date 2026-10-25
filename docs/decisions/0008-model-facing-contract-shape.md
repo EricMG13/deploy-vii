@@ -523,3 +523,17 @@ map and cite those lines and never retype a printed amount (docs/development/liv
 prompt rule are added. Task 8.11 (per-statement submits) will change the shape.
 
 Not verified: live use; Sol's actual use of the tool; other issuers' layouts.
+
+## Amendment, 25 Oct 2026 (task 8.12)
+
+User decision "C" (24 Oct 2026): Python measures how much of the extracted statement lines a
+`financials` payload covers, and whether its amounts agree with them. The ratio is recorded on
+every submit (`extracted_coverage`; docs/testing-and-telemetry.md, "Extracted coverage"). An
+extracted-coverage floor (`[model_tests.completeness_floor] extracted_coverage_min`) is
+available and off by default; the user turns it on after seeing measured ratios. The
+model-facing shape is unchanged: `FinancialSubmission`, `StatementLine`, the sent `financials`
+schema, its prompt and its tools are as before. A set floor only adds `Financials incomplete`
+issues to a submit's verdict.
+
+Not verified: live use; other issuers' layouts; the floor's effect on Sol's rejection and
+escalation rates.
