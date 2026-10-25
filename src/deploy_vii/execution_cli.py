@@ -30,7 +30,7 @@ from deploy_vii.cp_model_workflow import (
     verify_cp_model_publication,
 )
 from deploy_vii.delivery_dir import run_paths
-from deploy_vii.execution import Attempt, Execution
+from deploy_vii.execution import Attempt, Execution, current_inputs
 from deploy_vii.live.prompts import readiness_addendum_instructions
 from deploy_vii.module_submits import (
     MODULE_SUBMITS,
@@ -287,6 +287,13 @@ def report_index(store: Execution, pathway_id: str, output: Path) -> str:
 def run_offline(args: argparse.Namespace) -> str:
     """Advance exactly one host review at a time; all model judgments remain supplied files."""
     try:
+        return _run_offline(args)
+    except (OSError, ValueError) as error:
+        raise refusal_exit(f"run refused: {error}") from error
+
+
+def _run_offline(args: argparse.Namespace) -> str:
+    try:
         paths = run_paths(getattr(args, "out", None), args.run)
     except ValueError as error:
         raise refusal_exit(f"run refused: {error}") from error
@@ -424,6 +431,16 @@ def run_offline(args: argparse.Namespace) -> str:
 
 
 def execute(args: argparse.Namespace) -> str:
+    action = args.action
+    try:
+        return _execute(args)
+    except (OSError, ValueError) as error:
+        if action not in {"resume", "report-open"}:
+            raise
+        raise refusal_exit(f"{action} refused: {error}") from error
+
+
+def _execute(args: argparse.Namespace) -> str:
     run_id = (
         args.run
         or getattr(args, "create_run", None)
@@ -431,6 +448,8 @@ def execute(args: argparse.Namespace) -> str:
         or getattr(args, "render_run", None)
     )
     if args.directory is None and not run_id:
+        if args.action in {"resume", "report-open"}:
+            raise refusal_exit(f"{args.action} refused: execution requires --directory or --run")
         raise SystemExit("execution requires --directory or --run")
     if run_id:
         try:
@@ -457,6 +476,11 @@ def execute(args: argparse.Namespace) -> str:
                 for m in plan(snapshot.run.requested_modules)
                 if m not in {h.module_id for h in snapshot.heads if h.status != "stale"}
             ]
+            if remaining:
+                try:
+                    current_inputs(snapshot, remaining[0])
+                except ValueError as error:
+                    return f"nothing to resume; next module: {remaining[0]}; cannot begin: {error}"
             return "nothing to resume" + (
                 f"; next runnable module: {remaining[0]}"
                 if remaining

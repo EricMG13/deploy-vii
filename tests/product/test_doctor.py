@@ -1,4 +1,5 @@
 import argparse
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -515,6 +516,242 @@ def offline_args(tmp_path: Path, store: Execution) -> tuple[argparse.Namespace, 
         reviews=None,
         modules=None,
     ), Execution(paths["journal"])
+
+
+def offline_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "deploy_vii", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_run_refuses_accepted_conditional_readiness_without_rejecting_or_mutating(
+    tmp_path: Path,
+) -> None:
+    store = fixture_store(tmp_path / "fixture")
+    _, review = readiness_fixture()
+    conditional = review.model_copy(
+        update={
+            "consumers": tuple(
+                item.model_copy(
+                    update={"readiness": "CONDITIONAL", "missing_source": "CP-1 module brief"}
+                )
+                if item.module_id == "CP-1"
+                else item
+                for item in review.consumers
+            )
+        }
+    )
+    accepted = submit_cp0_review(
+        store, store.begin("CP-0").ticket_id, conditional.model_dump_json()
+    )
+    assert accepted.status == "finished" and not accepted.issues
+    args, store = offline_args(tmp_path, store)
+    before = store.read()
+    result = offline_cli(
+        "--out",
+        str(args.out),
+        "run",
+        "--request",
+        str(args.request),
+        "--root",
+        str(args.root),
+        "--run",
+        args.run,
+    )
+    assert result.returncode == 2 and "run refused:" in result.stderr
+    assert "Traceback" not in result.stderr and "source readiness" in result.stderr
+    assert store.read() == before and len(before.attempts) == 1
+    explicit = offline_cli("execution", "--directory", str(store.directory), "begin", "CP-1")
+    assert explicit.returncode == 2 and "source readiness" in explicit.stderr
+    guidance = offline_cli("execution", "--directory", str(store.directory), "resume")
+    assert guidance.returncode == 0 and "CP-1" in guidance.stdout
+    assert "cannot begin" in guidance.stdout and "next runnable module: CP-1" not in guidance.stdout
+    assert store.read() == before
+
+
+def test_resume_refuses_changed_retained_bytes_and_exact_cli_retry_matches_explicit_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+
+    store = fixture_store(tmp_path / "fixture")
+    ticket = store.begin("CP-0")
+    payload = readiness_fixture()[1].model_dump_json()
+
+    def interrupted_finish(*_args: object, **_kwargs: object) -> Never:
+        raise RuntimeError("interrupt after production validation")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(Execution, "finish", interrupted_finish)
+        with pytest.raises(RuntimeError, match="after production validation"):
+            submit_cp0_review(store, ticket.ticket_id, payload)
+    before = store.read()
+    assert before.attempts[-1].steps[0].status == "valid"
+    review = tmp_path / "review.json"
+    review.write_text("{}")
+    result = offline_cli(
+        "execution",
+        "--directory",
+        str(store.directory),
+        "resume",
+        "--ticket",
+        ticket.ticket_id,
+        "--review",
+        str(review),
+    )
+    assert result.returncode == 2 and "resume refused:" in result.stderr
+    assert "Traceback" not in result.stderr and "different response" in result.stderr
+    assert store.read() == before and review.read_text() == "{}"
+    direct_path = tmp_path / "explicit"
+    shutil.copytree(store.directory, direct_path)
+    direct = Execution(direct_path)
+    expected = submit_cp0_review(direct, ticket.ticket_id, payload)
+    review.write_text(payload)
+    resumed = offline_cli(
+        "execution",
+        "--directory",
+        str(store.directory),
+        "resume",
+        "--ticket",
+        ticket.ticket_id,
+        "--review",
+        str(review),
+    )
+    assert resumed.returncode == 0 and not resumed.stderr
+    assert store.read() == direct.read() and store.read().attempts[-1] == expected
+    assert review.read_text() == payload
+
+
+@pytest.mark.parametrize("case", ["outside-source", "partial-pack"])
+def test_run_refuses_preparation_or_partial_pack_without_overwriting(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep source")
+    pack, _ = readiness_fixture()
+    request = tmp_path / "request.json"
+    request.write_text(
+        PreparationRequest(
+            run=pack.run,
+            sources=(
+                SourceRequest(source_id="filing", path="../outside.txt", media_type="text/plain"),
+            )
+            if case == "outside-source"
+            else (),
+        ).model_dump_json()
+    )
+    out = tmp_path / "out"
+    paths = run_paths(out, "refusal")
+    if case == "partial-pack":
+        paths["pack"].mkdir(parents=True)
+        (paths["pack"] / "private.txt").write_text("keep incomplete pack")
+    result = offline_cli(
+        "--out",
+        str(out),
+        "run",
+        "--request",
+        str(request),
+        "--root",
+        str(source_root),
+        "--run",
+        "refusal",
+    )
+    assert result.returncode == 2 and "run refused:" in result.stderr
+    assert "Traceback" not in result.stderr and not paths["journal"].exists()
+    assert outside.read_text() == "keep source"
+    if case == "partial-pack":
+        assert {p.name for p in paths["pack"].iterdir()} == {"private.txt"}
+        assert (paths["pack"] / "private.txt").read_text() == "keep incomplete pack"
+    else:
+        assert not paths["pack"].exists()
+
+
+@pytest.mark.parametrize("action", ["resume", "report-open"])
+@pytest.mark.parametrize("directory", [False, True], ids=["no-directory", "missing-journal"])
+def test_new_execution_commands_refuse_missing_journal_without_traceback(
+    tmp_path: Path,
+    action: str,
+    directory: bool,
+) -> None:
+    missing = tmp_path / "missing"
+    arguments = ("--directory", str(missing)) if directory else ()
+    result = offline_cli("execution", *arguments, action)
+    assert result.returncode == 2 and f"{action} refused:" in result.stderr
+    assert "Traceback" not in result.stderr and not missing.exists()
+
+
+@pytest.mark.parametrize("error", [ValueError, OSError, RuntimeError, TypeError])
+def test_run_refusal_boundary_preserves_pending_ticket_and_exposes_programming_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+) -> None:
+    from deploy_vii import execution_cli
+
+    args, store = offline_args(tmp_path, fixture_store(tmp_path / "fixture"))
+
+    def failed_instructions(*_args: object, **_kwargs: object) -> Never:
+        raise error("instruction failure")
+
+    monkeypatch.setattr(execution_cli, "step_instructions", failed_instructions)
+    if error in {ValueError, OSError}:
+        with pytest.raises(SystemExit) as refused:
+            execution_cli.run_offline(args)
+        assert refused.value.code == 2
+    else:
+        with pytest.raises(error, match="instruction failure"):
+            execution_cli.run_offline(args)
+    before = store.read()
+    assert len(before.attempts) == 1 and before.attempts[0].status == "pending"
+    assert not before.attempts[0].steps and before.attempts[0].payload_sha256 is None
+    if error in {ValueError, OSError}:
+        with pytest.raises(SystemExit) as refused:
+            execution_cli.run_offline(args)
+        assert refused.value.code == 2 and store.read() == before
+
+
+def test_report_open_refuses_write_failure_and_preserves_partial_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deploy_vii.execution_cli import execute
+
+    store = fixture_store(tmp_path / "fixture")
+    before = store.read()
+    output = store.directory.parent / "report"
+    original = Path.write_text
+
+    def denied_write(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if path == output / "index.html":
+            raise PermissionError("synthetic report write denied")
+        return original(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", denied_write)
+    with pytest.raises(SystemExit) as refused:
+        execute(
+            argparse.Namespace(
+                directory=store.directory,
+                run=None,
+                action="report-open",
+                pathway=None,
+                browser=False,
+            )
+        )
+    assert refused.value.code == 2 and store.read() == before
+    assert output.is_dir() and not tuple(output.iterdir())
 
 
 @pytest.mark.parametrize("difference", ["issuer_id", "run_id", "source"])
