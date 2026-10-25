@@ -768,6 +768,23 @@ def test_extract_statements_needs_page_locators(case: Case) -> None:
         PackTools(case.store.pack()).extract_statements({"source_id": "S1", "locators": ["page:1"]})
 
 
+def test_extract_reads_each_page_locator_as_written(case: Case) -> None:
+    """Confidence review: `page:1` and `page:01` are distinct locators of one source (the
+    contract forbids only a repeated locator); each is extracted from its own span."""
+    pack = case.store.pack()
+    spans = (Span(locator="page:1", text=DECK_PAGE), Span(locator="page:01", text=_ONE_ROW))
+    source = pack.sources[0].model_copy(update={"spans": spans})
+    tools = PackTools(pack.model_copy(update={"sources": (source,)}))
+    for locator, raws in (("page:1", ["1", "2"]), ("page:01", ["3", "4"])):
+        ((_, shown, rows),) = rendered(
+            tools.extract_statements({"source_id": "S1", "locators": [locator]})
+        )
+        assert shown == locator and rows[0][1] == raws
+
+
+_ONE_ROW = "Other revenue        3        4"
+
+
 def test_the_financials_rules_add_the_extract_rule_verbatim(case: Case) -> None:
     """Task 8.10b item 3: one added `financials` rule, in the brief's words; no other step."""
     assert EXTRACT_RULE == (

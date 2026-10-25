@@ -342,7 +342,13 @@ class PackTools:
             raise ToolError(f"bad arguments: locators repeat {', '.join(repeated)}")
         if not self.pages[source_id]:
             raise ToolError(f"source {source_id} has no page:N locators")
-        spans = {span.locator: span for span in self.pages[source_id].values()}
+        # By locator as written: `self.pages` keys by page number, where `page:1` and
+        # `page:01` (distinct locators) would collide.
+        spans = {
+            span.locator: span
+            for span in self.ready[source_id].spans
+            if _PAGE.fullmatch(span.locator)
+        }
         if unknown := [item for item in locators if item not in spans]:
             raise ToolError(f"{', '.join(unknown)} is not a located span of {source_id}")
         digest = str(self.ready[source_id].sha256)
