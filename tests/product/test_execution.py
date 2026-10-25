@@ -27,6 +27,7 @@ from deploy_vii.execution import (
     candidate_issues,
     current_inputs,
     rebind_heads,
+    resolution,
     staled,
 )
 from deploy_vii.preparation import PreparedPack
@@ -1805,6 +1806,27 @@ def test_the_extend_scope_command_prints_the_report_and_refuses_with_exit_2(
     assert begun["module_id"] == "CP-MODEL" and begun["number"] == 0
 
 
+def test_drift_that_predates_an_extension_is_kept_and_stays_refreshable(tmp_path: Path) -> None:
+    """Fix round 1, R1: CP-1A settled before CP-1, so it now resolves CP-1 as context; that
+    drift is not the extension's, so +CP-OS stales nothing and CP-1A refreshes as before."""
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    first = store.begin("CP-1")
+    store.finish(first.ticket_id, "not json", lambda _: ())  # rejected: CP-1 has no head
+    ticket = store.begin("CP-1A")
+    store.finish(ticket.ticket_id, candidate_for(store, "CP-1A").model_dump_json(), lambda _: ())
+    repair = store.begin("CP-1")
+    store.finish(repair.ticket_id, candidate_for(store, "CP-1", 1).model_dump_json(), lambda _: ())
+    before = store.read()
+
+    report = store.extend_scope((*before.run.requested_modules, "CP-OS"))
+
+    assert report.extended and report.added == ("CP-OS",) and report.staled == ()
+    assert store.read().heads == before.heads
+    refresh = store.begin("CP-1A")  # as in the test above: a new input set, CP-1 as context
+    assert refresh.number == 0 and refresh.inputs[-1].input_id == "CP-1"
+
+
 # --- Scope extension properties (task 9.1, decision 0012: execution ordering) -----------------
 
 EdgeKind = Literal["none", "required", "optional"]
@@ -1885,7 +1907,9 @@ def extensions(
     """A catalog, three nested requested sets S0 ⊆ S1 ⊆ S2 and the settled heads of S0's graph.
 
     Each head's recorded binding is its S0 resolution (a consistent journal) or, where drawn, a
-    binding with drawn hashes (an input that has since changed); some heads are already stale.
+    binding with drawn hashes: drift that predates the extension (an upstream refreshed since,
+    or a head settled before an upstream it now resolves); some heads are already stale and
+    some resolve nothing because an upstream never settled.
     """
     size = draw(st.integers(2, 8))
     kinds = st.sampled_from(("none", "required", "optional"))
@@ -1902,12 +1926,8 @@ def extensions(
     for module_id in order:
         if not draw(st.booleans()):
             continue
-        try:
-            recorded = resolve(module_id, heads)
-            consistent = draw(st.booleans())
-        except ValueError:
-            consistent = False
-        if not consistent:
+        recorded = resolution(resolve, module_id, heads)
+        if recorded is None or not draw(st.booleans()):
             recorded = tuple(
                 Input(input_id=item, sha256=draw(HASHES))
                 for item in order
@@ -1923,13 +1943,21 @@ def extensions(
     return catalog, (first, second, third), tuple(shuffled)
 
 
-def rebound(
-    catalog: Catalog, requested: frozenset[str], heads: tuple[Head, ...]
-) -> tuple[Head, ...]:
+def resolver_of(catalog: Catalog, requested: frozenset[str]) -> Resolver:
     graph = catalog.dependencies(requested)
+    return synthetic_resolver(graph, catalog.plan(graph))
+
+
+def rebound(
+    catalog: Catalog, old: frozenset[str], new: frozenset[str], heads: tuple[Head, ...]
+) -> tuple[Head, ...]:
+    """`extend_scope`'s use of the rule: the old resolution against the heads as they were."""
+    graph = catalog.dependencies(new)
     order = catalog.plan(graph)
-    bound = {head.module_id: head.inputs for head in heads}
-    return rebind_heads(order, graph, heads, bound, synthetic_resolver(graph, order))
+    as_they_were = {head.module_id: head for head in heads}
+    previous = resolver_of(catalog, old)
+    before = {head.module_id: resolution(previous, head.module_id, as_they_were) for head in heads}
+    return rebind_heads(order, graph, heads, before, synthetic_resolver(graph, order))
 
 
 def newly_stale(before: tuple[Head, ...], after: tuple[Head, ...]) -> set[str]:
@@ -1940,40 +1968,37 @@ def newly_stale(before: tuple[Head, ...], after: tuple[Head, ...]) -> set[str]:
     }
 
 
-def changes(resolve: Resolver, head: Head, heads: Mapping[str, Head]) -> bool:
-    try:
-        return resolve(head.module_id, heads) != head.inputs
-    except ValueError:
-        return True
-
-
 @settings(max_examples=300, deadline=None)
 @given(extensions())
-def test_scope_extension_stales_exactly_the_heads_whose_resolved_inputs_change(
+def test_scope_extension_stales_exactly_the_heads_whose_resolution_it_changes(
     case: tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]],
 ) -> None:
-    catalog, (_, _, target), heads = case
+    catalog, (first, _, target), heads = case
     graph = catalog.dependencies(target)
-    order = catalog.plan(graph)
-    resolve = synthetic_resolver(graph, order)
-    after = rebound(catalog, target, heads)
+    new, old = resolver_of(catalog, target), resolver_of(catalog, first)
+    original = {head.module_id: head for head in heads}
+    before = {head.module_id: resolution(old, head.module_id, original) for head in heads}
+    after = rebound(catalog, first, target, heads)
     final = {head.module_id: head for head in after}
     staled_now = newly_stale(heads, after)
 
     assert [head.module_id for head in after] == [head.module_id for head in heads]
-    for old, new in zip(heads, after, strict=True):
-        if old.status == "stale" or new.module_id not in staled_now:
-            assert new == old  # kept heads and already-stale heads are untouched
+    for was, now in zip(heads, after, strict=True):
+        if was.status == "stale" or now.module_id not in staled_now:
+            assert now == was  # kept heads and already-stale heads are untouched
         else:
-            assert new.notes == (*old.notes, new.notes[-1])
-            assert new.notes[-1].startswith("Scope extended: inputs changed (")
-            assert new.model_copy(update={"status": old.status, "notes": old.notes}) == old
-    # (a) staled iff the resolved input tuple changes, judged on the final heads.
-    for head in heads:
-        if head.status != "stale":
-            assert (head.module_id in staled_now) == changes(resolve, head, final)
+            assert now.notes == (*was.notes, now.notes[-1])
+            assert now.notes[-1].startswith("Scope extended: inputs changed (")
+            assert now.model_copy(update={"status": was.status, "notes": was.notes}) == was
+    # (a) staled iff the new resolution differs from the pre-extension one (final heads).
+    live = [head for head in heads if head.status != "stale"]
+    for head in live:
+        changed = resolution(new, head.module_id, final) != before[head.module_id]
+        assert (head.module_id in staled_now) == changed
+    # Drift that predates the extension is never the extension's: no extension, no staling.
+    assert rebound(catalog, first, first, heads) == heads
 
-    # Differential: an order-free fixpoint over "an input of mine is now stale" agrees.
+    # Differential: an order-free fixpoint over "my resolution moved" agrees.
     fixpoint: set[str] = set()
     while True:
         view = {
@@ -1982,25 +2007,22 @@ def test_scope_extension_stales_exactly_the_heads_whose_resolved_inputs_change(
         }
         grown = fixpoint | {
             head.module_id
-            for head in heads
-            if head.status != "stale" and changes(resolve, head, view)
+            for head in live
+            if resolution(new, head.module_id, view) != before[head.module_id]
         }
         if grown == fixpoint:
             break
         fixpoint = grown
     assert fixpoint == staled_now
 
-    # (d) nothing outside the transitive consumers of a directly changed binding is staled.
-    original = {head.module_id: head for head in heads}
+    # (d) nothing outside the transitive consumers (new graph) of a directly changed head.
     reach = {
         head.module_id
-        for head in heads
-        if head.status != "stale" and changes(resolve, head, original)
+        for head in live
+        if resolution(new, head.module_id, original) != before[head.module_id]
     }
     while True:
-        grown = reach | {
-            head.module_id for head in heads if any(i.input_id in reach for i in head.inputs)
-        }
+        grown = reach | {head.module_id for head in heads if graph[head.module_id] & reach}
         if grown == reach:
             break
         reach = grown
@@ -2012,12 +2034,12 @@ def test_scope_extension_stales_exactly_the_heads_whose_resolved_inputs_change(
 def test_scope_extension_is_idempotent_and_path_independent(
     case: tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]],
 ) -> None:
-    catalog, (_, middle, target), heads = case
-    direct = rebound(catalog, target, heads)
+    catalog, (first, middle, target), heads = case
+    direct = rebound(catalog, first, target, heads)
     # (b) extending again to the same set changes nothing.
-    assert rebound(catalog, target, direct) == direct
+    assert rebound(catalog, target, target, direct) == direct
     # (c) S0 -> S1 -> S2 stales the same heads as S0 -> S2.
-    stepwise = rebound(catalog, target, rebound(catalog, middle, heads))
+    stepwise = rebound(catalog, middle, target, rebound(catalog, first, middle, heads))
     assert newly_stale(heads, stepwise) == newly_stale(heads, direct)
     assert [head.status for head in stepwise] == [head.status for head in direct]
 

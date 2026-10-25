@@ -328,57 +328,78 @@ def invalidate(heads: tuple[Head, ...], changed: str) -> tuple[Head, ...]:
 # --- scope extension (task 9.1, decision 0005 MC-9) ------------------------------------------
 
 Resolver = Callable[[str, Mapping[str, Head]], tuple[Input, ...]]
+# A head's resolution: the inputs `current_inputs` binds now, or None where it refuses to bind
+# (ValueError: an upstream unrun, stale or blocked under a block edge, or NotAuthorized).
+Resolution = tuple[Input, ...] | None
 
 
-def _binds_as_recorded(item: Input, current: Mapping[str, Head]) -> bool:
-    """Whether a recorded input still names its producer's head as it is now."""
-    head = current.get(item.input_id)
-    if head is None:
-        return True  # not a module head (the prepared pack, which scope never changes)
-    return head.status == item.status and head.result_sha256 == item.sha256
+def resolution(resolve: Resolver, module_id: str, heads: Mapping[str, Head]) -> Resolution:
+    """`resolve`'s binding of `module_id`, or None when it refuses with ValueError.
+
+    Only ValueError, the journal's refusal to bind, is a resolution outcome; anything else
+    propagates."""
+    try:
+        return resolve(module_id, heads)
+    except ValueError:
+        return None
 
 
 def _changed_ids(
-    recorded: tuple[Input, ...],
-    resolved: tuple[Input, ...] | None,
+    was: Resolution,
+    now: Resolution,
     edges: Collection[str],
     current: Mapping[str, Head],
     order: Sequence[str],
 ) -> tuple[str, ...]:
-    """The input ids whose binding differs between `recorded` and the new resolution.
+    """The input ids whose binding differs between the two resolutions.
 
-    `resolved` is None when the head cannot be rebound; the changed ids are then the recorded
-    inputs that no longer bind as recorded and the producers the new graph adds to its edges
-    (in plan order). With the same bindings in another order, the inputs whose position moved."""
-    before = {item.input_id: item for item in recorded}
-    if resolved is None:
-        added = sorted((item for item in edges if item not in before), key=order.index)
-        unbound = (item.input_id for item in recorded if not _binds_as_recorded(item, current))
-        return tuple(dict.fromkeys((*unbound, *added)))
-    now = {item.input_id: item for item in resolved}
-    ids = tuple(key for key in dict.fromkeys((*before, *now)) if before.get(key) != now.get(key))
+    Both resolved: ids whose (hash, status) differ or that appear or disappear; with the same
+    bindings in another order, those whose position moved. Only the old one resolved: the
+    upstream ids it bound that no longer bind as it bound them, then the producers the new
+    graph adds. Otherwise, or when that names none, the fixed fallback: the module's upstream
+    ids in the new graph, in plan order. Never exception text."""
+    fallback = tuple(sorted(edges, key=order.index))
+    if was is None:
+        return fallback
+    before = {item.input_id: item for item in was}
+    if now is None:
+        unbound = (
+            item.input_id
+            for item in was
+            if item.input_id in current
+            and (current[item.input_id].result_sha256, current[item.input_id].status)
+            != (item.sha256, item.status)
+        )
+        added = (item for item in fallback if item not in before)
+        return tuple(dict.fromkeys((*unbound, *added))) or fallback
+    after = {item.input_id: item for item in now}
+    ids = tuple(
+        key for key in dict.fromkeys((*before, *after)) if before.get(key) != after.get(key)
+    )
     if ids:
         return ids
-    return tuple(old.input_id for old, new in zip(recorded, resolved, strict=True) if old != new)
+    return tuple(old.input_id for old, new in zip(was, now, strict=True) if old != new)
 
 
 def rebind_heads(
     order: Sequence[str],
     graph: Mapping[str, Collection[str]],
     heads: tuple[Head, ...],
-    bound: Mapping[str, tuple[Input, ...]],
+    before: Mapping[str, Resolution],
     resolve: Resolver,
 ) -> tuple[Head, ...]:
-    """The scope-extension staling rule (MC-9), without running anything.
+    """The scope-extension staling rule (MC-9, fix round 1 ruling R1), without running anything.
 
-    Walks the heads in the new plan `order`, resolving each settled one against the heads as
-    already updated by this walk. `bound[module_id]` is what the journal bound the head to
-    when it settled (its attempt's `inputs`; `Head.inputs` may add a module's own non-journal
-    inputs, such as a submission hash). A head whose resolution equals that binding (same
-    ids, hashes, statuses and order) is kept as it is; otherwise, including when `resolve`
-    raises ValueError, it is staled with `Scope extended: inputs changed (<ids>); rerun
-    required`. An already-stale head stays as it is. `graph` is the new dependency map
-    (`registry.dependencies`), read only to name changed ids. Heads keep their tuple order.
+    `before[module_id]` is the head's resolution before the extension (`current_inputs` on the
+    old snapshot, None where it refused). Walks the heads in the new plan `order`, resolving
+    each settled one with `resolve` under the new scope against the heads as already updated
+    by this walk. A head is staled, with `Scope extended: inputs changed (<ids>); rerun
+    required`, iff its new resolution differs from `before` (ids, hashes, statuses and order;
+    exactly one side refusing counts as a difference, both refusing does not). So drift that
+    predates the extension, such as a CP-1A settled before CP-1, is kept as it was. An
+    already-stale head stays as it is. `graph` is the new dependency map
+    (`registry.dependencies`), read only to name changed ids. Heads keep their tuple order;
+    a head outside the new graph raises ValueError.
     """
     current = {head.module_id: head for head in heads}
     outside = sorted(set(current) - set(order))
@@ -388,19 +409,11 @@ def rebind_heads(
         head = current.get(module_id)
         if head is None or head.status == "stale":
             continue
-        recorded = bound[module_id]
-        reason = None
-        try:
-            resolved: tuple[Input, ...] | None = resolve(module_id, current)
-        except ValueError as error:  # unbindable under the new graph: the head is staled
-            resolved, reason = None, str(error)
-        if resolved == recorded:
+        was, now = before[module_id], resolution(resolve, module_id, current)
+        if now == was:
             continue
-        ids = _changed_ids(recorded, resolved, graph.get(module_id, ()), current, order)
-        named = ", ".join(ids) if ids else reason
-        current[module_id] = staled(
-            head, f"Scope extended: inputs changed ({named}); rerun required"
-        )
+        ids = ", ".join(_changed_ids(was, now, graph.get(module_id, ()), current, order))
+        current[module_id] = staled(head, f"Scope extended: inputs changed ({ids}); rerun required")
     return tuple(current[head.module_id] for head in heads)
 
 
@@ -1023,7 +1036,8 @@ class Execution:
         any module new to the dependency graph that CP-0 has not assessed (`unassessed`).
         Otherwise one transition records the extended set on `snapshot.run` (the pack blob is
         not rewritten) and rebinds every settled head under the new graph (`rebind_heads`):
-        only the heads whose resolved inputs change are staled. Nothing runs.
+        only the heads whose `current_inputs` resolution the extension changes are staled
+        (drift that predates it stays as it was). Nothing runs.
         """
         with self._locked():
             snapshot = self.read()
@@ -1044,8 +1058,8 @@ class Execution:
                 )
             extended = (*old, *(item for item in wanted if item not in held))
             order = plan(extended)
-            before = dependencies(old)
-            added = tuple(item for item in order if item not in before)
+            in_graph = dependencies(old)
+            added = tuple(item for item in order if item not in in_graph)
             readiness = next((head for head in snapshot.heads if head.module_id == "CP-0"), None)
             missing = unassessed(added, readiness)
             if missing:
@@ -1058,18 +1072,13 @@ class Execution:
                 probe = snapshot.model_copy(update={"run": run, "heads": tuple(current.values())})
                 return current_inputs(probe, module_id)
 
-            settled_by = {
-                (item.module_id, item.result_sha256): item.inputs
-                for item in snapshot.attempts
-                if item.result_sha256 is not None
+            def previous(module_id: str, _heads: Mapping[str, Head]) -> tuple[Input, ...]:
+                return current_inputs(snapshot, module_id)
+
+            before = {
+                head.module_id: resolution(previous, head.module_id, {}) for head in snapshot.heads
             }
-            bound: dict[str, tuple[Input, ...]] = {}
-            for head in snapshot.heads:
-                key = (head.module_id, head.result_sha256)
-                if key not in settled_by:
-                    raise ValueError(f"Execution head {head.module_id} has no settling attempt")
-                bound[head.module_id] = settled_by[key]
-            heads = rebind_heads(order, dependencies(extended), snapshot.heads, bound, resolve)
+            heads = rebind_heads(order, dependencies(extended), snapshot.heads, before, resolve)
             changed = {
                 new.module_id: new.notes[-1]
                 for old_head, new in zip(snapshot.heads, heads, strict=True)
