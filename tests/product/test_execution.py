@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import tempfile
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -1704,6 +1705,41 @@ def test_scope_extension_refusals_write_nothing(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match=r"^Cannot change scope while an attempt is pending$"):
             store.extend_scope(requested)
         unchanged()
+
+
+def test_refusal_order_pairs_name_the_earlier_refusal(tmp_path: Path) -> None:
+    """Fix round 1, R3: unknown before non-superset; non-superset before unassessed."""
+    store = settled_store(tmp_path, ("CP-0", "CP-1", "CP-1A", "CP-2"))
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+    for requested, message in (
+        (("CP-0", "CP-99"), r"^Unknown r14 entry: CP-99$"),
+        (
+            ("CP-0", "CP-1", "CP-1A", "CP-4"),
+            r"^Scope only extends; create a new execution to remove modules$",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            store.extend_scope(requested)
+        assert current_digest(store) == pointer
+        assert set((store.directory / "snapshots").iterdir()) == snapshots
+
+
+def test_a_head_outside_the_new_graph_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    """Fix round 1, R3: a journal whose heads lie outside its own scope (tampered) is refused."""
+    store = settled_store(tmp_path, ("CP-0", "CP-1", "CP-1A", "CP-2"))
+    snapshot = store.read()
+    narrowed = snapshot.run.model_copy(update={"requested_modules": ("CP-0", "CP-1")})
+    store._write(snapshot.model_copy(update={"run": narrowed}))
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Execution heads outside the run's dependency graph: ['CP-1A', 'CP-2']"),
+    ):
+        store.extend_scope(("CP-0", "CP-1", "CP-OS"))
+    assert current_digest(store) == pointer
+    assert set((store.directory / "snapshots").iterdir()) == snapshots
 
 
 def test_the_assessed_guard_fails_closed_without_a_settled_cp0_head() -> None:
