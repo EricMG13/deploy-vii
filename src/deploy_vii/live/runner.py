@@ -33,6 +33,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from deploy_vii.business_context import cp1_context_facts
+from deploy_vii.contracts import Fact
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_workflow import cp1_registers
 from deploy_vii.execution import Attempt, Execution, ExecutionSnapshot
@@ -351,6 +352,49 @@ def _upstream(store: Execution, attempt: Attempt, step_id: str) -> tuple[Upstrea
     return tuple(blocks)
 
 
+@dataclass(frozen=True)
+class PromptInputs:
+    """What a step's prompt is built from besides the pack, its sources and its REPAIR block:
+    the one-shot dispatch and the tool loop (task 8.9) build from the same seams. `upstream`:
+    the retained steps' projections (task 7.5); `cp1_facts`: CP-1A's bound CP-1 facts (task
+    7.2); `module_context`: the module CONTEXT of `live.context.MODULE_CONTEXTS` (task 8.6);
+    `scope`: the QA scope (task 7.4) or CP-5's review scope (task 8.6);
+    `quality_inputs_sha256`: the QA inputs the QA scope shows and the review must bind."""
+
+    upstream: tuple[UpstreamInput, ...]
+    cp1_facts: tuple[Fact, ...]
+    module_context: dict[str, object] | None
+    scope: dict[str, Any] | None
+    quality_inputs_sha256: str | None
+
+
+def prompt_inputs(store: Execution, attempt: Attempt, step_id: str) -> PromptInputs:
+    """The prompt inputs of `step_id` on `attempt`. Task 7.4: the QA review reads the QA scope
+    of the recomputed registers (registers that do not stage raise here, before anything is
+    spent), not the four retained stage outputs (task 7.5: `live.context` omits them)."""
+    registers = cp1_registers(store, attempt.ticket_id) if step_id == QUALITY else None
+    inputs = cp1_quality_inputs(registers) if registers is not None else None
+    scope = (
+        quality_scope(registers, inputs)
+        if registers is not None
+        else integrity_scope(store, attempt)
+        if step_id == INTEGRITY
+        else None
+    )
+    return PromptInputs(
+        upstream=_upstream(store, attempt, step_id),
+        # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
+        cp1_facts=tuple(cp1_context_facts(store, attempt))
+        if STEPS[step_id].module_id == "CP-1A"
+        else (),
+        # Task 8.6: CP-2, CP-4 and CP-3 (task 8.7: and CP-6) read their bound upstream through
+        # Python's view of it.
+        module_context=module_context(store, attempt, step_id),
+        scope=scope,
+        quality_inputs_sha256=None if inputs is None else inputs.content_hash(),
+    )
+
+
 def step_try(attempt: Attempt, step_id: str) -> int:
     """2 when the journal kept this step's rejected first try for its repair within the attempt."""
     return 2 if any(item.step_id == step_id for item in attempt.step_repairs) else 1
@@ -429,12 +473,6 @@ def _plan(
     candidate = pool.candidate(drawn.slug)
     decision = candidate.effort_for(effort)
     repair = repair_prompt(snapshot, attempt, step.step_id)
-    # Task 7.4: the QA review reads the QA scope of the recomputed registers (registers that do
-    # not stage raise here, before anything is spent), not the four retained stage outputs
-    # (task 7.5: `live.context` omits them for `quality`).
-    quality = step.step_id == QUALITY
-    registers = cp1_registers(store, ticket_id) if quality else None
-    inputs = cp1_quality_inputs(registers) if registers is not None else None
     # Task 8.6: CP-4 and CP-3 are sent only the sources their bound upstream names (CP-0's
     # legal, or third-party, sources); any other declared source is refused before spending.
     if step.step_id in SOURCE_SCOPES:
@@ -446,26 +484,17 @@ def _plan(
                 f"{step.step_id} is sent {', '.join(extra)}, which is not one of the sources its "
                 f"bound upstream names ({', '.join(allowed) or 'none'})"
             )
-    scope = (
-        quality_scope(registers, inputs)
-        if registers is not None
-        else integrity_scope(store, attempt)
-        if step.step_id == INTEGRITY
-        else None
-    )
+    inputs = prompt_inputs(store, attempt, step.step_id)
     messages = build(
         step.step_id,
         store.pack(snapshot),
         step.declared_sources,
         step.schema,
-        upstream=_upstream(store, attempt, step.step_id),
+        upstream=inputs.upstream,
         repair_issues=repair.issues,
-        # Task 7.2: the CP-1 facts the attempt binds (none unless CP-1 was settled at begin).
-        cp1_facts=cp1_context_facts(store, attempt) if step.module_id == "CP-1A" else (),
-        # Task 8.6: CP-2, CP-4 and CP-3 (task 8.7: and CP-6) read their bound upstream through
-        # Python's view of it.
-        module_context=module_context(store, attempt, step.step_id),
-        scope=scope,
+        cp1_facts=inputs.cp1_facts,
+        module_context=inputs.module_context,
+        scope=inputs.scope,
     )
     chat = ChatRequest(
         model=candidate.slug,
@@ -543,7 +572,11 @@ def _plan(
             "request_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
             "declared_inputs": list(step.declared_sources),
             # Task 7.4 fix round 1: the QA inputs the scope shows and the review must bind.
-            **({} if inputs is None else {"quality_inputs_sha256": inputs.content_hash()}),
+            **(
+                {}
+                if inputs.quality_inputs_sha256 is None
+                else {"quality_inputs_sha256": inputs.quality_inputs_sha256}
+            ),
         },
     )
 

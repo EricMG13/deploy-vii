@@ -18,25 +18,42 @@ from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient, ChatRequest, Response
 from deploy_vii.live.ledger import OPENROUTER, Ledger, LedgerError, opening_provider
 from deploy_vii.live.prompts import NO_TOOLS_RULE, PromptError, build, span_line, tools_rule
+from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
 from deploy_vii.live.submission import STEPS, submit_model_payload
 from deploy_vii.live.tools import (
+    ABSENCE,
+    ABSENCE_MARKERS,
     INCOMPLETE,
     UNBACKED_ABSENCE,
+    UNREAD,
     UNREAD_PAGE,
     PackTools,
     Seen,
     ToolError,
     ToolRules,
     absence_issues,
+    absence_markers,
+    applicable_rules,
     completeness_issues,
     expected_cells,
     fiscal_year,
     tool_specs,
     unread_citation_issues,
 )
-from deploy_vii.registry import STEP_CHAINS, StepChain, tool_loop_steps
+from deploy_vii.registry import (
+    PACK_TOOLS,
+    STEP_CHAINS,
+    SUBMIT_ONLY,
+    StepChain,
+    pack_tool_steps,
+    step_modules,
+    tool_loop_steps,
+    tool_set,
+    tool_sets,
+)
 from deploy_vii.source_context import SourceContextReview
+from tests.product import test_cp4_legal as cp4_tests
 from tests.product.live_support import FAKE_KEY
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
 from tests.product.test_workflow import cp1_case
@@ -68,11 +85,62 @@ def case(tmp_path_factory: pytest.TempPathFactory) -> Case:
 # --- registry, prompt, request -----------------------------------------------------------------
 
 
-def test_the_four_cp1_stages_are_the_tool_loop_steps() -> None:
-    assert tool_loop_steps() == CP1_STAGES
+# Task 8.9, user decisions 1-3 (24 Oct 2026): every live step is a tool loop; these are the
+# eight steps the decisions name, with the tool set each gets. CP-1's four 8.0d loops keep the
+# pack tools they had (decision 1: unchanged).
+DECISION_3 = {
+    "source_readiness": PACK_TOOLS,
+    "business_context": PACK_TOOLS,
+    "relative_value": PACK_TOOLS,
+    "legal_covenants": PACK_TOOLS,
+    "quality": SUBMIT_ONLY,
+    "credit_synthesis": SUBMIT_ONLY,
+    "integrity_review": SUBMIT_ONLY,
+    "committee_challenge": SUBMIT_ONLY,
+}
+EVERY_TOOL_SET = {**DECISION_3, **dict.fromkeys(CP1_STAGES, PACK_TOOLS)}
+
+
+def test_every_live_step_of_every_module_is_a_tool_loop_step() -> None:
+    assert tool_loop_steps() == set(step_modules())
+    for chain in STEP_CHAINS:
+        assert chain.tool_steps == frozenset(chain.steps) and chain.one_shot == frozenset()
     chain = next(c for c in STEP_CHAINS if c.module_id == "CP-1")
-    with pytest.raises(ValueError, match="as a tool loop, not one of its steps"):
-        StepChain(**{**chain.__dict__, "tool_steps": frozenset({"nowhere"})})
+    with pytest.raises(ValueError, match="runs nowhere one-shot, not one of its steps"):
+        StepChain(**{**chain.__dict__, "one_shot": frozenset({"nowhere"})})
+    # A chain may still name a one-shot step (the one-shot path stays for the differential).
+    some = StepChain(**{**chain.__dict__, "one_shot": frozenset({"quality"})})
+    assert "quality" not in some.tool_steps and "quality" not in tool_sets((some,))
+    assert tool_sets((some,))["financials"] == PACK_TOOLS
+
+
+def test_the_tool_set_rule_matches_decision_3_exactly() -> None:
+    assert {step: tool_set(step) for step in DECISION_3} == DECISION_3
+    assert tool_sets() == EVERY_TOOL_SET
+    assert pack_tool_steps() == {s for s, kind in EVERY_TOOL_SET.items() if kind == PACK_TOOLS}
+
+
+def test_the_tool_set_is_derived_pack_iff_the_step_quotes_or_reads_the_pack() -> None:
+    """The rule: a tool-loop step gets the pack tools iff its validator checks spans against the
+    pack (`pack_sources`: it must read what it quotes) or its chain lists it in `pack_reads`
+    (CP-1's narrative and readiness, which 8.0d ran with the pack tools; decision 1). Every
+    other tool-loop step is submit-only. Nothing is typed twice."""
+    for chain in STEP_CHAINS:
+        for step in chain.tool_steps:
+            pack = step in chain.pack_sources or step in chain.pack_reads
+            assert tool_set(step) == (PACK_TOOLS if pack else SUBMIT_ONLY), step
+    assert {s for c in STEP_CHAINS for s in c.pack_reads} == {"narrative", "readiness"}
+    cp1 = next(c for c in STEP_CHAINS if c.module_id == "CP-1")
+    with pytest.raises(ValueError, match="lists source_context in both pack_sources and"):
+        StepChain(**{**cp1.__dict__, "pack_reads": frozenset({"source_context"})})
+    with pytest.raises(ValueError, match="reads the pack in nowhere, not one of its steps"):
+        StepChain(**{**cp1.__dict__, "pack_reads": frozenset({"nowhere"})})
+    with pytest.raises(
+        ValueError, match="reads the pack in narrative by tool, which runs one-shot"
+    ):
+        StepChain(**{**cp1.__dict__, "one_shot": frozenset({"narrative"})})
+    with pytest.raises(ValueError, match="nowhere is not a tool-loop step"):
+        tool_set("nowhere")
 
 
 def test_a_tool_loop_prompt_names_the_tools_and_sends_no_source_block(case: Case) -> None:
@@ -306,10 +374,120 @@ def test_the_rules_validate_their_settings_and_need_the_context_for_the_floor() 
     }
 
 
+# Task 8.9: the rules each tool-loop step checks. CP-1's four keep 8.0d's (both; vacuous for
+# narrative and readiness, which cite evidence ids only). The new pack steps cite `page:N`
+# locators, so the cited-page rule applies; none of them carries the fields the absence rule
+# reads, so it is omitted. Submit-only steps read nothing and check no rule.
+RULES_BY_STEP = {
+    **dict.fromkeys(CP1_STAGES, (ABSENCE, UNREAD)),
+    **dict.fromkeys(("source_readiness", "relative_value"), (UNREAD,)),
+    # Fix round 1 (user decision, 24 Oct 2026): strict absence for CP-1A and CP-4.
+    **dict.fromkeys(("business_context", "legal_covenants"), (ABSENCE, UNREAD)),
+    **dict.fromkeys(("quality", "credit_synthesis", "integrity_review"), ()),
+    "committee_challenge": (),
+}
+ABSENCE_FIELDS = ('"event_scan"', '"no_events_identified"', '"missing"', '"not_disclosed"')
+
+
+def test_each_tool_step_checks_only_the_rules_its_contract_can_fail() -> None:
+    assert {step: applicable_rules(step) for step in RULES_BY_STEP} == RULES_BY_STEP
+    assert set(RULES_BY_STEP) == tool_loop_steps()
+    for step in ("source_readiness", "business_context", "relative_value", "legal_covenants"):
+        sent = json.dumps(strict_schema(STEPS[step].schema))
+        assert '"locator"' in sent and not [f for f in ABSENCE_FIELDS if f in sent], step
+    rules = ToolRules()
+    for step, kind in tool_sets().items():
+        assert rules.active(step) == (kind == PACK_TOOLS), step
+    cited = json.dumps({"x": {"source_id": "S1", "locator": "page:4", "quote": "q"}})
+    for step in ("source_readiness", "business_context", "relative_value", "legal_covenants"):
+        found = rules.issues(step, cited, seen=Seen(), context=None)
+        assert found == (f"{UNREAD_PAGE}: S1 page:4",), step
+        read = Seen(read=frozenset({("S1", "page:4")}))
+        assert rules.issues(step, cited, seen=read, context=None) == ()
+    for step in ("quality", "credit_synthesis", "integrity_review", "committee_challenge"):
+        assert not ToolRules(floor=1).active(step)
+        with pytest.raises(ValueError, match=f"{step} is submit-only: it checks no tool-loop"):
+            rules.issues(step, cited, seen=Seen(), context=None)
+    assert rules.to_record("legal_covenants")["applied"] == [ABSENCE, UNREAD]
+    assert rules.to_record("credit_synthesis")["applied"] == []
+
+
+def test_the_absence_markers_come_from_each_steps_sent_schema() -> None:
+    """Fix round 1: a CP-1A or CP-4 row that says the sources do not disclose something (its
+    schema's enum carries the marker) needs a recorded search; CP-3's `kind: none` is not a
+    marker (user decision), and CP-1's stages keep 8.0d's own absence fields."""
+    assert {step: absence_markers(step) for step in RULES_BY_STEP if absence_markers(step)} == {
+        "business_context": (("available", "No"), ("status", "Not disclosed")),
+        "legal_covenants": (("threshold_unit", "not stated"),),
+    }
+    assert ("kind", "none") not in ABSENCE_MARKERS
+    payload = json.dumps(
+        {
+            "disclosure_items": [{"available": "Yes"}, {"available": "No"}],
+            "operating_drivers": [{"status": "Not disclosed"}],
+            "covenants": [{"threshold_unit": "not stated"}],
+            "market_evidence": [{"kind": "none"}],
+        }
+    )
+    assert absence_issues("business_context", payload, Seen()) == (
+        f"{UNBACKED_ABSENCE}: disclosure_items.1.available No; search_pack before claiming it is "
+        "not disclosed",
+        f"{UNBACKED_ABSENCE}: operating_drivers.0.status Not disclosed; search_pack before "
+        "claiming it is not disclosed",
+    )
+    assert absence_issues("legal_covenants", payload, Seen()) == (
+        f"{UNBACKED_ABSENCE}: covenants.0.threshold_unit not stated; search_pack before claiming "
+        "it is not disclosed",
+    )
+    for searched in (Seen(searched=(None,)), Seen(searched=("indenture",))):
+        assert absence_issues("business_context", payload, searched) == ()
+        assert absence_issues("legal_covenants", payload, searched) == ()
+    for step in ("relative_value", "source_readiness", "narrative", "readiness"):
+        assert absence_issues(step, payload, Seen()) == (), step
+    assert ToolRules().issues("relative_value", payload, seen=Seen(), context=None) == ()
+    assert absence_issues("legal_covenants", "[1]", Seen()) == ()
+
+
+def test_a_submit_only_step_is_offered_its_submit_tool_only() -> None:
+    def names(specs: tuple[dict[str, Any], ...]) -> list[str]:
+        return [spec["function"]["name"] for spec in specs]
+
+    assert names(tool_specs("credit_synthesis", SUBMIT_ONLY)) == ["submit_credit_synthesis"]
+    assert names(tool_specs("legal_covenants", PACK_TOOLS)) == [
+        "search_pack",
+        "read_pages",
+        "submit_legal_covenants",
+    ]
+    for step, kind in tool_sets().items():  # without a kind: the registry's
+        assert tool_specs(step) == tool_specs(step, kind)
+    (only,) = tool_specs("quality")
+    assert only["function"]["parameters"] == strict_schema(STEPS["quality"].schema)
+
+
+def test_the_pack_tools_read_only_the_steps_declared_sources(tmp_path: Path) -> None:
+    pack = cp4_tests.journal(tmp_path).pack()
+    assert [s.source_id for s in pack.sources] == ["filing", "indenture", "deck"]
+    tools = PackTools(pack, sources=("filing", "indenture"))
+    assert tools.ids == ("filing", "indenture")
+    for raw in (
+        {"source_id": "deck", "first_page": 1, "last_page": 1},
+        {"query": "the", "source_id": "deck"},
+    ):
+        with pytest.raises(ToolError, match="deck is not one of the sources this step reads"):
+            (tools.read_pages if "first_page" in raw else tools.search_pack)(raw)
+    text = tools.search_pack({"query": "the", "max_hits": 15})
+    assert "<<<SOURCE id=deck " not in text
+    assert tools.seen().searched == (None,)
+    everything = PackTools(pack)
+    assert everything.ids == ("filing", "indenture", "deck")
+    with pytest.raises(ValueError, match="nowhere is not a source of the pack"):
+        PackTools(pack, sources=("nowhere",))
+
+
 def test_a_rule_issue_rejects_a_payload_the_stage_accepts(tmp_path: Path, case: Case) -> None:
     shutil.copytree(case.store.directory, tmp_path / "journal")
     journal = Execution(tmp_path / "journal")
-    with pytest.raises(ValueError, match="CP-1 stages"):
+    with pytest.raises(ValueError, match=r"pack-tool steps, not to quality$"):
         submit_model_payload(journal, case.ticket, "quality", "{}", rules=lambda _: ())
     found = submit_model_payload(
         journal, case.ticket, "financials", case.payload, rules=lambda _: ("Rule: broken",)
@@ -359,6 +537,22 @@ def test_the_effort_table_floor_and_flag_are_read_and_checked(tmp_path: Path) ->
     ):
         with pytest.raises(SettingsError, match=reason):
             load_settings(settings_file(tmp_path / str(number), bad), root=tmp_path)
+
+
+def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling() -> None:
+    """Task 8.9 item 4: a row per tool-loop step, each with its reason as a comment; Sol at
+    medium (decision 0005, 24 Oct 2026) and one escalation to high at most. The floor stays
+    off (user decision, 24 Oct 2026)."""
+    path = Path("settings/project.toml")
+    loaded = load_settings(path)
+    assert loaded.tool_loop and loaded.completeness_floor is None
+    assert set(loaded.step_efforts) == tool_loop_steps()
+    assert set(loaded.step_efforts.values()) == {StepEffort("medium", "high")}
+    table = path.read_text(encoding="utf-8").split("[model_tests.step_effort]\n", 1)[1]
+    rows = table.split("\n\n[", 1)[0].splitlines()
+    for step in tool_loop_steps():
+        (index,) = [n for n, line in enumerate(rows) if line.startswith(f"{step} = ")]
+        assert rows[index - 1].startswith("# "), f"{step} has no reason above its row"
 
 
 @given(st.sampled_from(EFFORT_LADDER), st.sampled_from(EFFORT_LADDER))

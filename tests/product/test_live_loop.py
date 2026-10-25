@@ -5,7 +5,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -14,36 +14,61 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from deploy_vii.contracts import Span
 from deploy_vii.cp0_workflow import submit_cp0_review
+from deploy_vii.cp1_quality import cp1_quality_inputs
+from deploy_vii.cp1_workflow import cp1_registers
+from deploy_vii.cp3_relative_value import MarketEvidence
 from deploy_vii.execution import Execution
 from deploy_vii.live import loop
 from deploy_vii.live.catalog import ModelSelection, PinnedPool
 from deploy_vii.live.client import ChatClient, ChatResult, Request, Response, TransportError, Usage
+from deploy_vii.live.context import SOURCE_SCOPES, declared_sources, readable_sources
 from deploy_vii.live.credit import CreditExhausted
 from deploy_vii.live.ledger import CapExceeded, Ledger
 from deploy_vii.live.loop import (
     LIMIT,
     LIMITS,
     NO_SUBMIT,
+    TOOL_SET_LIMITS,
     ToolLimits,
     ToolStepResult,
     call_nudge,
     issue_class,
+    limits_for,
     run_tool_step,
     transient,
 )
-from deploy_vii.live.prompts import tools_rule
+from deploy_vii.live.prompts import NO_TOOLS_RULE, build, submit_only_rule, tools_rule
 from deploy_vii.live.retention import TOOL_TRANSCRIPT, AttemptWriter
 from deploy_vii.live.runner import (
     IN_FLIGHT_EXHAUSTED_MARK,
     IN_FLIGHT_SETTLE_MARK,
     StepSpec,
     in_flight_refused,
+    prompt_inputs,
 )
 from deploy_vii.live.settings import StepEffort, load_settings
-from deploy_vii.live.tools import UNBACKED_ABSENCE, PackTools, ToolRules
+from deploy_vii.live.submission import STEPS
+from deploy_vii.live.tools import (
+    ABSENCE,
+    UNBACKED_ABSENCE,
+    PackTools,
+    ToolError,
+    ToolRules,
+    applicable_rules,
+)
+from deploy_vii.preparation import PreparedPack
+from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, tool_set, tool_sets
+from tests.product import test_cp3_relative_value as cp3_tests
+from tests.product import test_live_modules as module_tests
 from tests.product.live_support import catalog_of, catalog_row, make_rtf_key
+from tests.product.test_business_context import submission_fixture as cp1a_submission
+from tests.product.test_cp1_workflow import staged
+from tests.product.test_execution import accept_cp0, fixture_store
 from tests.product.test_live_credit import CREDIT_402, IN_FLIGHT_402
+from tests.product.test_live_runner import model_review
+from tests.product.test_readiness import as_submission, readiness_fixture
 from tests.product.test_workflow import cp1_case
 
 MODEL = "openai/gpt-6.1-sol"
@@ -192,7 +217,7 @@ class Rig:
         *,
         effort: StepEffort = MEDIUM,
         rules: ToolRules | None = None,
-        limits: ToolLimits = LIMITS,
+        limits: ToolLimits | None = None,
         sleep: Callable[[float], None] = no_wait,
         on_stop: Callable[[ToolStepResult], None] | None = None,
         step_id: str = "source_context",
@@ -743,3 +768,560 @@ def test_the_limits_hold_and_the_ledger_sums_the_settled_calls(
             with pytest.raises(ValueError, match=r"never re-run|not the next step|finished"):
                 rig.run(again, limits=limits)
             assert not again.requests
+
+
+# --- task 8.9: every registered step as a tool loop -------------------------------------------
+
+
+def submit_to(step_id: str, payload: str, ident: str = "c-1") -> Response:
+    return tool_reply((ident, f"submit_{step_id}", payload))
+
+
+def cp0_start(root: Path) -> tuple[Execution, str, str]:
+    store = fixture_store(root)
+    payload = as_submission(readiness_fixture()[1]).model_dump_json()
+    return store, store.begin("CP-0").ticket_id, payload
+
+
+def cp1a_start(root: Path) -> tuple[Execution, str, str]:
+    store = fixture_store(root)
+    accept_cp0(store)
+    return store, store.begin("CP-1A").ticket_id, cp1a_submission().model_dump_json()
+
+
+def quality_start(root: Path) -> tuple[Execution, str, str]:
+    store, attempt = staged(root)
+    inputs = cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+    return store, attempt.ticket_id, json.dumps(model_review(inputs))
+
+
+def module_start(step_id: str) -> Callable[[Path], tuple[Execution, str, str]]:
+    def start(root: Path) -> tuple[Execution, str, str]:
+        store, payload = module_tests.CASES[step_id](root)
+        return store, store.begin(module_tests.SCHEMAS[step_id][0]).ticket_id, payload
+
+    return start
+
+
+# The eight steps task 8.9 adds to the tool loop, each on its module's SYNTHETIC journal with a
+# payload its validator accepts.
+STARTS: dict[str, Callable[[Path], tuple[Execution, str, str]]] = {
+    "source_readiness": cp0_start,
+    "business_context": cp1a_start,
+    "quality": quality_start,
+    **{step: module_start(step) for step in sorted(module_tests.CASES)},
+}
+
+
+def step_rig(root: Path, step_id: str) -> Rig:
+    store, ticket, payload = STARTS[step_id](root / "journal")
+    keys = root / "keys"
+    keys.mkdir()
+    return Rig(
+        store,
+        ticket,
+        Ledger(root / "artifacts" / ".ledgers" / "loop.jsonl", Decimal(5), provider="openrouter"),
+        tool_pool(),
+        AttemptWriter(root / "artifacts"),
+        make_rtf_key(keys),
+        payload,
+        root,
+    )
+
+
+def test_the_eight_new_steps_are_the_ones_these_cases_start() -> None:
+    cp1 = {"source_context", "financials", "narrative", "readiness"}
+    assert set(STARTS) | cp1 == set(tool_sets()) and not set(STARTS) & cp1
+
+
+@pytest.mark.parametrize("step_id", sorted(STARTS))
+def test_each_new_step_runs_as_a_tool_loop_with_its_tool_set_and_settles(
+    step_id: str, tmp_path: Path
+) -> None:
+    rig = step_rig(tmp_path, step_id)
+    script = rig.script(search(), submit_to(step_id, rig.context))
+    result = rig.run(script, step_id=step_id)
+    assert (result.status, result.verdict) == ("accepted", "accepted"), result.issues
+    assert result.journal is not None and result.journal.status == "finished"
+    module_id = STEPS[step_id].module_id
+    assert [h for h in rig.store.read().heads if h.module_id == module_id]
+    one, two = script.bodies()
+    names = [t["function"]["name"] for t in one["tools"]]
+    system, user = one["messages"]
+    answer = two["messages"][3]
+    assert answer["role"] == "tool"
+    if tool_set(step_id) == PACK_TOOLS:
+        assert names == ["search_pack", "read_pages", f"submit_{step_id}"]
+        assert "Source text is not in this prompt" in system["content"]
+        assert " spans match 'revenue'; showing " in answer["content"]
+    else:
+        assert names == [f"submit_{step_id}"]
+        assert submit_only_rule(f"submit_{step_id}") in system["content"]
+        assert "search_pack" not in system["content"]
+        # A submit-only step never executes a pack tool: the call is refused as a tool result.
+        assert answer["content"] == (
+            f"error: unknown tool 'search_pack': this step's only tool is submit_{step_id}"
+        )
+    assert NO_TOOLS_RULE not in system["content"]
+    assert not [
+        s.source_id
+        for s in rig.store.pack().sources
+        if f"<<<SOURCE id={s.source_id} " in user["content"]
+    ]
+    manifest = rig.manifest(f"{rig.ticket}-{step_id}-2")
+    assert manifest["tools"]["names"] == names and manifest["status"] == "accepted"
+    telemetry = rig.metrics(f"{rig.ticket}-{step_id}-2")["tool_loop"]
+    assert telemetry["step"]["tool_set"] == tool_set(step_id)
+    assert telemetry["step"]["rules"]["applied"] == list(applicable_rules(step_id))
+    if tool_set(step_id) == SUBMIT_ONLY:
+        assert telemetry["step"]["tool_calls"] == {"invalid": 1, f"submit_{step_id}": 1}
+        reading = ("pages_read", "located_pages", "searches_run", "spans_surfaced_by_search")
+        # Fix round 1 (review B5): every reading field is null, the cited-but-unread one too.
+        assert [telemetry["step"][f] for f in (*reading, "final_payload_cited_not_read")] == [
+            None
+        ] * 5
+    else:
+        assert isinstance(telemetry["step"]["final_payload_cited_not_read"], list)
+
+
+def request_of(rig: Rig, step_id: str, number: int = 1) -> dict[str, Any]:
+    path = rig.directory(f"{rig.ticket}-{step_id}-{number}") / "request.json"
+    loaded: dict[str, Any] = json.loads(path.read_text())
+    return loaded
+
+
+@pytest.mark.parametrize("step_id", sorted(STARTS))
+def test_each_new_step_is_sent_its_one_shot_inputs_less_the_pack_source_blocks(
+    step_id: str, tmp_path: Path
+) -> None:
+    """The loop's user message is the one-shot prompt's with its pack SOURCE blocks left out:
+    the same CONTEXT (module context, QA or review scope) and upstream blocks (the
+    `live.context` seams). The system prompt differs in rule 5 only."""
+    rig = step_rig(tmp_path, step_id)
+    rig.run(rig.script(tool_reply(content="no", finish="stop")), step_id=step_id)
+    store = rig.store
+    attempt = next(a for a in store.read().attempts if a.ticket_id == rig.ticket)
+    inputs = prompt_inputs(store, attempt, step_id)
+    every = tuple(s.source_id for s in store.pack().sources)
+    declared = declared_sources(store, attempt, step_id, every)
+    one_shot = build(
+        step_id,
+        store.pack(),
+        declared,
+        STEPS[step_id].schema,
+        upstream=inputs.upstream,
+        cp1_facts=inputs.cp1_facts,
+        module_context=inputs.module_context,
+        scope=inputs.scope,
+    )
+    blocks = one_shot[1].content.split("\n\n<<<")
+    kept = [b for b in blocks if not any(b.startswith(f"SOURCE id={s} ") for s in declared)]
+    system, user = request_of(rig, step_id)["body"]["messages"]
+    assert user["content"] == "\n\n<<<".join(kept)
+    if step_id in SOURCE_SCOPES:
+        rule = tools_rule(f"submit_{step_id}", sources=readable_sources(store, attempt, step_id))
+    elif tool_set(step_id) == PACK_TOOLS:
+        rule = tools_rule(f"submit_{step_id}")
+    else:
+        rule = submit_only_rule(f"submit_{step_id}")
+    assert system["content"] == one_shot[0].content.replace(NO_TOOLS_RULE, rule)
+
+
+def test_cp4s_tools_read_only_its_legal_sources_and_its_prompt_says_so(tmp_path: Path) -> None:
+    rig = step_rig(tmp_path, "legal_covenants")
+    read = json.dumps({"source_id": "deck", "first_page": 1, "last_page": 1})
+    scoped = json.dumps({"query": "covenant", "source_id": "deck"})
+    script = rig.script(
+        tool_reply(("r", "read_pages", read), ("s", "search_pack", scoped)),
+        tool_reply(("a", "search_pack", json.dumps({"query": "the", "max_hits": 15}))),
+        submit_to("legal_covenants", rig.context),
+    )
+    result = rig.run(script, step_id="legal_covenants")
+    assert result.status == "accepted", result.issues
+    system = script.bodies()[0]["messages"][0]["content"]
+    assert tools_rule("submit_legal_covenants", sources=("filing", "indenture")) in system
+    assert "The tools read only this step's declared sources: filing, indenture." in system
+    refusals = [m["content"] for m in script.bodies()[1]["messages"] if m["role"] == "tool"]
+    assert (
+        refusals
+        == ["error: source deck is not one of the sources this step reads: ['filing', 'indenture']"]
+        * 2
+    )
+    found = [m["content"] for m in script.bodies()[2]["messages"] if m["role"] == "tool"][-1]
+    assert "<<<SOURCE id=deck " not in found and "<<<SOURCE id=indenture " in found
+
+
+def test_a_cp3_without_a_market_source_reads_nothing_and_its_prompt_says_so(
+    tmp_path: Path,
+) -> None:
+    store, attempt = module_tests.no_market_cp3(tmp_path / "journal")
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    rig = Rig(
+        store,
+        attempt.ticket_id,
+        Ledger(tmp_path / "l.jsonl", Decimal(5), provider="openrouter"),
+        tool_pool(),
+        AttemptWriter(tmp_path / "artifacts"),
+        make_rtf_key(keys),
+        "{}",
+        tmp_path,
+    )
+    script = rig.script(search(), tool_reply(content="no", finish="stop"))
+    rig.run(script, step_id="relative_value")
+    system = script.bodies()[0]["messages"][0]["content"]
+    assert tools_rule("submit_relative_value", sources=()) in system
+    assert "this step declares no source" in system
+    assert script.bodies()[1]["messages"][-1]["content"].startswith("0 spans match")
+
+
+def test_the_quality_loop_binds_its_qa_inputs_in_the_manifest(tmp_path: Path) -> None:
+    rig = step_rig(tmp_path, "quality")
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    inputs = prompt_inputs(rig.store, attempt, "quality")
+    rig.run(rig.script(submit_to("quality", rig.context)), step_id="quality")
+    hashes = rig.manifest(f"{rig.ticket}-quality-1")["hashes"]
+    assert inputs.quality_inputs_sha256 is not None
+    assert hashes["quality_inputs_sha256"] == inputs.quality_inputs_sha256
+    user = request_of(rig, "quality")["body"]["messages"][1]["content"]
+    assert "<<<CONTEXT id=quality-scope " in user
+
+
+def test_a_rejected_new_step_finishes_its_attempt_after_its_submits(tmp_path: Path) -> None:
+    """The journal's own budget is unchanged: a one-step module's rejected submit finishes the
+    attempt (no within-attempt repair); the loop judges each submit in scratch and enters the
+    last one only."""
+    rig = step_rig(tmp_path, "credit_synthesis")
+    script = rig.script(*(submit_to("credit_synthesis", "{}", f"c{n}") for n in range(3)))
+    result = rig.run(script, step_id="credit_synthesis")
+    assert (result.status, result.verdict) == ("rejected", "rejected")
+    assert [s["outcome"] for s in result.submits] == ["rejected"] * 3
+    assert not result.attempt_pending and result.issues
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    assert attempt.status == "finished" and attempt.issues == result.issues
+
+
+ABSENT_ROWS = {
+    "business_context": (
+        "operating_drivers.0.status Not disclosed",
+        "disclosure_items.0.available No",
+    ),
+    "legal_covenants": ("covenants.2.threshold_unit not stated",),
+}
+
+
+@pytest.mark.parametrize("step_id", sorted(ABSENT_ROWS))
+def test_a_cp1a_or_cp4_absence_marker_needs_a_search_in_the_loop(
+    step_id: str, tmp_path: Path
+) -> None:
+    """Fix round 1 (user decision, 24 Oct 2026): an absence marker in a CP-1A or CP-4 submit
+    needs a prior search_pack, as 8.0d's absence rule treats CP-1's absence claims."""
+    rig = step_rig(tmp_path / "bare", step_id)
+    stop = tool_reply(content="done", finish="stop")
+    result = rig.run(rig.script(submit_to(step_id, rig.context), stop), step_id=step_id)
+    assert (result.status, result.verdict) == ("rejected", "rejected: no-submit")
+    absent = [i for i in result.issues if i.startswith(UNBACKED_ABSENCE)]
+    assert absent == [
+        f"{UNBACKED_ABSENCE}: {row}; search_pack before claiming it is not disclosed"
+        for row in ABSENT_ROWS[step_id]
+    ]
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    assert attempt.status == "finished" and set(absent) <= set(attempt.issues)
+    searched = step_rig(tmp_path / "searched", step_id)
+    script = searched.script(search(), submit_to(step_id, searched.context))
+    result = searched.run(script, step_id=step_id)
+    assert (result.status, result.verdict) == ("accepted", "accepted"), result.issues
+
+
+def test_a_cp3_none_market_row_needs_no_search(tmp_path: Path) -> None:
+    """CP-3's `kind: none` is a legitimate "no market evidence" row (user decision, 24 Oct
+    2026): the loop checks no absence rule on it; its validator judges it."""
+    rig = step_rig(tmp_path, "relative_value")
+    row = MarketEvidence(
+        source_id="none", kind="none", quote=None, as_of="none", limitation="No dealer sheet"
+    )
+    payload = cp3_tests.unquoted(market_evidence=(row,)).model_dump_json()
+    assert ABSENCE not in applicable_rules("relative_value")
+    result = rig.run(rig.script(submit_to("relative_value", payload)), step_id="relative_value")
+    assert (result.status, result.verdict) == ("accepted", "accepted"), result.issues
+
+
+def test_the_call_limit_is_the_tool_sets_six_or_thirty_from_the_registry() -> None:
+    """Fix round 1 (user decision, 24 Oct 2026): a submit-only step has 6 calls, a pack-tool
+    step 30; the limit follows the registry's tool set, never a per-step list."""
+    assert {kind: limits.max_calls for kind, limits in TOOL_SET_LIMITS.items()} == {
+        PACK_TOOLS: 30,
+        SUBMIT_ONLY: 6,
+    }
+    for step_id, kind in tool_sets().items():
+        assert limits_for(step_id) == replace(LIMITS, max_calls=30 if kind == PACK_TOOLS else 6)
+
+
+@pytest.mark.parametrize("step_id", sorted(s for s in STARTS if tool_set(s) == SUBMIT_ONLY))
+def test_a_submit_only_step_calling_a_refused_tool_ends_at_its_sixth_call(
+    step_id: str, tmp_path: Path
+) -> None:
+    rig = step_rig(tmp_path, step_id)
+    script = rig.script(*(search(f"s{n}") for n in range(10)))
+    result = rig.run(script, step_id=step_id)  # the registry's limits, not the rig's
+    assert (result.verdict, result.status) == (LIMIT, NO_SUBMIT)
+    assert str(result.verdict_reason).startswith("6 calls, ")
+    assert len(script.requests) == 6 and not result.submits
+    records = rig.ledger.state().attempts
+    assert [r.attempt_id for r in records] == [f"{rig.ticket}-{step_id}-{n}" for n in range(1, 7)]
+    assert all(r.status == "settled" for r in records)
+    assert rig.ledger.state().spent == result.cost_usd
+    limits = request_of(rig, step_id, 6)["tool_loop"]["limits"]
+    assert limits["max_calls"] == 6
+    texts = tool_messages(script)
+    assert texts and all(t.startswith("error: unknown tool 'search_pack'") for t in texts)
+
+
+# --- task 8.9 properties (decision 0012) -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Frozen89:
+    journal: Path
+    ticket: str
+    payload: str
+
+
+@pytest.fixture(scope="module")
+def frozen_starts(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Frozen89]:
+    """Each new step's starting journal, built once; every example copies it."""
+    root = tmp_path_factory.mktemp("starts")
+    found = {}
+    for step_id, start in STARTS.items():
+        store, ticket, payload = start(root / step_id)
+        found[step_id] = Frozen89(store.directory, ticket, payload)
+    return found
+
+
+def copied_rig(root: Path, start: Frozen89) -> Rig:
+    shutil.copytree(start.journal, root / "journal")
+    keys = root / "keys"
+    keys.mkdir()
+    return Rig(
+        Execution(root / "journal"),
+        start.ticket,
+        Ledger(root / "artifacts" / ".ledgers" / "loop.jsonl", Decimal(5), provider="openrouter"),
+        tool_pool(),
+        AttemptWriter(root / "artifacts"),
+        make_rtf_key(keys),
+        start.payload,
+        root,
+    )
+
+
+def tool_messages(script: Script) -> list[str]:
+    return [
+        str(m["content"]) for b in script.bodies() for m in b["messages"] if m["role"] == "tool"
+    ]
+
+
+TOOL_NAMES = st.sampled_from(["search_pack", "read_pages", "other", "wrapped", "malformed"])
+SOURCE_IDS = st.sampled_from(["filing", "indenture", "deck", "market-sheet", "nowhere", None])
+
+
+def tool_call(n: int, name: str, source: str | None) -> dict[str, Any]:
+    """One tool call as a provider sends it: a pack tool on `source`, an unknown tool, a pack
+    tool whose arguments are wrapped in an extra `arguments` object (the MiMo shape in
+    `hybrid-cp0-candidates.md`), or one without a function (malformed)."""
+    search = {"query": "the", "source_id": source, "max_hits": 15}
+    read = {"source_id": source, "first_page": 1, "last_page": 2}
+    raw: dict[str, Any] = {
+        "search_pack": search,
+        "read_pages": read,
+        "other": {"x": 1},
+        "wrapped": {"arguments": search},
+    }.get(name, {})
+    called = "search_pack" if name == "wrapped" else name
+    if name == "malformed":
+        return {"id": f"m{n}", "type": "function"}
+    return {
+        "id": f"t{n}",
+        "type": "function",
+        "function": {"name": called, "arguments": json.dumps(raw)},
+    }
+
+
+def turn(calls: list[dict[str, Any]]) -> Response:
+    body = json.loads(tool_reply(("x", "search_pack", "{}")).body)
+    body["choices"][0]["message"]["tool_calls"] = calls
+    return Response(200, json.dumps(body).encode())
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(
+    step_id=st.sampled_from(sorted(STARTS)),
+    turns=st.lists(st.lists(st.tuples(TOOL_NAMES, SOURCE_IDS), min_size=1, max_size=4), max_size=3),
+)
+def test_a_step_never_runs_a_tool_outside_its_tool_set_or_reads_outside_its_sources(
+    frozen_starts: dict[str, Frozen89],
+    step_id: str,
+    turns: list[list[tuple[str, str | None]]],
+) -> None:
+    """Property (8.9 item 5b): a submit-only step never runs a pack tool (every such call is a
+    refused tool result); a pack-tool step's results show only its readable sources; any call
+    shape, a malformed one included, is a journaled result or verdict, never a crash."""
+    with tempfile.TemporaryDirectory() as directory:
+        rig = copied_rig(Path(directory), frozen_starts[step_id])
+        attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+        before = rig.store.read().content_hash()
+        replies = [
+            turn([tool_call(n, name, source) for n, (name, source) in enumerate(calls)])
+            for calls in turns
+        ]
+        script = Script(replies, rig.clock, fallback=tool_reply(content="no", finish="stop"))
+        result = rig.run(script, step_id=step_id)
+        texts = tool_messages(script)
+        if tool_set(step_id) == SUBMIT_ONLY:
+            assert all(t.startswith("error: unknown tool ") for t in texts), texts
+            assert not [t for t in texts if "<<<SOURCE" in t]
+        else:
+            readable = set(readable_sources(rig.store, attempt, step_id))
+            shown = {
+                line.split("<<<SOURCE id=", 1)[1].split(" ", 1)[0]
+                for t in texts
+                for line in t.splitlines()
+                if line.startswith("<<<SOURCE id=")
+            }
+            assert shown <= readable, (shown, readable)
+        malformed = any(name == "malformed" for calls in turns for name, _ in calls)
+        assert result.status == NO_SUBMIT and not result.submits
+        assert result.verdict in {"rejected: no-submit", "rejected: malformed tool call"}
+        assert (result.verdict == "rejected: malformed tool call") <= malformed
+        assert rig.store.read().content_hash() == before  # nothing judged: journal untouched
+
+
+PAGED_SOURCES = ("a", "b", "c")
+
+
+def paged_pack() -> PreparedPack:
+    pack, _ = readiness_fixture()
+    (source,) = pack.sources
+    sources = tuple(
+        source.model_copy(
+            update={
+                "source_id": name,
+                "spans": tuple(
+                    Span(locator=f"page:{n}", text=f"{name} page {n} revenue") for n in range(1, 6)
+                ),
+            }
+        )
+        for name in PAGED_SOURCES
+    )
+    return pack.model_copy(update={"sources": sources})
+
+
+@settings(max_examples=150, deadline=None)
+@given(
+    scope=st.lists(st.sampled_from(PAGED_SOURCES), unique=True),
+    calls=st.lists(
+        st.tuples(
+            st.sampled_from(["search", "read"]),
+            st.sampled_from([*PAGED_SOURCES, None, "zz"]),
+            st.integers(1, 6),
+        ),
+        max_size=8,
+    ),
+)
+def test_the_pack_tools_never_read_or_search_outside_their_scope(
+    scope: list[str], calls: list[tuple[str, str | None, int]]
+) -> None:
+    """Property (8.9 item 5b): over any scope and any calls, what the tools showed, recorded as
+    read and searched stays inside the scope; a call outside it is refused (`ToolError`)."""
+    tools = PackTools(paged_pack(), sources=scope)
+    for kind, source, page in calls:
+        raw: dict[str, Any] = (
+            {"query": "revenue", "source_id": source}
+            if kind == "search"
+            else {"source_id": source, "first_page": page, "last_page": page}
+        )
+        try:
+            text = (tools.search_pack if kind == "search" else tools.read_pages)(raw)
+        except ToolError:
+            assert source not in scope or (kind == "read" and source is None)
+            continue
+        assert source in scope or (kind == "search" and source is None)
+        ids = {
+            line.split(" ", 2)[1].removeprefix("id=")
+            for line in text.splitlines()
+            if line.startswith("<<<SOURCE")
+        }
+        assert ids <= set(scope)
+    seen = tools.seen()
+    assert {source for source, _ in seen.read} <= set(scope)
+    assert {s for s in seen.searched if s is not None} <= set(scope)
+
+
+ACTIONS_89 = st.sampled_from(["search", "bad", "good", "502", "text", "read"])
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(
+    step_id=st.sampled_from(sorted(STARTS)),
+    actions=st.lists(ACTIONS_89, min_size=1, max_size=8),
+    max_calls=st.integers(1, 5),
+    max_submits=st.integers(1, 3),
+    step_s=st.sampled_from([1.0, 1900.0]),
+)
+def test_the_limits_hold_and_the_ledger_sums_the_settled_calls_on_every_new_step(
+    frozen_starts: dict[str, Frozen89],
+    step_id: str,
+    actions: list[str],
+    max_calls: int,
+    max_submits: int,
+    step_s: float,
+) -> None:
+    """Property (8.9 item 5c): 8.0d's limits and ledger property, over the eight new steps."""
+    limits = ToolLimits(max_calls=max_calls, max_submits=max_submits)
+    with tempfile.TemporaryDirectory() as directory:
+        rig = copied_rig(Path(directory), frozen_starts[step_id])
+        replies: dict[str, Callable[[int], Response]] = {
+            "search": lambda n: search(f"s{n}"),
+            "bad": lambda n: submit_to(step_id, REJECTED_89, f"b{n}"),
+            "good": lambda n: submit_to(step_id, rig.context, f"g{n}"),
+            "502": lambda n: Response(502, b"{}"),
+            "text": lambda n: tool_reply(content="no", finish="stop"),
+            "read": lambda n: tool_reply((f"r{n}", "read_pages", '{"source_id": "filing"}')),
+        }
+        script = Script(
+            [replies[a](n) for n, a in enumerate(actions)],
+            rig.clock,
+            step_s,
+            fallback=tool_reply(content="no", finish="stop"),
+        )
+        result = rig.run(script, limits=limits, step_id=step_id)
+        bodies = script.bodies()
+        assert len(bodies) <= limits.max_calls and len(result.submits) <= limits.max_submits
+        assert all(b["max_tokens"] == limits.max_tokens for b in bodies)
+        records = rig.ledger.state().attempts
+        assert [r.attempt_id for r in records] == list(result.attempt_ids)
+        assert all(r.status == "settled" for r in records)
+        spent = sum((r.charged_usd or Decimal(0) for r in records), Decimal(0))
+        assert rig.ledger.state().spent == spent == result.cost_usd
+        accepted = [s for s in result.submits if s["outcome"] == "accepted"]
+        assert len(accepted) <= 1 and (result.status == "accepted") == bool(accepted)
+        # A one-step module (or the QA review) settles on its one try: never sent again.
+        assert not result.attempt_pending or result.status != "rejected"
+        again = Script([], rig.clock, step_s, fallback=tool_reply(content="no", finish="stop"))
+        if result.attempt_pending:
+            with pytest.raises(ValueError, match="never re-run"):
+                rig.run(again, limits=limits, step_id=step_id)
+        else:
+            with pytest.raises(ValueError, match=r"never re-run|not the next step|finished"):
+                rig.run(again, limits=limits, step_id=step_id)
+        assert not again.requests
+
+
+REJECTED_89 = json.dumps({"unexpected": 1})

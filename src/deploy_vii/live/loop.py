@@ -7,6 +7,16 @@ prompt is the runner's (`prompts.build`: the step's upstream projections and any
 with rule 5 naming the tools, and no pack SOURCE block. The tools are `search_pack`,
 `read_pages` (`live.tools.PackTools`, read-only over the prepared pack) and `submit_<step>`.
 
+Task 8.9 (user decision, 24 Oct 2026: every live step of every module is a tool loop): the
+registry's tool set decides the tools (`registry.tool_sets`). A `pack` step gets the two pack
+tools, bounded to its declared sources where it has a source scope (CP-4's legal, CP-3's market
+sources: `live.context.readable_sources`), so the whole legal source is read on demand rather
+than pre-sent. A `submit-only` step (CP-1 `quality`, CP-2, CP-5, CP-6) gets its submit alone;
+a call to any other tool is refused as a tool result and never run. Every step's prompt is
+built from the one-shot dispatch's inputs (`runner.prompt_inputs`: the upstream projections,
+CP-1A's facts, the `MODULE_CONTEXTS` CONTEXT, the QA or review scope) less its pack SOURCE
+blocks, with rule 5 naming the step's tools.
+
 Order within a call: the request is retained, the call reserved (`reservation_usd` of the call's
 own growing body at `ToolLimits.max_tokens`), sent, the tools run, the reply retained, then the
 call is settled (`runner._cost`: `usage.cost`, else known zero for a refusal before inference,
@@ -16,14 +26,15 @@ reconcile paths of tasks 7.11, 7.13 and 7.14 read, so an interrupted call is rec
 interrupted attempt. Each sent call also keeps its tool transcript (`tool-calls.jsonl`). A step
 whose first call is already reserved or retained is never run again (`_started`).
 
-Limits per step (`ToolLimits`, the harness's): 30 calls, 3 submits, 3,600 s of wall clock and
-128,000 output tokens per call; a call may use the rest of the step's wall clock. From three
-calls left, each turn's tool results are followed by a Python-owned user message saying so
-(harness review C6: never inside tool or pack text). A transport, timeout or stream failure
-(`transient`) is retried once: the failed call is recorded and settled, the retry is a new call
-within the same budgets and is never a submit; a second failure in a row ends the step. An
-in-flight 402 is waited out and re-sent once per step, as `runner.dispatch` does (task 7.8); any
-other 402 raises CreditExhausted once the call is sealed.
+Limits per step (`ToolLimits`, the harness's): 30 calls (6 on a submit-only step, task 8.9 fix
+round 1: `limits_for`), 3 submits, 3,600 s of wall clock and 128,000 output tokens per call; a
+call may use the rest of the step's wall clock. From three calls left, each turn's tool results
+are followed by a Python-owned user message saying so (harness review C6: never inside tool or
+pack text). A transport, timeout or stream failure (`transient`) is retried once: the failed
+call is recorded and settled, the retry is a new call within the same budgets and is never a
+submit; a second failure in a row ends the step. An in-flight 402 is waited out and re-sent
+once per step, as `runner.dispatch` does (task 7.8); any other 402 raises CreditExhausted
+once the call is sealed.
 
 Judging: every submit is judged as the step's current try on the runner's trusted path
 (`submission.submit_model_payload`, then `runner.journal_outcome`) in a scratch copy of the
@@ -58,6 +69,7 @@ from typing import Any
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live.catalog import EffortDecision, PinnedCandidate, PinnedPool
 from deploy_vii.live.client import CHAT_URL, ChatClient, ChatRequest, ChatResult, TransportError
+from deploy_vii.live.context import SOURCE_SCOPES, readable_sources
 from deploy_vii.live.credential import load_key_with_note, redact
 from deploy_vii.live.credit import CreditExhausted, CreditState, from_dispatch_402
 from deploy_vii.live.draw import Draw, draw
@@ -83,12 +95,12 @@ from deploy_vii.live.runner import (
     _nullable,
     _pending,
     _provider_usage,
-    _upstream,
     code_sha256,
     composed_event,
     expected_step,
     in_flight_wait_s,
     journal_outcome,
+    prompt_inputs,
     prompt_token_bound,
     repair_prompt,
     request_bytes,
@@ -116,7 +128,7 @@ from deploy_vii.live.tools import (
     submit_name,
     tool_specs,
 )
-from deploy_vii.registry import tool_loop_steps
+from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, ToolSet, tool_loop_steps, tool_set
 from deploy_vii.source_context import SourceContextReview
 
 TOOL_STEPS = tool_loop_steps()
@@ -146,6 +158,17 @@ class ToolLimits:
 
 
 LIMITS = ToolLimits()
+# Task 8.9 fix round 1 (user decision, 24 Oct 2026): a submit-only step has 6 calls, so a model
+# that keeps calling a refused tool stops early; a pack-tool step keeps the harness's 30.
+TOOL_SET_LIMITS: Mapping[ToolSet, ToolLimits] = {
+    PACK_TOOLS: LIMITS,
+    SUBMIT_ONLY: replace(LIMITS, max_calls=6),
+}
+
+
+def limits_for(step_id: str) -> ToolLimits:
+    """The step's limits, from its registry tool set (`registry.tool_set`)."""
+    return TOOL_SET_LIMITS[tool_set(step_id)]
 
 
 def call_nudge(left: int, step_id: str, max_calls: int) -> str:
@@ -302,9 +325,11 @@ class _Step:
     plan: StepEffort
     rules: ToolRules
     limits: ToolLimits
-    tools: PackTools
+    kind: ToolSet
+    tools: PackTools | None  # None: a submit-only step reads nothing (task 8.9)
     specs: tuple[dict[str, Any], ...]
     context: SourceContextReview | None
+    quality_inputs_sha256: str | None
     conversation: list[dict[str, Any]]
     prefix: str
     current_try: int
@@ -380,6 +405,14 @@ def _prepare(
         raise ValueError(f"{prefix} already started; a started tool-loop step is never re-run")
     repair = repair_prompt(snapshot, attempt, spec.step_id)
     pack = store.pack(snapshot)
+    # Task 8.9: the same prompt inputs as the one-shot dispatch (`runner.prompt_inputs`: the
+    # upstream projections, CP-1A's facts, the module CONTEXT, the QA or review scope), the
+    # step's tool set, and for a pack-tool step with a source scope (CP-4, CP-3) its readable
+    # sources, which bound the pack tools too.
+    kind = tool_set(spec.step_id)
+    inputs = prompt_inputs(store, attempt, spec.step_id)
+    scoped = kind == PACK_TOOLS and spec.step_id in SOURCE_SCOPES
+    readable = readable_sources(store, attempt, spec.step_id) if scoped else None
     messages = [
         item.as_dict()
         for item in build(
@@ -387,10 +420,15 @@ def _prepare(
             pack,
             (),
             spec.schema,
-            upstream=_upstream(store, attempt, spec.step_id),
+            upstream=inputs.upstream,
             repair_issues=repair.issues,
+            cp1_facts=inputs.cp1_facts,
+            module_context=inputs.module_context,
+            scope=inputs.scope,
             submit_tool=submit_name(spec.step_id),
             submits=limits.max_submits,  # the prompt states the loop's own limit
+            tool_set=kind,
+            readable=readable,
         )
     ]
     context = None
@@ -412,9 +450,11 @@ def _prepare(
         plan=plan,
         rules=rules,
         limits=limits,
-        tools=PackTools(pack),
-        specs=tool_specs(spec.step_id),
+        kind=kind,
+        tools=PackTools(pack, readable) if kind == PACK_TOOLS else None,
+        specs=tool_specs(spec.step_id, kind),
         context=context,
+        quality_inputs_sha256=inputs.quality_inputs_sha256,
         conversation=messages,
         prefix=prefix,
         current_try=current,
@@ -516,7 +556,7 @@ def run_tool_step(
     bytes_per_token: Decimal,
     effort: StepEffort,
     rules: ToolRules,
-    limits: ToolLimits = LIMITS,
+    limits: ToolLimits | None = None,
     clock: Callable[[], str] = utc_stamp,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -529,7 +569,9 @@ def run_tool_step(
     caller's report keeps the calls already spent). On exhausted credit the step has ended, so
     its last judged submit, if any, is already in the live journal; on a cap refusal or any
     other raise mid-step the live journal is untouched (the submits were judged in scratch only)
-    and the ticket stays pending, with this try started and never re-run (`_started`)."""
+    and the ticket stays pending, with this try started and never re-run (`_started`). Without
+    `limits`, the step's tool set decides them (`limits_for`)."""
+    limits = limits_for(spec.step_id) if limits is None else limits
     step = _prepare(spec, store, ticket_id, ledger, pool, seed, writer, effort, rules, limits)
     loaded = load_key_with_note(key_path, key_index)
     if loaded.tokens_found > 1:
@@ -722,9 +764,14 @@ def _execute(
         raw = json.loads(arguments)
         if not isinstance(raw, dict):
             raise ToolError("bad arguments: not a JSON object")
-        if name == SEARCH:
+        if step.tools is None and name != submit_name(step.step_id):
+            # Task 8.9: a submit-only step is offered no pack tool and never runs one.
+            raise ToolError(
+                f"unknown tool {name!r}: this step's only tool is {submit_name(step.step_id)}"
+            )
+        if name == SEARCH and step.tools is not None:
             return "ok", step.tools.search_pack(raw), None
-        if name == READ:
+        if name == READ and step.tools is not None:
             return "ok", step.tools.read_pages(raw), None
         if name != submit_name(step.step_id):
             raise ToolError(f"unknown tool {name!r}")
@@ -754,7 +801,7 @@ def _rules(step: _Step, seen: Seen) -> Callable[[str], tuple[str, ...]] | None:
 def _judge(step: _Step, call: Call, payload: str) -> Submit:
     """Judge one submit as the step's current try, in a scratch copy of its starting journal."""
     number = len(step.submits) + 1
-    seen = step.tools.seen()
+    seen = step.tools.seen() if step.tools is not None else Seen()
     with tempfile.TemporaryDirectory(prefix="tool-submit-") as scratch:
         copy = Path(scratch) / "journal"
         shutil.copytree(step.store.directory, copy)
@@ -909,7 +956,8 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
     records = [item.record(step.step_id) for item in step.submits]
     final = step.submits[-1].payload if step.submits else None
     financials = step.step_id == "financials"
-    read = step.tools.read
+    tools = step.tools  # None: a submit-only step, whose reading fields are null (task 8.9)
+    read = tools.read if tools is not None else set()
     return {
         "call": call.number,
         "effort_level": call.level,
@@ -922,11 +970,12 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
         "retry_of_attempt_id": call.retry_of,
         "step": {
             "calls": len(step.calls),
+            "tool_set": step.kind,
             "tool_calls": dict(sorted(step.counts.items())),
-            "pages_read": len(read),
-            "located_pages": step.tools.located_pages,
-            "searches_run": len(step.tools.searched),
-            "spans_surfaced_by_search": len(step.tools.surfaced),
+            "pages_read": len(read) if tools is not None else None,
+            "located_pages": tools.located_pages if tools is not None else None,
+            "searches_run": len(tools.searched) if tools is not None else None,
+            "spans_surfaced_by_search": len(tools.surfaced) if tools is not None else None,
             "submits": records,
             "first_submit_accepted": records[0]["outcome"] == "accepted" if records else None,
             "submit_shrinkage": shrinkage(records),
@@ -935,13 +984,13 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
             "final_payload_cited_not_read": sorted(
                 list(item) for item in cited_locators(final) - read
             )
-            if final
+            if final and tools is not None
             else None,
             "verdict": step.verdict,
             "verdict_reason": step.verdict_reason,
             "cost_settled_usd": settled,
             "cost_held_usd": held,
-            "rules": step.rules.to_record(),
+            "rules": step.rules.to_record(step.step_id),
             "limits": asdict(step.limits),
         },
     }
@@ -1009,6 +1058,12 @@ def _manifest(step: _Step, call: Call, ctx: _Context) -> dict[str, Any]:
             "declared_inputs": [],
             # The evidence file the absence and cited-page rules read (review A item 3).
             "tool_transcript_sha256": call.transcript_sha256,
+            # Task 8.9, as the one-shot `quality` manifest (task 7.4 fix round 1).
+            **(
+                {}
+                if step.quality_inputs_sha256 is None
+                else {"quality_inputs_sha256": step.quality_inputs_sha256}
+            ),
             "snapshot_sha256": step.snapshot_sha256,
             "journal_inputs": {item.input_id: item.sha256 for item in step.attempt.inputs},
         },

@@ -107,6 +107,15 @@ arguments, status and full result, each submit's verdict and any call-limit nudg
   `financials` completeness and completeness-drop flag, the final payload's cited-but-unread
   locators, the verdict, the settled and held USD, the evidence rules and the limits.
 
+Task 8.9 (user decision, 24 Oct 2026) runs every live step of every module this way. The step
+block's `tool_set` is the step's registry tool set: `pack` (`search_pack`, `read_pages` and the
+submit) or `submit-only` (the submit alone). Its `rules` record adds `applied`, the evidence
+rules that step checks. Its `limits` hold the step's own: 30 calls on a `pack` step and 6 on a
+`submit-only` step. A `submit-only` step reads nothing, so its reading fields (`pages_read`,
+`located_pages`, `searches_run`, `spans_surfaced_by_search`, `final_payload_cited_not_read`) are
+null, not zero. The CP-1 `quality` loop's `manifest.json` `hashes` add `quality_inputs_sha256`,
+the hash of the QA inputs its prompt was built from.
+
 The last call's block is the step's. `manifest.json` records the tools offered, `tool_choice`,
 the previous call and the retried call, and its `hashes` include `tool-calls.jsonl`
 (`tool_transcript_sha256`). In the batch report a tool-loop step's USD cell is the step's total

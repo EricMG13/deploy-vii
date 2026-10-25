@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import socket
 import stat
 import tomllib
@@ -542,6 +543,9 @@ def test_cumulative_ceiling_message_names_both_numbers(
 def test_report_write_failure_does_not_mask_the_original_error(
     rig: Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("chmod cannot deny root; the write-failure path needs an unprivileged user")
+
     def broken(request: Request) -> Response:
         if request.url == KEY_URL:
             return key_status("1.5")
@@ -2186,8 +2190,9 @@ def test_a_probe_cp1_rejection_leaves_the_attempt_pending_with_its_step_repair(
 
 
 class ToolChain(Chain):
-    """The CP-1 cell with `tool_loop` on: each tool-loop step searches the pack once, then
-    submits its valid payload through `submit_<step>`; CP-0 and `quality` stay one-shot."""
+    """The CP-1 cell with `tool_loop` on (task 8.9: every step a tool loop): each step first
+    calls `search_pack` (a pack-tool step searches; the submit-only `quality` has it refused),
+    then submits its valid payload through `submit_<step>`."""
 
     def __call__(self, request: Request) -> Response:
         if request.url == KEY_URL:
@@ -2209,7 +2214,7 @@ class ToolChain(Chain):
         return tool_reply(("c", f"submit_{step}", self.payload(step)), model=body["model"])
 
 
-def test_the_module_driver_runs_the_four_stages_as_tool_loops(tmp_path: Path) -> None:
+def test_the_module_driver_runs_every_step_as_a_tool_loop(tmp_path: Path) -> None:
     rig, extraction = chain_rig(tmp_path)
     text = rig.settings.read_text(encoding="utf-8")
     rig.settings.write_text(
@@ -2225,24 +2230,31 @@ def test_the_module_driver_runs_the_four_stages_as_tool_loops(tmp_path: Path) ->
     assert rig.run([*rig.argv("module", "--module", "CP-1"), "--models", LUNA], chain) == 0
     rows = module_rows(rig)
     assert [(r[2], r[6]) for r in rows] == [(step, "accepted") for step in CHAIN]
-    assert [r[5].endswith("(2 calls)") for r in rows] == [False, True, True, True, True, False]
+    assert all(r[5].endswith("(2 calls)") for r in rows)
     assert rows[1][8] == "0.02"  # the step's two settled calls
-    assert len(chain.requests) == 10
+    assert len(chain.requests) == 12
     bodies = chat_bodies(chain)
-    assert [b.get("tool_choice") for b in bodies] == [None, *["required"] * 8, None]
-    efforts = [b["reasoning"] for b in bodies[1:9]]
-    assert efforts[:2] == [{"effort": "high"}] * 2  # default_effort: no row for the step
-    assert efforts[2:4] == [{"effort": "low"}] * 2  # financials' own row
+    assert [b.get("tool_choice") for b in bodies] == ["required"] * 12
+    assert not [b for b in bodies if "response_format" in b]
+    names = [[t["function"]["name"] for t in b["tools"]] for b in bodies]
+    assert names[0] == ["search_pack", "read_pages", "submit_source_readiness"]
+    assert names[-1] == ["submit_quality"]  # submit-only
+    efforts = [b["reasoning"] for b in bodies]
+    assert efforts[:4] == [{"effort": "high"}] * 4  # default_effort: no row for the step
+    assert efforts[4:6] == [{"effort": "low"}] * 2  # financials' own row
     report = rig.report()
     assert (
-        "- Tool loop: source_context high (ceiling high), financials low (ceiling high)" in report
+        "- Tool loop: source_readiness high (ceiling high; pack tools), source_context high "
+        "(ceiling high; pack tools), financials low (ceiling high; pack tools)" in report
     )
+    assert "quality high (ceiling high; submit-only tools)" in report
     path = rig.root / "artifacts" / "model-tests" / ".ledgers" / "b1.jsonl"
     assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["provider"] == "openrouter"
-    assert len(Ledger(path, Decimal("5.00")).state().attempts) == 10
-    # Fix round 1 (review B items 8 to 10): the report says what each line covers.
+    assert len(Ledger(path, Decimal("5.00")).state().attempts) == 12
+    # Fix round 1 (review B items 8 to 10): the report says what each line covers. Task 8.9:
+    # no planned step is one-shot, so the one-shot budget lines say they are unused.
     assert "completeness floor: off (user decision 24 Oct 2026)" in report
-    scope = "per call (one-shot steps; tool-loop steps: see Tool loop)"
+    scope = "per call (unused: every planned step is a tool loop; see Tool loop)"
     assert f"- Max tokens: 16000 {scope}" in report and f"- Timeout: 600.0 s {scope}" in report
     assert "completeness floor: off" in report.split("- Tool loop:")[1].splitlines()[0]
     held = next(
@@ -2251,6 +2263,29 @@ def test_the_module_driver_runs_the_four_stages_as_tool_loops(tmp_path: Path) ->
     total, kept = held.charged_usd + Decimal("0.01"), held.charged_usd
     assert rows[3][8] == f"{format(total, 'f')} ({cli.HELD} {format(kept, 'f')})"
     assert cli.HELD_FOOTNOTE in report
+
+
+def test_the_budget_lines_name_the_one_shot_steps_only_while_one_is_planned(
+    tmp_path: Path,
+) -> None:
+    """Task 8.9: the qualifier is accurate: a planned step outside the tool loop's plan (a
+    chain's `one_shot` step) keeps the 8.0d wording; none planned says the lines are unused."""
+    cells = [cli.Cell("module-00", "cp-1", ("source_readiness", "source_context"), 7)]
+    ledger = Ledger(tmp_path / "l.jsonl", Decimal(1))
+
+    def lines(*looped: str) -> list[str]:
+        plan = cli.ToolLoop(dict.fromkeys(looped, StepEffort.of("high")), ToolRules())
+        report = cli.render_report(
+            "module", "b", 7, fixture_pool(), ledger, cells, cli.Batch(), "high", tool_loop=plan
+        )
+        return [line for line in report.splitlines() if line.startswith("- Max tokens:")]
+
+    assert lines("source_context") == [
+        "- Max tokens: 16000 per call (one-shot steps; tool-loop steps: see Tool loop)"
+    ]
+    assert lines("source_readiness", "source_context") == [
+        "- Max tokens: 16000 per call (unused: every planned step is a tool loop; see Tool loop)"
+    ]
 
 
 def test_the_one_shot_budget_options_say_tool_loops_have_their_own() -> None:
@@ -2264,4 +2299,6 @@ def test_the_tool_loop_line_states_a_set_completeness_floor() -> None:
     plan = cli.ToolLoop({"financials": StepEffort.of("high")}, ToolRules(floor=3))
     (line,) = cli._tool_loop_lines(plan)
     assert line.endswith("; completeness floor: 3 statement lines per expected cell")
+    # Task 8.9 fix round 1: the call limit is the tool set's.
+    assert "; per step at most 30 calls on pack-tool steps and 6 on submit-only steps, " in line
     assert cli._tool_loop_lines(None) == []

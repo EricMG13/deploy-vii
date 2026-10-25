@@ -46,9 +46,11 @@ provider = "openrouter"
 credential_file = "~/Documents/op router.rtf"
 credential_token_index = 2
 # Reservation prompt bound: ceil(request bytes / this) + 64 (decision 0008, MC-10). Probe-2
-# measured 5.61 bytes per token (GLM 5.3 Flash: 867,481 request bytes, 154,609 prompt tokens);
-# 3.0 keeps a 1.9x margin over that measurement.
-prompt_bytes_per_token_lower_bound = 3.0
+# measured 5.61 bytes per token (GLM 5.3 Flash: 867,481 request bytes, 154,609 prompt tokens).
+# Task 8.9 fix round 2 (decision 0008 row of 25 Oct 2026): Sol's recorded hybrid-cp1-6 narrative
+# and readiness bodies measured 2.80 and 2.58, below the former 3.0, so the bound fell short;
+# 2.5 covers every recorded Sol request (tests/product/test_live_runner.py).
+prompt_bytes_per_token_lower_bound = 2.5
 credential_handling = "read-at-dispatch-in-memory-never-logged"
 selection = "user-named-pool-uniform-random-only-when-more-than-one-model"
 record_selection_seed = true
@@ -73,17 +75,44 @@ recurring_caps_usd = { e1_per_case = 3, e2_per_milestone = 15, e3_per_week = 3 }
 cumulative_ceiling_usd = 200
 no_credit_fallback = "native-luna-else-labelled-claude-agent-proxy-cohort"
 # Task 8.0d (user decision, 24 Oct 2026): E1 runs the CP-1 stages as tool loops, the hybrid
-# harness's design ported into the live runner (`live.loop`; decision 0005 row of 24 Oct 2026).
+# harness's design ported into the live runner (`live.loop`). Task 8.9 (user decision, 24 Oct
+# 2026): every live step of every module runs as one (decision 0005 rows of 24 Oct 2026).
 tool_loop = true
 
 # Task 8.0d: each tool-loop step's effort, and the highest level its one escalation (after two
 # rejected submits or a completeness-floor rejection) may reach. User-owned; `--effort` given on
 # the command line applies to every step instead.
 [model_tests.step_effort]
+# Task 8.9: a row for every tool-loop step (every live step). Effort sets reasoning, not input:
+# input grows only with what a step reads, and every call's output is capped at 128,000 tokens
+# whatever the level, so the ceiling never raises a call's worst case (`ToolLimits`).
+# CP-0, pack tools: first call about 3k tokens on czr-fy2025-v2 (pages read on demand).
+source_readiness = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): Sol medium hybrid-cp1-6 sent 4k-28k prompt tokens per call.
 source_context = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): 21k-68k prompt tokens per call in hybrid-cp1-6.
 financials = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): about 183k prompt tokens per call in hybrid-cp1-6 (its projection).
 narrative = { effort = "medium", ceiling = "high" }
+# CP-1, pack tools (8.0d): about 231k prompt tokens per call in hybrid-cp1-6 (its projection).
 readiness = { effort = "medium", ceiling = "high" }
+# CP-1 QA, submit-only: about 24k tokens on the hybrid-cp1-6 registers; nothing to read.
+quality = { effort = "medium", ceiling = "high" }
+# CP-1A, pack tools: first call about 9k tokens (method, rules, schema); pages on demand.
+business_context = { effort = "medium", ceiling = "high" }
+# CP-2, submit-only: a 108,950-byte CONTEXT (task 8.6; 19k-36k tokens at 5.61-3.0 bytes a
+# token), fixed, nothing to read: below the CP-1 stages already at medium, high at most.
+credit_synthesis = { effort = "medium", ceiling = "high" }
+# CP-4, pack tools: about 200k tokens of legal pages readable, read on demand at most 5 pages a
+# call instead of one 841 KB SOURCE block; effort does not change what is read, and Sol's
+# 1,050,000-token context holds every page plus the conversation, so medium, high at most.
+legal_covenants = { effort = "medium", ceiling = "high" }
+# CP-3, pack tools over its market sources only: first call about 5k tokens on the fixture.
+relative_value = { effort = "medium", ceiling = "high" }
+# CP-5, submit-only: projected review scope of 13,451 bytes (task 8.6), about 2k-4k tokens.
+integrity_review = { effort = "medium", ceiling = "high" }
+# CP-6, submit-only: about 8k tokens on the fixture; the real pack is unmeasured.
+committee_challenge = { effort = "medium", ceiling = "high" }
 
 # Task 8.0d: the `financials` completeness floor (statement lines per expected statement and
 # source scope) stays off: user decision, 24 Oct 2026, revisited after the cheaper-model choice

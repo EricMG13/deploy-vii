@@ -365,8 +365,9 @@ def test_project_settings_declare_the_runner_contract() -> None:
     assert settings.artifact_root.name == "model-tests"
     assert settings.credential_file.name == "op router.rtf"
     assert settings.credential_token_index == 2  # probe-2: the second token is the inference key
-    # Decision 0008 (MC-10): probe-2 measured 5.61 bytes per token; 3.0 keeps a 1.9x margin.
-    assert settings.prompt_bytes_per_token_lower_bound == Decimal("3.0")
+    # Decision 0008 (MC-10), task 8.9 fix round 2: Sol measured 2.58 bytes per token on the
+    # recorded readiness body (2.80 on narrative); 2.5 covers every recorded Sol request.
+    assert settings.prompt_bytes_per_token_lower_bound == Decimal("2.5")
     assert settings.model_calls_in_ci is False
 
 

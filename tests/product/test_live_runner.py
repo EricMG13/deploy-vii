@@ -7,6 +7,7 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ from deploy_vii.readiness import (
     extraction_coverage,
     live_consumers,
 )
+from tests.product import transcript_support
 from tests.product.live_support import (
     FAKE_KEY,
     SECOND_FAKE_KEY,
@@ -536,14 +538,72 @@ def test_prompt_token_bound_is_the_least_integer_covering_the_bytes(
     assert (tokens - 1) * ratio < exact
 
 
+@given(
+    texts=st.lists(st.text(max_size=400), min_size=2, max_size=2),
+    ratio=st.decimals(min_value=Decimal("0.5"), max_value=Decimal(8), places=2),
+)
+def test_prompt_token_bound_is_monotone_in_bytes_and_never_below_bytes_over_ratio(
+    texts: list[str], ratio: Decimal
+) -> None:
+    """Property (task 8.9 fix round 2): a larger body never bounds lower, and every bound is at
+    least its bytes over the ratio (any text: multi-byte UTF-8 included)."""
+    small, large = sorted(({"x": t} for t in texts), key=runner.request_bytes)
+    for body in (small, large):
+        bound = runner.prompt_token_bound(body, ratio)
+        assert bound >= Fraction(runner.request_bytes(body)) / Fraction(ratio)
+    assert runner.prompt_token_bound(small, ratio) <= runner.prompt_token_bound(large, ratio)
+    assert runner.prompt_token_bound(small, BYTES_PER_TOKEN) <= runner.prompt_token_bound(
+        large, BYTES_PER_TOKEN
+    )
+
+
+def recorded_i2_calls() -> list[tuple[str, dict[str, Any], int]]:
+    """Every committed harness I2 transcript request: (call, the recorded body, the provider's
+    `usage.prompt_tokens` for it), each tied to its entry by the entry's own hashes."""
+    calls = []
+    for path in transcript_support.transcript_entries():
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        if entry["kind"] != "harness":
+            continue
+        directory = transcript_support.REPOSITORY_ROOT / entry["transcript"]
+        if not directory.is_dir():
+            pytest.skip(f"{entry['transcript']} is not in this checkout")
+        recorded = zip(entry["reply_files"], entry["expected"]["requests"], strict=True)
+        for number, (name, expected) in enumerate(recorded, 1):
+            body = json.loads((directory / f"call-{number:02d}-request.json").read_text())
+            assert (
+                transcript_support.request_record(body)["rest_sha256"] == (expected["rest_sha256"])
+            )
+            reply = (directory / name).read_bytes()
+            assert transcript_support.sha256(reply) == entry["evidence_sha256"][name]
+            tokens = json.loads(reply)["usage"]["prompt_tokens"]
+            calls.append((f"{entry['step_id']} {name}", body, tokens))
+    return calls
+
+
+def test_the_settings_bound_covers_every_recorded_i2_request() -> None:
+    """Task 8.9 fix round 2 (decision 0008, MC-10): on every recorded Sol request of the
+    committed I2 transcripts the prompt bound at the settings ratio covers the provider's
+    prompt tokens. At the old 3.0 it fell short on the narrative and readiness bodies (2.80 and
+    2.58 bytes per token)."""
+    calls = recorded_i2_calls()
+    assert len(calls) == 19  # source_context 6, financials 7, narrative 4, readiness 2
+
+    def short(ratio: Decimal) -> list[str]:
+        return [c for c, body, n in calls if runner.prompt_token_bound(body, ratio) < n]
+
+    assert short(BYTES_PER_TOKEN) == []
+    assert {c.split()[0] for c in short(Decimal("3.0"))} == {"narrative", "readiness"}
+
+
 def test_reservation_records_the_bound_inputs(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     result = rig.run(ChatClient(FakeTransport(reply(rig))))
     request = load(attempt_dir(result) / "request.json")
     metrics = load(attempt_dir(result) / "metrics.json")
     parameters = request["non_secret_parameters"]
-    assert parameters["prompt_bytes_per_token_lower_bound"] == "3.0"
-    assert metrics["estimate"]["prompt_bytes_per_token_lower_bound"] == "3.0"
+    assert parameters["prompt_bytes_per_token_lower_bound"] == "2.5"
+    assert metrics["estimate"]["prompt_bytes_per_token_lower_bound"] == "2.5"
     assert metrics["estimate"]["request_bytes"] == runner.request_bytes(request["body"])
     bound = parameters["prompt_tokens_upper_bound"]
     assert metrics["estimate"]["prompt_tokens_upper_bound"] == bound
