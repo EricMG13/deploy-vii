@@ -4,15 +4,16 @@ import json
 import random
 import re
 import shutil
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
+from pydantic import BaseModel, ValidationError
 
 from deploy_vii.contracts import Source, Span
 from deploy_vii.cp1_workflow import FinancialSubmission
@@ -32,9 +33,18 @@ from deploy_vii.live.prompts import (
 )
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import journal_outcome
-from deploy_vii.live.schema import strict_schema
+from deploy_vii.live.schema import exact_json, json_object, strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
-from deploy_vii.live.submission import STEPS, submit_model_payload
+from deploy_vii.live.submission import (
+    BOOK_PARTS,
+    PART_KINDS,
+    STEPS,
+    Parts,
+    assemble,
+    check_part,
+    partial_schema,
+    submit_model_payload,
+)
 from deploy_vii.live.tools import (
     ABSENCE,
     ABSENCE_MARKERS,
@@ -60,6 +70,7 @@ from deploy_vii.live.tools import (
     unread_citation_issues,
 )
 from deploy_vii.preparation import PreparedPack
+from deploy_vii.readiness import shape_issues
 from deploy_vii.registry import (
     PACK_TOOLS,
     STEP_CHAINS,
@@ -67,6 +78,7 @@ from deploy_vii.registry import (
     StepChain,
     extract_tool_steps,
     pack_tool_steps,
+    part_submit_steps,
     step_modules,
     tool_loop_steps,
     tool_set,
@@ -1710,3 +1722,365 @@ def test_a_loop_submit_below_the_coverage_floor_is_rejected_and_escalates(
     assert '"reason": "a completeness-floor rejection"' in events
     step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
     assert step["rules"]["extracted_coverage_min"] == "0.70"
+
+
+# --- task 8.11 (user decision "B"): the financials submit in parts ------------------------------
+
+# The brief's table: what each part holds of a `FinancialBook` (`book_id` names the book in each).
+# `statement_lines` and `statement_identities` are split by statement over IS, CFS and BS.
+PART_TABLE = {
+    "frame": {
+        "entity_perimeter",
+        "accounting_basis",
+        "currency",
+        "unit",
+        "periods",
+        "statement_disclosures",
+        "addback_disclosure",
+        "segment_disclosure",
+    },
+    "IS": {"statement_lines", "statement_identities"},
+    "CFS": {"statement_lines", "statement_identities", "cash_movement_bridges"},
+    "BS": {
+        "statement_lines",
+        "statement_identities",
+        "balance_movements",
+        "balance_movement_bridges",
+    },
+    "other": {
+        "accounts",
+        "addbacks",
+        "segments",
+        "kpis",
+        "facilities",
+        "facility_fx_conversions",
+        "pro_forma",
+        "audit_basis_explanations",
+        "segment_allocation",
+        "limitations",
+    },
+}
+SPLIT_BY_STATEMENT = {"statement_lines", "statement_identities"}
+STATEMENTS = ("IS", "CFS", "BS")
+
+
+def test_every_book_field_belongs_to_exactly_one_part() -> None:
+    """Pin (item 1): the parts' book fields are the brief's table; every `FinancialBook` field
+    but `book_id` is in exactly one part, the two statement registers in IS, CFS and BS split
+    by statement; the frame holds every top-level field of the submission and the review."""
+    assert PART_KINDS == ("frame", "IS", "CFS", "BS", "other")
+    assert {kind: set(fields) for kind, fields in BOOK_PARTS.items()} == PART_TABLE
+    owners: dict[str, set[str]] = {}
+    for kind, fields in PART_TABLE.items():
+        for name in fields:
+            owners.setdefault(name, set()).add(kind)
+    assert set(owners) == set(FinancialBook.model_fields) - {"book_id"}
+    for name, kinds in owners.items():
+        assert kinds == set(STATEMENTS) if name in SPLIT_BY_STATEMENT else len(kinds) == 1, name
+    frame = partial_schema("frame")
+    assert list(frame.model_fields) == list(FinancialSubmission.model_fields)
+    review = frame.model_fields["financial"].annotation
+    assert isinstance(review, type) and issubclass(review, BaseModel)
+    assert list(review.model_fields) == list(FinancialReview.model_fields)
+    for kind in (*STATEMENTS, "other"):
+        assert list(partial_schema(kind).model_fields) == ["books"]
+
+
+def _book_model(kind: str) -> type[BaseModel]:
+    model = partial_schema(kind)
+    holder = model.model_fields["financial"].annotation if kind == "frame" else model
+    assert isinstance(holder, type) and issubclass(holder, BaseModel)
+    book = get_args(holder.model_fields["books"].annotation)[0]
+    assert isinstance(book, type) and issubclass(book, BaseModel)
+    return book
+
+
+@pytest.mark.parametrize("kind", ["frame", "IS", "CFS", "BS", "other"])
+def test_each_partial_schema_is_the_contracts_own_fields(kind: str) -> None:
+    """Nothing retyped: each part's fields have the stored contract's own JSON schema (types,
+    bounds, defaults, markers), and its `books` keep `FinancialReview.books`' bounds."""
+    full = FinancialBook.model_json_schema()["properties"]
+    book = _book_model(kind)
+    assert list(book.model_fields) == [
+        name for name in FinancialBook.model_fields if name == "book_id" or name in PART_TABLE[kind]
+    ]
+    own = book.model_json_schema()["properties"]
+    assert own == {name: full[name] for name in own}
+    holder: type[BaseModel] = partial_schema(kind)
+    if kind == "frame":
+        top = FinancialSubmission.model_json_schema()["properties"]
+        mine = holder.model_json_schema()["properties"]
+        assert {k: v for k, v in mine.items() if k != "financial"} == {
+            k: v for k, v in top.items() if k != "financial"
+        }
+        holder = cast(type[BaseModel], holder.model_fields["financial"].annotation)
+        review = FinancialReview.model_json_schema()["properties"]
+        mine = holder.model_json_schema()["properties"]
+        assert {k: v for k, v in mine.items() if k != "books"} == {
+            k: v for k, v in review.items() if k != "books"
+        }
+    books = holder.model_json_schema()["properties"]["books"]
+    wanted = FinancialReview.model_json_schema()["properties"]["books"]
+    assert {k: v for k, v in books.items() if k != "items"} == {
+        k: v for k, v in wanted.items() if k != "items"
+    }
+
+
+def split(payload: str) -> dict[str, str]:
+    """The five parts of a one-shot payload (the property's reference, apart from the code under
+    test): the frame is every field but each book's part fields, a statement line goes to its
+    statement's part and an identity to its target line's (same `line_id` and `period_id`)."""
+    document = json_object(payload)
+    assert document is not None
+    financial = document["financial"]
+    frame = {key: value for key, value in document.items() if key != "financial"}
+    frame["financial"] = {key: value for key, value in financial.items() if key != "books"}
+    frame["financial"]["books"] = [
+        {
+            key: value
+            for key, value in book.items()
+            if key == "book_id" or key in PART_TABLE["frame"]
+        }
+        for book in financial["books"]
+    ]
+    parts = {"frame": frame}
+    for kind in (*STATEMENTS, "other"):
+        books = []
+        for book in financial["books"]:
+            row = {
+                key: value
+                for key, value in book.items()
+                if key in PART_TABLE[kind] - SPLIT_BY_STATEMENT
+            }
+            if kind in STATEMENTS:
+                lines = [x for x in book.get("statement_lines", []) if x["statement"] == kind]
+                keys = {(x["line_id"], x["period_id"]) for x in lines}
+                row["statement_lines"] = lines
+                row["statement_identities"] = [
+                    x
+                    for x in book.get("statement_identities", [])
+                    if (x["target_line_id"], x["period_id"]) in keys
+                ]
+            books.append({"book_id": book["book_id"], **row})
+        parts[kind] = {"books": books}
+    return {kind: exact_json(part) for kind, part in parts.items()}
+
+
+def grouped(payload: str) -> dict[str, Any]:
+    """`payload` with each book's statement lines grouped IS, CFS, BS and its identities by their
+    target line's statement, each group in payload order (the order Python assembles)."""
+    document = json_object(payload)
+    assert document is not None
+    for book in document["financial"]["books"]:
+        lines = book.get("statement_lines", [])
+        of = {(x["line_id"], x["period_id"]): x["statement"] for x in lines}
+        book["statement_lines"] = sorted(lines, key=lambda x: STATEMENTS.index(x["statement"]))
+        identities = book.get("statement_identities", [])
+        book["statement_identities"] = sorted(
+            identities,
+            key=lambda x: STATEMENTS.index(of[(x["target_line_id"], x["period_id"])]),
+        )
+    return document
+
+
+@st.composite
+def submissions(draw: st.DrawFn, base: str) -> str:
+    """A `FinancialSubmission` generated from `base` (the synthetic case's): its statement lines
+    reordered, thinned and moved between statements (one statement per line id), identities kept
+    for the lines left, some other registers emptied, and sometimes a second book."""
+    document = json_object(base)
+    assert document is not None
+    book = document["financial"]["books"][0]
+    lines = draw(st.permutations(book["statement_lines"]))
+    kept = [line for line in lines if draw(st.booleans()) or draw(st.booleans())]
+    statements = {
+        line_id: draw(st.sampled_from(STATEMENTS))
+        for line_id in sorted({line["line_id"] for line in kept})
+    }
+    book["statement_lines"] = [{**line, "statement": statements[line["line_id"]]} for line in kept]
+    keys = {(line["line_id"], line["period_id"]) for line in kept}
+    book["statement_identities"] = [
+        x
+        for x in draw(st.permutations(book["statement_identities"]))
+        if (x["target_line_id"], x["period_id"]) in keys and draw(st.booleans())
+    ]
+    for name in ("accounts", "facilities", "balance_movement_bridges", "statement_disclosures"):
+        if draw(st.booleans()):
+            book[name] = []
+    if draw(st.booleans()):
+        second = json_object(exact_json(book))
+        assert second is not None
+        document["financial"]["books"].append({**second, "book_id": "second"})
+    payload = exact_json(document)
+    FinancialSubmission.model_validate_json(payload)  # a contract-valid submission
+    return payload
+
+
+def held_parts(parts: dict[str, str], order: Sequence[str]) -> Parts:
+    held = Parts()
+    for kind in order:
+        assert held.submit(kind, parts[kind]) == (), kind
+    return held
+
+
+@settings(
+    max_examples=60, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(data=st.data(), order=st.permutations(["frame", "IS", "CFS", "BS", "other"]))
+def test_split_then_assemble_round_trips_in_any_order_of_arrival(
+    case: Case, data: st.DataObject, order: list[str]
+) -> None:
+    """Property (item 1, decision 0012): for a generated submission, its parts accepted in any
+    order assemble to the one-shot payload of the same objects byte for byte (Python's order:
+    contract field order, statement lines IS, CFS, BS), which parses to the same model; a part
+    re-sent replaces the earlier one of its kind."""
+    payload = data.draw(submissions(case.payload))
+    parts = split(payload)
+    assembled = assemble(held_parts(parts, order))
+    expected = grouped(payload)
+    assert assembled == exact_json(expected)
+    assert FinancialSubmission.model_validate_json(assembled) == (
+        FinancialSubmission.model_validate_json(exact_json(expected))
+    )
+    # Replace semantics: an earlier part of each kind (another generated submission's) is
+    # replaced by the later one, whatever the order.
+    other = split(data.draw(submissions(case.payload)))
+    held = held_parts(other, order)
+    for kind in order:
+        assert held.submit(kind, parts[kind]) == ()
+    assert assemble(held) == assembled
+
+
+def test_a_one_shot_payload_in_contract_order_assembles_byte_for_byte(case: Case) -> None:
+    """The synthetic case's payload, whose lines interleave BS, IS and CFS per period, assembles
+    to its own bytes once its lines are grouped; grouped as Python groups them, it is already
+    canonical (assembling it again changes nothing)."""
+    assembled = assemble(held_parts(split(case.payload), PART_KINDS))
+    assert assembled == exact_json(grouped(case.payload))
+    assert assembled != exact_json(json_object(case.payload))  # the interleave is regrouped
+    assert assemble(held_parts(split(assembled), PART_KINDS)) == assembled
+
+
+def _part(kind: str, payload: str) -> dict[str, Any]:
+    document = json_object(split(payload)[kind])
+    assert document is not None
+    return document
+
+
+def test_a_part_is_checked_on_arrival_against_its_partial_schema(case: Case) -> None:
+    """A part answers its own shape issues (in the stored contract's wording) and the checks a
+    split needs: each line in its statement's part, each identity with its target line, each
+    book once. A field Python fills (a hash, a scope dimension) is never asked for."""
+    frame = _part("frame", case.payload)
+    for book in frame["financial"]["books"]:
+        for name in ("currency", "unit", "accounting_basis", "entity_perimeter"):
+            del book[name]
+            for period in book["periods"]:
+                del period[name]
+    del frame["context_step_sha256"]
+    del frame["binding"]["financial_review_sha256"]
+    for period in frame["financial"]["books"][0]["periods"]:
+        for citation in period["citations"]:
+            del citation["source_sha256"]
+    assert check_part("frame", exact_json(frame)) == ()
+    frame["financial"]["run_id"] = 7
+    frame["surplus"] = 1
+    assert check_part("frame", exact_json(frame)) == (
+        "surplus: Extra inputs are not permitted",
+        "financial.run_id: Input should be a valid string",
+    )
+    cfs = _part("CFS", case.payload)
+    book = cfs["books"][0]
+    assert check_part("CFS", exact_json(cfs)) == ()
+    assert check_part("IS", exact_json(cfs))[0] == (
+        "books.0.cash_movement_bridges: Extra inputs are not permitted"
+    )
+    del book["cash_movement_bridges"]
+    first = book["statement_lines"][0]
+    assert check_part("IS", exact_json(cfs))[0] == (
+        f"books.0.statement_lines.0.statement: a CFS line ({first['line_id']} "
+        f"{first['period_id']}) in the IS part; send it in the CFS part"
+    )
+    target = book["statement_identities"][0]
+    book["statement_lines"] = [
+        x
+        for x in book["statement_lines"]
+        if (x["line_id"], x["period_id"]) != (target["target_line_id"], target["period_id"])
+    ]
+    assert check_part("CFS", exact_json(cfs)) == (
+        f"books.0.statement_identities.0.target_line_id: {target['target_line_id']} "
+        f"{target['period_id']} is not a line of book consolidated in this CFS part",
+    )
+    twice = {"books": [_part("IS", case.payload)["books"][0]] * 2}
+    assert check_part("IS", exact_json(twice)) == (
+        "books.1.book_id: consolidated repeats books.0; a part holds each book once",
+    )
+    assert check_part("other", "[1]") == ("(root): Input should be an object",)
+    assert check_part("BS", '{"books": []}') == (
+        "books: Tuple should have at least 1 item after validation, not 0",
+    )
+    with pytest.raises(ValueError, match="unknown part"):
+        check_part("KPI", "{}")
+
+
+def test_a_rejected_part_changes_nothing_held_and_a_resent_one_replaces_it(case: Case) -> None:
+    parts = split(case.payload)
+    held = held_parts(parts, ["frame", "IS"])
+    wrong = _part("CFS", case.payload)
+    assert held.submit("IS", exact_json(wrong)) != ()
+    assert held.held["IS"] == json_object(parts["IS"])
+    fewer = _part("IS", case.payload)
+    fewer["books"][0]["statement_lines"] = fewer["books"][0]["statement_lines"][:2]
+    fewer["books"][0]["statement_identities"] = []
+    assert held.submit("IS", exact_json(fewer)) == ()
+    assert held.held["IS"] == fewer
+    assert held.listing() == (
+        "parts held: frame (11 entries), IS (2 lines); parts not sent: CFS, BS, other"
+    )
+
+
+def test_a_part_with_a_null_for_a_defaulted_field_is_held_with_the_default(case: Case) -> None:
+    """The sent schema makes a defaulted field nullable (`live.schema`); the part is held
+    null-resolved against its own schema, as `normalise` resolves a one-shot payload."""
+    bs = _part("BS", case.payload)
+    bs["books"][0]["balance_movements"] = None
+    held = Parts()
+    assert held.submit("BS", exact_json(bs)) == ()
+    assert held.held["BS"]["books"][0]["balance_movements"] == []
+
+
+def contract_issues(document: dict[str, Any]) -> tuple[str, ...]:
+    """The stored contract's own shape issues of an assembled payload."""
+    try:
+        FinancialSubmission.model_validate_json(exact_json(document))
+    except ValidationError as error:
+        return shape_issues(error)
+    return ()
+
+
+def test_missing_parts_contribute_nothing_and_no_value_is_invented(case: Case) -> None:
+    """An assembly holds what was sent: an absent part's fields are absent (the contract's own
+    default, or its "Field required"), never filled; with nothing sent it is `{}`."""
+    parts = split(case.payload)
+    assert assemble(Parts()) == "{}"
+    only = json_object(assemble(held_parts(parts, ["IS"])))
+    assert only is not None
+    assert list(only) == ["financial"] and list(only["financial"]) == ["books"]
+    (book,) = only["financial"]["books"]
+    assert list(book) == ["book_id", "statement_lines", "statement_identities"]
+    assert {x["statement"] for x in book["statement_lines"]} == {"IS"}
+    no_other = json_object(assemble(held_parts(parts, ["frame", "IS", "CFS", "BS"])))
+    assert no_other is not None
+    (book,) = no_other["financial"]["books"]
+    assert not set(book) & PART_TABLE["other"]
+    issues = contract_issues(no_other)
+    assert "financial.books.0.accounts: Field required" in issues
+    assert "financial.books.0.segment_allocation: Field required" in issues
+
+
+def test_the_part_submit_steps_are_financials_and_quote_the_pack() -> None:
+    cp1 = next(chain for chain in STEP_CHAINS if chain.module_id == "CP-1")
+    assert part_submit_steps() == cp1.part_submits == {"financials"}
+    assert all(not chain.part_submits for chain in STEP_CHAINS if chain.module_id != "CP-1")
+    with pytest.raises(ValueError, match="submits narrative in parts, not one of its steps"):
+        StepChain(**{**cp1.__dict__, "part_submits": frozenset({"narrative"})})
