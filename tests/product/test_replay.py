@@ -25,7 +25,12 @@ from deploy_vii.live.client import ChatClient
 from deploy_vii.live.cohort import accept_proxy_payload
 from deploy_vii.live.corpus import CorpusError, entry_from_attempt, write_entry
 from deploy_vii.live.ledger import Ledger
-from deploy_vii.live.prompts import EXTRACT_RULE
+from deploy_vii.live.prompts import (
+    EXTRACT_RULE,
+    FINANCIAL_PARTS_RULE,
+    parts_tools_rule,
+    tools_rule,
+)
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import StepSpec
 from deploy_vii.live.schema import marked_fields
@@ -1139,8 +1144,14 @@ def test_the_financials_prompt_change_is_exactly_the_named_rule(tmp_path: Path) 
     replayed = transcript_support.replay(entry, start, tmp_path / "replay")
     system = replayed.bodies[0]["messages"][0]["content"]
     rule = f"\nk. {EXTRACT_RULE}"
-    assert system.count(rule) == 1
-    before = transcript_support.sha256(system.replace(rule, ""))
+    # Task 8.11: the loop's rule l and its parts rule 5; with both undone and rule k removed,
+    # the prompt is the one recorded before 8.10b, byte for byte.
+    parts = f"\nl. {FINANCIAL_PARTS_RULE}"
+    rule5 = parts_tools_rule("submit_financials")
+    for added in (rule, parts, rule5):
+        assert system.count(added) == 1, added
+    undone = system.replace(parts, "").replace(rule5, tools_rule("submit_financials"))
+    before = transcript_support.sha256(undone.replace(rule, ""))
     assert before == FINANCIALS_PROMPT_BEFORE_8_10B
     assert {r["system_sha256"] for r in entry["expected"]["requests"]} == {before}
     hybrid = load_entry(FINANCIALS_TRANSCRIPTS / "hybrid-cp1-6-sol-medium.json")
@@ -1150,6 +1161,10 @@ def test_the_financials_prompt_change_is_exactly_the_named_rule(tmp_path: Path) 
         assert (
             "task 8.10b (25 Oct 2026" in prompt["changed_by"]
             and "EXTRACT_RULE" in (prompt["changed_by"])
+        )
+        assert prompt["changed_by"].endswith(
+            "; task 8.11 (25 Oct 2026; FINANCIAL_PARTS_RULE, financials rule l; rule 5 "
+            "parts_tools_rule)"
         )
     assert entry["system_prompt"]["recorded_sha256"] == FINANCIALS_PROMPT_BEFORE_8_10B
     assert hybrid["system_prompt"]["changed_by"].startswith("task 7.19 (QUOTE_PAGE_RULE); ")
