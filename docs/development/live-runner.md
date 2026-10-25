@@ -50,7 +50,7 @@ one more record plus its schemas, composer and prompt contract.
 
 | Module | Role |
 | --- | --- |
-| `settings.py` | Reads `[model_tests]` from `settings/project.toml` with `tomllib` (candidates, caps, artifact root, `credential_file`, `credential_token_index`: an integer >= 1, default 1 when absent; 0, negatives, booleans, floats and strings are refused; `prompt_bytes_per_token_lower_bound`: required, a positive finite number, no default). |
+| `settings.py` | Reads `[model_tests]` from `settings/project.toml` with `tomllib` (candidates, caps, artifact root, `credential_file`, `credential_token_index`: an integer >= 1, default 1 when absent; 0, negatives, booleans, floats and strings are refused; `prompt_bytes_per_token_lower_bound`: required, a positive finite number, no default). Task 8.12: `[model_tests.completeness_floor]` holds `min_statement_lines` (an integer >= 1), `extracted_coverage_min` (a Decimal string from 0 to 1 with at most four decimal places; floats, `NaN`, negatives and values above 1 are refused) or both, and no other key; an empty table is refused, and an absent key is that floor off (see "Extracted coverage"). |
 | `credential.py` | `load_key` (wraps `load_key_with_note`, which returns a `LoadedKey`): RTF to text with `textutil` (fails closed without it; the file-exists check runs first, so a missing file is reported the same on every platform), then keeps one whole `sk-or-` token from any surrounding label, prose, quotes, blank lines, BOM or CRLF; a repeated token counts once. `load_key_with_note(path, index=1)` returns the distinct token at that 1-based position in the converted text's order; `index` is `[model_tests].credential_token_index`, passed as a parameter through `dispatch(..., key_index=)` and `ChatClient(..., key_index=)`. An index beyond the distinct tokens fails closed ("credential_token_index N but only M key-shaped tokens"; a repeated token is one), and an index that is not an integer >= 1 is refused before the file is read. A refused key (for example a 401) is never retried with another token: there is no automatic fallback. `LoadedKey.note()` gives `{"key_tokens_found": M, "key_token_used": N}`, which the runner adds to the manifest's `credential` block and the key-status probe to the credit record (`key_file`), only when M > 1. Refuses an empty file or no token ("no key-shaped token among N non-empty lines"); messages and notes carry counts only, never file text; a `textutil` failure, timeout or non-UTF-8 output is a `CredentialError` with no chained cause. Documented fail-open: a key broken inside by an invisible format character or a line break yields a truncated token, which is sent (a 401 or a refused key check follows; nothing leaks or is spent). `scrub_key`, `redact`. |
 | `catalog.py` | `Catalog` (fetch or file), `pin` to a `PinnedPool`, DeepSeek resolution, `resolve_effort`. |
 | `draw.py` | `draw(pool, seed)`, algorithm `python-random-MT19937`; a one-model pool is not drawn from (algorithm `trivial-single-model-pool`, index 0, seed still recorded; decision 0005 amendment, 22 Oct 2026). |
@@ -65,7 +65,7 @@ one more record plus its schemas, composer and prompt contract.
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
 | `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
 | `loop.py` | Task 8.0d; task 8.9: every live step ([every step a tool loop](#every-step-a-tool-loop-task-89)). `run_tool_step` (one step as a tool loop, ported from `devtools/hybrid_cp1.py`; one attempt directory and ledger attempt per call; `tool-calls.jsonl` beside `output.md`), `ToolLimits`, `ToolStepResult`, `call_nudge`, `transient`. Schema-check rejections do not apply to tool-loop steps (their schema is sent as the submit tool's parameters); a runtime 400 that names the schema ends the step as `provider-schema-error`. |
-| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`; task 8.9: bounded to a step's declared sources; task 8.10b: `extract_statements` for `financials`, see "Statement extraction"), `tool_specs` (task 8.9: by tool set; a submit-only step gets its submit alone), `applicable_rules` (task 8.9), the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
+| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`; task 8.9: bounded to a step's declared sources; task 8.10b: `extract_statements` for `financials`, see "Statement extraction"), `tool_specs` (task 8.9: by tool set; a submit-only step gets its submit alone), `applicable_rules` (task 8.9), the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. Task 8.12 (user decision "C"): `extracted_coverage`, `seen_tables` and `coverage_issues`, the extracted-coverage measure and floor (`ToolRules.coverage_min`, `ToolRules.from_settings`; off by default, see "Extracted coverage"); a set coverage floor adds `; extracted-coverage floor: <x> of each expected cell's extracted statement lines` to that line. |
 
 ### Per-module context (task 8.6)
 
@@ -1499,6 +1499,36 @@ phase 2 (task 8.10b) wires it into the `financials` tool loop.
   the named specs before hashing, so every recorded request still matches exactly; rule k is
   named the same way through `system_prompt.changed_by`. Verdicts, tool results and costs
   replay as recorded.
+
+## Extracted coverage
+
+25 Oct 2026 (task 8.12, user decision "C", 24 Oct 2026): Python measures how much of the
+extracted statement lines a `financials` payload covers and records it on every submit
+(`extracted_coverage`; the definition, agreement and measured values are in
+docs/testing-and-telemetry.md, "Extracted coverage"). The model-facing prompt and schema are
+unchanged.
+
+- **The floor key.** `[model_tests.completeness_floor] extracted_coverage_min = "0.50"`: a
+  Decimal string from 0 to 1 with at most four places. It is off by default (absent or
+  commented out; the user turns it on after seeing measured ratios). With it set,
+  `ToolRules.issues` for `financials` adds one issue per expected cell whose coverage is below
+  it: `Financials incomplete: coverage <x> of <cell> below the floor <y> (<k> of <n> extracted
+  lines covered)`. The comparison is exact (k < y x n), and the cell's four-place coverage,
+  rounded down, agrees with it.
+- **Unmeasured cells.** A cell with no extracted lines is not judged. This fail-open is stated
+  in every rules record (`extracted_coverage_unmeasured`), and each such cell's reason is in the
+  telemetry. The line-count floor (`min_statement_lines`, also off) judges a cell's line count;
+  the two floors may be set together.
+- **Escalation.** A coverage issue starts with `Financials incomplete`, so it counts as a
+  completeness-floor rejection: `completeness_floor_failed` on the submit, and escalation.
+- **Rules record.** `to_record` reports `extracted_coverage_min` and its reason when off.
+- **Pages.** The tables are the financial sources' pages the model was shown by the submit
+  (`seen_tables`), extracted once per submit. The scratch and live journals judge the same
+  tables.
+- **I2.** With the floor off, the two `financials` transcripts replay as recorded: the field is
+  additive. With `"1.00"`, hybrid-cp1-6's accepted payload is rejected with one issue for each
+  of its eight cells (`tests/product/test_live_loop.py`). The synthetic entry stays accepted:
+  it read no page, so no cell is measured.
 
 ## Not covered here
 

@@ -119,6 +119,62 @@ null, not zero. Task 8.10b: `pages_read` counts full `read_pages` reads only, as
 cited-page rule does. The CP-1 `quality` loop's `manifest.json` `hashes` add `quality_inputs_sha256`,
 the hash of the QA inputs its prompt was built from.
 
+**Extracted coverage (task 8.12, user decision "C", 24 Oct 2026).** Every `financials` submit's
+record holds `extracted_coverage` next to `completeness` (`live.tools.extracted_coverage`), or
+null with `extracted_coverage_reason` when the retained payload does not parse (the stage
+validator rejects it). Python computes it; the model-facing prompt and schema are unchanged.
+
+- **Pages.** Per submit, the loop extracts the `page:N` spans of the `source_context` review's
+  financial sources that the model had been shown by then, through `read_pages` or
+  `extract_statements` (`tools.seen_tables`). It never extracts a page the model was not
+  shown, never the whole filing.
+- **Cells.** The cells are the line-count floor's (`expected_cells`): IS and CFS per fiscal-year
+  scope, BS per period-end scope. Each is keyed `<statement> <source> scope <id> (<dates>)`.
+- **A cell's extracted lines.** Every line of the extracted pages of the cell's source that the
+  payload's lines of the cell's statement cite (in books bound to the scope's entity, any
+  period). "Cite" here and below means the line's `value.citations`; `sign_citations` do not
+  count. The extractor tags no statement, and header years proved unreliable (CZR's
+  statement headers print `December 31,` with the years on another line, while a note table
+  prints both years). So the pages are the cited ones alone. A comparative year therefore
+  counts its statement's page even when the payload holds none of its lines.
+- **Covered.** An extracted line is covered when a payload line of the same statement, in a
+  period the cell's scope matches (`scope_matches_period`; for BS, the scope's end date), cites
+  the line's page with either:
+  - a quote holding one of the line's printed non-nil values verbatim as a whole number (`40`
+    is not in `140`, `4,000`, `40.5` or `(40)`), or
+  - a label equal to the extracted label after whitespace normalisation.
+
+  Flagged lines count; a line holding only nil dashes is covered by its label alone.
+- **Coverage.** Covered / extracted as a Decimal string rounded down to four places. It is null
+  when nothing is extracted, with the reason: no line of the statement cites a page of the
+  source; no cited page was read or extracted; or the cited pages hold no extracted line.
+  `overall` sums the cells (a line counts once per cell) and gives the reason when nothing is
+  extracted.
+- **Agreement (telemetry only).** Each payload statement line with an amount, on the extracted
+  pages it cites, is compared with the extracted lines of its label there (whitespace
+  normalised):
+  - `agreed`: its amount is one of their `values`; a payload 0 agrees with a printed nil dash;
+  - `sign_differs`: only its negation is. This is a `signed` expense the page prints as a
+    magnitude, or a flipped sign; Python cannot tell which;
+  - `disagreed`: neither is (a retyped `-100` for the printed `(10)`);
+  - `unmatched`: no line there has its label.
+
+  `not_on_an_extracted_page` and `without_amount` count the rest. The first five disagreements
+  and the first five sign differences are listed with their pages, label, payload value and
+  extracted values.
+
+Measured on the recorded `financials` payloads (25 Oct 2026):
+
+- hybrid-cp1-6 Sol medium (19 pages read): IS FY2025 17 of 29 lines (0.5862), CFS FY2025 40 of 48
+  (0.8333), BS 2025-12-31 31 of 33 (0.9393), and 0 for each of the five comparative cells.
+  Overall 88 of 297 (0.2962). Agreement: 79 agreed, 9 sign differences (expenses and cash
+  paid printed as magnitudes, written negative under `signed`), 0 disagreed, 11 unmatched (8
+  renamed IS lines such as `Casino revenue` for the printed `Casino`, `Other investing cash
+  flow`, `Preferred stock`, `Common stock`). The 22 uncovered current-year lines are those 11
+  renamed lines, 4 per-share and share-count lines and 7 supplemental cash-flow lines on
+  page:61.
+- synthetic-search-accept: no page read, so every cell is null with its reason.
+
 The last call's block is the step's. `manifest.json` records the tools offered, `tool_choice`,
 the previous call and the retried call, and its `hashes` include `tool-calls.jsonl`
 (`tool_transcript_sha256`). In the batch report a tool-loop step's USD cell is the step's total
