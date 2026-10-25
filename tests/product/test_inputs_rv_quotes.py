@@ -530,10 +530,10 @@ def test_cli_kind_comes_from_the_input_table(
 ) -> None:
     from deploy_vii.inputs import KINDS
 
-    assert tuple(KINDS) == ("rv",)
+    assert tuple(KINDS) == ("rv", "portfolio")  # portfolio: task PF-1
     assert KINDS["rv"] is validate_rv_quotes
-    assert run_cli(["portfolio", str(tmp_path / "x.xlsx")], monkeypatch) == 2
-    assert "invalid choice: 'portfolio'" in capsys.readouterr().err
+    assert run_cli(["quotes", str(tmp_path / "x.xlsx")], monkeypatch) == 2
+    assert "invalid choice: 'quotes'" in capsys.readouterr().err
 
 
 def test_template_validates_ok_with_six_synthetic_rows() -> None:

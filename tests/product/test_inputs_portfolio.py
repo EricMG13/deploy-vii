@@ -6,6 +6,7 @@ issuers, no market or fund data.
 """
 
 import io
+import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -1027,3 +1028,57 @@ def test_validate_portfolio_reads_the_file(tmp_path: Path) -> None:
 def test_fixes_are_unique_strings() -> None:
     assert len(set(FIXES)) == len(FIXES)
     assert TEMPLATE_PATH in " ".join(FIXES)
+
+
+def run_cli(arguments: list[str], monkeypatch: pytest.MonkeyPatch) -> int:
+    from deploy_vii.__main__ import main
+
+    monkeypatch.setattr(sys, "argv", ["deploy-vii", "validate-input", *arguments])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    code = exit_info.value.code
+    assert isinstance(code, int)
+    return code
+
+
+def test_cli_portfolio_prints_ok_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / FILE
+    path.write_bytes(workbook(valid()))
+    assert run_cli(["portfolio", str(path)], monkeypatch) == 0
+    assert capsys.readouterr().out == "OK: 7 sheets, 2 compliance rows\n"
+
+
+def test_cli_portfolio_prints_one_line_per_issue_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = changed("Compliance_Monitor", 0, {"headroom": "0.15", "checked_by": None})
+    path = tmp_path / FILE
+    path.write_bytes(workbook(data))
+    assert run_cli(["portfolio", str(path)], monkeypatch) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{FILE}:Compliance_Monitor!M2: checked_by is empty — fix: enter who checked the row,"
+        " e.g. analyst",
+        f"{FILE}:Compliance_Monitor!J2: headroom 0.15 is not limit 2.5 minus current_value 2.37"
+        f" = 0.13 (to within 0.01) — fix: {COMPLIANCE_HEADROOM_FIX}",
+        "FAILED: 2 issues",
+    ]
+
+
+def test_cli_portfolio_json_prints_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / FILE
+    path.write_bytes(workbook(changed("Exposure_Summary", 0, {"value": "999"})))
+    assert run_cli(["portfolio", str(path), "--json"], monkeypatch) == 1
+    printed = PortfolioReport.model_validate_json(capsys.readouterr().out)
+    assert printed == validate_portfolio(path)
+    assert (printed.ok, printed.sheets, printed.compliance_rows) == (False, 7, 2)
+
+
+def test_cli_portfolio_kind_comes_from_the_input_table() -> None:
+    from deploy_vii.inputs import KINDS
+
+    assert tuple(KINDS) == ("rv", "portfolio")
+    assert KINDS["portfolio"] is validate_portfolio

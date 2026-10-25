@@ -6,6 +6,10 @@
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from deploy_vii.inputs.portfolio import validate_portfolio
 from deploy_vii.inputs.rv_quotes import ValidationReport, validate_rv_quotes
 
-KINDS: Mapping[str, Callable[[Path], ValidationReport]] = {"rv": validate_rv_quotes}
+KINDS: Mapping[str, Callable[[Path], ValidationReport]] = {
+    "rv": validate_rv_quotes,
+    "portfolio": validate_portfolio,
+}
