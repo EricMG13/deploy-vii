@@ -13,7 +13,7 @@ import pytest
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
-from deploy_vii.contracts import Span
+from deploy_vii.contracts import Source, Span
 from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.execution import Execution
 from deploy_vii.financial_contracts import FinancialBook, FinancialReview
@@ -653,8 +653,8 @@ DECK_PAGE = "Deck revenue        1        2"
 
 
 def statement_pack(store: Execution) -> PreparedPack:
-    """The synthetic pack with S1's spans as pages 1-9 (page:2 a statement page) and a second
-    source `deck` holding a statement page too."""
+    """The synthetic pack with S1's spans as pages 1-9 (page:2 a statement page), a second
+    source `deck` holding a statement page too, and a missing (not ready) source `gone`."""
     pack = store.pack()
     source = pack.sources[0]
     spans = tuple(
@@ -665,7 +665,8 @@ def statement_pack(store: Execution) -> PreparedPack:
         update={"source_id": "deck", "spans": (Span(locator="page:1", text=DECK_PAGE),)}
     )
     paged_source = source.model_copy(update={"spans": spans})
-    return pack.model_copy(update={"sources": (paged_source, deck)})
+    gone = Source(source_id="gone", name="Missing filing", status="missing", limitation="absent")
+    return pack.model_copy(update={"sources": (paged_source, deck, gone)})
 
 
 def names(specs: tuple[dict[str, Any], ...]) -> list[str]:
@@ -738,6 +739,8 @@ def test_extract_statements_renders_the_lines_as_delimited_source_data(case: Cas
     ("raw", "reason"),
     [
         ({"source_id": "deck", "locators": ["page:1"]}, "deck is not one of the sources this"),
+        # Review m6: declared, but not ready.
+        ({"source_id": "gone", "locators": ["page:1"]}, "source gone is unavailable"),
         ({"source_id": "S9", "locators": ["page:1"]}, "unknown source_id 'S9'"),
         ({"source_id": "S1", "locators": ["page:99"]}, "page:99 is not a located span of S1"),
         ({"source_id": "S1", "locators": ["page:02"]}, "page:02 is not a located span of S1"),
@@ -759,7 +762,7 @@ def test_extract_statements_renders_the_lines_as_delimited_source_data(case: Cas
 def test_an_extract_call_outside_the_declared_sources_or_the_pack_is_refused(
     case: Case, raw: dict[str, Any], reason: str
 ) -> None:
-    tools = PackTools(statement_pack(case.store), sources=("S1",))
+    tools = PackTools(statement_pack(case.store), sources=("S1", "gone"))
     with pytest.raises(ToolError, match=reason):
         tools.extract_statements(raw)
     assert tools.seen() == Seen()  # a refused call records nothing
