@@ -73,7 +73,7 @@ from deploy_vii.registry import (
     tool_sets,
 )
 from deploy_vii.source_context import SourceContextReview
-from deploy_vii.statement_extract import extract_statement_lines
+from deploy_vii.statement_extract import ExtractedTable, extract_statement_lines
 from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_source_context as source_context_tests
 from tests.product.live_support import FAKE_KEY, make_rtf_key
@@ -1396,6 +1396,42 @@ def test_a_payload_zero_agrees_with_a_printed_nil_dash(paged_case: PagedCase) ->
     measured = extracted_coverage(json.dumps(document), paged_case.context, (table,))
     assert measured is not None
     assert (measured["agreement"]["agreed"], measured["agreement"]["disagreed"]) == (29, 1)
+
+
+def test_a_nil_dash_is_never_quote_matched_and_a_nil_only_line_needs_its_label(
+    paged_case: PagedCase,
+) -> None:
+    """Fix round 1 (review F4): a quote holding a printed dash covers no line by that dash, so a
+    line printing only nil dashes is covered by its label alone; a line printing a dash beside
+    numbers is still covered by a quote holding one of the numbers."""
+    row = "Synthetic ncf          20          20         20            20           80"
+    nil_only = "Synthetic ncf          —           —          —             —            —"
+    assert row in CFS_PAGE
+    table = extract_statement_lines(CFS_PAGE.replace(row, nil_only), "page:1", source_id="S1")
+    ncf = next(line for line in table.lines if line.label == "Synthetic ncf")
+    assert ncf.values == (None,) * 5 and ncf.raw_values == ("—",) * 5
+
+    def covered(label: str, quote: str, page: ExtractedTable = table) -> int:
+        document = built(paged_case)
+        for line_id in FY_LINES:  # nothing else covers anything
+            rename(cfs_line(document, line_id, "FY"))
+        line = cfs_line(document, "ncf", "FY")
+        line["label"], line["value"]["citations"][0]["quote"] = label, quote
+        found = cell(extracted_coverage(json.dumps(document), paged_case.context, (page,)))
+        assert found["extracted"] == 6
+        count: int = found["covered"]
+        return count
+
+    assert covered("Net change", "Synthetic ncf — —") == 0  # the dash is not quoted
+    assert covered("Net change", "—") == 0
+    assert covered("Synthetic ncf", "x") == 1  # by its label alone
+    mixed = CFS_PAGE.replace(
+        row, row.replace("          20           80", "          —            83")
+    )
+    with_dash = extract_statement_lines(mixed, "page:1", source_id="S1")
+    assert None in next(x for x in with_dash.lines if x.label == "Synthetic ncf").values
+    assert covered("Net change", "—", with_dash) == 0
+    assert covered("Net change", "ncf 83", with_dash) == 1  # 83: no other line prints it
 
 
 def test_agreement_lists_the_first_five_disagreements(paged_case: PagedCase) -> None:
