@@ -93,6 +93,7 @@ shard-b tests/product/test_report_tables.py
 shard-b tests/product/test_report_view.py
 shard-b tests/product/test_report_view_call.py
 shard-b tests/product/test_source_context.py
+shard-b tests/product/test_statement_extract.py
 shard-b tests/product/test_statement_history.py
 shard-b tests/product/test_statements.py
 shard-b tests/product/test_step_registry.py

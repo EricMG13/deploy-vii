@@ -1,0 +1,54 @@
+                                                                          CAESARS ENTERTAINMENT, INC.
+                                                               CONSOLIDATED STATEMENTS OF CASH FLOWS
+
+                                                                                                                                                 Years Ended December 31,
+(In millions)                                                                                                                      2025                       2024                        2023
+CASH FLOWS FROM OPERATING ACTIVITIES:
+Net income (loss)                                                                                                        $                  (437)    $                  (211)    $                  828
+Adjustments to reconcile net income (loss) to net cash provided by operating activities:
+   Depreciation and amortization                                                                                                           1,417                      1,324                       1,261
+   Amortization of deferred financing costs and discounts                                                                                    178                         179                        200
+   Provision for credit losses                                                                                                                43                          49                          41
+   Loss on extinguishment of debt                                                                                                               4                         89                        200
+   Non-cash lease amortization                                                                                                                24                          26                          51
+   Gain on investments                                                                                                                         (1)                        (7)                         (5)
+   Stock-based compensation expense                                                                                                           95                          94                        104
+   (Gain) loss on sale or disposal of property, equipment, trademark and businesses                                                           17                       (359)                          22
+   Impairment charges                                                                                                                        182                         302                          95
+   Deferred income taxes                                                                                                                     (11)                         87                       (888)
+   Other non-cash adjustments to net (income) loss                                                                                             (8)                       (23)                        (40)
+Change in operating assets and liabilities:
+   Accounts receivable                                                                                                                       (53)                         86                         (82)
+   Prepaid expenses and other assets                                                                                                         (49)                        (13)                         39
+   Income taxes receivable and payable, net                                                                                                  (81)                        (48)                        (27)
+   Accounts payable, accrued expenses and other liabilities                                                                                  (18)                      (500)                          10
+        Net cash provided by operating activities                                                                                          1,302                      1,075                       1,809
+
+CASH FLOWS FROM INVESTING ACTIVITIES:
+   Purchase of property and equipment                                                                                                       (805)                    (1,296)                     (1,264)
+   Acquisition of intangible assets                                                                                                            (4)                       (15)                        (30)
+   Proceeds from sale of property, equipment, trademark and businesses                                                                       218                         554                           1
+   Proceeds from the sale of investments                                                                                                        8                         14                           4
+   Distributions from unconsolidated affiliate                                                                                                23                          39                          —
+   Investments in unconsolidated affiliates                                                                                                    (6)                        —                           (3)
+   Other                                                                                                                                       (5)                        —                           36
+        Net cash used in investing activities                                                                                               (571)                      (704)                     (1,256)
+
+CASH FLOWS FROM FINANCING ACTIVITIES:
+   Proceeds from long-term debt and revolving credit facilities                                                                            1,580                      7,525                       5,460
+   Repayments of long-term debt and revolving credit facilities                                                                           (1,969)                    (7,670)                     (6,106)
+   Financing obligation payments                                                                                                             (26)                         (8)                         (8)
+   Debt issuance and extinguishment costs                                                                                                     —                        (121)                         (79)
+   Repurchase of common stock                                                                                                               (229)                      (191)                          —
+   Taxes paid related to net share settlement of equity awards                                                                               (17)                        (17)                        (27)
+   Payments to acquire ownership interest in subsidiary                                                                                       —                           —                          (66)
+   Contributions from noncontrolling interest owners                                                                                          —                           —                          116
+   Distributions to noncontrolling interest owners                                                                                          (102)                        (16)                         (3)
+        Net cash used in financing activities                                                                                               (763)                      (498)                       (713)
+   Decrease in cash, cash equivalents and restricted cash                                                                                    (32)                      (127)                       (160)
+   Cash, cash equivalents and restricted cash, beginning of period                                                                         1,016                      1,143                       1,303
+   Cash, cash equivalents and restricted cash, end of period                                                             $                   984     $                1,016      $                1,143
+
+
+Table of Contents
+                                                                                                   60

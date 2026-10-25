@@ -172,6 +172,19 @@ QUOTE_PAGE_RULE = (
     "printed at the foot of the preceding page is not on the table's page: quote a row label or "
     "a figure from the table's own page, or cite the heading's own page."
 )
+# Task 8.10b (user decision "A", 24 Oct 2026; phase 2): the candidate screen failed `financials`
+# on hand transcription of about 800 statement objects; Python extracts the printed lines
+# (`live.tools.extract_statements`) and the model maps and cites them instead of retyping them.
+# Fix round 1 (B1): amounts are still written as rule a says and items keep their rule f
+# ids; a value no line holds is read and cited through `read_pages`.
+EXTRACT_RULE = (
+    "Statement lines come from `extract_statements`: keep its labels verbatim and take each "
+    "amount from the line's raw_values, written as rule a says, never retyped from memory or "
+    "prose. You map `item_id`/`period_id`, choose `line_kind` and `sign_convention`, and cite "
+    "the page. A value no extracted line holds keeps its rule f `item_id`, is read with "
+    "`read_pages` and cited there, and carries a limitation saying it was not extracted. "
+    "Verify a line the tool flags with `read_pages` before using it."
+)
 # Task 7.14 (batches e1-cp1-13 and -14: three of four source contexts left `currency` null on every
 # scope and worded the current year's perimeter unlike the comparative years'):
 # `source_context.validate_source_context` rejects a null dimension on a financial source's
@@ -691,7 +704,8 @@ STEP_CONTRACTS: Mapping[str, str] = {
         f"g. {CONFLICT_RULE}\n"
         f"h. {SEGMENT_ALLOCATION_RULE}\n"
         f"i. {BOUND_SCOPE_RULE}\n"
-        f"j. {QUOTE_PAGE_RULE}"
+        f"j. {QUOTE_PAGE_RULE}\n"
+        f"k. {EXTRACT_RULE}"
     ),
     # Task 7.0i: the model supplies no hash. Every CP-1 hash binding is pre-filled by Python
     # (`live.submission.prefill`) and left out of the sent schema, so no rule asks for one.
