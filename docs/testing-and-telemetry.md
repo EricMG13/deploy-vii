@@ -169,5 +169,11 @@ read-only pack tools and the step's own submit tool, with `tool_choice: required
 24 Oct 2026; decision 0005 row 8.0d). Luna's Chat Completions tool-calling limit above therefore
 applies before any Luna tool-loop test is admitted. The pool is currently Sol alone.
 
+25 Oct 2026: skill rehearsals (task LP-1, [rehearsals](development/rehearsals.md)) form the
+labelled `proxy-claude` cohort of DC-8. A stand-in agent follows the packaged skill through the
+real CLI while `devtools/skill_rehearsal.py` records commands, issues, the report and an
+estimated cost (US$12 cap per rehearsal, inside the US$200 ceiling). The cohort is never pooled
+with the Sol pool and its results are never model-quality evidence.
+
 Not verified: account entitlement, per-provider effort mapping, adapter/tool
 behavior, live quality, cost or performance. These require working tests and inputs.
