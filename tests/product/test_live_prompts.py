@@ -798,6 +798,29 @@ def test_the_qa_scope_is_required_for_quality_and_refused_elsewhere() -> None:
         prompts.build("readiness", pack, (), STEPS["readiness"].schema, scope={})
 
 
+@pytest.mark.parametrize("step_id", tuple(STEPS))
+def test_source_readiness_metadata_preserves_module_context_and_scope_guards(step_id: str) -> None:
+    pack, _ = readiness_fixture()
+    schema = STEPS[step_id].schema
+    metadata = {"source_readiness_addendum": {"limitations": ["Synthetic restriction"]}}
+    scope = {} if step_id in prompts.SCOPE_BLOCKS else None
+    shown = prompts.build(step_id, pack, (), schema, module_context=metadata, scope=scope)
+    assert "Synthetic restriction" in shown[1].content
+    if step_id in MODULE_CONTEXTS:
+        with pytest.raises(prompts.PromptError, match="needs its module context"):
+            prompts.build(step_id, pack, (), schema, scope=scope)
+    else:
+        for extra in ({}, {"analytical": {}}, {**metadata, "analytical": {}}):
+            with pytest.raises(prompts.PromptError, match="not a declared input"):
+                prompts.build(step_id, pack, (), schema, module_context=extra, scope=scope)
+    if step_id in prompts.SCOPE_BLOCKS:
+        with pytest.raises(prompts.PromptError, match="needs its"):
+            prompts.build(step_id, pack, (), schema, module_context=metadata)
+    else:
+        with pytest.raises(prompts.PromptError, match="scope block is not a declared input"):
+            prompts.build(step_id, pack, (), schema, module_context=metadata, scope={})
+
+
 def test_a_cell_slot_without_its_register_fact_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

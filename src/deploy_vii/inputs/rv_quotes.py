@@ -95,7 +95,8 @@ FIX: Mapping[str, str] = {
 ECHO = 80  # characters of a cell value a message quotes
 # What `zipfile` raises for damaged members beyond `prepare_source`'s own refusals.
 DAMAGED = (zlib.error, EOFError, RuntimeError)
-ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
+# Native XLSX coordinates: bound the lexeme before integer/column arithmetic.
+ADDRESS = re.compile(r"([A-Z]{1,3})([1-9][0-9]{0,6})")
 NUMBER = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 SERIAL = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
@@ -181,7 +182,10 @@ def validate_rv_bytes(file: str, raw: bytes) -> ValidationReport:
     if SHEET not in sheets:
         found = ", ".join(sheets) or "none"
         return report(0, (issue("A1", f"no sheet named {SHEET} (found: {found})", FIX["sheet"]),))
-    grid = cells(source.spans)
+    grids, locator_issues = sheet_cells(source.spans, file)
+    if locator_issues:
+        return report(0, locator_issues)
+    grid = grids.get(SHEET, {})
     if not any(span.text.strip() for span in grid.values()):
         return report(0, (issue("A1", f"sheet {SHEET} is empty", FIX["empty"]),))
     data = sorted({row for _, row in grid if row > 1 and nonblank(grid, row)})
@@ -203,19 +207,48 @@ def validate_rv_bytes(file: str, raw: bytes) -> ValidationReport:
     return report(len(data), issues)
 
 
-def cells(spans: Sequence[Span]) -> dict[tuple[int, int], Span]:
-    """The `rv_quotes` cell spans by (column number, row number); merged-range metadata and
-    comment parts are not cells."""
-    prefix = "sheet:" + quote(SHEET, safe="") + "!"
-    grid: dict[tuple[int, int], Span] = {}
+def sheet_cells(
+    spans: Sequence[Span], file: str
+) -> tuple[dict[str, dict[tuple[int, int], Span]], list[Issue]]:
+    """Project only canonical frozen cell locators; keep comments and merged metadata separate."""
+    grids: dict[str, dict[tuple[int, int], Span]] = {}
+    issues: list[Issue] = []
     for span in spans:
-        match = ADDRESS.match(span.locator.removeprefix(prefix))
-        if span.locator.startswith(prefix) and match is not None:
+        if not span.locator.startswith("sheet:"):
+            continue
+        encoded, separator, address = span.locator.removeprefix("sheet:").partition("!")
+        name = unquote(encoded)
+        problem = None
+        if not name or encoded != quote(name, safe=""):
+            problem = "sheet locator is not a canonical sheet URI"
+        elif separator and address.startswith("merged:") and span.data_type == "metadata":
+            continue
+        else:
+            match = ADDRESS.fullmatch(address)
             column = 0
-            for char in match.group(1):
-                column = column * 26 + ord(char) - ord("A") + 1
-            grid[column, int(match.group(2))] = span
-    return grid
+            if match is not None:
+                for char in match.group(1):
+                    column = column * 26 + ord(char) - ord("A") + 1
+            if match is None or column > 16384 or int(match.group(2)) > 1048576:
+                problem = f"cell address '{echo(address)}' is not canonical A1 within A1:XFD1048576"
+            else:
+                grid = grids.setdefault(name, {})
+                coordinate = column, int(match.group(2))
+                if coordinate in grid:
+                    problem = "cell address repeats a frozen coordinate"
+                else:
+                    grid[coordinate] = span
+        if problem is not None:
+            issues.append(
+                Issue(
+                    file=file,
+                    sheet=name or SHEET,
+                    cell=echo(address) or "A1",
+                    problem=problem,
+                    fix=FIX["workbook"],
+                )
+            )
+    return grids, issues
 
 
 def text(grid: Mapping[tuple[int, int], Span], column: int, row: int) -> str:

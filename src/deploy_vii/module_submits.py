@@ -58,11 +58,12 @@ def host_context(store: Execution, attempt: Attempt, step_id: str) -> dict[str, 
     `live.context.module_context` and the scope block): the module context of CP-2, CP-3, CP-4
     and CP-6; CP-1A's CP-1 facts block; CP-5's review scope under its block id. Empty for a step
     with nothing."""
+    context = module_context(store, attempt, step_id) or {}
     if step_id == "business_context":
-        return cp1a_context_block(store.pack(), cp1_context_facts(store, attempt))
+        return {**cp1a_context_block(store.pack(), cp1_context_facts(store, attempt)), **context}
     if step_id == "integrity_review":
-        return {INTEGRITY_BLOCK_ID: integrity_scope(store, attempt)}
-    return module_context(store, attempt, step_id) or {}
+        return {INTEGRITY_BLOCK_ID: integrity_scope(store, attempt), **context}
+    return context
 
 
 SOURCES_HEADER = "sources (extracted text as the runner sends it; --with-sources prints it)"

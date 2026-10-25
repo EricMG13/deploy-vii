@@ -103,9 +103,62 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
   the envelope's) and the Model page (`model_destination_html`). The defect the task's
   confidence review found (after an extension the CP-1 envelope export, render and CP-MODEL
   publication refused) is fixed in 61cce94: an envelope exported before an extension still
-  reads back, and a CP-MODEL added by extension publishes and verifies. Follow-up 9.1b (a CP-0
-  readiness addendum for added consumers) lifts the assessed-only refusal before M10 owners
-  rely on extension.
+  reads back, and a CP-MODEL added by extension publishes and verifies. Source-readiness
+  addenda (9.1b, below) assess added consumers without replacing CP-0.
+
+### Bound source-readiness addendum (task 9.1b)
+
+For evidence already in the frozen pack, `cp0_addendum_context(store, requested)` derives
+`readiness-addendum-context/1`: the pack/current CP-0 hash, original and target requested
+sets, exact new dependency closure, retained original review and previous applicable
+assessments. The original review must come from the completed retained attempt that
+produced the current accepted/restricted CP-0 head; Python recomputes its step and
+settlement. A caller-created head or command cache is insufficient.
+
+`execution --directory D cp0-addendum-context <full-new-set...>` returns that context,
+its hash, the submission schema, consumer purposes, coverage and evidence instructions.
+An offline `ReadinessAddendumSubmission` supplies only `consumers`, `gaps` and nonempty
+`analysis`, with located verbatim citations. Python binds source hashes and attachment
+sets. Every added live consumer, including required closure members, is mandatory;
+there are no placeholder assessments. Shared readiness validation checks the unchanged
+original sources/rows plus previous and new judgments against the exact target set.
+New gaps may affect only the added consumers and cannot reuse a prior gap identity.
+
+Submit with `execution --directory D extend-scope <full-new-set...>
+--readiness-addendum FILE --context-sha256 HASH`, or `submit_cp0_addendum`. The existing
+pending → unknown → shrink → no-op ordering precedes the bound-context and review
+checks. Under one lock Python rederives the context, validates the raw review, stores
+raw/context/composed blobs, rebinds heads and publishes the pointer last. Invalid review
+exits 1 with issues; refusals exit 2. Neither publishes a transition. Resume after a
+failed final write by resubmitting the same context/payload if still current; unreachable
+blobs are harmless. An already-applied target remains the ordinary no-op.
+
+`execution/5` optionally carries `readiness_addenda` refs, omitted when empty; ordinary
+reports likewise omit the absent addendum hash. Reads authenticate any current CP-0
+head's commands, inputs and status against its retained result before using original
+command priority, including when no addendum refs remain. Reads also authenticate each
+grant against its retained producing CP-0 attempt and historical pack, then verify every
+earlier applicable attestation and its exact consumer/gap/analysis projection in order. Missing,
+duplicate, forward/cyclic or forged history refuses; self-consistent cached metadata is
+insufficient. Historical grants remain readable after refresh, with their old bindings
+inapplicable. Canonical blobs/composition and commands/restrictions are also checked.
+Original CP-0 rows always take priority.
+Exactly one matching pack/current-CP-0 grant can authorize an originally absent consumer;
+only READY or READY_WITH_LIMITATIONS can begin. Its ticket appends an accepted/restricted
+`readiness-addendum` input, and its context and descendants retain consumer-local limits
+and gaps. Normal instructions include this source-readiness metadata even for steps
+without analytical module context; other undeclared context remains refused.
+Later disjoint grants preserve earlier consumer input hashes. Pack/CP-0
+refresh revokes applicability through the existing staleness/lineage rules.
+
+Old CP-0/CP-1/CP-1A heads, qualification, attempts and envelope files are preserved unless
+ordinary scope rebinding changes their inputs. Existing exported receipts remain intact;
+a fresh export retains the same envelope bytes and records its current snapshot hash.
+This is source readiness only. CP-1/CP-1A frozen consumer lists do not widen. M10 owners
+must require their own bound upstream sufficiency assessment or retain explicit ABSENT/
+not-ready limitations. Missing evidence requires normal pack replacement and reruns.
+All addendum analytical/rendering/native qualification remains `unrun`; live dispatch
+and external same-case qualification remain subject to the existing pause.
 
 ## Claim run text (decision 0005 MC-2)
 

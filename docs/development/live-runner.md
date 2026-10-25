@@ -1622,6 +1622,24 @@ assembled payload exactly as a payload sent whole.
   Rule l and rule 5 are named through `system_prompt.changed_by`. Verdicts, tool results and
   costs replay as recorded; nothing was re-recorded.
 
+## Offline source-readiness addenda (task 9.1b)
+
+The administrative `execution cp0-addendum-context` / `extend-scope
+--readiness-addendum FILE --context-sha256 HASH` route imports a complete assessment;
+it does not register an ordinary step or dispatch a provider. See the
+[execution/resume contract](execution.md#bound-source-readiness-addendum-task-91b).
+The original CP-0 review, source classifications and original CP-1/CP-1A consumer lists
+stay frozen. A grant is source readiness, not analytical sufficiency for a new M10 owner.
+
+An added consumer's normal runner prompt and host `module-context` include the verified
+consumer assessment/hash and restrictions under `source_readiness_addendum`, alongside
+its ordinary CP-1 facts or integrity scope when applicable. The ordinary source tools
+retain their actual scope: CP-4 reads only sources the original CP-0 classified executed
+or filed. A missing, changed or corrupt grant refuses context construction. Limitations
+and new consumer-local gaps travel through settlement and downstream inheritance.
+No-addendum prompts/contexts retain their prior content. No live/native/provider
+qualification or automatic paid assessment route is introduced here.
+
 ## Not covered here
 
 Model-facing submissions for `source_context` and the narrative steps (they keep their stored

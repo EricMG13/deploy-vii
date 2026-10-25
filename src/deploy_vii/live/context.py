@@ -49,7 +49,7 @@ from deploy_vii import (
 from deploy_vii.contracts import Fact, Module
 from deploy_vii.cp1_workflow import FinancialStage
 from deploy_vii.downstream_readiness import DownstreamInputs
-from deploy_vii.execution import Attempt, Execution
+from deploy_vii.execution import Attempt, Execution, readiness_command
 from deploy_vii.narrative import EvidenceRecord
 from deploy_vii.registry import FULL as FULL
 from deploy_vii.registry import NARRATIVE_EVIDENCE as NARRATIVE_EVIDENCE
@@ -112,7 +112,22 @@ def module_context(store: Execution, attempt: Attempt, step_id: str) -> dict[str
     """The module CONTEXT entries of `step_id` over `attempt`'s bound upstream; None for a step
     that has none."""
     build = MODULE_CONTEXTS.get(step_id)
-    return None if build is None else build(store, attempt)
+    context = {} if build is None else build(store, attempt)
+    bound = next((i for i in attempt.inputs if i.input_id == "readiness-addendum"), None)
+    if bound is not None:
+        _, ref, grant = readiness_command(store.read(), attempt.module_id)
+        if ref is None or grant is None or ref.sha256 != bound.sha256:
+            raise ProjectionError("Bound source-readiness addendum changed")
+        addendum = store.readiness_addendum(ref)
+        context["source_readiness_addendum"] = {
+            "sha256": ref.sha256,
+            "assessment": next(
+                c for c in addendum.consumers if c.module_id == attempt.module_id
+            ).model_dump(mode="json"),
+            "limitations": grant.limitations,
+            "scope": "Source readiness only; upstream analytical consumer sufficiency is separate",
+        }
+    return context or None
 
 
 def _cp3_market_sources(store: Execution, attempt: Attempt) -> tuple[str, ...]:
