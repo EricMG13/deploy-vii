@@ -161,7 +161,8 @@ Every column is required unless the tables below say optional. Rules that apply 
   every column.
 - **No total rows** in `Rating_Distribution`, `Sector_Exposure` or `Maturity_Profile` (a label
   containing the word `total` or `subtotal`, such as `Total` or `Top 20 Subtotal`). Python adds
-  the rows up.
+  the rows up. A genuine label that contains the word, such as a sector `Total Return Swaps`,
+  is refused too: rename it without the word (for example `TR Swaps`).
 - Hidden rows, columns and sheets are read like any others, and the pack marks their cells
   hidden.
 
