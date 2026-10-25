@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 from deploy_vii.bindings.shipped import SHIPPED_MAPS
-from deploy_vii.cp0_workflow import submit_cp0_review
+from deploy_vii.cp0_workflow import (
+    InvalidReadinessAddendum,
+    cp0_addendum_context,
+    submit_cp0_addendum,
+    submit_cp0_review,
+)
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_render import render_cp1_envelope
 from deploy_vii.cp1_workflow import (
@@ -24,6 +29,7 @@ from deploy_vii.cp_model_workflow import (
     verify_cp_model_publication,
 )
 from deploy_vii.execution import Attempt, Execution
+from deploy_vii.live.prompts import readiness_addendum_instructions
 from deploy_vii.module_submits import (
     MODULE_SUBMITS,
     host_context,
@@ -45,9 +51,13 @@ def configure(parser: argparse.ArgumentParser) -> None:
         actions.add_parser(name).add_argument("--pack", type=Path, required=True)
     actions.add_parser("status")
     actions.add_parser("begin").add_argument("module")
-    actions.add_parser(
+    extension = actions.add_parser(
         "extend-scope", help="extend the requested modules to a superset (task 9.1)"
-    ).add_argument("modules", nargs="+", help="the full new requested set, aliases allowed")
+    )
+    extension.add_argument("modules", nargs="+", help="the full new requested set, aliases allowed")
+    extension.add_argument("--readiness-addendum", type=Path)
+    extension.add_argument("--context-sha256")
+    actions.add_parser("cp0-addendum-context").add_argument("modules", nargs="+")
     for name in ("statement-preview", "interface-preview", "register-preview"):
         preview = actions.add_parser(name)
         preview.add_argument("--ticket", required=True)
@@ -138,7 +148,7 @@ def settled_json(store: Execution, attempt: Attempt) -> str:
 
 def review_text(args: argparse.Namespace) -> str:
     """The `--review` file's text; a missing file is a one-line refusal, exit 2."""
-    path: Path = args.review
+    path: Path = args.readiness_addendum if args.action == "extend-scope" else args.review
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError as missing:
@@ -279,10 +289,29 @@ def execute(args: argparse.Namespace) -> str:
         return module_context_json(store, args)
     elif args.action == "extend-scope":
         try:
+            if bool(args.readiness_addendum) != bool(args.context_sha256):
+                raise ValueError("Supply --readiness-addendum and --context-sha256 together")
+            if args.readiness_addendum:
+                return submit_cp0_addendum(
+                    store,
+                    tuple(args.modules),
+                    review_text(args),
+                    context_sha256=args.context_sha256,
+                ).model_dump_json()
             return store.extend_scope(tuple(args.modules)).model_dump_json()
+        except InvalidReadinessAddendum as rejected:
+            print(json.dumps({"issues": rejected.issues}))
+            print("\n".join(rejected.issues), file=sys.stderr)
+            raise SystemExit(1) from rejected
         except ValueError as refused:  # one line on stderr, exit 2; the journal is unchanged
             print(f"extend-scope refused: {refused}", file=sys.stderr)
             raise SystemExit(2) from refused
+    elif args.action == "cp0-addendum-context":
+        try:
+            context = cp0_addendum_context(store, tuple(args.modules))
+            return json.dumps(readiness_addendum_instructions(store.pack(), context))
+        except ValueError as refused:
+            raise refusal_exit(f"cp0-addendum-context refused: {refused}") from refused
     elif args.action == "interrupt":
         return attempt_json(store, store.interrupt(args.ticket, args.reason))
     elif args.action == "cp0-submit":

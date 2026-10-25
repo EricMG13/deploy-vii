@@ -216,6 +216,62 @@ def test_a_step_with_no_context_entries_gets_an_empty_mapping_as_the_runner_does
     assert runner_context(cli.store, attempt, "source_readiness") == {}
 
 
+@pytest.fixture(scope="module")
+def addendum_parent(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from tests.product.test_workflow import production_journal
+
+    return production_journal(
+        tmp_path_factory.mktemp("host-addendum-parent"), requested=("CP-1",)
+    ).directory
+
+
+@pytest.mark.parametrize(
+    "module_id,step", [("CP-1A", "business_context"), ("CP-5", "integrity_review")]
+)
+def test_added_special_case_host_context_keeps_runner_parity(
+    addendum_parent: Path,
+    tmp_path: Path,
+    module_id: str,
+    step: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import shutil
+
+    from deploy_vii.cp0_workflow import submit_cp0_addendum
+    from tests.product.test_workflow import payload
+
+    shutil.copytree(addendum_parent, tmp_path / "journal")
+    store = Execution(tmp_path / "journal")
+    requested = (*store.read().run.requested_modules, module_id)
+    raw, digest = payload(store, requested)
+    submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    attempt = store.begin(module_id)
+    expected = runner_context(store, attempt, step)
+    assert "source_readiness_addendum" in expected
+    assert host_context(store, attempt, step) == expected
+    if module_id == "CP-1A":
+        assert expected["cp1_facts"]
+    else:
+        assert expected[INTEGRITY_BLOCK_ID]
+    cli = Cli(store, monkeypatch, capsys)
+    code, out, err = cli(
+        "module-context", "--module", module_id, "--step", step, "--ticket", attempt.ticket_id
+    )
+    assert code == 0 and not err and json.loads(out) == json.loads(json.dumps(expected))
+    bound = attempt.inputs[-1]
+    malformed = attempt.model_copy(
+        update={"inputs": (*attempt.inputs[:-1], bound.model_copy(update={"sha256": "0" * 64}))}
+    )
+    with pytest.raises(ValueError, match="addendum changed"):
+        host_context(store, malformed, step)
+    store.interrupt(attempt.ticket_id, "Synthetic context staleness test")
+    pack = store.pack()
+    store.replace_pack(pack.model_copy(update={"sources": pack.sources[:-1]}))
+    with pytest.raises(ValueError, match="addendum changed"):
+        host_context(store, attempt, step)
+
+
 def test_begin_is_refused_with_one_line_while_pending_and_after_the_repair_is_spent(
     cli: Cli, tmp_path: Path
 ) -> None:

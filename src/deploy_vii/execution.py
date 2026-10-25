@@ -41,7 +41,13 @@ from deploy_vii.contracts import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import prose_issues
-from deploy_vii.readiness import NOT_CONSUMERS, citation_issues
+from deploy_vii.readiness import (
+    NOT_CONSUMERS,
+    Readiness,
+    ReadinessAddendum,
+    ReadinessAddendumSubmissionInput,
+    citation_issues,
+)
 from deploy_vii.registry import (
     canonical,
     dependencies,
@@ -198,6 +204,52 @@ def head_of(result: Module, qualification: Qualification | None = None) -> Head:
     )
 
 
+class ReadinessGrant(Contract):
+    module_id: Identifier
+    command: Text
+    readiness: Readiness
+    limitations: tuple[Text, ...]
+
+
+class ReadinessAddendumRef(Contract):
+    sha256: Hash
+    pack_sha256: Hash
+    cp0_result_sha256: Hash
+    added_modules: tuple[Identifier, ...]
+    grants: tuple[ReadinessGrant, ...]
+
+
+def addendum_ref(addendum: ReadinessAddendum) -> ReadinessAddendumRef:
+    return ReadinessAddendumRef(
+        sha256=addendum.content_hash(),
+        pack_sha256=addendum.context.pack_sha256,
+        cp0_result_sha256=addendum.context.cp0_result_sha256,
+        added_modules=addendum.context.added_modules,
+        grants=tuple(
+            ReadinessGrant(
+                module_id=c.module_id,
+                command=f"Run {c.module_id}"
+                if c.readiness in {"READY", "READY_WITH_LIMITATIONS"}
+                else "DO NOT RUN",
+                readiness=c.readiness,
+                limitations=tuple(
+                    dict.fromkeys(
+                        (
+                            *c.limitations,
+                            *(
+                                g.description
+                                for g in addendum.gaps
+                                if c.module_id in g.affected_modules
+                            ),
+                        )
+                    )
+                ),
+            )
+            for c in addendum.consumers
+        ),
+    )
+
+
 class ExecutionSnapshot(Contract):
     schema_version: Literal["execution/5"] = "execution/5"
     parent: Hash | None = None
@@ -207,6 +259,42 @@ class ExecutionSnapshot(Contract):
     pack_sha256: Hash  # SHA-256 of the canonical-JSON pack blob
     attempts: tuple[Attempt, ...] = ()
     heads: tuple[Head, ...] = ()
+    readiness_addenda: tuple[ReadinessAddendumRef, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_addenda(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if not self.readiness_addenda:
+            data.pop("readiness_addenda", None)
+        return data
+
+
+def readiness_command(
+    snapshot: ExecutionSnapshot, module_id: str
+) -> tuple[tuple[str | None, ...], ReadinessAddendumRef | None, ReadinessGrant | None]:
+    head = next((h for h in snapshot.heads if h.module_id == "CP-0"), None)
+    if head is None or head.status == "stale":
+        return (), None, None
+    original = tuple(c.text for c in head.commands if c.row_id == module_id)
+    if original:
+        return original, None, None
+    matches = [
+        (ref, grant)
+        for ref in snapshot.readiness_addenda
+        for grant in ref.grants
+        if ref.pack_sha256 == snapshot.pack_sha256
+        and ref.cp0_result_sha256 == head.result_sha256
+        and head.status in {"accepted", "restricted"}
+        and module_id in ref.added_modules
+        and module_id in dependencies(snapshot.run.requested_modules)
+        and grant.module_id == module_id
+    ]
+    if len(matches) > 1:
+        raise ValueError("Ambiguous source-readiness addenda")
+    if not matches:
+        return (), None, None
+    ref, grant = matches[0]
+    return (grant.command,), ref, grant
 
 
 class NotAuthorized(ValueError):
@@ -258,16 +346,25 @@ def current_inputs(snapshot: ExecutionSnapshot, module_id: str) -> tuple[Input, 
             continue
         if head.status == "accepted" or head.status == "restricted":
             context.append(Input(input_id=item, sha256=head.result_sha256, status=head.status))
-    if module_id not in {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}:
-        readiness = heads.get("CP-0")
-        commands = (
-            ()
-            if readiness is None
-            else tuple(item.text for item in readiness.commands if item.row_id == module_id)
-        )
+    addendum_inputs: tuple[Input, ...] = ()
+    if module_id not in NOT_CONSUMERS:
+        commands, ref, grant = readiness_command(snapshot, module_id)
         if commands != (f"Run {module_id}",):
             raise NotAuthorized(module_id, commands)
-    return (Input(input_id="prepared-pack", sha256=snapshot.pack_sha256), *upstream, *context)
+        if ref is not None and grant is not None:
+            addendum_inputs = (
+                Input(
+                    input_id="readiness-addendum",
+                    sha256=ref.sha256,
+                    status="accepted" if grant.readiness == "READY" else "restricted",
+                ),
+            )
+    return (
+        Input(input_id="prepared-pack", sha256=snapshot.pack_sha256),
+        *upstream,
+        *context,
+        *addendum_inputs,
+    )
 
 
 def candidate_issues(
@@ -417,7 +514,9 @@ def rebind_heads(
     return tuple(current[head.module_id] for head in heads)
 
 
-def unassessed(added: Sequence[str], readiness: Head | None) -> tuple[str, ...]:
+def unassessed(
+    added: Sequence[str], readiness: Head | None, snapshot: ExecutionSnapshot | None = None
+) -> tuple[str, ...]:
     """Added modules CP-0 has no T8 `exact_command` row for (ruling B, task 9.1).
 
     CP-0, CP-MODEL, CP-MEMO and CP-OS need no readiness row. Any other added module needs a
@@ -428,7 +527,13 @@ def unassessed(added: Sequence[str], readiness: Head | None) -> tuple[str, ...]:
         if readiness is None or readiness.status == "stale"
         else {item.row_id for item in readiness.commands}
     )
-    return tuple(item for item in added if item not in NOT_CONSUMERS and item not in rows)
+    return tuple(
+        item
+        for item in added
+        if item not in NOT_CONSUMERS
+        and item not in rows
+        and (snapshot is None or not readiness_command(snapshot, item)[0])
+    )
 
 
 class StaledHead(Contract):
@@ -449,6 +554,14 @@ class ExtendReport(Contract):
     kept: tuple[Identifier, ...]
     staled: tuple[StaledHead, ...]
     plan: tuple[Identifier, ...]
+    readiness_addendum_sha256: Hash | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_addendum(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.readiness_addendum_sha256 is None:
+            data.pop("readiness_addendum_sha256", None)
+        return data
 
 
 def scope_within(blob: Run, effective: Run) -> bool:
@@ -492,6 +605,12 @@ def inherited_limitations(
     heads = {item.module_id: item for item in snapshot.heads}
     texts: list[str] = []
     for item in attempt.inputs:
+        if item.input_id == "readiness-addendum":
+            _, ref, grant = readiness_command(snapshot, attempt.module_id)
+            if ref is None or grant is None or ref.sha256 != item.sha256:
+                raise ValueError("Bound source-readiness addendum changed")
+            texts.extend(grant.limitations)
+            continue
         head = heads.get(item.input_id)
         if head is None:
             continue
@@ -679,7 +798,27 @@ class Execution:
                 f"Unsupported execution store schema {version!r}; this version reads {SCHEMA}. "
                 "Retain the old store and create a new execution directory; nothing is migrated."
             )
-        return ExecutionSnapshot.model_validate_json(raw)
+        snapshot = ExecutionSnapshot.model_validate_json(raw)
+        for ref in snapshot.readiness_addenda:
+            self.readiness_addendum(ref)
+        return snapshot
+
+    def readiness_addendum(self, ref: ReadinessAddendumRef) -> ReadinessAddendum:
+        """Verify the retained contract and every cached authorization field before use."""
+        from deploy_vii.cp0_workflow import _check_addendum
+
+        addendum = ReadinessAddendum.model_validate_json(self._load(ref.sha256))
+        if addendum.content_hash() != ref.sha256 or addendum_ref(addendum) != ref:
+            raise ValueError("Source-readiness addendum cache does not match its blob")
+        if self.payload(addendum.context.content_hash()) != addendum.context.model_dump_json():
+            raise ValueError("Source-readiness addendum context does not match its blob")
+        pack = PreparedPack.model_validate_json(self._load(addendum.context.pack_sha256))
+        if pack.content_hash() != addendum.context.pack_sha256:
+            raise ValueError("Source-readiness addendum pack is not canonical")
+        rebuilt = _check_addendum(pack, addendum.context, self.payload(addendum.payload_sha256))
+        if rebuilt != addendum:
+            raise ValueError("Source-readiness addendum differs from trusted composition")
+        return addendum
 
     def _store(self, text: str) -> str:
         """Write `text` once as a blob and return its SHA-256 (idempotent for the same bytes)."""
@@ -1029,7 +1168,12 @@ class Execution:
                 )
             )
 
-    def extend_scope(self, requested: Sequence[str]) -> ExtendReport:
+    def extend_scope(
+        self,
+        requested: Sequence[str],
+        *,
+        readiness_addendum: ReadinessAddendumSubmissionInput | None = None,
+    ) -> ExtendReport:
         """Extend the run's requested modules to the superset `requested` (MC-9, task 9.1).
 
         Refusals, in order, write nothing: a pending attempt; an unknown module; a set that is
@@ -1061,16 +1205,29 @@ class Execution:
             order = plan(extended)
             in_graph = dependencies(old)
             added = tuple(item for item in order if item not in in_graph)
+            candidate_addendum = None
+            refs = snapshot.readiness_addenda
+            if readiness_addendum is not None:
+                from deploy_vii.cp0_workflow import _addendum_context, _check_addendum
+
+                context = _addendum_context(self, snapshot, extended, added)
+                if context.content_hash() != readiness_addendum.context_sha256:
+                    raise ValueError("Source-readiness addendum context changed")
+                candidate_addendum = _check_addendum(
+                    self.pack(snapshot), context, readiness_addendum.payload
+                )
+                refs = (*refs, addendum_ref(candidate_addendum))
+            run = snapshot.run.model_copy(update={"requested_modules": extended})
+            proposed = snapshot.model_copy(update={"run": run, "readiness_addenda": refs})
             readiness = next((head for head in snapshot.heads if head.module_id == "CP-0"), None)
-            missing = unassessed(added, readiness)
+            missing = unassessed(added, readiness, proposed)
             if missing:
                 raise ValueError(
                     f"CP-0 has not assessed {', '.join(missing)}; create a new execution"
                 )
-            run = snapshot.run.model_copy(update={"requested_modules": extended})
 
             def resolve(module_id: str, current: Mapping[str, Head]) -> tuple[Input, ...]:
-                probe = snapshot.model_copy(update={"run": run, "heads": tuple(current.values())})
+                probe = proposed.model_copy(update={"heads": tuple(current.values())})
                 return current_inputs(probe, module_id)
 
             def previous(module_id: str, _heads: Mapping[str, Head]) -> tuple[Input, ...]:
@@ -1095,10 +1252,23 @@ class Execution:
                     if item in changed
                 ),
                 plan=order,
+                readiness_addendum_sha256=None
+                if candidate_addendum is None
+                else candidate_addendum.content_hash(),
             )
+            if candidate_addendum is not None:
+                assert readiness_addendum is not None
+                self._store(readiness_addendum.payload)
+                self._store(candidate_addendum.context.model_dump_json())
+                self._store(candidate_addendum.model_dump_json())
             self._write(  # last: every refusal and failure above leaves the journal unchanged
                 snapshot.model_copy(
-                    update={"parent": snapshot.content_hash(), "run": run, "heads": heads}
+                    update={
+                        "parent": snapshot.content_hash(),
+                        "run": run,
+                        "heads": heads,
+                        "readiness_addenda": refs,
+                    }
                 )
             )
             return report

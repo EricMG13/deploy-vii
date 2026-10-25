@@ -87,6 +87,38 @@ class ReadinessReview(Contract):
     analysis: tuple[Claim, ...]
 
 
+class ReadinessAddendumContext(Contract):
+    schema_version: Literal["readiness-addendum-context/1"] = "readiness-addendum-context/1"
+    pack_sha256: Hash
+    cp0_result_sha256: Hash
+    base_requested_modules: tuple[Identifier, ...]
+    target_requested_modules: tuple[Identifier, ...]
+    added_modules: tuple[Identifier, ...]
+    original_review: ReadinessReview
+    previous_addenda: tuple[Hash, ...] = ()
+    prior_consumers: tuple[ConsumerReadiness, ...] = ()
+    prior_gaps: tuple[ReadinessGap, ...] = ()
+    prior_analysis: tuple[Claim, ...] = ()
+
+
+class ReadinessAddendum(Contract):
+    schema_version: Literal["readiness-addendum/1"] = "readiness-addendum/1"
+    context: ReadinessAddendumContext
+    payload_sha256: Hash
+    consumers: tuple[ConsumerReadiness, ...]
+    gaps: tuple[ReadinessGap, ...]
+    analysis: tuple[Claim, ...]
+    implementation: Literal["implemented"] = "implemented"
+    analytical_qualification: Literal["unrun"] = "unrun"
+    rendering_acceptance: Literal["unrun"] = "unrun"
+    native_host_qualification: Literal["unrun"] = "unrun"
+
+
+class ReadinessAddendumSubmissionInput(Contract):
+    payload: str
+    context_sha256: str  # checked after the extension's established refusal/no-op guards
+
+
 def shape_issues(error: ValidationError) -> tuple[str, ...]:
     """One issue per Pydantic error, short form `<field.path>: <message>`.
 
@@ -308,7 +340,23 @@ def validate_review(pack: PreparedPack, review: ReadinessReview) -> tuple[str, .
         review = ReadinessReview.model_validate_json(review.model_dump_json())
     except ValidationError as error:
         return shape_issues(error)
+    return _review_issues(pack, review, live_consumers(pack))
 
+
+def _validate_review_for(
+    pack: PreparedPack, review: ReadinessReview, expected: tuple[str, ...]
+) -> tuple[str, ...]:
+    try:
+        pack = PreparedPack.model_validate_json(pack.model_dump_json())
+        review = ReadinessReview.model_validate_json(review.model_dump_json())
+    except ValidationError as error:
+        return shape_issues(error)
+    return _review_issues(pack, review, expected)
+
+
+def _review_issues(
+    pack: PreparedPack, review: ReadinessReview, expected: tuple[str, ...]
+) -> tuple[str, ...]:
     issues: list[str] = []
     if review.pack_sha256 != pack.content_hash():
         issues.append("Review does not bind the current prepared pack")
@@ -317,7 +365,7 @@ def validate_review(pack: PreparedPack, review: ReadinessReview) -> tuple[str, .
         item.source_id for item in review.sources
     } != set(sources_by_id):
         issues.append("Assess every prepared source exactly once")
-    selected = set(live_consumers(pack))
+    selected = set(expected)
     if (
         len(review.consumers) != len(selected)
         or {item.module_id for item in review.consumers} != selected

@@ -116,6 +116,7 @@ from deploy_vii.readiness import (
     GapKind,
     GapSeverity,
     Readiness,
+    ReadinessAddendumContext,
     ReadinessReview,
     live_consumers,
     shape_issues,
@@ -200,6 +201,12 @@ class ReadinessSubmission(Contract):
     # `minItems: 1` in the sent schema only (task 2.10): the trusted validator stays the one that
     # rejects an empty read-through, in its own words, beside the submission's other issues.
     analysis: tuple[ClaimJudgment, ...] = Field(json_schema_extra={"minItems": 1})
+
+
+class ReadinessAddendumSubmission(Contract):
+    consumers: tuple[ConsumerJudgment, ...]
+    gaps: tuple[GapJudgment, ...]
+    analysis: tuple[ClaimJudgment, ...] = Field(min_length=1)
 
 
 type Judgment = SourceJudgment | ConsumerJudgment | GapJudgment | ClaimJudgment
@@ -340,8 +347,9 @@ def _placeholder_gap(gap_id: str, kind: str, what: str, affected: list[str]) -> 
     }
 
 
-def compose(pack: PreparedPack, submission: ReadinessSubmission) -> Composition:
-    """The stored `ReadinessReview` for `submission` over `pack` (see the module docstring)."""
+def _bind_judgments(
+    pack: PreparedPack, groups: Sequence[Sequence[Judgment]]
+) -> tuple[list[list[dict[str, Any]]], tuple[str, ...]]:
     bindable = {s.source_id: s.sha256 for s in pack.sources if s.status == "ready" and s.sha256}
     issues: list[str] = []
 
@@ -365,12 +373,16 @@ def compose(pack: PreparedPack, submission: ReadinessSubmission) -> Composition:
     def with_citations(item: Judgment) -> dict[str, Any]:
         return {**item.model_dump(mode="json"), "citations": cite(item.citations)}
 
-    sources = [with_citations(item) for item in submission.sources]
-    consumers = [with_citations(item) for item in submission.consumers]
+    return [[with_citations(item) for item in group] for group in groups], tuple(issues)
+
+
+def compose(pack: PreparedPack, submission: ReadinessSubmission) -> Composition:
+    """The stored `ReadinessReview` for `submission` over `pack` (see the module docstring)."""
+    (sources, consumers, gaps, analysis), issues = _bind_judgments(
+        pack, (submission.sources, submission.consumers, submission.gaps, submission.analysis)
+    )
     for consumer in consumers:  # the attachment set: the distinct cited sources, in order
         consumer["source_ids"] = list(dict.fromkeys(c["source_id"] for c in consumer["citations"]))
-    gaps = [with_citations(item) for item in submission.gaps]
-    analysis = [with_citations(item) for item in submission.analysis]
     expected = live_consumers(pack)
     assessed = {item.source_id for item in submission.sources}
     judged = {item.module_id for item in submission.consumers}
@@ -412,6 +424,46 @@ def compose(pack: PreparedPack, submission: ReadinessSubmission) -> Composition:
     except ValidationError as error:
         return Composition(None, (*bound, *shape_issues(error)), tuple(placeholders))
     return Composition(review, bound, tuple(placeholders))
+
+
+def compose_addendum(
+    pack: PreparedPack, context: ReadinessAddendumContext, payload: str
+) -> Composition:
+    """Compose only new judgments; never fill an omitted consumer with a placeholder."""
+    try:
+        submission = ReadinessAddendumSubmission.model_validate_json(payload)
+        (consumers, gaps, analysis), issues = _bind_judgments(
+            pack, (submission.consumers, submission.gaps, submission.analysis)
+        )
+        for consumer in consumers:
+            consumer["source_ids"] = list(
+                dict.fromkeys(c["source_id"] for c in consumer["citations"])
+            )
+        original = context.original_review
+        review = ReadinessReview.model_validate_json(
+            json.dumps(
+                {
+                    **original.model_dump(mode="json"),
+                    "consumers": [
+                        c.model_dump(mode="json")
+                        for c in (*original.consumers, *context.prior_consumers)
+                    ]
+                    + consumers,
+                    "gaps": [
+                        g.model_dump(mode="json") for g in (*original.gaps, *context.prior_gaps)
+                    ]
+                    + gaps,
+                    "analysis": [
+                        c.model_dump(mode="json")
+                        for c in (*original.analysis, *context.prior_analysis)
+                    ]
+                    + analysis,
+                }
+            )
+        )
+    except ValidationError as error:
+        return Composition(None, shape_issues(error))
+    return Composition(review, issues)
 
 
 def compose_payload(pack: PreparedPack, payload: str) -> Composition:

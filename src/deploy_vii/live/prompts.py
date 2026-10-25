@@ -58,7 +58,7 @@ from deploy_vii.live.schema import strict_schema
 from deploy_vii.narrative import _DIMENSIONS, _FINANCIAL
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.quality import QualityInputs
-from deploy_vii.readiness import extraction_coverage, live_consumers
+from deploy_vii.readiness import ReadinessAddendumContext, extraction_coverage, live_consumers
 from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, ToolSet, modules, part_submit_steps
 from deploy_vii.statement_validation import ACCOUNT_LINKS, OPTIONAL_ITEMS, REQUIRED_ITEMS
 
@@ -1022,6 +1022,39 @@ def _context_body(
             )
         body.update(module_context)
     return json.dumps(body, indent=1, sort_keys=True)
+
+
+def readiness_addendum_instructions(
+    pack: PreparedPack, context: ReadinessAddendumContext
+) -> dict[str, object]:
+    """Offline administrative assessment instructions; no ordinary step is registered."""
+    from deploy_vii.live.submission import ReadinessAddendumSubmission
+
+    if pack.content_hash() != context.pack_sha256:
+        raise ValueError("Source-readiness addendum context pack changed")
+    registry = {m.module_id: m for m in modules()}
+    return {
+        "context": context.model_dump(mode="json"),
+        "context_sha256": context.content_hash(),
+        "schema": ReadinessAddendumSubmission.model_json_schema(),
+        "consumers": [
+            {"module_id": m, "title": registry[m].title, "purpose": registry[m].purpose}
+            for m in context.added_modules
+            if m not in {"CP-0", "CP-MODEL", "CP-MEMO", "CP-OS"}
+        ],
+        "sources": [
+            {"source_id": s.source_id, "extraction_coverage": extraction_coverage(s)}
+            for s in pack.sources
+        ],
+        "instructions": (
+            "Assess exactly the added consumers using located verbatim source quotes. "
+            "Account for unchanged source classifications, limitations and all prior gaps. "
+            "New gaps may affect only added consumers; never revise old judgments or evidence. "
+            "Context is not evidence and cannot be cited. This attests source readiness only; "
+            "CP-1/CP-1A analytical consumer sufficiency requires its own bound assessment. "
+            "Changed sources, classifications or old judgments require normal pack/CP-0 refresh."
+        ),
+    }
 
 
 def quality_scope(

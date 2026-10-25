@@ -1,18 +1,26 @@
 """Offline protocol fixtures, not analyst sufficiency or Module acceptance."""
 
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from deploy_vii.contracts import Claim, Input
-from deploy_vii.cp0_workflow import submit_cp0_review
+from deploy_vii.cp0_workflow import (
+    InvalidReadinessAddendum,
+    cp0_addendum_context,
+    submit_cp0_addendum,
+    submit_cp0_review,
+)
 from deploy_vii.cp1_workflow import FinancialStage, FinancialSubmission, submit_cp1_step
 from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReport, DownstreamReview
-from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation
+from deploy_vii.execution import Attempt, Execution, StepSubmission, StepValidation, current_inputs
 from deploy_vii.financial_contracts import FinancialBook
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import ConsumerReadiness, ReadinessReview, SourceAssessment
@@ -21,7 +29,7 @@ from tests.product.test_canonical_gaps import case
 from tests.product.test_execution import candidate_for, fixture_store, settled, step_text
 from tests.product.test_model_readiness import ready_case
 from tests.product.test_narrative import draft
-from tests.product.test_readiness import readiness_fixture
+from tests.product.test_readiness import as_submission, readiness_fixture
 
 
 def test_cp0_trusted_submission_and_crash_between_promotion_writes(
@@ -557,3 +565,888 @@ def test_legacy_snapshot_version_is_rejected_explicitly(tmp_path: Path, version:
     legacy = store.read().model_copy(update={"schema_version": version})
     with pytest.raises(ValidationError, match="execution/5"):
         ExecutionSnapshot.model_validate_json(legacy.model_dump_json())
+
+
+# M9.1b: genuine retained CP-0 source-readiness addenda (synthetic/offline only).
+
+
+def journal(tmp_path: Path) -> Execution:
+    pack, review = readiness_fixture()
+    pack = pack.model_copy(
+        update={"run": pack.run.model_copy(update={"requested_modules": ("CP-1",)})}
+    )
+    review = review.model_copy(
+        update={
+            "pack_sha256": pack.content_hash(),
+            "consumers": tuple(c for c in review.consumers if c.module_id == "CP-1"),
+            "gaps": (),
+        }
+    )
+    store = Execution.create(tmp_path / "journal", pack)
+    # Retain noncanonical JSON: the review's canonical hash is not its raw blob name.
+    payload = json.dumps(review.model_dump(mode="json"), indent=2)
+    done = submit_cp0_review(store, store.begin("CP-0").ticket_id, payload)
+    assert not done.issues
+    return store
+
+
+def payload(store: Execution, requested: tuple[str, ...]) -> tuple[str, str]:
+    context = cp0_addendum_context(store, requested)
+    _, review = readiness_fixture()
+    template = as_submission(review)
+    consumer = template.consumers[0]
+    document = {
+        "consumers": [
+            consumer.model_copy(update={"module_id": m}).model_dump(mode="json")
+            for m in context.added_modules
+            if m != "CP-0"
+        ],
+        "gaps": [],
+        "analysis": [
+            c.model_copy(update={"claim_id": "new-readiness"}).model_dump(mode="json")
+            for c in template.analysis
+        ],
+    }
+    return json.dumps(document), context.content_hash()
+
+
+def test_genuine_cp0_can_authorize_a_new_consumer_without_rewriting_old_rows(
+    tmp_path: Path,
+) -> None:
+    store = journal(tmp_path)
+    before = store.read()
+    old_inputs = current_inputs(before, "CP-1")
+    requested = (*before.run.requested_modules, "CP-4")
+    with pytest.raises(ValueError, match="not assessed CP-4"):
+        store.extend_scope(requested)
+    raw, context_hash = payload(store, requested)
+    report = submit_cp0_addendum(store, requested, raw, context_sha256=context_hash)
+    after = Execution(store.directory).read()
+    assert report.extended and report.readiness_addendum_sha256
+    assert after.pack_sha256 == before.pack_sha256
+    assert after.heads == before.heads and after.attempts == before.attempts
+    assert current_inputs(after, "CP-1") == old_inputs
+    assert "readiness_addenda" not in before.model_dump(mode="json")
+    assert after.readiness_addenda[0].sha256 == report.readiness_addendum_sha256
+
+
+def test_invalid_import_writes_nothing_and_stale_context_refuses(tmp_path: Path) -> None:
+    store = journal(tmp_path)
+    requested = ("CP-1", "CP-4")
+    raw, context_hash = payload(store, requested)
+    before = {
+        p.relative_to(store.directory): p.read_bytes()
+        for p in store.directory.rglob("*")
+        if p.is_file()
+    }
+    with pytest.raises(ValueError):
+        submit_cp0_addendum(store, requested, "{}", context_sha256=context_hash)
+    with pytest.raises(ValueError, match="context"):
+        submit_cp0_addendum(store, requested, raw, context_sha256="0" * 64)
+    after = {
+        p.relative_to(store.directory): p.read_bytes()
+        for p in store.directory.rglob("*")
+        if p.is_file()
+    }
+    assert before == after
+
+
+def production_journal(
+    tmp_path: Path, requested: tuple[str, ...] = ("CP-1", "CP-1A", "CP-5")
+) -> Execution:
+    """Genuine CP-0, all CP-1 stages/promotion, CP-1A and CP-5; original scope omits CP-4."""
+    from deploy_vii.business_context import Quote, submit_cp1a_step
+    from deploy_vii.contracts import Citation
+    from deploy_vii.cp1_quality import cp1_quality_inputs
+    from deploy_vii.cp1_workflow import (
+        FinancialStage,
+        FinancialSubmission,
+        cp1_registers,
+        promote_cp1,
+        submit_cp1_step,
+    )
+    from deploy_vii.cp5_integrity import review_scope, submit_cp5_step
+    from deploy_vii.downstream_readiness import DownstreamInputs, DownstreamReview
+    from deploy_vii.readiness import ConsumerReadiness, ReadinessReview, SourceAssessment
+    from deploy_vii.registry import plan
+    from tests.product.test_business_context import submission_fixture as business_submission
+    from tests.product.test_canonical_gaps import case
+    from tests.product.test_cp1_workflow import at_ceiling
+    from tests.product.test_cp4_legal import legal_pack
+    from tests.product.test_cp5_integrity import review_all
+    from tests.product.test_execution import step_text
+    from tests.product.test_model_readiness import ready_case
+    from tests.product.test_narrative import populated
+
+    pack, context, financial, definition, binding = case(ready_case())
+    filing = readiness_fixture()[0].sources[0]
+    indenture = legal_pack().sources[1]
+    pack = pack.model_copy(
+        update={
+            "run": pack.run.model_copy(update={"requested_modules": requested}),
+            "sources": (*pack.sources, filing, indenture),
+        }
+    )
+    citations = tuple(
+        Citation(
+            source_id=s.source_id,
+            source_sha256=s.sha256,
+            locator=s.spans[0].locator,
+            quote=s.spans[0].text,
+        )
+        for s in pack.sources
+    )
+    context = context.model_copy(
+        update={
+            "pack_sha256": pack.content_hash(),
+            "sources": (
+                *context.sources,
+                *(
+                    context.sources[0].model_copy(
+                        update={
+                            "source_id": c.source_id,
+                            "classification": "nonfinancial",
+                            "document_type": "Synthetic text",
+                            "scopes": (),
+                            "citations": (c,),
+                            "event_scan_citations": (c,),
+                        }
+                    )
+                    for c in citations[1:]
+                ),
+            ),
+        }
+    )
+    financial = financial.model_copy(update={"pack_sha256": pack.content_hash()})
+    definition = definition.model_copy(update={"financial_review_sha256": financial.content_hash()})
+    binding = binding.model_copy(
+        update={
+            "financial_review_sha256": financial.content_hash(),
+            "source_context_review_sha256": context.content_hash(),
+        }
+    )
+    note = ("Synthetic evidence; no issuer qualification",)
+    review = ReadinessReview(
+        pack_sha256=pack.content_hash(),
+        objective="Synthetic retained pipeline",
+        reporting_period="FY2025",
+        issuer_confirmed=True,
+        sources=tuple(
+            SourceAssessment(
+                source_id=c.source_id,
+                document_family="Synthetic text",
+                authority="executed" if c.source_id == "indenture" else "unknown",
+                entity="Synthetic",
+                period="FY2025",
+                version_relationship="Original frozen evidence",
+                fidelity="verified",
+                citations=(c,),
+                limitations=note,
+            )
+            for c in citations
+        ),
+        consumers=tuple(
+            ConsumerReadiness(
+                module_id=m,
+                readiness="READY_WITH_LIMITATIONS",
+                evidence_demand="Synthetic workflow",
+                source_ids=("S1",),
+                rationale="Offline protocol check",
+                citations=(citations[0],),
+                limitations=note,
+            )
+            for m in plan(pack.run.requested_modules)
+            if m != "CP-0"
+        ),
+        gaps=(),
+        analysis=readiness_fixture()[1].analysis,
+    )
+    store = Execution.create(tmp_path / "journal", pack)
+    assert not submit_cp0_review(
+        store, store.begin("CP-0").ticket_id, json.dumps(review.model_dump(mode="json"), indent=2)
+    ).issues
+    ticket = store.begin("CP-1")
+    done = submit_cp1_step(store, ticket.ticket_id, "source_context", context.model_dump_json())
+    assert not done.issues
+    extraction = FinancialSubmission(
+        context_step_sha256=done.steps[0].content_hash(),
+        financial=financial,
+        definition=definition,
+        binding=binding,
+    )
+    done = submit_cp1_step(store, ticket.ticket_id, "financials", extraction.model_dump_json())
+    assert not done.issues
+    stage = FinancialStage.model_validate_json(step_text(store, done.steps[-1]))
+    done = submit_cp1_step(
+        store, ticket.ticket_id, "narrative", populated(stage.narrative_inputs).model_dump_json()
+    )
+    assert not done.issues
+    inputs = DownstreamInputs.model_validate_json(step_text(store, done.steps[-1]))
+    done = submit_cp1_step(
+        store,
+        ticket.ticket_id,
+        "readiness",
+        DownstreamReview(inputs_sha256=inputs.content_hash()).model_dump_json(),
+    )
+    assert not done.issues
+    quality = cp1_quality_inputs(cp1_registers(store, ticket.ticket_id))
+    done = promote_cp1(store, ticket.ticket_id, at_ceiling(quality).model_dump_json())
+    assert not done.issues
+    if "CP-1A" not in plan(requested):
+        return store
+    submission = business_submission(pack)
+    source = submission.sources[0]
+    submission = submission.model_copy(
+        update={
+            "sources": tuple(
+                source.model_copy(
+                    update={
+                        "source_id": c.source_id,
+                        "citations": (
+                            Quote(source_id=c.source_id, locator=c.locator, quote=c.quote),
+                        ),
+                    }
+                )
+                for c in citations
+            )
+        }
+    )
+    done = submit_cp1a_step(
+        store, store.begin("CP-1A").ticket_id, "business_context", submission.model_dump_json()
+    )
+    assert not done.issues
+    ticket = store.begin("CP-5")
+    done = submit_cp5_step(
+        store,
+        ticket.ticket_id,
+        "integrity_review",
+        review_all(review_scope(store, ticket)).model_dump_json(),
+    )
+    assert not done.issues
+    return store
+
+
+@pytest.fixture(scope="module")
+def production(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return production_journal(tmp_path_factory.mktemp("readiness-addendum")).directory
+
+
+def test_production_cp4_settles_with_legal_tools_and_old_envelope_identity(
+    production: Path, tmp_path: Path
+) -> None:
+    from deploy_vii.cp1_render import read_cp1_envelope, render_cp1_envelope
+    from deploy_vii.cp1_workflow import write_cp1_envelope
+    from deploy_vii.cp4_legal import submit_cp4_step
+    from deploy_vii.cp5_integrity import review_scope, submit_cp5_step
+    from deploy_vii.live.context import module_context, readable_sources
+    from deploy_vii.live.runner import prompt_inputs
+    from deploy_vii.live.tools import PackTools, ToolError
+    from tests.product.test_cp4_legal import INDENTURE, submission_fixture
+    from tests.product.test_cp5_integrity import review_all
+
+    shutil.copytree(production, tmp_path / "journal")
+    store = Execution(tmp_path / "journal")
+    before = store.read()
+    exported = write_cp1_envelope(store, tmp_path / "before").parent
+    files = {p.name: p.read_bytes() for p in exported.iterdir()}
+    requested = (*before.run.requested_modules, "CP-4")
+    with pytest.raises(ValueError, match="not assessed CP-4"):
+        store.extend_scope(requested)
+    raw, context_hash = payload(store, requested)
+    document = json.loads(raw)
+    document["consumers"][0].update(
+        evidence_demand="Executed covenant terms and original CP-1 figures",
+        rationale="Executed synthetic indenture supports bounded legal interpretation",
+        citations=[{"source_id": "indenture", "locator": "line:1", "quote": INDENTURE[0]}],
+        limitations=["Synthetic legal source attestation limit"],
+    )
+    document["gaps"] = [
+        {
+            "gap_id": "covenant-scope",
+            "kind": "scope",
+            "severity": "minor",
+            "description": "Synthetic covenant scope attestation gap",
+            "affected_modules": ["CP-4"],
+            "remediation": "Review complete executed amendments",
+            "citations": [],
+        }
+    ]
+    raw = json.dumps(document)
+    report = submit_cp0_addendum(store, requested, raw, context_sha256=context_hash)
+    assert tuple(h.module_id for h in report.staled) == ("CP-5",)
+    after = store.read()
+    assert after.attempts == before.attempts and after.pack_sha256 == before.pack_sha256
+    for module in ("CP-0", "CP-1", "CP-1A"):
+        assert next(h for h in after.heads if h.module_id == module) == next(
+            h for h in before.heads if h.module_id == module
+        )
+    ticket = store.begin("CP-4")
+    assert ticket.inputs[-1].input_id == "readiness-addendum"
+    shown = module_context(store, ticket, "legal_covenants")
+    assert shown is not None and shown["source_readiness_addendum"]
+    assert prompt_inputs(store, ticket, "legal_covenants").module_context == shown
+    assert readable_sources(store, ticket, "legal_covenants") == ("indenture",)
+    tools = PackTools(store.pack(), readable_sources(store, ticket, "legal_covenants"))
+    assert "indenture" in tools.search_pack({"query": "Leverage"})
+    with pytest.raises(ToolError, match="not one of"):
+        tools.search_pack({"query": "cash", "source_id": "filing"})
+    done = submit_cp4_step(
+        store,
+        ticket.ticket_id,
+        "legal_covenants",
+        submission_fixture(blocked=True).model_dump_json(),
+    )
+    assert not done.issues and done.status == "finished"
+    cp4 = store.result(done.result_sha256 or "")
+    assert "Synthetic legal source attestation limit" in cp4.inherited_limitations
+    assert "Synthetic covenant scope attestation gap" in cp4.inherited_limitations
+    ticket = store.begin("CP-5")
+    done = submit_cp5_step(
+        store,
+        ticket.ticket_id,
+        "integrity_review",
+        review_all(review_scope(store, ticket)).model_dump_json(),
+    )
+    assert not done.issues
+    assert set(cp4.inherited_limitations) <= set(
+        store.result(done.result_sha256 or "").inherited_limitations
+    )
+    again = write_cp1_envelope(store, tmp_path / "after").parent
+    assert {p.name: p.read_bytes() for p in exported.iterdir()} == files
+    assert {p.name: p.read_bytes() for p in again.iterdir() if p.name != "complete.json"} == {
+        name: raw for name, raw in files.items() if name != "complete.json"
+    }
+    old_receipt = json.loads(files["complete.json"])
+    new_receipt = json.loads((again / "complete.json").read_text())
+    assert {k: v for k, v in old_receipt.items() if k != "snapshot_sha256"} == {
+        k: v for k, v in new_receipt.items() if k != "snapshot_sha256"
+    }
+    assert read_cp1_envelope(store, exported) == read_cp1_envelope(store, again)
+    assert render_cp1_envelope(store, again, tmp_path / "page")["envelope"] == "verified"
+
+
+@pytest.fixture(scope="module")
+def original(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return journal(tmp_path_factory.mktemp("original-readiness")).directory
+
+
+@pytest.fixture
+def original_store(original: Path, tmp_path: Path) -> Execution:
+    shutil.copytree(original, tmp_path / "journal")
+    return Execution(tmp_path / "journal")
+
+
+def retained_files(store: Execution) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(store.directory)): p.read_bytes()
+        for p in store.directory.rglob("*")
+        if p.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "duplicate",
+        "extra",
+        "alias",
+        "closure",
+        "quote",
+        "locator",
+        "source",
+        "ready-limit",
+        "empty-limits",
+        "duplicate-gap",
+        "old-gap",
+        "empty-analysis",
+        "source-override",
+    ],
+)
+def test_bad_addenda_fail_closed_without_writing(original_store: Execution, mutation: str) -> None:
+    store = original_store
+    requested = ("CP-1", "CP-2") if mutation == "closure" else ("CP-1", "CP-4")
+    raw, context_hash = payload(store, requested)
+    doc = json.loads(raw)
+    row = doc["consumers"][0]
+    if mutation == "missing":
+        doc["consumers"] = []
+    elif mutation in {"duplicate", "extra"}:
+        doc["consumers"].append(
+            {**row, "module_id": row["module_id"] if mutation == "duplicate" else "CP-3"}
+        )
+    elif mutation == "alias":
+        row["module_id"] = "CP-PARSE"
+    elif mutation == "closure":
+        doc["consumers"] = [c for c in doc["consumers"] if c["module_id"] != "CP-1A"]
+    elif mutation in {"quote", "locator", "source"}:
+        row["citations"][0][
+            {"quote": "quote", "locator": "locator", "source": "source_id"}[mutation]
+        ] = "invented"
+    elif mutation == "ready-limit":
+        row.update(readiness="READY", limitations=[])
+    elif mutation == "empty-limits":
+        row["limitations"] = []
+    elif mutation in {"duplicate-gap", "old-gap"}:
+        gap = {
+            "gap_id": "new-gap",
+            "kind": "source",
+            "severity": "material",
+            "description": "Synthetic gap",
+            "affected_modules": ["CP-1" if mutation == "old-gap" else "CP-4"],
+            "remediation": "Supply evidence",
+            "citations": [],
+        }
+        doc["gaps"] = [gap, gap] if mutation == "duplicate-gap" else [gap]
+    elif mutation == "empty-analysis":
+        doc["analysis"] = []
+    else:
+        doc["sources"] = []
+    before = retained_files(store)
+    with pytest.raises(InvalidReadinessAddendum):
+        submit_cp0_addendum(store, requested, json.dumps(doc), context_sha256=context_hash)
+    assert retained_files(store) == before
+
+
+@pytest.mark.parametrize(
+    "requested,match",
+    [
+        (("CP-1", "CP-99"), "Unknown r14 entry"),
+        (("CP-4",), "Scope only extends"),
+    ],
+)
+def test_addendum_preserves_refusal_order(
+    original_store: Execution, requested: tuple[str, ...], match: str
+) -> None:
+    store = original_store
+    before = retained_files(store)
+    with pytest.raises(ValueError, match=match):
+        submit_cp0_addendum(store, requested, "{}", context_sha256="malformed")
+    assert retained_files(store) == before
+    report = submit_cp0_addendum(store, ("CP-1",), "{}", context_sha256="malformed")
+    assert not report.extended and retained_files(store) == before
+    store.begin("CP-1")
+    before = retained_files(store)
+    with pytest.raises(ValueError, match="attempt is pending"):
+        submit_cp0_addendum(store, requested, "{}", context_sha256="malformed")
+    assert retained_files(store) == before
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "missing-attempt",
+        "bad-output",
+        "step-inputs",
+        "stale",
+        "blocked",
+        "head-cache",
+        "pack-change",
+        "head-change",
+    ],
+)
+def test_original_cp0_provenance_and_current_context_are_required(
+    original_store: Execution, state: str
+) -> None:
+    store = original_store
+    raw, context_hash = payload(store, ("CP-1", "CP-4"))
+    snapshot = store.read()
+    head = snapshot.heads[0]
+    if state == "missing-attempt":
+        snapshot = snapshot.model_copy(update={"attempts": ()})
+    elif state in {"bad-output", "step-inputs"}:
+        attempt = snapshot.attempts[0]
+        update = {"output_sha256": store._store("{}")} if state == "bad-output" else {"inputs": ()}
+        step = attempt.steps[0].model_copy(update=update)
+        snapshot = snapshot.model_copy(
+            update={"attempts": (attempt.model_copy(update={"steps": (step,)}),)}
+        )
+    elif state in {"stale", "blocked"}:
+        snapshot = snapshot.model_copy(
+            update={"heads": (head.model_copy(update={"status": state}),)}
+        )
+    elif state == "head-cache":
+        snapshot = snapshot.model_copy(
+            update={"heads": (head.model_copy(update={"commands": ()}),)}
+        )
+    elif state == "pack-change":
+        pack = store.pack().model_copy(update={"sources": ()})
+        store.replace_pack(pack)
+        snapshot = store.read()
+    else:
+        snapshot = snapshot.model_copy(
+            update={"heads": (head.model_copy(update={"result_sha256": "f" * 64}),)}
+        )
+    store._write(snapshot)
+    before = retained_files(store)
+    with pytest.raises(ValueError):
+        submit_cp0_addendum(store, ("CP-1", "CP-4"), raw, context_sha256=context_hash)
+    assert retained_files(store) == before
+
+
+@pytest.mark.parametrize("status", ["BLOCKED", "CONDITIONAL"])
+def test_assessed_nonrunnable_extension_still_refuses_begin(
+    production: Path, tmp_path: Path, status: str
+) -> None:
+    from deploy_vii.execution import NotAuthorized
+
+    shutil.copytree(production, tmp_path / "journal")
+    store = Execution(tmp_path / "journal")
+    requested = (*store.read().run.requested_modules, "CP-4")
+    raw, digest = payload(store, requested)
+    doc = json.loads(raw)
+    doc["consumers"][0].update(readiness=status, missing_source="Executed amendment")
+    assert submit_cp0_addendum(store, requested, json.dumps(doc), context_sha256=digest).extended
+    with pytest.raises(NotAuthorized):
+        store.begin("CP-4")
+
+
+def test_later_disjoint_grant_preserves_existing_consumer_input(
+    production: Path, tmp_path: Path
+) -> None:
+    shutil.copytree(production, tmp_path / "journal")
+    store = Execution(tmp_path / "journal")
+    requested = (*store.read().run.requested_modules, "CP-4")
+    raw, digest = payload(store, requested)
+    first = submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    inputs = current_inputs(store.read(), "CP-4")
+    requested = (*requested, "CP-2")
+    raw, digest = payload(store, requested)
+    second = submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    assert first.readiness_addendum_sha256 != second.readiness_addendum_sha256
+    assert current_inputs(store.read(), "CP-4") == inputs
+    assert current_inputs(store.read(), "CP-2")[-1].sha256 == second.readiness_addendum_sha256
+    before = retained_files(store)
+    assert not submit_cp0_addendum(store, requested, "{}", context_sha256="malformed").extended
+    assert retained_files(store) == before
+
+
+@pytest.mark.parametrize("corruption", ["missing", "bytes", "raw", "context", "cache"])
+def test_grant_corruption_fails_closed_on_reopen(
+    original_store: Execution, corruption: str
+) -> None:
+    store = original_store
+    raw, digest = payload(store, ("CP-1", "CP-4"))
+    submit_cp0_addendum(store, ("CP-1", "CP-4"), raw, context_sha256=digest)
+    snapshot = store.read()
+    ref = snapshot.readiness_addenda[0]
+    addendum = store.readiness_addendum(ref)
+    digest = ref.sha256
+    if corruption == "cache":
+        grant = ref.grants[0].model_copy(update={"limitations": ("Forged restriction",)})
+        ref = ref.model_copy(update={"grants": (grant,)})
+        store._write(snapshot.model_copy(update={"readiness_addenda": (ref,)}))
+    else:
+        digest = (
+            addendum.payload_sha256
+            if corruption == "raw"
+            else addendum.context.content_hash()
+            if corruption == "context"
+            else digest
+        )
+        blob = store.directory / "blobs" / digest
+        if corruption == "bytes":
+            blob.write_text("{}")
+        else:
+            blob.unlink()
+    with pytest.raises(ValueError):
+        Execution(store.directory).read()
+
+
+def test_interrupted_pointer_write_never_publishes_scope_without_attestation(
+    original_store: Execution, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import deploy_vii.execution as execution
+
+    store = original_store
+    raw, digest = payload(store, ("CP-1", "CP-4"))
+    before = store.read()
+    atomic = execution._atomic_write
+
+    def interrupt(path: Path, raw: bytes) -> None:
+        if path.name == "current":
+            raise OSError("Synthetic interrupted pointer write")
+        atomic(path, raw)
+
+    monkeypatch.setattr(execution, "_atomic_write", interrupt)
+    with pytest.raises(OSError, match="Synthetic interrupted"):
+        submit_cp0_addendum(store, ("CP-1", "CP-4"), raw, context_sha256=digest)
+    assert Execution(store.directory).read() == before
+    monkeypatch.setattr(execution, "_atomic_write", atomic)
+    assert submit_cp0_addendum(store, ("CP-1", "CP-4"), raw, context_sha256=digest).extended
+    assert Execution(store.directory).read().readiness_addenda
+
+
+@given(
+    st.sampled_from(["READY", "READY_WITH_LIMITATIONS", "CONDITIONAL", "BLOCKED"]),
+    st.booleans(),
+    st.booleans(),
+)
+def test_composed_assessment_agrees_with_shared_validator(
+    status: str, cite: bool, gap: bool
+) -> None:
+    """Differential: immutable pack, same full review, shared exact-set evidence rules."""
+    from deploy_vii.cp0_workflow import _check_addendum
+    from deploy_vii.live.submission import compose_addendum
+    from deploy_vii.readiness import ReadinessAddendumContext, _validate_review_for, validate_review
+
+    pack, original = readiness_fixture()
+    pack = pack.model_copy(
+        update={"run": pack.run.model_copy(update={"requested_modules": ("CP-1",)})}
+    )
+    original = original.model_copy(
+        update={
+            "pack_sha256": pack.content_hash(),
+            "consumers": tuple(c for c in original.consumers if c.module_id == "CP-1"),
+            "gaps": (),
+        }
+    )
+    context = ReadinessAddendumContext(
+        pack_sha256=pack.content_hash(),
+        cp0_result_sha256="0" * 64,
+        base_requested_modules=("CP-1",),
+        target_requested_modules=("CP-1", "CP-4"),
+        added_modules=("CP-4",),
+        original_review=original,
+    )
+    template = as_submission(original)
+    consumer = template.consumers[0].model_copy(
+        update={
+            "module_id": "CP-4",
+            "readiness": status,
+            "missing_source": "Executed amendment" if status == "CONDITIONAL" else None,
+            "citations": template.consumers[0].citations if cite else (),
+        }
+    )
+    raw = json.dumps(
+        {
+            "consumers": [consumer.model_dump(mode="json")],
+            "gaps": [
+                {
+                    "gap_id": "new",
+                    "kind": "scope",
+                    "severity": "minor",
+                    "description": "Synthetic coverage limit",
+                    "affected_modules": ["CP-4"],
+                    "remediation": "Review full evidence",
+                    "citations": [],
+                }
+            ]
+            if gap
+            else [],
+            "analysis": [c.model_dump(mode="json") for c in template.analysis],
+        }
+    )
+    composed = compose_addendum(pack, context, raw)
+    assert composed.review is not None
+    expected = _validate_review_for(pack, composed.review, ("CP-1", "CP-4"))
+    # The public CP-0 validator never broadens the immutable original scope.
+    assert "Assess each selected canonical live consumer exactly once" in validate_review(
+        pack, composed.review
+    )
+    try:
+        accepted = _check_addendum(pack, context, raw)
+    except InvalidReadinessAddendum as rejected:
+        assert rejected.issues == expected
+    else:
+        assert not expected and accepted.consumers[0].module_id == "CP-4"
+    assert _validate_review_for(pack, original, ("CP-1",)) == validate_review(pack, original)
+
+
+def test_public_readiness_validator_preserves_shape_error_before_scope_resolution() -> None:
+    from deploy_vii.readiness import _validate_review_for, validate_review
+
+    pack, review = readiness_fixture()
+    malformed = pack.model_copy(update={"run": None})
+    assert (
+        validate_review(malformed, review)
+        == _validate_review_for(malformed, review, ())
+        == ("run: Input should be an object",)
+    )
+
+
+def test_addendum_instructions_refuse_pack_drift_after_context(original_store: Execution) -> None:
+    from deploy_vii.live.prompts import readiness_addendum_instructions
+
+    context = cp0_addendum_context(original_store, ("CP-1", "CP-4"))
+    changed = original_store.pack().model_copy(update={"sources": ()})
+    with pytest.raises(ValueError, match="context pack changed"):
+        readiness_addendum_instructions(changed, context)
+
+
+@settings(max_examples=6, deadline=None)
+@given(st.permutations(("CP-1", "CP-1A", "CP-5", "CP-OS")))
+def test_no_addendum_keeps_real_inputs_and_old_bytes(
+    production: Path, order: tuple[str, ...]
+) -> None:
+    """Generated M9 differential against the old non-consumer extension invariants."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "journal"
+        shutil.copytree(production, path)
+        store = Execution(path)
+        before = store.read()
+        old_inputs = {h.module_id: current_inputs(before, h.module_id) for h in before.heads}
+        report = store.extend_scope(order)
+        after = store.read()
+        assert report.added == ("CP-OS",) and not report.staled
+        assert after.heads == before.heads and after.attempts == before.attempts
+        assert after.pack_sha256 == before.pack_sha256
+        assert all(current_inputs(after, m) == inputs for m, inputs in old_inputs.items())
+        assert "readiness_addenda" not in after.model_dump(mode="json")
+        assert "readiness_addendum_sha256" not in report.model_dump(mode="json")
+        assert not store.extend_scope(order).extended
+        alias = store.extend_scope((*order, "CP-PARSE"))
+        assert alias.extended and alias.added == () and alias.staled == ()
+        assert not store.extend_scope((*order, "CP-PARSE")).extended
+
+
+def test_cli_addendum_context_import_rejection_and_refusal(
+    original_store: Execution,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.product.test_module_submits import Cli
+
+    store = original_store
+    cli = Cli(store, monkeypatch, capsys)
+    code, out, err = cli("cp0-addendum-context", "CP-1", "CP-4")
+    shown = json.loads(out)
+    assert code == 0 and not err and shown["context"]["added_modules"] == ["CP-4"]
+    assert set(shown["schema"]["properties"]) == {"consumers", "gaps", "analysis"}
+    file = tmp_path / "addendum.json"
+    raw, digest = payload(store, ("CP-1", "CP-4"))
+    assert digest == shown["context_sha256"]
+    before = retained_files(store)
+    code, out, err = cli(
+        "extend-scope",
+        "CP-1",
+        "CP-4",
+        "--readiness-addendum",
+        str(file),
+        "--context-sha256",
+        digest,
+    )
+    assert code == 2 and not out and "no review file" in err
+    assert retained_files(store) == before
+    file.write_text("{}")
+    code, out, err = cli(
+        "extend-scope",
+        "CP-1",
+        "CP-4",
+        "--readiness-addendum",
+        str(file),
+        "--context-sha256",
+        digest,
+    )
+    assert code == 1 and json.loads(out)["issues"] and err
+    assert retained_files(store) == before
+    file.write_text(raw)
+    code, out, err = cli(
+        "extend-scope",
+        "CP-1",
+        "CP-4",
+        "--readiness-addendum",
+        str(file),
+        "--context-sha256",
+        "0" * 64,
+    )
+    assert code == 2 and not out and "context changed" in err
+    assert retained_files(store) == before
+    code, out, err = cli(
+        "extend-scope",
+        "CP-1",
+        "CP-4",
+        "--readiness-addendum",
+        str(file),
+        "--context-sha256",
+        digest,
+    )
+    assert code == 0 and not err and json.loads(out)["readiness_addendum_sha256"]
+
+
+def test_addendum_cannot_override_an_original_blocked_row(original_store: Execution) -> None:
+    from deploy_vii.execution import NotAuthorized, readiness_command
+
+    store = original_store
+    snapshot = store.read()
+    review = cp0_addendum_context(store, ("CP-1", "CP-4")).original_review
+    review = review.model_copy(
+        update={
+            "consumers": tuple(
+                c.model_copy(update={"readiness": "BLOCKED"}) for c in review.consumers
+            )
+        }
+    )
+    other = Execution.create(store.directory.parent / "blocked", store.pack())
+    assert not submit_cp0_review(
+        other, other.begin("CP-0").ticket_id, review.model_dump_json()
+    ).issues
+    raw, digest = payload(other, ("CP-1", "CP-4"))
+    submit_cp0_addendum(other, ("CP-1", "CP-4"), raw, context_sha256=digest)
+    assert readiness_command(other.read(), "CP-1")[0] == ("DO NOT RUN",)
+    with pytest.raises(NotAuthorized):
+        current_inputs(other.read(), "CP-1")
+    assert store.read() == snapshot
+
+
+def test_ambiguous_or_revoked_grants_never_authorize(production: Path, tmp_path: Path) -> None:
+    from deploy_vii.execution import NotAuthorized, readiness_command
+
+    shutil.copytree(production, tmp_path / "journal")
+    store = Execution(tmp_path / "journal")
+    requested = (*store.read().run.requested_modules, "CP-4")
+    raw, digest = payload(store, requested)
+    submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    snapshot = store.read()
+    assert current_inputs(snapshot, "CP-4")[-1].input_id == "readiness-addendum"
+    ambiguous = snapshot.model_copy(update={"readiness_addenda": snapshot.readiness_addenda * 2})
+    with pytest.raises(ValueError, match="Ambiguous"):
+        current_inputs(ambiguous, "CP-4")
+    head = next(h for h in snapshot.heads if h.module_id == "CP-0")
+    changed = snapshot.model_copy(
+        update={
+            "heads": tuple(
+                h.model_copy(update={"result_sha256": "0" * 64}) if h == head else h
+                for h in snapshot.heads
+            )
+        }
+    )
+    with pytest.raises(NotAuthorized):
+        current_inputs(changed, "CP-4")
+    assert readiness_command(changed, "CP-4")[0] == ()
+    pack = store.pack().model_copy(update={"sources": store.pack().sources[:-1]})
+    store.replace_pack(pack)
+    assert readiness_command(store.read(), "CP-4")[0] == ()
+
+
+def test_ready_grant_binds_accepted_input_and_begins(original_store: Execution) -> None:
+    store = original_store
+    review = cp0_addendum_context(store, ("CP-1", "CP-1A")).original_review
+    review = review.model_copy(
+        update={
+            "sources": tuple(
+                s.model_copy(update={"authority": "issuer", "limitations": ()})
+                for s in review.sources
+            ),
+            "consumers": tuple(
+                c.model_copy(update={"readiness": "READY", "limitations": ()})
+                for c in review.consumers
+            ),
+        }
+    )
+    ready = Execution.create(store.directory.parent / "ready", store.pack())
+    assert not submit_cp0_review(
+        ready, ready.begin("CP-0").ticket_id, review.model_dump_json()
+    ).issues
+    raw, digest = payload(ready, ("CP-1", "CP-1A"))
+    doc = json.loads(raw)
+    doc["consumers"][0].update(readiness="READY", limitations=[])
+    submit_cp0_addendum(ready, ("CP-1", "CP-1A"), json.dumps(doc), context_sha256=digest)
+    attempt = ready.begin("CP-1A")
+    assert (
+        attempt.inputs[-1].input_id == "readiness-addendum"
+        and attempt.inputs[-1].status == "accepted"
+    )
