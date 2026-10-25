@@ -1537,6 +1537,22 @@ unchanged.
   of its eight cells (`tests/product/test_live_loop.py`). The synthetic entry stays accepted:
   it read no page, so no cell is measured.
 
+## The CLI prints the step prompt (task M8c, 25 Oct 2026)
+
+`execution step-instructions --module M --ticket T --step S [--with-sources]`
+(`module_submits.step_instructions`) prints the one-shot prompt the runner would send for the
+ticket's next step, composed by the runner's own seams with no second copy of any rule:
+`expected_step`, `prompt_inputs`, `repair_prompt`, `context.declared_sources` and
+`prompts.build` (`submit_tool=None`), each message under a `--- <role> ---` line. With
+`--with-sources` the messages are the runner's byte for byte (tests compare them for every
+module step on the fixtures, CP-1's `quality` included); without it the declared SOURCE blocks
+are replaced by one `source:` line each (the original at `originals/<sha256>` under the pack
+directory, the extracted text's byte length, the hash) and the retained-upstream blocks stay,
+since the host cannot read those as files. A ticket of another module, a step outside the
+chain, a step that is not the ticket's next, or a prompt `build` refuses is a one-line exit 2.
+The same task made `cp0-submit`, `cp1-submit` and `cp1-promote` exit 1 on a rejected review, as
+`module-submit` does. The runner is unchanged.
+
 ## Not covered here
 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep

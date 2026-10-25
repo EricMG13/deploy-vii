@@ -593,3 +593,14 @@ def test_the_module_docstrings_name_no_private_runner_function() -> None:
 
     assert "_context_body" not in (module_submits.__doc__ or "")
     assert "_context_body" not in (host_context.__doc__ or "")
+
+
+def test_the_skill_prints_a_steps_instructions_before_each_review_it_asks_for() -> None:
+    skill = Path(__file__).parents[2] / ".github/skills/deploy-vii/SKILL.md"
+    lines = skill.read_text(encoding="utf-8").splitlines()
+    assert len(lines) <= 150
+    commands = [line.split()[4] for line in lines if line.startswith("deploy-vii execution ")]
+    for submit in ("cp0-submit", "cp1-submit", "cp1-promote", "module-submit"):
+        first = commands.index(submit)
+        assert commands[first - 1] in {"step-instructions", "step-output", "cp1-quality-inputs"}
+    assert commands.count("step-instructions") == 4

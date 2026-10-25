@@ -7,23 +7,22 @@ description: Run the Deploy VII evidence workbench on a named issuer source pack
 
 Python owns every number and every validation; you supply evidence-grounded review text
 and run the commands below. The methodology lives in the repository, not in this skill.
-No part of this has been tried on a real Copilot host (see `docs/native-delivery.md`,
-"Not accepted offline"). This skill declares no `allowed-tools`: the host asks before
-each shell command, so expect a prompt per step.
+Nothing here has been tried on a real Copilot host (`docs/native-delivery.md`, "Not accepted
+offline"). No `allowed-tools` is declared: the host asks before each shell command.
 
 ## Prerequisites
 - A checkout of the Deploy VII repository, Python 3.13 and uv. Run `make setup` once
-  (it runs `uv sync --locked`). Then run the CLI as `uv run --locked deploy-vii ...`, or
-  as `deploy-vii ...` with `.venv/bin` on PATH. The commands below omit the prefix.
-- **Gap:** no installer, `setup` or `doctor` command exists. `make setup` is the only
-  route and nothing checks the install. `deploy-vii plan CP-0` shows that the CLI runs.
-- A request file (JSON, schema `preparation-request/1`) naming the run and the source
-  files, and a pack root directory holding those files (`references/commands.md`).
+  (`uv sync --locked`), then `uv run --locked deploy-vii ...`, or `deploy-vii ...` with
+  `.venv/bin` on PATH (the commands below omit the prefix).
+- **Gap:** no installer, `setup` or `doctor` command exists; nothing checks the install.
+  `deploy-vii plan CP-0` shows that the CLI runs.
+- A request file (JSON, schema `preparation-request/1`) naming the run and the source files,
+  and a pack root directory holding them (`references/commands.md`).
 
-**Gap:** the product fixes no delivery directory; every command takes a caller-chosen
-path. This skill's convention is `./deploy-vii-out/<run-id>/`, holding `pack/`,
-`journal/`, `reviews/` and one directory per published artifact below. Several commands
-refuse an output path that already exists: use a new directory each time.
+**Gap:** the product fixes no delivery directory; every command takes a caller-chosen path.
+This skill's convention is `./deploy-vii-out/<run-id>/`, holding `pack/`, `journal/`,
+`reviews/` and one directory per published artifact below. Several commands refuse an output
+path that already exists: use a new directory each time.
 
 ## Flow
 Module order follows `deploy-vii plan`. The CLI submits CP-0 to CP-6 and publishes CP-MODEL.
@@ -46,29 +45,32 @@ deploy-vii prepare --request <request.json> --root <pack-root> --output ./deploy
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal create --pack ./deploy-vii-out/<run-id>/pack
 ```
 
-4. CP-0. Begin an attempt (prints JSON; keep its `ticket_id`), write the source-readiness
-   review to `reviews/cp0.txt`, then submit it. Printed `issues` mean it was rejected; one
-   repair attempt is allowed (`references/resume.md`).
+4. CP-0. Begin an attempt (prints JSON; keep its `ticket_id`), print the step's instructions
+   (read its rules and JSON Schema; the sources it lists are the files under `pack/`), write
+   the review to `reviews/cp0.txt`, then submit it. A rejected review exits 1 with the
+   issues on stderr; one repair attempt is allowed (`references/resume.md`).
 
 ```
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal begin CP-0
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-instructions --module CP-0 --ticket <ticket> --step source_readiness
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp0-submit --ticket <ticket> --review ./deploy-vii-out/<run-id>/reviews/cp0.txt
 ```
 
-5. CP-1. Begin, then submit the four steps in order (`source_context`, `financials`,
-   `narrative`, `readiness`), one review file per step, then the QA review:
+5. CP-1. Begin; for each step in order (`source_context`, `financials`, `narrative`,
+   `readiness`) print its instructions, submit a review file; then the QA review (`quality`):
 
 ```
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal begin CP-1
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-instructions --module CP-1 --ticket <ticket> --step source_context
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp1-submit --ticket <ticket> --step source_context --review ./deploy-vii-out/<run-id>/reviews/cp1-source_context.txt
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-output --ticket <ticket> --step source_context
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp1-quality-inputs --ticket <ticket>
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-instructions --module CP-1 --ticket <ticket> --step quality
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp1-promote --ticket <ticket> --review ./deploy-vii-out/<run-id>/reviews/cp1-quality.txt
 ```
 
-   `step-output` prints a retained step output (read it before the next review);
-   `cp1-quality-inputs` prints the registers for the QA review; `cp1-promote` settles CP-1.
-   Repeat `cp1-submit` for each step name.
+   `step-output` prints a retained output (read it before the next review);
+   `cp1-quality-inputs` prints the QA registers; `cp1-promote` settles CP-1. Repeat per step.
 
 6. Optional preview while CP-1 is pending (never settles a ticket):
 
@@ -84,7 +86,7 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal render --enve
 ```
 
    The page is `report/accepted.html`, or `refused.html` which states why. Rendering does
-   not accept the page: browser acceptance stays unrun. This is the CP-1 page; see step 10.
+   not accept it: browser acceptance stays unrun. This is the CP-1 page; see step 10.
 
 8. CP-MODEL, only when the run requests it and CP-1 is accepted or restricted:
 
@@ -94,11 +96,12 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp-model-veri
 ```
 
 9. Each later module (CP-1A, CP-2 to CP-6; names in `references/commands.md`): begin, print
-   the step's CONTEXT (`{}` if none), write the review, submit. A rejected review prints
-   the validator's issues on stderr and exits 1: repair, then `begin` again. Exit 2 refuses.
+   the step's instructions (rules, JSON Schema, CONTEXT; the sources it lists are files under
+   `pack/`), write the review, submit. A rejected review prints the validator's issues on
+   stderr and exits 1: repair, then `begin` again. Exit 2 refuses.
 
 ```
-deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal module-context --module CP-2 --ticket <ticket> --step credit_synthesis
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-instructions --module CP-2 --ticket <ticket> --step credit_synthesis
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal module-submit --module CP-2 --ticket <ticket> --step credit_synthesis --review ./deploy-vii-out/<run-id>/reviews/cp2.txt
 ```
 
@@ -116,8 +119,7 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal status
 ```
 
 ## Interrupt and resume
-- Interrupt a pending attempt. This records a reason in the journal; it does not stop any
-  process the host is running:
+- Interrupt a pending attempt (records a reason; stops no host process):
 
 ```
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal interrupt --ticket <ticket> --reason "<why>"
@@ -128,18 +130,16 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal interrupt --t
   review text (`references/resume.md`). Behaviour after a killed host session is not verified.
 
 ## Model dispatch
-You (the host model) write the review texts. `deploy-vii live` is a different thing: a
-capped OpenRouter test runner for development, using a local credential file, never the
-host model. **Gap:** nothing dispatches the host's own models, and there is no single
-run-all command. Do not run `deploy-vii live` unless the user asks for a capped
-development test and names the cap (`references/commands.md`).
+You (the host model) write the review texts. `deploy-vii live` is a capped OpenRouter test
+runner for development with a local credential file, never the host model. **Gap:** nothing
+dispatches the host's own models and there is no run-all command. Do not run it unless the
+user asks for a capped development test and names the cap (`references/commands.md`).
 
 ## Stop rules
 - Never exceed a cap in `settings/project.toml` (`recurring_caps_usd`,
-  `cumulative_ceiling_usd`); read the numbers there, they are not copied here. Never pass
-  a larger `--cap` to `live`. The cumulative ceiling spans OpenRouter and Anthropic spend
-  together (decision 0006 DC-6, amendment of 24 Oct 2026:
-  `docs/decisions/0006-delegated-choices-and-orchestration.md`).
+  `cumulative_ceiling_usd`); read the numbers there. Never pass a larger `--cap` to `live`.
+  The cumulative ceiling spans OpenRouter and Anthropic spend together (decision 0006 DC-6,
+  amendment of 24 Oct 2026: `docs/decisions/0006-delegated-choices-and-orchestration.md`).
 - No credit top-up and no workaround for missing credit. If `live` exits with code 4
   (credit exhausted), stop and report; the ticket stays pending for the coordinator.
 - Report a refused or rejected result as it is. Never edit a journal, pack or output by

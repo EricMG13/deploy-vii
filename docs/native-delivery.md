@@ -56,9 +56,12 @@ commands work in order, that a host loads or follows the skill, or any resume be
   model, so nothing in the CLI dispatches the host's own models.
 - Source scope differs from the runner: for CP-3 and CP-4 the runner sends only the sources
   their upstream selects and normalises omitted defaults before validating; the host reads
-  the whole pack, and the module's own schema and validator govern the review it writes.
-- No command prints a step's response schema or rules yet, so the host cannot read the shape
-  of a review from the CLI (follow-up M8c).
+  the sources `step-instructions` lists (the same scope), and the module's own schema and
+  validator govern the review it writes.
+- `step-instructions` names each declared source by the original's hash under the pack
+  directory (`originals/<sha256>`) and gives the byte length of the extracted text the runner
+  would send, not the original's size (the journal does not keep the original). The host reads
+  the original with its own tools; the runner's model reads the extracted spans.
 - Host-written reviews are not checked by the runner's tool-loop rules (absence claims need
   a prior search, cited pages must have been read), which depend on a tool loop's record; the
   module validators run in full.
