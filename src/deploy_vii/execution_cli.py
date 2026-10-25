@@ -99,8 +99,14 @@ def issue_lines(attempt: Attempt) -> tuple[str, ...]:
     step that was rejected and kept for its one repair (task 7.0g)."""
     if attempt.issues:
         return attempt.issues
-    held = [step for step in (*attempt.steps, *attempt.step_repairs) if step.issues]
-    return held[-1].issues if held and attempt.status == "pending" else ()
+    if attempt.status != "pending":
+        return ()
+    invalid = [step for step in attempt.steps if step.status == "invalid"]
+    if invalid:
+        return invalid[-1].issues
+    valid = {step.step_id for step in attempt.steps if step.status == "valid"}
+    waiting = [step for step in attempt.step_repairs if step.step_id not in valid]
+    return waiting[-1].issues if waiting else ()
 
 
 def module_submit(store: Execution, args: argparse.Namespace) -> str:

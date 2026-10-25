@@ -14,7 +14,8 @@ from deploy_vii import registry
 from deploy_vii.__main__ import main
 from deploy_vii.contracts import Module
 from deploy_vii.cp0_workflow import build_readiness
-from deploy_vii.execution import Execution
+from deploy_vii.execution import Attempt, Execution, StepSubmission
+from deploy_vii.execution_cli import issue_lines
 from deploy_vii.live.context import module_context
 from deploy_vii.module_submits import MODULE_SUBMITS, submit_module_step
 from deploy_vii.report_view import pathways
@@ -217,3 +218,18 @@ def test_report_refuses_an_existing_output_directory(cli: Cli, tmp_path: Path) -
     pathway_id = cli.store.read().run.pathway
     code, _, err = cli("report", "--pathway", pathway_id, "--output", str(tmp_path))
     assert code == 2 and "exists" in err
+
+
+def test_issue_lines_read_a_kept_rejected_try_only_while_its_step_is_unrepaired() -> None:
+    bad = StepSubmission(
+        step_id="s", inputs=(), payload_sha256="0" * 64, status="invalid", issues=("bad",)
+    )
+    good = StepSubmission(
+        step_id="s", inputs=(), payload_sha256="1" * 64, status="valid", output_sha256="2" * 64
+    )
+    kept = Attempt(ticket_id="t", module_id="CP-1", inputs=(), number=0, step_repairs=(bad,))
+    assert issue_lines(kept) == ("bad",)
+    repaired = Attempt(
+        ticket_id="t", module_id="CP-1", inputs=(), number=0, steps=(good,), step_repairs=(bad,)
+    )
+    assert issue_lines(repaired) == ()
