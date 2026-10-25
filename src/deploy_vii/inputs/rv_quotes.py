@@ -17,7 +17,7 @@ import re
 import zlib
 from collections.abc import Mapping, Sequence
 from datetime import date
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Final, Literal, Self, cast
 from urllib.parse import quote, unquote
@@ -243,7 +243,9 @@ def rv_quotes_facts(source: Source) -> RVQuotesFacts:
     verifying it against original bytes remains the pack loader/consumer's responsibility.
     No quote selection, price convention, authority or financial calculation is supplied.
     """
-    result, facts = read(source.name, source)
+    name = getattr(source, "name", None)
+    file = name if isinstance(name, str) and name else "<invalid frozen source>"
+    result, facts = read(file, source)
     if facts is None:
         raise RVQuotesRefused(result)
     return facts
@@ -479,7 +481,10 @@ def row_findings(
             findings.append((f"{LETTERS[COLUMNS.index(name)]}{row}", *found))
         elif name in LEVELS and values[name]:
             try:
-                levels[name] = Decimal(values[name])
+                # Parse exactly without inheriting disabled traps or changing caller flags.
+                with localcontext() as context:
+                    context.traps[InvalidOperation] = True
+                    levels[name] = Decimal(values[name])
             except DecimalException:
                 flagged.add(name)
                 problem = f"{name} '{echo(values[name])}' is not a supported Decimal representation"

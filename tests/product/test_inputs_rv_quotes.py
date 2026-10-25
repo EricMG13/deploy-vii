@@ -9,7 +9,7 @@ import io
 import shutil
 import sys
 from datetime import date
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -1087,3 +1087,161 @@ def test_reader_retains_existing_row_refusals(change: dict[str, Any], tmp_path: 
     with pytest.raises(RVQuotesRefused) as refused:
         rv_quotes_facts(quote_source(path.read_bytes()))
     assert refused.value.report == result
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize("trap", [True, False])
+@pytest.mark.parametrize("api", ["bytes", "facts"])
+def test_unsupported_numeric_levels_refuse_without_changing_caller_context(
+    level: str, trap: bool, api: str
+) -> None:
+    raw = numeric_cell_bytes(level, "1e9999999999999999999", "str")
+    frozen = quote_source(raw)
+    with localcontext() as context:
+        context.traps[InvalidOperation] = trap
+        context.flags[Inexact] = True
+        before = repr(context)
+        if api == "bytes":
+            result = validate_rv_bytes(FILE, raw)
+        else:
+            with pytest.raises(RVQuotesRefused) as refused:
+                rv_quotes_facts(frozen)
+            result = refused.value.report
+        assert repr(context) == before
+    assert not result.ok
+    (issue,) = result.issues
+    assert issue.cell == f"{LETTERS[COLUMNS.index(level)]}2"
+    assert "not a supported Decimal representation" in issue.problem
+    assert issue.fix == NUMBER_FIX
+
+
+@pytest.mark.parametrize("name", [None, 123])
+@pytest.mark.parametrize("construction", ["copy", "construct"])
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
+def test_invalid_source_names_use_a_safe_refusal_label(name: int | None, construction: str) -> None:
+    frozen = quote_source(TEMPLATE.read_bytes())
+    invalid = (
+        frozen.model_copy(update={"name": name})
+        if construction == "copy"
+        else Source.model_construct(**(dict(frozen) | {"name": name}))
+    )
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(invalid)
+    (issue,) = refused.value.report.issues
+    assert issue.file == "<invalid frozen source>"
+    assert issue.cell == "A1" and "invalid frozen source identity" in issue.problem
+
+
+def test_missing_source_name_is_a_house_refusal() -> None:
+    payload = dict(quote_source(TEMPLATE.read_bytes()))
+    del payload["name"]
+    invalid = Source.model_construct(**payload)
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(invalid)
+    assert refused.value.report.issues[0].file == "<invalid frozen source>"
+
+
+def test_valid_frozen_name_remains_the_exact_diagnostic_label() -> None:
+    frozen = quote_source(numeric_cell_bytes("yield_pct", "7.5", "e"))
+    frozen = frozen.model_copy(update={"name": "synthetic-folder/custom-quotes.xlsx"})
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(frozen)
+    assert refused.value.report.issues[0].file == frozen.name
+
+
+@settings(max_examples=80, deadline=None)
+@given(
+    st.sampled_from(LEVELS),
+    st.booleans(),
+    st.one_of(
+        EXPONENT_LEXEME,
+        st.sampled_from(
+            [
+                "7.50000000000000001",
+                "1e999999999999999999",
+                "-1e-999999999999999999",
+                "1e9999999999999999999",
+            ]
+        ),
+    ),
+)
+def test_numeric_boundary_is_exact_and_context_independent(
+    level: str, trap: bool, lexeme: str
+) -> None:
+    raw = numeric_cell_bytes(level, lexeme, "str")
+    frozen = quote_source(raw)
+    with localcontext() as independent:
+        independent.traps[InvalidOperation] = True
+        try:
+            expected = Decimal(lexeme)
+        except DecimalException:
+            expected = None
+    with localcontext() as caller:
+        caller.prec = 1
+        caller.Emax = 2
+        caller.Emin = -2
+        caller.clamp = 1
+        caller.rounding = "ROUND_FLOOR"
+        for signal in caller.traps:
+            caller.traps[signal] = True
+        caller.traps[InvalidOperation] = trap
+        caller.flags[Inexact] = True
+        before = repr(caller)
+        result = validate_rv_bytes(FILE, raw)
+        if expected is None:
+            assert not result.ok
+            with pytest.raises(RVQuotesRefused) as refused:
+                rv_quotes_facts(frozen)
+            assert refused.value.report == result
+        else:
+            assert result.ok
+            assert getattr(rv_quotes_facts(frozen).quotes[0], level) == expected
+        assert repr(caller) == before
+
+
+@pytest.mark.parametrize("trap", [True, False])
+@pytest.mark.parametrize(
+    "bid,ask,ordered",
+    [
+        ("7.50000000000000001", "7.50000000000000002", True),
+        ("1e999999999999999998", "1e999999999999999999", True),
+        ("1e-999999999999999999", "1e-999999999999999998", True),
+        ("7.50000000000000002", "7.50000000000000001", False),
+    ],
+)
+def test_bid_ask_order_remains_exact_in_hostile_caller_context(
+    trap: bool, bid: str, ask: str, ordered: bool
+) -> None:
+    raw = workbook_bytes(
+        [
+            {
+                "provider": "Synthetic Dealer",
+                "as_of": "2026-09-30",
+                "issuer": "Synthetic Issuer",
+                "facility_id": "F1",
+                "instrument": "Loan",
+                "quote_kind": "observed",
+                "currency": "USD",
+                "bid": bid,
+                "ask": ask,
+            }
+        ]
+    )
+    frozen = quote_source(raw)
+    with localcontext() as caller:
+        caller.prec, caller.Emax, caller.Emin = 1, 2, -2
+        for signal in caller.traps:
+            caller.traps[signal] = True
+        caller.traps[InvalidOperation] = trap
+        caller.flags[Inexact] = True
+        before = repr(caller)
+        result = validate_rv_bytes(FILE, raw)
+        assert result.ok == ordered
+        if ordered:
+            row = rv_quotes_facts(frozen).quotes[0]
+            assert row.bid == Decimal(bid) and row.ask == Decimal(ask)
+        else:
+            with pytest.raises(RVQuotesRefused) as refused:
+                rv_quotes_facts(frozen)
+            assert refused.value.report == result
+        assert repr(caller) == before
