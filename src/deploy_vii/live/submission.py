@@ -1202,10 +1202,16 @@ def _split_issues(kind: str, document: Mapping[str, Any]) -> list[str]:
     return issues
 
 
-def _checked(kind: str, payload: str) -> tuple[tuple[str, ...], dict[str, Any] | None]:
-    """(issues, the part null-resolved against its own schema when it has none)."""
+@dataclass(frozen=True)
+class _Checked:
+    issues: tuple[str, ...]
+    document: dict[str, Any] | None  # the part null-resolved, when it has no issue
+    resolved: tuple[str, ...]  # the paths of the nulls resolved (`live.schema.normalise`)
+
+
+def _checked(kind: str, payload: str) -> _Checked:
     model = partial_schema(kind)
-    normalised, _ = normalise(model, payload)
+    normalised, resolved = normalise(model, payload)
     document = json_object(normalised)
     issues: list[str] = []
     try:
@@ -1222,16 +1228,16 @@ def _checked(kind: str, payload: str) -> tuple[tuple[str, ...], dict[str, Any] |
         )
         issues = [issue for issue in shape_issues(error) if issue not in unset]
     if document is None:  # not a JSON object: the shape issue says so
-        return tuple(issues), None
+        return _Checked(tuple(issues), None, resolved)
     issues += _split_issues(kind, document)
     found = tuple(dict.fromkeys(issues))
-    return found, None if found else document
+    return _Checked(found, None if found else document, resolved)
 
 
 def check_part(kind: str, payload: str) -> tuple[str, ...]:
     """The issues of one part of `kind` as it arrives (empty: the part is accepted); see the
     section comment above. An unknown kind raises ValueError."""
-    return _checked(kind, payload)[0]
+    return _checked(kind, payload).issues
 
 
 def _size(kind: str, document: Mapping[str, Any]) -> int:
@@ -1247,17 +1253,21 @@ def _size(kind: str, document: Mapping[str, Any]) -> int:
 
 class Parts:
     """The parts of one financials submission a tool loop holds: the last accepted part of each
-    kind. A part of a kind already held replaces it; a rejected part changes nothing."""
+    kind. A part of a kind already held replaces it; a rejected part changes nothing. A part is
+    held null-resolved against its own schema, as `submit_model_payload` resolves a payload sent
+    whole; `resolved` keeps each held part's resolved paths (the loop records them)."""
 
     def __init__(self) -> None:
         self.held: dict[str, dict[str, Any]] = {}
+        self.resolved: dict[str, tuple[str, ...]] = {}
 
     def submit(self, kind: str, payload: str) -> tuple[str, ...]:
         """Check one part (`check_part`) and hold it when it has no issue; its issues."""
-        issues, document = _checked(kind, payload)
-        if document is not None:
-            self.held[kind] = document
-        return issues
+        checked = _checked(kind, payload)
+        if checked.document is not None:
+            self.held[kind] = checked.document
+            self.resolved[kind] = checked.resolved
+        return checked.issues
 
     def size(self, kind: str) -> int:
         return _size(kind, self.held[kind])

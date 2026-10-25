@@ -4,6 +4,8 @@ import json
 import random
 import re
 import shutil
+import tempfile
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 import pytest
-from hypothesis import HealthCheck, example, given, settings
+from hypothesis import HealthCheck, event, example, given, settings
 from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
 
@@ -34,7 +36,7 @@ from deploy_vii.live.prompts import (
 )
 from deploy_vii.live.retention import AttemptWriter
 from deploy_vii.live.runner import journal_outcome
-from deploy_vii.live.schema import exact_json, json_object, strict_schema
+from deploy_vii.live.schema import exact_json, json_object, normalise, strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
 from deploy_vii.live.submission import (
     BOOK_PARTS,
@@ -91,9 +93,18 @@ from deploy_vii.source_context import SourceContextReview
 from deploy_vii.statement_extract import ExtractedTable, extract_statement_lines
 from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_source_context as source_context_tests
+from tests.product import transcript_support
 from tests.product.live_support import FAKE_KEY, make_rtf_key
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
-from tests.product.test_live_loop import Rig, step_rig, tool_messages, tool_pool, tool_reply
+from tests.product.test_live_loop import (
+    HYBRID_QUOTE_ISSUE,
+    Rig,
+    _financials_entry,
+    step_rig,
+    tool_messages,
+    tool_pool,
+    tool_reply,
+)
 from tests.product.test_statement_extract import _FILLER, _row
 from tests.product.test_workflow import cp1_case
 
@@ -2244,3 +2255,466 @@ def test_a_step_without_parts_is_refused_the_part_tool(tmp_path: Path) -> None:
     ]
     step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
     assert (step["parts_submitted"], step["assemblies"]) == (None, None)
+
+
+# --- item 4: the differential (decision 0012) -------------------------------------------------
+
+_INDEXED = re.compile(r"\b(financial\.books\.(\d+)\.(statement_lines|statement_identities))\.(\d+)")
+_NOT_LISTED = re.compile(r"[0-9]+ further issues not listed")
+
+
+def regrouping(payload: str) -> dict[tuple[int, str], dict[int, int]]:
+    """Per (book index, register): each one-shot index's index once lines are grouped IS, CFS,
+    BS and identities by their target line's statement (the order `assemble` writes)."""
+    document = json_object(payload)
+    assert document is not None
+    moved: dict[tuple[int, str], dict[int, int]] = {}
+    for number, book in enumerate(document["financial"]["books"]):
+        lines = book.get("statement_lines", [])
+        of = {(x["line_id"], x["period_id"]): x["statement"] for x in lines}
+        keys = {
+            "statement_lines": [STATEMENTS.index(x["statement"]) for x in lines],
+            "statement_identities": [
+                STATEMENTS.index(of[(x["target_line_id"], x["period_id"])])
+                for x in book.get("statement_identities", [])
+            ],
+        }
+        for register, order in keys.items():
+            ranked = sorted(range(len(order)), key=lambda i, order=order: order[i])
+            moved[(number, register)] = {old: new for new, old in enumerate(ranked)}
+    return moved
+
+
+def renumbered(text: str, moved: dict[tuple[int, str], dict[int, int]]) -> str:
+    """`text` with each one-shot statement line or identity index as the assembled one."""
+
+    def swap(match: re.Match[str]) -> str:
+        new = moved[(int(match[2]), match[3])][int(match[4])]
+        return f"{match[1]}.{new}"
+
+    return _INDEXED.sub(swap, text)
+
+
+@dataclass(frozen=True)
+class Judged:
+    outcome: str
+    issues: tuple[str, ...]
+    retained: str
+    prefilled: tuple[tuple[str, str], ...]  # (path, kind), in the order Python set them
+    nulls: tuple[str, ...]
+    coverage: dict[str, Any] | None
+
+
+def judge(
+    start: Path,
+    root: Path,
+    payload: str,
+    seen: Seen,
+    context: SourceContextReview,
+    tables: tuple[ExtractedTable, ...],
+) -> Judged:
+    """`payload` through the unchanged trusted path (`submit_model_payload` with the loop's
+    rules as of `seen`, then `journal_outcome`) on a copy of the `start` journal, whose pending
+    ticket expects `financials`, with the 8.12 coverage of the retained payload over `tables`."""
+    shutil.copytree(start, root)
+    journal = Execution(root)
+    ticket = next(a for a in journal.read().attempts if a.status == "pending").ticket_id
+    rules = ToolRules()
+    submitted = submit_model_payload(
+        journal,
+        ticket,
+        "financials",
+        payload,
+        rules=lambda text: rules.issues(
+            "financials", text, seen=seen, context=context, tables=tables
+        ),
+    )
+    outcome, issues = journal_outcome(journal, "financials", submitted.journal)
+    return Judged(
+        outcome,
+        issues,
+        submitted.payload,
+        tuple(zip(submitted.prefilled, submitted.prefilled_kinds, strict=True)),
+        submitted.nulls_resolved,
+        extracted_coverage(submitted.payload, context, tables),
+    )
+
+
+def judged(case: PagedCase, root: Path, payload: str, seen: Seen) -> Judged:
+    """`judge` on the paged case, over its CFS page."""
+    return judge(case.store.directory, root, payload, seen, case.context, (CFS_TABLE,))
+
+
+def value_at(document: dict[str, Any], path: str) -> object:
+    found: Any = document
+    for key in path.split("."):
+        found = found[int(key)] if isinstance(found, list) else found[key]
+    return cast(object, found)
+
+
+REVIEW_HASHES = ("definition.financial_review_sha256", "binding.financial_review_sha256")
+
+
+def assert_same_judgement(one_shot: Judged, assembled: Judged, payload: str) -> None:
+    """The differential's claim: the assembly of a one-shot payload's parts is judged exactly as
+    the one-shot payload, its line and identity indices renumbered to the assembled order; the
+    retained objects are the same objects, and every binding Python set has the same value but
+    the two hashes of the financial review, which covers the order of its lines."""
+    moved = regrouping(payload)
+    assert assembled.outcome == one_shot.outcome
+    # The same issues; the validators list them in line order, so their order follows the
+    # assembled order where lines moved.
+    issues = tuple(renumbered(i, moved) for i in one_shot.issues)
+    reordered = any(old != new for moves in moved.values() for old, new in moves.items())
+    assert assembled.issues == issues or reordered
+    if issues and _NOT_LISTED.fullmatch(issues[-1]):
+        # Over 20, the journal lists the first 20 found (`execution.bounded_issues`, unchanged)
+        # and counts the rest: which 20 follows line order; the total is the same.
+        assert (len(assembled.issues), assembled.issues[-1]) == (len(issues), issues[-1])
+    else:
+        assert Counter(assembled.issues) == Counter(issues)
+    # A part is held null-resolved (its nulls are resolved, and recorded, when it arrives), so
+    # the assembly has none left to resolve.
+    assert assembled.nulls == ()
+    assert sorted(assembled.prefilled) == sorted(
+        (renumbered(path, moved), kind) for path, kind in one_shot.prefilled
+    )
+    assert assembled.coverage == one_shot.coverage
+    whole, parts = json_object(one_shot.retained), json_object(assembled.retained)
+    assert whole is not None and parts is not None
+    changed = {
+        path
+        for path, _ in one_shot.prefilled
+        if value_at(whole, path) != value_at(parts, renumbered(path, moved))
+    }
+    assert changed == (set(REVIEW_HASHES) if reordered else set())
+    for document in (whole, parts):
+        for holder in ("definition", "binding"):  # REVIEW_HASHES
+            del document[holder]["financial_review_sha256"]
+    assert grouped(exact_json(whole)) == parts  # the same objects (keys in any order)
+
+
+SEEN_CFS = Seen(read=frozenset({("S1", "page:1")}), searched=(None,))
+
+
+def test_the_case_payload_in_parts_is_judged_as_the_one_shot_payload(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Differential (item 4): the built paged-case payload, whose lines interleave BS, IS and
+    CFS, judged whole and as the assembly of its five parts: the same verdict (accepted), issues,
+    bindings, prefill and coverage/agreement."""
+    payload = exact_json(built(paged_case))
+    assembled = assemble(held_parts(split(payload), PART_KINDS))
+    one_shot = judged(paged_case, tmp_path / "whole", payload, SEEN_CFS)
+    parts = judged(paged_case, tmp_path / "parts", assembled, SEEN_CFS)
+    assert (one_shot.outcome, one_shot.issues) == ("accepted", ())
+    assert one_shot.coverage is not None and one_shot.coverage["overall"]["covered"] == 6
+    assert_same_judgement(one_shot, parts, payload)
+
+
+@settings(
+    max_examples=12,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(data=st.data())
+def test_generated_submissions_in_parts_are_judged_as_their_one_shot_payloads(
+    paged_case: PagedCase, data: st.DataObject
+) -> None:
+    """Differential (item 4) over generated submissions (lines moved between statements,
+    thinned, reordered; registers emptied; a second book): the assembly of the parts is judged
+    as the one-shot payload, rejections included."""
+    payload = data.draw(submissions(exact_json(built(paged_case))))
+    assembled = assemble(held_parts(split(payload), PART_KINDS))
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        one_shot = judged(paged_case, root / "whole", payload, SEEN_CFS)
+        parts = judged(paged_case, root / "parts", assembled, SEEN_CFS)
+    over = bool(one_shot.issues) and bool(_NOT_LISTED.fullmatch(one_shot.issues[-1]))
+    event(f"{one_shot.outcome}, {'over 20 issues' if over else 'every issue listed'}")
+    assert_same_judgement(one_shot, parts, payload)
+
+
+# The recorded hybrid-cp1-6 Sol medium financials step (artifacts under `artifacts/`; skipped,
+# never passed, where they are absent).
+HYBRID = "hybrid-cp1-6-sol-medium"
+
+
+def hybrid_bodies(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    directory = transcript_support.REPOSITORY_ROOT / entry["transcript"]
+    return [json.loads((directory / name).read_bytes()) for name in entry["reply_files"]]
+
+
+def hybrid_calls(entry: dict[str, Any], name: str) -> list[str]:
+    """The arguments of each recorded call of tool `name`, in order."""
+    return [
+        call["function"]["arguments"]
+        for body in hybrid_bodies(entry)
+        for call in body["choices"][0]["message"].get("tool_calls", [])
+        if call["function"]["name"] == name
+    ]
+
+
+def hybrid_seen(entry: dict[str, Any]) -> Seen:
+    """What the recorded step had been shown by its submits: its reads and its searches."""
+    read = set()
+    for arguments in hybrid_calls(entry, "read_pages"):
+        raw = json.loads(arguments)
+        for page in range(raw["first_page"], raw["last_page"] + 1):
+            read.add((raw["source_id"], f"page:{page}"))
+    searched = tuple(json.loads(a).get("source_id") for a in hybrid_calls(entry, "search_pack"))
+    return Seen(read=frozenset(read), searched=searched)
+
+
+def test_the_recorded_hybrid_payloads_in_parts_are_judged_as_sent_whole(tmp_path: Path) -> None:
+    """Differential (item 4, the key one): each recorded hybrid-cp1-6 `financials` payload (the
+    rejected first submit and the accepted second), sent as the assembly of its five parts, is
+    judged as the payload Sol sent whole: verdict, issues, prefill, bindings (but the review's
+    two hashes, which cover its line order: Sol wrote IS, BS, CFS, Python assembles IS, CFS,
+    BS) and coverage/agreement over the pages Sol read."""
+    entry, start = _financials_entry(HYBRID, tmp_path)
+    store = Execution(start)
+    context = SourceContextReview.model_validate_json(
+        store.payload(
+            next(a for a in store.read().attempts if a.status == "pending").steps[0].payload_sha256
+        )
+    )
+    seen = hybrid_seen(entry)
+    assert len(seen.read) == 19
+    tables = seen_tables(PackTools(store.pack()), seen, context)
+    outcomes = []
+    for number, payload in enumerate(hybrid_calls(entry, "submit_financials")):
+        held = held_parts(split(payload), PART_KINDS)
+        assembled = assemble(held)
+        # The one-shot payload of the same objects, null-resolved as `submit_model_payload`
+        # resolves it (Sol sent `component_period_ids: null`), in Python's order; the parts
+        # resolved the same nulls on arrival.
+        resolved, nulls = normalise(FinancialSubmission, payload)
+        assert assembled == exact_json(contract_ordered(grouped(resolved))) and nulls
+        # (the frame's and other's paths are the whole payload's, `financial.` aside; a
+        # statement part's index its own lines, so only their count is compared)
+        on_arrival = [*held.resolved["frame"], *(f"financial.{p}" for p in held.resolved["other"])]
+        assert set(on_arrival) <= set(nulls)
+        assert sum(len(paths) for paths in held.resolved.values()) == len(nulls)
+        whole = judge(start, tmp_path / f"whole-{number}", payload, seen, context, tables)
+        parts = judge(start, tmp_path / f"parts-{number}", assembled, seen, context, tables)
+        assert whole.nulls == nulls
+        assert_same_judgement(whole, parts, payload)
+        outcomes.append((whole.outcome, whole.issues))
+    assert outcomes == [
+        ("rejected", (HYBRID_QUOTE_ISSUE,)),
+        ("accepted", ()),
+    ]
+
+
+def contract_ordered(document: dict[str, Any]) -> dict[str, Any]:
+    """`document` with the keys Python writes (the submission's, the review's, each book's) in
+    their contract's field order; every other object as it is."""
+
+    def ordered(value: dict[str, Any], model: type[BaseModel]) -> dict[str, Any]:
+        return {name: value[name] for name in model.model_fields if name in value}
+
+    financial = ordered(document["financial"], FinancialReview)
+    financial["books"] = [ordered(book, FinancialBook) for book in financial["books"]]
+    return ordered({**document, "financial": financial}, FinancialSubmission)
+
+
+def in_parts(entry: dict[str, Any]) -> dict[str, Any]:
+    """The entry with each recorded whole `submit_financials` call replaced, in its turn, by the
+    payload's five parts and then `submit_financials` with `{}` (a synthetic entry of the same
+    replies otherwise: the same usage, so the same cost)."""
+    bodies = hybrid_bodies(entry)
+    for body in bodies:
+        message = body["choices"][0]["message"]
+        calls = []
+        for call in message.get("tool_calls", []):
+            if call["function"]["name"] != "submit_financials":
+                calls.append(call)
+                continue
+            parts = split(call["function"]["arguments"])
+            calls += [
+                {
+                    "id": f"{call['id']}-{kind}",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_financials_part",
+                        "arguments": f'{{"part": "{kind}", "payload": {parts[kind]}}}',
+                    },
+                }
+                for kind in PART_KINDS
+            ]
+            calls.append({**call, "function": {"name": "submit_financials", "arguments": "{}"}})
+        if "tool_calls" in message:
+            message["tool_calls"] = calls
+    return {**entry, "kind": "synthetic", "replies": bodies}
+
+
+def test_the_recorded_hybrid_step_sent_in_parts_reaches_the_same_journal(tmp_path: Path) -> None:
+    """Differential (item 4) through the loop: the recorded step with each whole submit sent as
+    its parts, under the default rules, makes the same submits (outcome, issues, completeness,
+    extracted coverage and agreement), the same verdict and cost, and leaves the live journal
+    with the same step states and the same objects retained."""
+    entry, start = _financials_entry(HYBRID, tmp_path)
+    whole = transcript_support.replay(entry, start, tmp_path / "whole", rules=ToolRules())
+    parts = transcript_support.replay(in_parts(entry), start, tmp_path / "parts", rules=ToolRules())
+    for key in ("outcome", "issues", "completeness", "extracted_coverage", "counts"):
+        assert [s[key] for s in parts.result.submits] == [s[key] for s in whole.result.submits], key
+    assert [s["outcome"] for s in whole.result.submits] == ["rejected", "accepted"]
+    assert [s["assembled_from"] for s in whole.result.submits] == [None, None]
+    held = [s["assembled_from"] for s in parts.result.submits]
+    assert held[0] == held[1] and held[0] is not None and set(held[0]) == set(PART_KINDS)
+    # 99 statement lines; the frame's 3 periods and 9 disclosures; other's 96 entries.
+    assert sum(held[0][kind] for kind in STATEMENTS) == 99
+    assert (held[0]["frame"], held[0]["other"]) == (12, 96)
+    assert parts.result.verdict == whole.result.verdict == "accepted"
+    assert parts.result.cost_usd == whole.result.cost_usd
+    journals = {name: Execution(tmp_path / name / "journal") for name in ("whole", "parts")}
+    steps = {
+        name: next(a for a in store.read().attempts if a.module_id == "CP-1").steps
+        for name, store in journals.items()
+    }
+    assert [(s.step_id, s.status, s.issues) for s in steps["whole"]] == [
+        (s.step_id, s.status, s.issues) for s in steps["parts"]
+    ]
+    retained = {
+        name: json_object(journals[name].payload(steps[name][1].payload_sha256))
+        for name in journals
+    }
+    for document in retained.values():
+        assert document is not None
+        for holder in ("definition", "binding"):
+            del document[holder]["financial_review_sha256"]
+    whole_document, parts_document = retained["whole"], retained["parts"]
+    assert whole_document is not None and parts_document is not None
+    assert grouped(exact_json(whole_document)) == parts_document
+
+
+def retained_step(rig: Rig) -> tuple[str, str | None]:
+    """(payload hash, output hash) of the live journal's financials step."""
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    step = attempt.steps[1]
+    assert step.step_id == "financials"
+    return step.payload_sha256, step.output_sha256
+
+
+def test_a_model_sending_five_parts_reaches_the_one_shot_replys_accepted_journal(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 4: scripted replies frame, IS, CFS, BS, other, then `submit_financials {}` reach
+    8.0d's accepted state (search, one whole submit); against the same objects sent whole in
+    Python's order, the live journal retains the same payload and the same stage output, byte
+    for byte."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    parts = split(paged_case.payload)
+    sent = [part_call(f"p-{n}", kind, parts[kind]) for n, kind in enumerate(PART_KINDS)]
+    runs = {
+        "8.0d": [tool_reply(search), tool_reply(("c-1", "submit_financials", paged_case.payload))],
+        "grouped": [
+            tool_reply(search),
+            tool_reply(("c-1", "submit_financials", exact_json(grouped(paged_case.payload)))),
+        ],
+        "parts": [
+            tool_reply(search),
+            tool_reply(*sent[:2]),
+            tool_reply(*sent[2:]),
+            tool_reply(("c-1", "submit_financials", "{}")),
+        ],
+    }
+    states, kept = {}, {}
+    for name, replies in runs.items():
+        rig = paged_rig(tmp_path / name, paged_case)
+        result = rig.run(rig.script(*replies), step_id="financials")
+        assert (result.status, result.verdict) == ("accepted", "accepted"), name
+        states[name], kept[name] = _state(rig), retained_step(rig)
+    assert (
+        states["parts"]
+        == states["8.0d"]
+        == states["grouped"]
+        == [
+            ("source_context", "valid", ()),
+            ("financials", "valid", ()),
+        ]
+    )
+    assert kept["parts"] == kept["grouped"] != kept["8.0d"]  # the 8.0d lines interleave
+
+
+def test_a_missing_part_is_the_validators_gap_and_a_resent_part_replaces_the_held_one(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 4: an assembly without the other part (its one try was rejected: IS lines sent as
+    other) is judged by the validators, whose own issues name the gap and nothing is filled in;
+    the IS part sent with two of its five lines and then whole is held whole (the later accepted
+    part replaces the held one); other then sent, the assembly is accepted on the second submit."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    parts = split(paged_case.payload)
+    fewer = _part("IS", paged_case.payload)
+    fewer["books"][0]["statement_lines"] = fewer["books"][0]["statement_lines"][:2]
+    fewer["books"][0]["statement_identities"] = []
+    rig = paged_rig(tmp_path / "run", paged_case)
+    script = rig.script(
+        tool_reply(
+            search,
+            part_call("p-0", "frame", parts["frame"]),
+            part_call("p-1", "IS", exact_json(fewer)),
+            part_call("p-2", "IS", parts["IS"]),
+            part_call("p-3", "CFS", parts["CFS"]),
+            part_call("p-4", "BS", parts["BS"]),
+            part_call("p-x", "other", parts["IS"]),
+            ("c-1", "submit_financials", "{}"),
+        ),
+        tool_reply(
+            part_call("p-5", "other", parts["other"]),
+            ("c-2", "submit_financials", "{}"),
+        ),
+    )
+    result = rig.run(script, step_id="financials")
+    assert [s["outcome"] for s in result.submits] == ["rejected", "accepted"]
+    assert result.submits[0]["assembled_from"] == {"frame": 11, "IS": 5, "CFS": 30, "BS": 6}
+    assert result.submits[1]["assembled_from"]["other"] == 195
+    # The gap in the validators' own words: the payload Python assembled, judged directly.
+    without = held_parts(parts, ("frame", "IS", "CFS", "BS"))
+    direct = judged(paged_case, tmp_path / "direct", assemble(without), Seen(searched=(None,)))
+    assert tuple(result.submits[0]["issues"]) == direct.issues
+    assert direct.outcome == "rejected"
+    assert "financial.books.0.accounts: Field required" in direct.issues
+    assert not any("part" in issue for issue in direct.issues)
+    texts = results(rig, result)
+    assert texts[6].startswith("rejected part other:\n- ")
+    assert texts[7].endswith(
+        "\nparts held: frame (11 entries), IS (5 lines), CFS (30 lines), BS (6 lines); "
+        "parts not held: other"
+    )
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["parts_submitted"]["IS"] == {"accepted": 2, "rejected": 0}
+    assert step["parts_submitted"]["other"] == {"accepted": 1, "rejected": 1}
+    assert step["assemblies"] == 2
+    assert _state(rig) == [("source_context", "valid", ()), ("financials", "valid", ())]
+
+
+def test_an_omitted_part_the_validators_do_not_require_is_judged_as_the_one_shot_without_it(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 4: nothing requires a part as such; an assembly without the IS part is judged
+    exactly as the one-shot payload without its IS lines and identities (here accepted: the
+    paged case's validators, with the completeness floor off, need no IS line). Python adds
+    no gate of its own."""
+    parts = split(paged_case.payload)
+    document = json_object(paged_case.payload)
+    assert document is not None
+    for book in document["financial"]["books"]:
+        book["statement_lines"] = [x for x in book["statement_lines"] if x["statement"] != "IS"]
+        kept = {(x["line_id"], x["period_id"]) for x in book["statement_lines"]}
+        book["statement_identities"] = [
+            x for x in book["statement_identities"] if (x["target_line_id"], x["period_id"]) in kept
+        ]
+    payload = exact_json(document)
+    seen = Seen(searched=(None,))
+    one_shot = judged(paged_case, tmp_path / "whole", payload, seen)
+    assembled = judged(
+        paged_case,
+        tmp_path / "parts",
+        assemble(held_parts(parts, ("frame", "CFS", "BS", "other"))),
+        seen,
+    )
+    assert one_shot.outcome == "accepted"
+    assert_same_judgement(one_shot, assembled, payload)

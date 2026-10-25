@@ -875,10 +875,12 @@ def _part(step: _Step, kind: str, arguments: str) -> tuple[str, str, dict[str, A
     issues = step.parts.submit(kind, exact_json(document["payload"]))
     outcome = "rejected" if issues else "accepted"
     step.part_outcomes.append((kind, outcome))
-    record = {"part": kind, "outcome": outcome, "issues": list(issues)}
+    record: dict[str, Any] = {"part": kind, "outcome": outcome, "issues": list(issues)}
     if issues:
         listed = "\n".join(f"- {issue}" for issue in issues)
         return PART_REJECTED, f"rejected part {kind}:\n{listed}\n{step.parts.listing()}", record
+    # The nulls resolved on arrival, recorded as a whole payload's are (`payload_nulls_resolved`).
+    record["nulls_resolved"] = list(step.parts.resolved[kind])
     size = f"{step.parts.size(kind)} {step.parts.unit(kind)}"
     return PART_ACCEPTED, f"accepted part {kind} ({size})", record
 
