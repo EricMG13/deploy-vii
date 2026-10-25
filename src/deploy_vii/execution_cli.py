@@ -24,8 +24,7 @@ from deploy_vii.cp_model_workflow import (
     verify_cp_model_publication,
 )
 from deploy_vii.execution import Attempt, Execution
-from deploy_vii.live.context import module_context
-from deploy_vii.module_submits import MODULE_SUBMITS, submit_module_step
+from deploy_vii.module_submits import MODULE_SUBMITS, host_context, submit_module_step
 from deploy_vii.preparation import load_pack
 from deploy_vii.registry import canonical, modules, step_chain
 from deploy_vii.render import render as render_view
@@ -138,7 +137,7 @@ def module_context_json(store: Execution, args: argparse.Namespace) -> str:
             f"module-context refused: {args.step} is not a step of {args.module}; {steps}"
         )
     try:
-        entries = module_context(store, attempt, args.step)
+        entries = host_context(store, attempt, args.step)
     except ValueError as refusal:
         raise refusal_exit(f"module-context refused: {refusal}") from refusal
     if entries is None:

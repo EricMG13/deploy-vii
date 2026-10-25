@@ -12,15 +12,18 @@ import pytest
 
 from deploy_vii import registry
 from deploy_vii.__main__ import main
+from deploy_vii.business_context import context_block
 from deploy_vii.contracts import Module
 from deploy_vii.cp0_workflow import build_readiness
 from deploy_vii.execution import Attempt, Execution, StepSubmission
 from deploy_vii.execution_cli import issue_lines
-from deploy_vii.live.context import module_context
-from deploy_vii.module_submits import MODULE_SUBMITS, submit_module_step
+from deploy_vii.live.prompts import INTEGRITY_BLOCK_ID
+from deploy_vii.live.runner import prompt_inputs
+from deploy_vii.module_submits import MODULE_SUBMITS, host_context, submit_module_step
 from deploy_vii.report_view import pathways
 from tests.product.test_business_context import cp1_fact, submission_fixture
 from tests.product.test_cp2_synthesis import journal, synthesis
+from tests.product.test_live_modules import CASES, SCHEMAS, cp1a_case
 from tests.product.test_readiness import readiness_fixture
 
 # What the live runner pins (`live.runner.MODULE_STEP_ENTRIES`), written out by hand so the
@@ -161,26 +164,47 @@ def test_module_submit_refuses_a_step_outside_the_chain_with_exit_2(
     assert code == 2 and out == "" and "credit_synthesis" in err
 
 
-def test_module_context_equals_the_live_runners_module_context_byte_for_byte(cli: Cli) -> None:
-    ticket = json.loads(cli("begin", "CP-2")[1])["ticket_id"]
-    code, out, err = cli(
-        "module-context", *("--module", "CP-2", "--ticket", ticket, "--step", "credit_synthesis")
+def runner_context(store: Execution, attempt: Attempt, step: str) -> dict[str, object]:
+    """The CONTEXT entries the live runner adds for `step`, from its own `prompt_inputs`."""
+    inputs = prompt_inputs(store, attempt, step)
+    entries: dict[str, object] = {}
+    if step == "business_context":
+        entries.update(context_block(store.pack(), inputs.cp1_facts))
+    if inputs.module_context is not None:
+        entries.update(inputs.module_context)
+    if inputs.scope is not None:
+        entries[INTEGRITY_BLOCK_ID] = inputs.scope
+    return entries
+
+
+CONTEXT_CASES = {
+    "business_context": ("CP-1A", cp1a_case),
+    **{step: (module, CASES[step]) for step, (module, _) in SCHEMAS.items()},
+}
+
+
+@pytest.mark.parametrize("step", sorted(CONTEXT_CASES))
+def test_module_context_is_what_the_live_runner_sends_for_every_module_byte_for_byte(
+    step: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module, case = CONTEXT_CASES[step]
+    store, _ = case(tmp_path)
+    attempt = store.begin(module)
+    code, out, err = Cli(store, monkeypatch, capsys)(
+        "module-context", *("--module", module, "--ticket", attempt.ticket_id, "--step", step)
     )
-    attempt = next(a for a in cli.store.read().attempts if a.ticket_id == ticket)
-    expected = module_context(cli.store, attempt, "credit_synthesis")
+    expected = runner_context(store, attempt, step)
     assert expected and code == 0 and err == ""
     assert out == json.dumps(expected, indent=1, sort_keys=True) + "\n"
 
 
-def test_a_step_with_no_context_prints_empty_json_and_says_so_on_stderr(cli: Cli) -> None:
-    # CP-1A (settled in the journal) has no module context: the step reads the pack alone.
-    step = registry.step_chain("CP-1A").steps[0]
-    attempt = next(a for a in cli.store.read().attempts if a.module_id == "CP-1A")
-    assert module_context(cli.store, attempt, step) is None
-    code, out, err = cli(
-        "module-context", *("--module", "CP-1A", "--ticket", attempt.ticket_id, "--step", step)
-    )
-    assert code == 0 and json.loads(out) == {} and "no module context" in err
+def test_a_step_with_no_context_entries_gets_none_as_the_runner_does(cli: Cli) -> None:
+    attempt = next(a for a in cli.store.read().attempts if a.module_id == "CP-1")
+    assert host_context(cli.store, attempt, "source_readiness") is None
+    assert runner_context(cli.store, attempt, "source_readiness") == {}
 
 
 # --- item 3: report ---
