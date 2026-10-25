@@ -227,6 +227,19 @@ def test_begin_is_refused_with_one_line_while_pending_and_after_the_repair_is_sp
     )
 
 
+def test_a_missing_review_file_is_a_one_line_refusal_naming_the_path(
+    cli: Cli, tmp_path: Path
+) -> None:
+    ticket = json.loads(cli("begin", "CP-2")[1])["ticket_id"]
+    absent = tmp_path / "absent.json"
+    code, out, err = cli(
+        "module-submit",
+        *("--module", "CP-2", "--ticket", ticket, "--step", "credit_synthesis"),
+        *("--review", str(absent)),
+    )
+    assert code == 2 and out == "" and str(absent) in err and len(err.splitlines()) == 1
+
+
 # --- item 3: report ---
 
 

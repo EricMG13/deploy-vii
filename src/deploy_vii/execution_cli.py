@@ -112,9 +112,11 @@ def module_submit(store: Execution, args: argparse.Namespace) -> str:
     """Submit the review file as the module's step: the attempt record on stdout, and when the
     validator rejected it each issue line on stderr and exit 1 (the host agent repairs on them)."""
     try:
-        attempt = submit_module_step(
-            store, args.module, args.ticket, args.step, args.review.read_text(encoding="utf-8")
-        )
+        review = args.review.read_text(encoding="utf-8")
+    except FileNotFoundError as missing:
+        raise refusal_exit(f"module-submit refused: no review file at {args.review}") from missing
+    try:
+        attempt = submit_module_step(store, args.module, args.ticket, args.step, review)
     except ValueError as refusal:
         raise refusal_exit(f"module-submit refused: {refusal}") from refusal
     issues = issue_lines(attempt)
