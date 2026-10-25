@@ -1,19 +1,22 @@
 """Task 8.0d: the tool loop's parts: pack tools, evidence rules, requests, settings, ledgers."""
 
 import json
+import re
 import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import example, given
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.contracts import Span
 from deploy_vii.cp1_workflow import FinancialSubmission
 from deploy_vii.execution import Execution
+from deploy_vii.financial_contracts import FinancialBook, FinancialReview
 from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient, ChatRequest, Response
 from deploy_vii.live.ledger import OPENROUTER, Ledger, LedgerError, opening_provider
@@ -26,6 +29,8 @@ from deploy_vii.live.prompts import (
     span_line,
     tools_rule,
 )
+from deploy_vii.live.retention import AttemptWriter
+from deploy_vii.live.runner import journal_outcome
 from deploy_vii.live.schema import strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
 from deploy_vii.live.submission import STEPS, submit_model_payload
@@ -65,9 +70,13 @@ from deploy_vii.registry import (
     tool_sets,
 )
 from deploy_vii.source_context import SourceContextReview
+from deploy_vii.statement_extract import extract_statement_lines
 from tests.product import test_cp4_legal as cp4_tests
-from tests.product.live_support import FAKE_KEY
+from tests.product import test_source_context as source_context_tests
+from tests.product.live_support import FAKE_KEY, make_rtf_key
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
+from tests.product.test_live_loop import Rig, step_rig, tool_pool, tool_reply
+from tests.product.test_statement_extract import _FILLER, _row
 from tests.product.test_workflow import cp1_case
 
 CP1_STAGES = {"source_context", "financials", "narrative", "readiness"}
@@ -773,3 +782,299 @@ def test_the_financials_rules_add_the_extract_rule_verbatim(case: Case) -> None:
         "financials", case.store.pack(), (), STEPS["financials"].schema, submit_tool="x"
     )[0].content
     assert system.count(EXTRACT_RULE) == 1
+
+
+# --- decision 0012 for 8.10b: property, differential, loop ----------------------------------
+
+_BLOCK = re.compile(r"<<<SOURCE id=(\S+) sha256=\S+>>>\n(.*?)\n<<<END>>>", re.DOTALL)
+
+
+def rendered(text: str) -> Iterator[tuple[str, str, list[tuple[int, list[str]]]]]:
+    """(source_id, locator, [(line_no, raw_values)]) of each page `extract_statements` showed."""
+    for match in _BLOCK.finditer(text):
+        source_id, body = match.groups()
+        first, *rows = body.split("\n")
+        locator = first.removeprefix("locator=").split(" | ")[0]
+        found = []
+        for row in rows:
+            cells = row.split(" | ")
+            if len(cells) == 5 and cells[0].isdigit():
+                found.append((int(cells[0]), cells[3].split(" ")))
+        yield source_id, locator, found
+
+
+_PAGE_TEXT = st.lists(
+    st.one_of(_FILLER, _row(st.integers(2, 6)).map(lambda row: row[0])), max_size=12
+).map("\n".join)
+
+
+@settings(max_examples=120, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    pages=st.lists(_PAGE_TEXT, min_size=1, max_size=4),
+    declared=st.sets(st.sampled_from(("S1", "deck")), min_size=1),
+    source=st.sampled_from(("S1", "deck", "S9")),
+    asked=st.lists(st.integers(0, 6), max_size=10),
+)
+def test_extract_shows_only_printed_tokens_of_declared_sources(
+    case: Case, pages: list[str], declared: set[str], source: str, asked: list[int]
+) -> None:
+    """Property (8.10b item 4): every raw_values token the tool renders is a substring of its
+    page's text (of the very line it names), and every page it renders, and records as read, is
+    a page of a declared source; anything else is a refused call that records nothing."""
+    base = case.store.pack().sources[0]
+    texts = {f"page:{n}": text for n, text in enumerate(pages, 1)}
+    spans = tuple(Span(locator=locator, text=text) for locator, text in texts.items())
+    sources = tuple(
+        base.model_copy(update={"source_id": ident, "spans": spans}) for ident in ("S1", "deck")
+    )
+    pack = case.store.pack().model_copy(update={"sources": sources})
+    tools = PackTools(pack, sources=tuple(sorted(declared)))
+    raw = {"source_id": source, "locators": [f"page:{n}" for n in asked]}
+    try:
+        text = tools.extract_statements(raw)
+    except ToolError:
+        assert tools.seen() == Seen()
+        return
+    assert source in declared and asked
+    shown = list(rendered(text))
+    assert [(ident, locator) for ident, locator, _ in shown] == [
+        (source, f"page:{n}") for n in asked
+    ]
+    for ident, locator, rows in shown:
+        lines = texts[locator].split("\n")
+        for line_no, raws in rows:
+            assert all(token in texts[locator] for token in raws)
+            assert all(token in lines[line_no - 1] for token in raws)
+        table = extract_statement_lines(texts[locator], locator, source_id=ident)
+        assert [(x.line_no, list(x.raw_values)) for x in table.lines] == rows
+    assert tools.seen().read == {(source, f"page:{n}") for n in asked}
+    assert {ident for ident, _ in tools.seen().read} <= declared
+
+
+# A printed cash-flow page for the synthetic CP-1 case's six CFS lines (Q1-Q4 and FY 2025 in
+# the case's book), added to S1 as `page:1`.
+CFS_PAGE = "\n".join(
+    (
+        "                       Three Months Ended                               Year Ended",
+        "                       March 31    June 30    September 30  December 31  December 31,",
+        "(In millions)          2025        2025       2025          2025         2025",
+        "CASH FLOWS:",
+        "Synthetic profit       40          40         40            40           160",
+        "Synthetic noncash      20          20         20            20           80",
+        "Synthetic cfo          60          60         60            60           240",
+        "Synthetic cfi          (10)        (10)       (10)          (10)         (40)",
+        "Synthetic cff          (30)        (30)       (30)          (30)         (120)",
+        "Synthetic ncf          20          20         20            20           80",
+    )
+)
+COLUMNS = ("Q1", "Q2", "Q3", "Q4", "FY")  # the model's mapping of the page's columns
+# The same six lines as a person would type them from the page (decision 0012's reference).
+TYPED = {
+    "profit": ("Synthetic profit", ("40", "40", "40", "40", "160")),
+    "noncash": ("Synthetic noncash", ("20", "20", "20", "20", "80")),
+    "cfo": ("Synthetic cfo", ("60", "60", "60", "60", "240")),
+    "cfi": ("Synthetic cfi", ("-10", "-10", "-10", "-10", "-40")),
+    "cff": ("Synthetic cff", ("-30", "-30", "-30", "-30", "-120")),
+    "ncf": ("Synthetic ncf", ("20", "20", "20", "20", "80")),
+}
+
+
+@dataclass(frozen=True)
+class PagedCase:
+    store: Execution  # the synthetic CP-1 case with CFS_PAGE as S1 page:1, at financials
+    ticket: str
+    context: SourceContextReview
+    payload: str  # its valid financials payload (no page citation)
+
+
+@pytest.fixture(scope="module")
+def paged_case(tmp_path_factory: pytest.TempPathFactory) -> PagedCase:
+    freeze = source_context_tests.freeze
+
+    def with_page(value: FinancialBook) -> tuple[PreparedPack, FinancialReview]:
+        pack, review = freeze(value)
+        source = pack.sources[0]
+        spans = (*source.spans, Span(locator="page:1", text=CFS_PAGE))
+        pack = pack.model_copy(update={"sources": (source.model_copy(update={"spans": spans}),)})
+        return pack, review.model_copy(update={"pack_sha256": pack.content_hash()})
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(source_context_tests, "freeze", with_page)
+        store, _, extraction = cp1_case(tmp_path_factory.mktemp("paged"))
+    assert any(span.locator == "page:1" for span in store.pack().sources[0].spans)
+    attempt = store.read().attempts[1]
+    context = SourceContextReview.model_validate_json(
+        store.payload(attempt.steps[0].payload_sha256)
+    )
+    payload = extraction.model_copy(
+        update={"context_step_sha256": attempt.steps[0].content_hash()}
+    ).model_dump_json()
+    return PagedCase(store, attempt.ticket_id, context, payload)
+
+
+def _cited(document: dict[str, Any], lines: dict[str, tuple[str, tuple[str, ...]]]) -> str:
+    """`document` with the named CFS lines' label and per-period amounts replaced, each value
+    citing page:1 with its label as the quote."""
+    book = document["financial"]["books"][0]
+    sha = next(
+        c["source_sha256"] for line in book["statement_lines"] for c in line["value"]["citations"]
+    )
+    for line in book["statement_lines"]:
+        if line["line_id"] not in lines:
+            continue
+        label, amounts = lines[line["line_id"]]
+        line["label"] = label
+        line["value"]["amount"] = amounts[COLUMNS.index(line["period_id"])]
+        line["value"]["citations"] = [
+            {"source_id": "S1", "source_sha256": sha, "locator": "page:1", "quote": label}
+        ]
+    return json.dumps(document)
+
+
+def from_extracted(payload: str, tools: PackTools) -> str:
+    """The payload built from `extract_statements`' lines: labels and amounts as extracted (the
+    model's part is the line-id and column-to-period mapping)."""
+    table = extract_statement_lines(CFS_PAGE, "page:1", source_id="S1")
+    ids = {label: line_id for line_id, (label, _) in TYPED.items()}
+    tools.extract_statements({"source_id": "S1", "locators": ["page:1"]})
+    lines = {
+        ids[line.label]: (line.label, tuple(str(value) for value in line.values))
+        for line in table.lines
+    }
+    return _cited(json.loads(payload), lines)
+
+
+def by_hand(payload: str) -> str:
+    return _cited(json.loads(payload), TYPED)
+
+
+def verdict(case: PagedCase, root: Path, payload: str, seen: Seen) -> tuple[str, tuple[str, ...]]:
+    shutil.copytree(case.store.directory, root)
+    journal = Execution(root)
+    rules = ToolRules()
+    found = submit_model_payload(
+        journal,
+        case.ticket,
+        "financials",
+        payload,
+        rules=lambda text: rules.issues("financials", text, seen=seen, context=case.context),
+    ).journal
+    return journal_outcome(journal, "financials", found)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    ["none", "unread", "swapped-columns", "wrong-quote"],
+)
+def test_extracted_and_typed_payloads_get_the_same_verdicts(
+    tmp_path: Path, paged_case: PagedCase, mutate: str
+) -> None:
+    """Differential (8.10b item 4): the financials validators and the loop's rules judge a
+    payload built from extracted lines exactly as the hand-typed payload of the same lines,
+    under the same mutation of both."""
+    tools = PackTools(paged_case.store.pack())
+    extracted = from_extracted(paged_case.payload, tools)
+    typed = by_hand(paged_case.payload)
+    read = PackTools(paged_case.store.pack())
+    read.read_pages({"source_id": "S1", "first_page": 1, "last_page": 1})
+    assert tools.seen().read == read.seen().read == {("S1", "page:1")}
+    # Both searched the pack once (the synthetic book's `missing` observations need it).
+    seen_extracted = Seen(read=tools.seen().read, searched=(None,))
+    seen_read = Seen(read=read.seen().read, searched=(None,))
+    if mutate == "unread":
+        seen_extracted = seen_read = Seen(searched=(None,))
+    pairs = [extracted, typed]
+    if mutate == "swapped-columns":
+        pairs = [p.replace('"period_id": "Q1"', '"period_id": "QX"') for p in pairs]
+        pairs = [p.replace('"period_id": "Q2"', '"period_id": "Q1"') for p in pairs]
+        pairs = [p.replace('"period_id": "QX"', '"period_id": "Q2"') for p in pairs]
+    if mutate == "wrong-quote":
+        pairs = [p.replace('"quote": "Synthetic cfi"', '"quote": "Synthetic cfx"') for p in pairs]
+    one = verdict(paged_case, tmp_path / "extracted", pairs[0], seen_extracted)
+    two = verdict(paged_case, tmp_path / "typed", pairs[1], seen_read)
+    assert one == two
+    if mutate == "none":
+        assert one == ("accepted", ())
+    if mutate == "unread":
+        assert one[0] == "rejected" and f"{UNREAD_PAGE}: S1 page:1" in one[1]
+    if mutate == "wrong-quote":
+        assert one[0] == "rejected"
+
+
+def paged_rig(root: Path, case: PagedCase) -> Rig:
+    shutil.copytree(case.store.directory, root / "journal")
+    keys = root / "keys"
+    keys.mkdir()
+    return Rig(
+        Execution(root / "journal"),
+        case.ticket,
+        Ledger(root / "artifacts" / ".ledgers" / "loop.jsonl", Decimal(5), provider="openrouter"),
+        tool_pool(),
+        AttemptWriter(root / "artifacts"),
+        make_rtf_key(keys),
+        case.payload,
+        root,
+    )
+
+
+def _state(rig: Rig) -> list[tuple[str, str, tuple[str, ...]]]:
+    attempt = next(a for a in rig.store.read().attempts if a.ticket_id == rig.ticket)
+    return [(s.step_id, s.status, s.issues) for s in attempt.steps]
+
+
+def test_the_financials_loop_extracts_then_submits_to_the_same_accepted_state(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """8.0d's scripted replies (search, then submit) and a model that searches, extracts the
+    page and submits the payload built from its lines reach the same accepted state."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    extract = ("c-e", EXTRACT, json.dumps({"source_id": "S1", "locators": ["page:1"]}))
+    built = from_extracted(paged_case.payload, PackTools(paged_case.store.pack()))
+    runs = {
+        "8.0d": [tool_reply(search), tool_reply(("c-1", "submit_financials", paged_case.payload))],
+        "extract": [
+            tool_reply(search),
+            tool_reply(extract),
+            tool_reply(("c-1", "submit_financials", built)),
+        ],
+    }
+    states = {}
+    for name, replies in runs.items():
+        rig = paged_rig(tmp_path / name, paged_case)
+        script = rig.script(*replies)
+        result = rig.run(script, step_id="financials")
+        assert (result.status, result.verdict) == ("accepted", "accepted"), name
+        assert [s["outcome"] for s in result.submits] == ["accepted"]
+        states[name] = _state(rig)
+        bodies = script.bodies()
+        assert all(
+            [t["function"]["name"] for t in body["tools"]]
+            == ["search_pack", "read_pages", EXTRACT, "submit_financials"]
+            for body in bodies
+        )
+        if name == "extract":
+            tool = bodies[2]["messages"][-1]
+            assert tool["role"] == "tool" and tool["tool_call_id"] == "c-e"
+            assert tool["content"] == PackTools(paged_case.store.pack()).extract_statements(
+                json.loads(extract[2])
+            )
+    assert (
+        states["8.0d"]
+        == states["extract"]
+        == [
+            ("source_context", "valid", ()),
+            ("financials", "valid", ()),
+        ]
+    )
+
+
+def test_a_pack_step_other_than_financials_is_refused_the_extract_tool(tmp_path: Path) -> None:
+    """The loop runs `extract_statements` only for an `extract_tool_steps()` step: for any
+    other pack-tool step it is an unknown tool, counted invalid and never run."""
+    rig = step_rig(tmp_path, "business_context")
+    extract = ("c-e", EXTRACT, json.dumps({"source_id": "S1", "locators": ["page:1"]}))
+    script = rig.script(tool_reply(extract), tool_reply())
+    result = rig.run(script, step_id="business_context", rules=ToolRules(checked=()))
+    assert result.verdict != "accepted"
+    tool = script.bodies()[1]["messages"][-1]
+    assert tool["content"] == "error: unknown tool 'extract_statements'"
