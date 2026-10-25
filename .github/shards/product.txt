@@ -75,7 +75,7 @@ shard-b tests/product/test_live_schema.py
 shard-c tests/product/test_live_submission.py
 shard-a tests/product/test_live_tool_parts.py
 shard-b tests/product/test_model_interface.py
-shard-b tests/product/test_m10_sufficiency.py
+shard-c tests/product/test_m10_sufficiency.py
 shard-b tests/product/test_model_readiness.py
 shard-b tests/product/test_narrative.py
 shard-a tests/product/test_narrative_projection.py
