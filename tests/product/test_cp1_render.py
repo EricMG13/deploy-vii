@@ -135,6 +135,19 @@ def test_an_envelope_for_another_run_or_an_unsettled_module_is_not_shown() -> No
         envelope_view(empty_view(envelope.run, candidate=False), candidate)
 
 
+def test_an_envelope_is_shown_in_a_view_whose_scope_extends_its_own_only() -> None:
+    """Task 9.1: the envelope keeps the pack blob's scope; the view's may be a superset."""
+    envelope = synthetic_envelope()
+    wider = envelope.run.model_copy(
+        update={"requested_modules": (*envelope.run.requested_modules, "CP-OS")}
+    )
+    shown = envelope_view(empty_view(wider, candidate=False), envelope)
+    assert next(m for m in shown.modules if m.module_id == "CP-1").status == "accepted"
+    narrower = envelope.run.model_copy(update={"requested_modules": ("CP-0", "CP-1")})
+    with pytest.raises(ValueError, match="another run"):
+        envelope_view(empty_view(narrower, candidate=False), envelope)
+
+
 def test_a_refused_envelope_renders_no_cp1_block_and_says_why() -> None:
     base = empty_view(synthetic_envelope().run, candidate=False)
     reason = "Envelope module is not the CP-1 head's settled module"
@@ -244,22 +257,21 @@ def test_every_journal_binding_is_checked_on_its_own(promoted: tuple[Execution, 
     snapshot = store.read()
     envelope = read_cp1_envelope(store, directory)
     receipt = json.loads((directory / "complete.json").read_text())
-    assert cp1_binding_issues(envelope, receipt, snapshot) == ()
+    run = store.pack(snapshot).run  # the pack blob's run: what promotion hashed (task 9.1)
+    assert cp1_binding_issues(envelope, receipt, snapshot, run=run) == ()
     moved = snapshot.model_copy(update={"pack_sha256": "e" * 64})
     assert "Envelope pack differs from the journal's prepared pack" in cp1_binding_issues(
-        envelope, receipt, moved
+        envelope, receipt, moved, run=run
     )
-    other_run = snapshot.model_copy(
-        update={"run": snapshot.run.model_copy(update={"issuer_name": "Another issuer"})}
-    )
+    other_run = run.model_copy(update={"issuer_name": "Another issuer"})
     assert "Envelope run differs from the journal's run" in cp1_binding_issues(
-        envelope, receipt, other_run
+        envelope, receipt, snapshot, run=other_run
     )
     for key in ("quality_report_sha256", "qualification", "status", "registers_sha256"):
-        issues = cp1_binding_issues(envelope, {**receipt, key: "forged"}, snapshot)
+        issues = cp1_binding_issues(envelope, {**receipt, key: "forged"}, snapshot, run=run)
         assert issues == (f"Receipt {key} does not match the journal",), key
     unsettled = snapshot.model_copy(update={"heads": ()})
-    assert cp1_binding_issues(envelope, receipt, unsettled) == (
+    assert cp1_binding_issues(envelope, receipt, unsettled, run=run) == (
         "CP-1 has no accepted or restricted head in the journal",
     )
 
@@ -287,8 +299,32 @@ def test_a_stale_head_refuses_the_export(promoted: tuple[Execution, Path]) -> No
         read_cp1_envelope(store, source),
         json.loads((source / "complete.json").read_text()),
         snapshot.model_copy(update={"heads": stale}),
+        run=store.pack(snapshot).run,
     )
     assert issues == ("CP-1 has no accepted or restricted head in the journal",)
+
+
+def test_the_cp1_envelope_export_and_render_survive_a_scope_extension(
+    promoted: tuple[Execution, Path], tmp_path: Path
+) -> None:
+    """Task 9.1 fix round 1 (R2): CP-1's envelope keeps the pack blob's run, so extending the
+    run's scope neither breaks the export nor the read-back nor the render."""
+    shared, exported = promoted
+    shutil.copytree(shared.directory, tmp_path / "journal")
+    store = Execution(tmp_path / "journal")
+    before = read_cp1_envelope(store, exported)
+    names = ("envelope.md", "envelope.json")
+    files = {name: (exported / name).read_bytes() for name in names}
+
+    store.extend_scope((*store.read().run.requested_modules, "CP-OS"))
+
+    assert read_cp1_envelope(store, exported) == before  # exported before the extension
+    again = write_cp1_envelope(store, tmp_path / "again").parent
+    assert {name: (again / name).read_bytes() for name in names} == files
+    assert read_cp1_envelope(store, again) == before
+    receipt = render_cp1_envelope(store, again, tmp_path / "page")
+    assert receipt["envelope"] == "verified" and receipt["issues"] == []
+    assert (tmp_path / "page" / "accepted.html").is_file()
 
 
 def test_the_render_command_writes_the_verified_page_and_a_receipt(

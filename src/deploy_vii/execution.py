@@ -451,9 +451,10 @@ class ExtendReport(Contract):
     plan: tuple[Identifier, ...]
 
 
-def _scope_within(blob: Run, effective: Run) -> bool:
-    """The pack blob's run is the snapshot's, its requested modules a subset of the effective
-    (snapshot) set: scope only extends (task 9.1)."""
+def scope_within(blob: Run, effective: Run) -> bool:
+    """`blob` is `effective` with its requested modules a subset: the same run before and after
+    scope extensions (task 9.1). The pack blob against the snapshot, a CP-1 envelope against
+    the view it is shown in."""
     return blob.model_dump(exclude={"requested_modules"}) == effective.model_dump(
         exclude={"requested_modules"}
     ) and set(blob.requested_modules) <= set(effective.requested_modules)
@@ -738,7 +739,7 @@ class Execution:
         """
         snapshot = self.read() if snapshot is None else snapshot
         pack = PreparedPack.model_validate_json(self._load(snapshot.pack_sha256))
-        if not _scope_within(pack.run, snapshot.run) or pack.content_hash() != snapshot.pack_sha256:
+        if not scope_within(pack.run, snapshot.run) or pack.content_hash() != snapshot.pack_sha256:
             raise ValueError("Execution pack blob is not the canonical pack of this snapshot")
         return pack
 
