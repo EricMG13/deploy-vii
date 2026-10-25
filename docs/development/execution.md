@@ -79,28 +79,33 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
   <ids>; create a new execution`. The same set after canonicalisation is a no-op report.
   Otherwise one transition writes `snapshot.run` with the extended set (no new contract field;
   `execution/5` unchanged) and rebinds every settled head under the new graph without
-  running anything (`rebind_heads`): a head is kept, byte for byte with its attempts and
-  repair count, when `current_inputs` resolves exactly the inputs its settling attempt bound
-  (ids, hashes, statuses and order; `Head.inputs` can add module-owned inputs such as a
-  submission hash, so it is not the comparison); otherwise it is staled with `Scope
-  extended: inputs changed (<ids>); rerun required` and reruns as any stale module does.
-  The walk goes in plan order against the heads already updated, so staling reaches the
-  transitive consumers. In the registry today the staled branch is CP-MODEL joining CP-5's
-  fan-in (CP-5 staled, then CP-6 and CP-MEMO if settled). The report (`added`, `kept`,
-  `staled` with notes, `plan`) is printed as JSON. The pack blob is not rewritten: `pack()`
-  accepts a blob whose run equals the snapshot's except for a requested set that is a subset,
-  `replace_pack` accepts a pack carrying either the snapshot's run or the current blob's, and
-  `view()` takes not-yet-run statuses from `snapshot.run`. Limitation: readers that take scope
-  from the pack blob's run (CP-0 readiness, CP-1 consumer entries, CP-1A consumers, CP-0
-  delivery, the live runner and the views those modules build from `pack.run`) keep the
-  original scope. Open defect (found by the task's confidence review, not fixed: it lies in
-  `cp1_workflow.py`, outside the task's paths): CP-1 promotion records its envelope hashes with
-  the run in the sidecar, and `_recheck_handoff` re-renders with `snapshot.run`, so after any
-  extension `write_cp1_envelope` refuses ("CP-1 handoff envelope.json renders as ..."), and with
-  it the `envelope` command, the CP-1 render and `publish_cp_model`; an envelope exported before
-  the extension also fails `cp1_binding_issues`. Until that is resolved, extend only runs
-  without a promoted CP-1 head, or create a new execution. Follow-up 9.1b (a CP-0 readiness addendum for added consumers) lifts the
-  assessed-only refusal before M10 owners rely on extension.
+  running anything (`rebind_heads`). Rule (fix round 1, ruling R1, 988f9d1): a head is staled
+  iff its `current_inputs` resolution under the new scope differs from its resolution before
+  the extension (ids, hashes, statuses and order; one side refusing to bind counts, both
+  refusing does not); every other head is kept byte for byte with its attempts and repair
+  count, so drift that predates the extension (a CP-1A settled before CP-1, which now
+  resolves CP-1 as context) stays as it was and refreshable. A staled head gets `Scope
+  extended: inputs changed (<ids>); rerun required` and reruns as any stale module does; the
+  ids are the inputs whose binding changed, or, where the new resolution refuses, the bound
+  upstreams that no longer bind and the new producers (fallback: the module's upstreams in
+  the new graph). The walk goes in plan order against the heads already updated, so staling
+  reaches the transitive consumers. In the registry today the staled branch is a new member
+  of CP-5's fan-in (CP-MODEL, or an assessed analyst such as CP-4): CP-5 is staled, then CP-6
+  and CP-MEMO if settled. The report (`added`, `kept`, `staled` with notes, `plan`) is printed
+  as JSON. The pack blob is not rewritten: `pack()` accepts a blob whose run equals the
+  snapshot's except for a requested set that is a subset (`scope_within`), `replace_pack`
+  accepts a pack carrying either the snapshot's run or the current blob's, and `view()` takes
+  not-yet-run statuses from `snapshot.run`. Readers that take scope from the pack blob's run
+  keep the original scope: CP-0 readiness, CP-1 consumer entries, CP-1A consumers, CP-0
+  delivery, the live runner, the views those modules build from `pack.run`, and (fix round 1,
+  ruling R2, 61cce94) the CP-1 envelope (`_recheck_handoff`, `write_cp1_envelope`,
+  `cp1_binding_issues`), the CP-1 render (`envelope_view` accepts a view whose scope extends
+  the envelope's) and the Model page (`model_destination_html`). The defect the task's
+  confidence review found (after an extension the CP-1 envelope export, render and CP-MODEL
+  publication refused) is fixed in 61cce94: an envelope exported before an extension still
+  reads back, and a CP-MODEL added by extension publishes and verifies. Follow-up 9.1b (a CP-0
+  readiness addendum for added consumers) lifts the assessed-only refusal before M10 owners
+  rely on extension.
 
 ## Claim run text (decision 0005 MC-2)
 
