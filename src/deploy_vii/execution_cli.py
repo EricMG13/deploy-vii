@@ -61,8 +61,8 @@ def configure(parser: argparse.ArgumentParser) -> None:
     context = actions.add_parser("module-context")
     context.add_argument("--module", required=True, choices=tuple(MODULE_SUBMITS))
     context.add_argument("--step", required=True)
-    for name in (submit, context):
-        name.add_argument("--ticket", required=True)
+    for module_action in (submit, context):
+        module_action.add_argument("--ticket", required=True)
     report = actions.add_parser("report")
     report.add_argument("--pathway", required=True, choices=PATHWAY_IDS)
     report.add_argument("--output", type=Path, required=True)
