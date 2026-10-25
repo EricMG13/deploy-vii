@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
@@ -1450,6 +1450,150 @@ def test_ready_grant_binds_accepted_input_and_begins(original_store: Execution) 
         attempt.inputs[-1].input_id == "readiness-addendum"
         and attempt.inputs[-1].status == "accepted"
     )
+
+
+@pytest.mark.parametrize("readiness", ["BLOCKED", "CONDITIONAL", "READY_WITH_LIMITATIONS"])
+@pytest.mark.parametrize("mutation", ["insert", "remove", "replace", "inputs", "status"])
+@pytest.mark.parametrize("access", ["read", "direct", "begin", "host", "runner", "instructions"])
+@pytest.mark.parametrize("remove_refs", [False, True])
+def test_current_cp0_cache_cannot_override_genuine_grant(
+    original_store: Execution, readiness: str, mutation: str, access: str, remove_refs: bool
+) -> None:
+    from deploy_vii.execution import Command, NotAuthorized
+    from deploy_vii.live.runner import prompt_inputs
+    from deploy_vii.module_submits import host_context, step_instructions
+
+    store = original_store
+    requested = ("CP-1", "CP-1A")
+    raw, digest = payload(store, requested)
+    document = json.loads(raw)
+    limitation = "Do not run without resolving the synthetic source gap"
+    document["consumers"][0].update(
+        readiness=readiness, missing_source="Required synthetic source", limitations=[limitation]
+    )
+    submit_cp0_addendum(store, requested, json.dumps(document), context_sha256=digest)
+    snapshot = store.read()
+    ref = snapshot.readiness_addenda[0]
+    assert store.readiness_addendum(ref).consumers[0].readiness == readiness
+    attempt = None
+    if readiness == "READY_WITH_LIMITATIONS":
+        attempt = store.begin("CP-1A")
+        assert attempt.inputs[-1].input_id == "readiness-addendum"
+        assert attempt.inputs[-1].sha256 == ref.sha256
+        shown = prompt_inputs(store, attempt, "business_context").module_context
+        assert shown is not None and limitation in str(shown)
+        assert limitation in str(host_context(store, attempt, "business_context"))
+        snapshot = store.read()
+    else:
+        with pytest.raises(NotAuthorized):
+            store.begin("CP-1A")
+    head = next(h for h in snapshot.heads if h.module_id == "CP-0")
+    authentic = store.head_module(head)
+    commands = {
+        "insert": (*head.commands, Command(row_id="CP-1A", text="Run CP-1A")),
+        "remove": (),
+        "replace": (Command(row_id="CP-1A", text="Run CP-1A"),),
+    }
+    update: dict[str, Any] = {"commands": commands[mutation]} if mutation in commands else {}
+    if mutation == "inputs":
+        update = {"inputs": ()}
+    elif mutation == "status":
+        update = {"status": "accepted" if head.status != "accepted" else "restricted"}
+    forged = head.model_copy(update=update)
+    with pytest.raises(ValueError, match=r"Execution head.*result blob"):
+        store.head_module(forged)
+    store._write(
+        snapshot.model_copy(
+            update={
+                "heads": (forged,),
+                "readiness_addenda": () if remove_refs else snapshot.readiness_addenda,
+            }
+        )
+    )
+    files = {p: p.read_bytes() for p in store.directory.rglob("*") if p.is_file()}
+    reopened = Execution(store.directory)
+    refusal = (
+        "ref is absent or ambiguous"
+        if access == "direct" and remove_refs
+        else "Execution head.*result blob"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        if access == "read":
+            reopened.read()
+        elif access == "direct":
+            reopened.readiness_addendum(ref)
+        elif access == "begin":
+            reopened.begin("CP-1A")
+        else:
+            # Blocked/conditional grants must refuse before producing a context ticket.
+            ticket = attempt if attempt is not None else reopened.begin("CP-1A")
+            if access == "host":
+                host_context(reopened, ticket, "business_context")
+            elif access == "runner":
+                prompt_inputs(reopened, ticket, "business_context")
+            else:
+                step_instructions(
+                    reopened, "CP-1A", ticket.ticket_id, "business_context", with_sources=False
+                )
+    assert {p: p.read_bytes() for p in store.directory.rglob("*") if p.is_file()} == files
+    assert reopened.result(head.result_sha256) == authentic
+
+
+@settings(max_examples=20, deadline=None)
+@example(1, [])
+@given(
+    st.integers(min_value=0, max_value=1),
+    st.lists(
+        st.tuples(
+            st.sampled_from(("CP-1", "CP-1A", "CP-4")),
+            st.sampled_from(("Run CP-1", "Run CP-1A", "DO NOT RUN", None)),
+        ),
+        max_size=3,
+    ),
+)
+def test_current_cp0_authority_equals_retained_producer(
+    original: Path, kept: int, additions: list[tuple[str, str | None]]
+) -> None:
+    """Real journal differential: only exact producer commands may retain grant authority."""
+    import tempfile
+
+    from deploy_vii.execution import Command, commands_of
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "journal"
+        shutil.copytree(original, path)
+        store = Execution(path)
+        raw, digest = payload(store, ("CP-1", "CP-1A"))
+        submit_cp0_addendum(store, ("CP-1", "CP-1A"), raw, context_sha256=digest)
+        snapshot = store.read()
+        ref = snapshot.readiness_addenda[0]
+        grant = store.readiness_addendum(ref)
+        inputs = current_inputs(snapshot, "CP-1A")
+        head = snapshot.heads[0]
+        original_commands = commands_of(store.result(head.result_sha256))
+        changed = head.model_copy(
+            update={
+                "commands": (
+                    *head.commands[:kept],
+                    *(Command(row_id=row, text=text) for row, text in additions),
+                )
+            }
+        )
+        store._write(snapshot.model_copy(update={"heads": (changed,)}))
+        files = {p: p.read_bytes() for p in store.directory.rglob("*") if p.is_file()}
+        reopened = Execution(path)
+        if changed.commands == original_commands:
+            assert current_inputs(reopened.read(), "CP-1A") == inputs
+            assert inputs[-1].sha256 == ref.sha256
+            assert reopened.readiness_addendum(ref) == grant
+        else:
+            with pytest.raises(ValueError, match=r"Execution head commands.*result blob"):
+                reopened.read()
+            with pytest.raises(ValueError, match=r"Execution head commands.*result blob"):
+                reopened.readiness_addendum(ref)
+            with pytest.raises(ValueError, match=r"Execution head commands.*result blob"):
+                reopened.begin("CP-1A")
+        assert {p: p.read_bytes() for p in store.directory.rglob("*") if p.is_file()} == files
 
 
 def test_self_consistent_forged_addendum_cannot_replace_true_cp0_baseline(
