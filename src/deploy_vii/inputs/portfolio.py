@@ -330,7 +330,9 @@ HOLDINGS = Sheet(
 )
 SHEETS = (MANDATE, EXPOSURE, RATINGS, SECTORS, TOP_HOLDINGS, MATURITIES, COMPLIANCE, HOLDINGS)
 BY_NAME = {sheet.name: sheet for sheet in SHEETS}
-# Every fix the validator can print (the README documents each).
+# Every fixed-text fix the validator can print (the README documents each verbatim). The
+# per-sheet structure fixes (`Sheet.fixes`) and the repeated-key fix are patterns over a sheet's
+# header, noun or key; the README documents those patterns.
 FIXES = tuple(
     dict.fromkeys(
         fix
@@ -338,7 +340,6 @@ FIXES = tuple(
             *RULE_FIX.values(),
             *REQUIRED_FIELDS.values(),
             *(column.fix for sheet in SHEETS for column in sheet.columns),
-            *(fix for sheet in SHEETS for fix in sheet.fixes()),
         )
         if fix and "{" not in fix
     )

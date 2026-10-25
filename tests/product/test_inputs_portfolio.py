@@ -27,9 +27,17 @@ from deploy_vii.inputs.portfolio import (
     validate_portfolio_bytes,
 )
 from deploy_vii.preparation import SourceRequest, prepare_source
+from scripts.build_templates import (
+    PORTFOLIO_README,
+    PORTFOLIO_ROWS,
+    build_portfolio,
+    portfolio_bytes,
+)
 
+ROOT = Path(__file__).resolve().parents[2]
 FILE = "portfolio.xlsx"
 TEMPLATE_PATH = "docs/templates/portfolio.template.xlsx"
+TEMPLATE = ROOT / TEMPLATE_PATH
 # The brief's contract, stated here independently of the module's constants.
 BRIEF_SHEETS: dict[str, tuple[str, ...]] = {
     "Mandate": ("section", "field", "value", "notes"),
@@ -1082,3 +1090,78 @@ def test_cli_portfolio_kind_comes_from_the_input_table() -> None:
 
     assert tuple(KINDS) == ("rv", "portfolio")
     assert KINDS["portfolio"] is validate_portfolio
+
+
+def test_template_validates_ok_with_eight_sheets_and_the_design_limits() -> None:
+    report = validate_portfolio(TEMPLATE)
+    assert rendered(report) == []
+    assert report.lines() == ("OK: 8 sheets, 5 compliance rows",)
+    facts = portfolio_facts(source(TEMPLATE.read_bytes(), TEMPLATE.name))
+    assert facts.mandate.nav == Decimal("630928502")
+    assert facts.mandate.nav_currency == "USD"
+    assert facts.mandate.as_of == date(2026, 5, 29)
+    limits = {
+        row.id: (row.limit, row.limit_unit, row.breach_type, row.scope, row.current_value)
+        for row in facts.compliance
+    }
+    assert limits == {
+        "C-01": (Decimal("2.5"), "% NAV", "Hard", "issuer", Decimal("2.37")),
+        "C-04": (Decimal("7.5"), "% NAV", "Hard", "rating_bucket", Decimal("7.36")),
+        "C-05": (Decimal("5.0"), "% NAV", "Soft", "rating_bucket", Decimal("3.73")),
+        "C-10": (Decimal("10.0"), "% NAV", "Soft", "seniority", Decimal("0.61")),
+        "SECTOR": (Decimal("10.0"), "% NAV", "Soft", "sector", Decimal("4.57")),
+    }
+    assert {row.checked_by for row in facts.compliance} == {"analyst"}
+    assert all(row.last_checked == date(2026, 5, 29) for row in facts.compliance)
+    issuers = [row.issuer for row in (*facts.top_holdings, *(facts.holdings or ()))]
+    assert issuers and all(issuer.endswith("(synthetic)") for issuer in issuers)
+    assert facts.mandate.fund_name.endswith("(synthetic)")
+
+
+def test_builder_is_byte_stable_and_matches_the_committed_template(tmp_path: Path) -> None:
+    build_portfolio(tmp_path / "first.xlsx")
+    build_portfolio(tmp_path / "second.xlsx")
+    first = (tmp_path / "first.xlsx").read_bytes()
+    assert first == (tmp_path / "second.xlsx").read_bytes()
+    assert first == portfolio_bytes(PORTFOLIO_ROWS)
+    assert first == TEMPLATE.read_bytes(), "run: uv run python scripts/build_templates.py"
+
+
+def test_an_independent_reader_sees_the_template_sheets_headers_and_readme() -> None:
+    book = openpyxl.load_workbook(TEMPLATE, read_only=True)
+    assert book.sheetnames == [*BRIEF_SHEETS, "README"]
+    for name, header in BRIEF_SHEETS.items():
+        rows = list(book[name].iter_rows(values_only=True))
+        assert rows[0] == header, name
+        assert len(rows) == 1 + len(PORTFOLIO_ROWS[name]), name
+    readme = [row[0] for row in book["README"].iter_rows(values_only=True)]
+    assert readme == list(PORTFOLIO_README)
+    assert readme[0] == "synthetic example — replace every row"
+    compliance = list(book["Compliance_Monitor"].iter_rows(values_only=True))
+    assert compliance[1][3] == 2.5  # limits are numeric cells; dates and ids are text
+    assert compliance[1][11] == "2026-05-29"
+
+
+def test_template_names_only_fictional_parties_issuers_and_checkers() -> None:
+    # An allow-list, so no reference name has to be written here to be kept out: every issuer
+    # and the fund are marked synthetic, every key party is a Synthetic one, every checker is
+    # the role `analyst`.
+    rows = PORTFOLIO_ROWS
+    named = [row["issuer"] for name in ("Top_Holdings", "Holdings_Detail") for row in rows[name]]
+    assert named and all(issuer.endswith("(synthetic)") for issuer in named)
+    parties = [row["value"] for row in rows["Mandate"] if row["section"] == "Key Parties"]
+    assert parties and all(party.startswith("Synthetic ") for party in parties)
+    assert {row["checked_by"] for row in rows["Compliance_Monitor"]} == {"analyst"}
+    fund = [row["value"] for row in rows["Mandate"] if row["field"] == "fund_name"]
+    assert fund == ["Test CLO I Ltd (synthetic)"]
+
+
+def test_readme_documents_every_sheet_column_and_fix() -> None:
+    readme = (ROOT / "docs" / "templates" / "README.md").read_text(encoding="utf-8")
+    section = readme[readme.index("## Portfolio workbook") :]
+    assert all(f"`{sheet.name}`" in section for sheet in SHEETS)
+    assert all(f"`{column.name}`" in section for sheet in SHEETS for column in sheet.columns)
+    assert [fix for fix in FIXES if fix not in section] == []
+    assert "deploy-vii validate-input portfolio" in section
+    assert "sheet:Compliance_Monitor" in section
+    assert "OK: 8 sheets, 5 compliance rows" in section
