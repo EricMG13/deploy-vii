@@ -1450,3 +1450,77 @@ def test_ready_grant_binds_accepted_input_and_begins(original_store: Execution) 
         attempt.inputs[-1].input_id == "readiness-addendum"
         and attempt.inputs[-1].status == "accepted"
     )
+
+
+def test_self_consistent_forged_addendum_cannot_replace_true_cp0_baseline(
+    original_store: Execution,
+) -> None:
+    """Attack fixture: retain genuine CP-0, forge only self-consistent addendum artifacts."""
+    from deploy_vii.cp0_workflow import _check_addendum
+    from deploy_vii.execution import addendum_ref
+
+    store = original_store
+    snapshot = store.read()
+    requested = ("CP-1", "CP-1A")
+    true_context = cp0_addendum_context(store, requested)
+    forged_review = true_context.original_review.model_copy(
+        update={
+            "sources": tuple(
+                s.model_copy(update={"authority": "issuer", "limitations": ()})
+                for s in true_context.original_review.sources
+            ),
+        }
+    )
+    context = true_context.model_copy(
+        update={
+            "original_review": forged_review,
+            "previous_addenda": ("f" * 64,),
+        }
+    )
+    raw, _ = payload(store, requested)
+    document = json.loads(raw)
+    document["consumers"][0].update(readiness="READY", limitations=[])
+    raw = json.dumps(document)
+    forged = _check_addendum(store.pack(), context, raw)
+    for value in (raw, context.model_dump_json(), forged.model_dump_json()):
+        store._store(value)
+    store._write(
+        snapshot.model_copy(
+            update={
+                "run": snapshot.run.model_copy(update={"requested_modules": requested}),
+                "readiness_addenda": (addendum_ref(forged),),
+            }
+        )
+    )
+    assert context.original_review != true_context.original_review
+    assert (
+        store.result(snapshot.heads[0].result_sha256).content_hash()
+        == snapshot.heads[0].result_sha256
+    )
+    with pytest.raises(ValueError):
+        reopened = Execution(store.directory)
+        reopened.read()
+        reopened.begin("CP-1A")
+
+
+def test_removed_prior_addendum_ref_and_blob_cannot_leave_a_runnable_descendant(
+    original_store: Execution,
+) -> None:
+    """Both grants are genuine; deleting prior authority must invalidate the descendant."""
+    store = original_store
+    requested = ("CP-1", "CP-4")
+    raw, digest = payload(store, requested)
+    submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    requested = (*requested, "CP-1A")
+    raw, digest = payload(store, requested)
+    submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    snapshot = store.read()
+    prior, descendant = snapshot.readiness_addenda
+    retained = store.readiness_addendum(descendant)
+    assert retained.context.previous_addenda == (prior.sha256,)
+    store._write(snapshot.model_copy(update={"readiness_addenda": (descendant,)}))
+    (store.directory / "blobs" / prior.sha256).unlink()
+    with pytest.raises(ValueError):
+        reopened = Execution(store.directory)
+        reopened.read()
+        reopened.begin("CP-1A")
