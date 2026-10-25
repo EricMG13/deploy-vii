@@ -1807,7 +1807,8 @@ def test_the_financials_loop_prompt_adds_the_parts_rule_as_l_and_names_five_tool
     rule = prompts.FINANCIAL_PARTS_RULE
     assert rule == (
         "Send the JSON object in five parts with `submit_financials_part`, each `payload` in its "
-        "part's schema, and `book_id` naming the book in every part. `frame`: every field "
+        "part's schema: one `books` entry for each book, its `book_id` naming it, so a part "
+        "holds every book's objects (never one part per book). `frame`: every field "
         "outside the books (`binding`, `definition`, `quarter_ids` and the `financial` object's "
         "own fields) with each book's `periods`, `statement_disclosures`, `addback_disclosure` "
         "and `segment_disclosure`. `IS`, `CFS` and `BS`: that statement's `statement_lines` and "
@@ -1817,7 +1818,8 @@ def test_the_financials_loop_prompt_adds_the_parts_rule_as_l_and_names_five_tool
         "`kpis`, `facilities`, `facility_fx_conversions`, `pro_forma`, "
         "`audit_basis_explanations`, `segment_allocation` and `limitations`. Each part is "
         "checked when it arrives and answered `accepted part` or `rejected part` with its "
-        "issues; a part sent again replaces the one held, so send a corrected part whole. Then "
+        "issues; a part sent again replaces the one held, every book's, so send a corrected "
+        "part whole. Then "
         "call `submit_financials` with `{}`: Python assembles the parts held into one object "
         "and the validators judge it as a submit."
     )

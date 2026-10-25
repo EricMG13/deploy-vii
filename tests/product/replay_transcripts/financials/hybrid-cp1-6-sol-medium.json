@@ -122,8 +122,8 @@
  "start_journal": "artifacts/model-tests/hybrid-cp1-6/sol-medium/source_context/journal-submit-1",
  "step_id": "financials",
  "system_prompt": {
-  "changed_by": "task 7.19 (QUOTE_PAGE_RULE); task 8.10b (25 Oct 2026; EXTRACT_RULE, financials rule k; fix round 1 wording, B1); task 8.11 (25 Oct 2026; FINANCIAL_PARTS_RULE, financials rule l; rule 5 parts_tools_rule)",
-  "now_sha256": "045840d2e6c08f79fba832df6227ee45a41f0a2b99b26295920ffa4be22ee35e",
+  "changed_by": "task 7.19 (QUOTE_PAGE_RULE); task 8.10b (25 Oct 2026; EXTRACT_RULE, financials rule k; fix round 1 wording, B1); task 8.11 (25 Oct 2026; FINANCIAL_PARTS_RULE, financials rule l; rule 5 parts_tools_rule; review wording: a part holds every book's objects)",
+  "now_sha256": "f5fcd3c8563acb277180c8f8b15a721ab7f0eebd7c07799e6747d2f571b96bec",
   "recorded_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
  },
  "tools_added": [

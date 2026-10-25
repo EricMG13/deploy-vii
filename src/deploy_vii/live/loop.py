@@ -872,6 +872,7 @@ def _part(step: _Step, kind: str, arguments: str) -> tuple[str, str, dict[str, A
     document = json_object(arguments)
     if document is None:  # `json.loads` read it, so only a NaN or an infinity is left
         raise ToolError("bad arguments: a number is not finite")
+    before = step.parts.size(kind) if kind in step.parts.held else None
     issues = step.parts.submit(kind, exact_json(document["payload"]))
     outcome = "rejected" if issues else "accepted"
     step.part_outcomes.append((kind, outcome))
@@ -882,6 +883,8 @@ def _part(step: _Step, kind: str, arguments: str) -> tuple[str, str, dict[str, A
     # The nulls resolved on arrival, recorded as a whole payload's are (`payload_nulls_resolved`).
     record["nulls_resolved"] = list(step.parts.resolved[kind])
     size = f"{step.parts.size(kind)} {step.parts.unit(kind)}"
+    if before is not None:  # named, so one book's part per call (each replacing) shows
+        size += f"; it replaces the {kind} part held, {before} {step.parts.unit(kind)}"
     return PART_ACCEPTED, f"accepted part {kind} ({size})", record
 
 

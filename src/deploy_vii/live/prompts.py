@@ -193,8 +193,9 @@ EXTRACT_RULE = (
 # `financials` prompt alone adds it as rule l (`build`); the one-shot prompt is unchanged.
 FINANCIAL_PARTS_RULE = (
     "Send the JSON object in five parts with `submit_financials_part`, each `payload` in its "
-    "part's schema, and `book_id` naming the book in every part. `frame`: every field outside "
-    "the books (`binding`, `definition`, `quarter_ids` and the `financial` object's own fields) "
+    "part's schema: one `books` entry for each book, its `book_id` naming it, so a part holds "
+    "every book's objects (never one part per book). `frame`: every field outside the books "
+    "(`binding`, `definition`, `quarter_ids` and the `financial` object's own fields) "
     "with each book's `periods`, `statement_disclosures`, `addback_disclosure` and "
     "`segment_disclosure`. `IS`, `CFS` and `BS`: that statement's `statement_lines` and the "
     "`statement_identities` whose target line (`target_line_id` and `period_id`) is one of "
@@ -203,8 +204,8 @@ FINANCIAL_PARTS_RULE = (
     "`kpis`, `facilities`, `facility_fx_conversions`, `pro_forma`, `audit_basis_explanations`, "
     "`segment_allocation` and `limitations`. Each part is checked when it arrives and answered "
     "`accepted part` or `rejected part` with its issues; a part sent again replaces the one "
-    "held, so send a corrected part whole. Then call `submit_financials` with `{}`: Python "
-    "assembles the parts held into one object and the validators judge it as a submit."
+    "held, every book's, so send a corrected part whole. Then call `submit_financials` with "
+    "`{}`: Python assembles the parts held into one object and the validators judge it as a submit."
 )
 # Task 7.14 (batches e1-cp1-13 and -14: three of four source contexts left `currency` null on every
 # scope and worded the current year's perimeter unlike the comparative years'):

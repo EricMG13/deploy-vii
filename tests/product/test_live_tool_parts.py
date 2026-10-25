@@ -2568,6 +2568,20 @@ def test_the_recorded_hybrid_step_sent_in_parts_reaches_the_same_journal(tmp_pat
     assert (held[0]["frame"], held[0]["other"]) == (12, 96)
     assert parts.result.verdict == whole.result.verdict == "accepted"
     assert parts.result.cost_usd == whole.result.cost_usd
+    # Each part call's record keeps the nulls that part resolved on arrival.
+    root = tmp_path / "parts" / "artifacts"
+    recorded = [
+        (entry["part"], entry["outcome"], entry["nulls_resolved"])
+        for attempt in parts.result.attempt_ids
+        for path in root.rglob(f"{attempt}/tool-calls.jsonl")
+        for entry in map(json.loads, path.read_text().splitlines())
+        if "part" in entry
+    ]
+    expected = []
+    for payload in hybrid_calls(entry, "submit_financials"):
+        resolved = held_parts(split(payload), PART_KINDS).resolved
+        expected += [(kind, "accepted", list(resolved[kind])) for kind in PART_KINDS]
+    assert recorded == expected and any(paths for _, _, paths in recorded)
     journals = {name: Execution(tmp_path / name / "journal") for name in ("whole", "parts")}
     steps = {
         name: next(a for a in store.read().attempts if a.module_id == "CP-1").steps
@@ -2679,6 +2693,12 @@ def test_a_missing_part_is_the_validators_gap_and_a_resent_part_replaces_the_hel
     assert "financial.books.0.accounts: Field required" in direct.issues
     assert not any("part" in issue for issue in direct.issues)
     texts = results(rig, result)
+    # A replacement says what it replaced, so a model that sent one book's lines per part
+    # (each replacing the last) sees it.
+    assert texts[2:4] == [
+        "accepted part IS (2 lines)",
+        "accepted part IS (5 lines; it replaces the IS part held, 2 lines)",
+    ]
     assert texts[6].startswith("rejected part other:\n- ")
     assert texts[7].endswith(
         "\nparts held: frame (11 entries), IS (5 lines), CFS (30 lines), BS (6 lines); "

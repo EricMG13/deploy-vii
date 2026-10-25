@@ -1164,7 +1164,7 @@ def test_the_financials_prompt_change_is_exactly_the_named_rule(tmp_path: Path) 
         )
         assert prompt["changed_by"].endswith(
             "; task 8.11 (25 Oct 2026; FINANCIAL_PARTS_RULE, financials rule l; rule 5 "
-            "parts_tools_rule)"
+            "parts_tools_rule; review wording: a part holds every book's objects)"
         )
     assert entry["system_prompt"]["recorded_sha256"] == FINANCIALS_PROMPT_BEFORE_8_10B
     assert hybrid["system_prompt"]["changed_by"].startswith("task 7.19 (QUOTE_PAGE_RULE); ")
