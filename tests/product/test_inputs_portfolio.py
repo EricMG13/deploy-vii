@@ -11,7 +11,7 @@ import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import openpyxl
@@ -24,6 +24,9 @@ from deploy_vii.inputs.portfolio import (
     FIXES,
     MEDIA_TYPE,
     SHEETS,
+    STRATEGIES,
+    ComplianceRow,
+    Mandate,
     PortfolioRefused,
     PortfolioReport,
     portfolio_facts,
@@ -249,6 +252,30 @@ def test_contract_is_the_briefs() -> None:
         assert optional == OPTIONAL_COLUMNS.get(sheet.name, set()), sheet.name
     assert [sheet.name for sheet in SHEETS if sheet.optional] == ["Holdings_Detail"]
     assert MEDIA_TYPE == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def test_typed_row_literals_match_the_validators_choices() -> None:
+    # The typed rows' Literal fields must accept exactly what the validator passes.
+    fields = ComplianceRow.model_fields
+    choices = {column.name: column.choices for column in SHEETS[6].columns}
+    assert get_args(fields["scope"].annotation) == choices["scope"]
+    assert get_args(fields["breach_type"].annotation) == choices["breach_type"]
+    assert get_args(fields["status"].annotation) == choices["status"]
+    assert get_args(Mandate.model_fields["strategy"].annotation) == STRATEGIES
+
+
+def test_comments_and_merged_ranges_are_not_cells() -> None:
+    book = openpyxl.load_workbook(io.BytesIO(workbook(valid())))
+    sheet = book["Mandate"]
+    sheet["D2"].comment = openpyxl.comments.Comment("synthetic note", "analyst")
+    sheet.merge_cells("D3:D4")
+    stream = io.BytesIO()
+    book.save(stream)
+    raw = stream.getvalue()
+    spans = [span.locator for span in source(raw).spans]
+    assert any(locator.startswith("part:") for locator in spans)
+    assert "sheet:Mandate!merged:D3:D4" in spans
+    assert rendered(validate_portfolio_bytes(FILE, raw)) == []
 
 
 def test_a_valid_workbook_is_ok_with_sheet_and_compliance_counts() -> None:
