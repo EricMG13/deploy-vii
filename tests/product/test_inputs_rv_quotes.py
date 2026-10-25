@@ -9,9 +9,10 @@ import io
 import shutil
 import sys
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 from xml.sax.saxutils import quoteattr
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
@@ -20,7 +21,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from deploy_vii.contracts import Run, Span
+from deploy_vii.contracts import Run, Source, Span
 from deploy_vii.inputs.rv_quotes import (
     COLUMNS,
     FIX,
@@ -28,12 +29,20 @@ from deploy_vii.inputs.rv_quotes import (
     LEVELS,
     MEDIA_TYPE,
     Issue,
+    RVQuotesRefused,
     ValidationReport,
+    rv_quotes_facts,
     sheet_cells,
     validate_rv_bytes,
     validate_rv_quotes,
 )
-from deploy_vii.preparation import PreparationRequest, SourceRequest, load_pack, prepare
+from deploy_vii.preparation import (
+    PreparationRequest,
+    SourceRequest,
+    load_pack,
+    prepare,
+    prepare_source,
+)
 from scripts.build_templates import README_LINES, SYNTHETIC_ROWS, build, workbook_bytes
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -741,3 +750,498 @@ def test_emptying_one_required_cell_is_exactly_one_issue_naming_it(
         (cell, f"{column} is empty")
     ]
     assert report.rows == len(rows)
+
+
+# These fixtures exercise retained OOXML cell metadata, including contradictory error caches.
+def numeric_cell_bytes(level: str, value: str, kind: str = "n", fmt: str = "General") -> bytes:
+    book = openpyxl.Workbook()
+    sheet = book.active
+    assert sheet is not None
+    sheet.title = "rv_quotes"
+    sheet.append(list(COLUMNS))
+    sheet.append([VALID.get(column) for column in COLUMNS])
+    cell = f"{LETTERS[COLUMNS.index(level)]}2"
+    sheet[cell] = 1
+    sheet[cell].number_format = fmt
+    stream = io.BytesIO()
+    book.save(stream)
+    output = io.BytesIO()
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with ZipFile(io.BytesIO(stream.getvalue())) as source, ZipFile(output, "w") as target:
+        for member in source.infolist():
+            raw = source.read(member)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                root = ET.fromstring(raw)
+                (node,) = [node for node in root.iter(ns + "c") if node.get("r") == cell]
+                node.set("t", kind)
+                for child in list(node):
+                    node.remove(child)
+                ET.SubElement(node, ns + "v").text = value
+                raw = ET.tostring(root)
+            target.writestr(member, raw)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize("kind,value", [("b", "1"), ("e", "7.5"), ("e", "#N/A")])
+def test_numeric_cell_types_are_refused_before_the_cached_lexeme(
+    level: str, kind: str, value: str
+) -> None:
+    result = validate_rv_bytes(FILE, numeric_cell_bytes(level, value, kind))
+    assert not result.ok
+    (issue,) = result.issues
+    assert issue.cell == f"{LETTERS[COLUMNS.index(level)]}2"
+    assert "TRUE/FALSE" in issue.problem if kind == "b" else "Excel error" in issue.problem
+
+
+@pytest.mark.parametrize("column", ["provider", "issuer", "facility_id", "instrument", "note"])
+def test_error_cells_cannot_supply_quote_metadata(column: str) -> None:
+    result = validate_rv_bytes(FILE, numeric_cell_bytes(column, "SYNTHETIC", "e"))
+    assert not result.ok
+    assert "Excel error" in result.issues[0].problem
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize("fmt", ["0%", "0.00%", "0.000%"])
+def test_percent_formatted_numeric_levels_are_refused(level: str, fmt: str) -> None:
+    result = validate_rv_bytes(FILE, numeric_cell_bytes(level, "0.075", fmt=fmt))
+    assert not result.ok
+    (issue,) = result.issues
+    assert issue.cell == f"{LETTERS[COLUMNS.index(level)]}2"
+    assert "formatted as a percentage" in issue.problem
+    assert "plain number" in issue.fix and "General" in issue.fix
+
+
+@pytest.mark.parametrize("level", LEVELS)
+def test_unsupported_decimal_exponent_is_a_cell_issue(level: str, tmp_path: Path) -> None:
+    path = write(tmp_path, [VALID | {"ask": "1", level: "1e9999999999999999999"}])
+    result = validate_rv_quotes(path)
+    assert not result.ok
+    assert any(issue.cell == f"{LETTERS[COLUMNS.index(level)]}2" for issue in result.issues)
+
+
+@pytest.mark.parametrize("kind", ["n", "str"])
+@pytest.mark.parametrize("fmt", ['0.00"%"', r"0.00\%", "General"])
+def test_literal_percent_formats_and_plain_numeric_text_remain_exact(kind: str, fmt: str) -> None:
+    frozen = quote_source(numeric_cell_bytes("yield_pct", "7.50000000000000001", kind, fmt))
+    assert validate_rv_bytes(
+        FILE, numeric_cell_bytes("yield_pct", "7.50000000000000001", kind, fmt)
+    ).ok
+    assert rv_quotes_facts(frozen).quotes[0].yield_pct == Decimal("7.50000000000000001")
+
+
+def test_numeric_text_does_not_inherit_percentage_scaling() -> None:
+    raw = numeric_cell_bytes("yield_pct", "7.5", "str", "0.00%")
+    assert validate_rv_bytes(FILE, raw).ok
+    assert rv_quotes_facts(quote_source(raw)).quotes[0].yield_pct == Decimal("7.5")
+
+
+def quote_source(raw: bytes) -> Source:
+    return prepare_source(
+        SourceRequest(source_id="synthetic-rv", path=FILE, media_type=MEDIA_TYPE), raw
+    )
+
+
+def test_frozen_reader_preserves_all_rows_exact_cells_and_source_limits(tmp_path: Path) -> None:
+    rows = [
+        VALID | {"price": "98.75000000000000001", "yield_pct": "7.5", "note": "  exact note  "},
+        VALID | {"provider": "Synthetic Dealer B", "price": None, "bid": "97.1", "ask": "98.2"},
+        VALID | {"quote_kind": "indicative_talk", "price": None, "spread_bps": "500"},
+    ]
+    path = write(tmp_path, rows)
+    frozen = quote_source(path.read_bytes())
+    path.unlink()  # No file read by the frozen reader.
+    facts = rv_quotes_facts(frozen)
+    assert facts.source_id == frozen.source_id
+    assert facts.source_sha256 == frozen.sha256
+    assert facts.limitation == frozen.limitation
+    assert facts.extraction_status == frozen.extraction_status
+    assert [quote.row for quote in facts.quotes] == [2, 3, 4]
+    assert [(quote.provider, quote.quote_kind) for quote in facts.quotes] == [
+        ("Synthetic Dealer A", "observed"),
+        ("Synthetic Dealer B", "observed"),
+        ("Synthetic Dealer A", "indicative_talk"),
+    ]
+    assert facts.quotes[0].price == Decimal("98.75000000000000001")
+    assert facts.quotes[1].price is None and facts.quotes[1].ref("price") is None
+    for row in facts.quotes:
+        for ref in row.refs:
+            assert ref.source_id == frozen.source_id and ref.source_sha256 == frozen.sha256
+            (span,) = [span for span in frozen.spans if span.locator == ref.locator]
+            assert ref.quote == span.text
+        for column in COLUMNS:
+            assert (
+                row.locator(column) == f"sheet:rv_quotes!{LETTERS[COLUMNS.index(column)]}{row.row}"
+            )
+    assert facts.quotes[0].ref("note").quote == "  exact note  "  # type: ignore[union-attr]
+    with pytest.raises(ValueError, match="frozen"):
+        facts.quotes[0].price = Decimal("1")
+    with pytest.raises(ValueError, match="frozen"):
+        facts.source_sha256 = "0" * 64
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize(
+    "kind,value,fmt",
+    [
+        ("b", "1", "General"),
+        ("e", "7.5", "General"),
+        ("n", "0.075", "0.00%"),
+        ("str", "1e9999999999999999999", "General"),
+    ],
+)
+def test_reader_and_validator_refuse_the_same_bad_cell_without_partial_facts(
+    level: str, kind: str, value: str, fmt: str
+) -> None:
+    raw = numeric_cell_bytes(level, value, kind, fmt)
+    result = validate_rv_bytes(FILE, raw)
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(quote_source(raw))
+    assert refused.value.report == result
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sha256": None},
+        {"sha256": "not-a-hash"},
+        {"source_id": ""},
+        {"status": "unreadable", "limitation": "synthetic refusal"},
+        {"extraction_status": "blocked"},
+        {"coverage": ()},
+    ],
+)
+def test_reader_refuses_unavailable_or_unverifiable_source_identity(change: dict[str, Any]) -> None:
+    frozen = quote_source(TEMPLATE.read_bytes()).model_copy(update=change)
+    with pytest.raises(RVQuotesRefused):
+        rv_quotes_facts(frozen)
+
+
+@pytest.mark.parametrize("status", ["empty", "unreadable"])
+def test_frozen_coverage_cannot_disagree_with_retained_quote_cells(status: str) -> None:
+    frozen = quote_source(TEMPLATE.read_bytes())
+    frozen = frozen.model_copy(
+        update={
+            "coverage": tuple(
+                item.model_copy(update={"status": status, "limitation": "synthetic limit"})
+                if item.locator == "sheet:rv_quotes"
+                else item
+                for item in frozen.coverage
+            )
+        }
+    )
+    with pytest.raises(RVQuotesRefused):
+        rv_quotes_facts(frozen)
+
+
+def test_reader_never_reuses_another_sources_refs() -> None:
+    first = quote_source(TEMPLATE.read_bytes())
+    second = quote_source(numeric_cell_bytes("yield_pct", "7.5")).model_copy(
+        update={"source_id": "second-rv"}
+    )
+    first_facts, second_facts = rv_quotes_facts(first), rv_quotes_facts(second)
+    assert first_facts.source_sha256 != second_facts.source_sha256
+    assert {ref.source_sha256 for row in second_facts.quotes for ref in row.refs} == {second.sha256}
+    assert {ref.source_id for row in second_facts.quotes for ref in row.refs} == {"second-rv"}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        numeric_cell_bytes("yield_pct", "1", "b"),
+        numeric_cell_bytes("yield_pct", "7.5", "e"),
+        numeric_cell_bytes("yield_pct", "0.075", fmt="0.00%"),
+        numeric_cell_bytes("bid", "1e9999999999999999999", "str"),
+    ],
+)
+def test_cli_numeric_boundary_refusals_are_actionable(
+    raw: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / FILE
+    path.write_bytes(raw)
+    assert run_cli(["rv", str(path)], monkeypatch) == 1
+    output = capsys.readouterr().out
+    assert "FAILED: 1 issues" in output and " — fix: " in output
+    assert "rv_quotes!" in output
+
+
+EXPONENT_LEXEME = st.builds(
+    lambda mantissa, sign, exponent: f"{mantissa}e{sign}{exponent}",
+    st.sampled_from(["-1.00000000000000001", "0", "1.25", "+99"]),
+    st.sampled_from(["", "+", "-"]),
+    st.text(alphabet="0123456789", min_size=1, max_size=30),
+)
+
+
+@settings(max_examples=80, deadline=None)
+@given(EXPONENT_LEXEME, EXPONENT_LEXEME)
+def test_generated_exponents_never_escape_and_exact_order_matches_decimal(
+    bid: str, ask: str
+) -> None:
+    raw = workbook_bytes(
+        [
+            {
+                "provider": "Synthetic dealer",
+                "as_of": "2026-09-30",
+                "issuer": "Synthetic issuer",
+                "facility_id": "F1",
+                "instrument": "Loan",
+                "quote_kind": "observed",
+                "currency": "USD",
+                "bid": bid,
+                "ask": ask,
+            }
+        ]
+    )
+    result = validate_rv_bytes(FILE, raw)
+    try:
+        expected_bid, expected_ask = Decimal(bid), Decimal(ask)
+        ordered = expected_bid <= expected_ask
+    except DecimalException:
+        assert not result.ok
+    else:
+        assert result.ok == ordered
+    if result.ok:
+        row = rv_quotes_facts(quote_source(raw)).quotes[0]
+        assert row.bid == Decimal(bid) and row.ask == Decimal(ask)
+        assert row.price is None and row.yield_pct is None and row.spread_bps is None
+    else:
+        with pytest.raises(RVQuotesRefused) as refused:
+            rv_quotes_facts(quote_source(raw))
+        assert refused.value.report == result
+
+
+@settings(max_examples=40, deadline=None)
+@given(quote_rows())
+def test_generated_facts_agree_with_independent_decimal_and_exact_frozen_cells(
+    rows: list[dict[str, str]],
+) -> None:
+    # Differential against the independent OOXML writer, plus each source's own cell identity.
+    generated, independent = workbook_bytes(rows), openpyxl_bytes(rows)
+    assert validate_rv_bytes(FILE, generated) == validate_rv_bytes(FILE, independent)
+    facts = []
+    for raw in (generated, independent):
+        frozen = quote_source(raw)
+        actual = rv_quotes_facts(frozen)
+        values = []
+        for row, expected in zip(actual.quotes, rows, strict=True):
+            typed = {}
+            for name in LEVELS:
+                typed[name] = getattr(row, name)
+                assert typed[name] == (Decimal(expected[name]) if expected.get(name) else None)
+            values.append(typed)
+            for name in COLUMNS:
+                ref = row.ref(name)
+                if expected.get(name):
+                    assert ref is not None
+                    assert ref.locator == row.locator(name)
+                    assert ref.quote.strip() == expected[name].strip()
+                    assert ref.source_id == frozen.source_id and ref.source_sha256 == frozen.sha256
+                else:
+                    assert ref is None
+        facts.append(values)
+    assert facts[0] == facts[1]
+
+
+@pytest.mark.parametrize("field", ["spans", "coverage"])
+def test_copied_sources_use_revalidated_nested_models(field: str) -> None:
+    frozen = quote_source(TEMPLATE.read_bytes())
+    copied = frozen.model_copy(
+        update={field: tuple(item.model_dump() for item in getattr(frozen, field))}
+    )
+    with pytest.warns(UserWarning, match="PydanticSerializationUnexpectedValue"):
+        assert rv_quotes_facts(copied) == rv_quotes_facts(frozen)
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize("lexeme", ["1e999999999999999999", "-1e-999999999999999999"])
+def test_nearby_representable_exponents_remain_exact_without_a_financial_cap(
+    level: str, lexeme: str
+) -> None:
+    raw = numeric_cell_bytes(level, lexeme, "str")
+    assert validate_rv_bytes(FILE, raw).ok
+    assert getattr(rv_quotes_facts(quote_source(raw)).quotes[0], level) == Decimal(lexeme)
+
+
+def test_blank_row_gaps_preserve_frozen_row_identity(tmp_path: Path) -> None:
+    path = write(tmp_path, [VALID, {}, VALID | {"provider": "Synthetic dealer B"}])
+    rows = rv_quotes_facts(quote_source(path.read_bytes())).quotes
+    assert [row.row for row in rows] == [2, 4]
+    assert rows[1].ref("provider").locator == "sheet:rv_quotes!A4"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"as_of": "2026-02-30"},
+        {"currency": "usd"},
+        {"facility_id": "bad id"},
+        {"quote_kind": "unknown"},
+        {"price": "=1+1"},
+        {"provider": VALID["issuer"]},
+    ],
+)
+def test_reader_retains_existing_row_refusals(change: dict[str, Any], tmp_path: Path) -> None:
+    path = write(tmp_path, [VALID, VALID | {"provider": "Synthetic B"} | change])
+    result = validate_rv_quotes(path)
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(quote_source(path.read_bytes()))
+    assert refused.value.report == result
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize("trap", [True, False])
+@pytest.mark.parametrize("api", ["bytes", "facts"])
+def test_unsupported_numeric_levels_refuse_without_changing_caller_context(
+    level: str, trap: bool, api: str
+) -> None:
+    raw = numeric_cell_bytes(level, "1e9999999999999999999", "str")
+    frozen = quote_source(raw)
+    with localcontext() as context:
+        context.traps[InvalidOperation] = trap
+        context.flags[Inexact] = True
+        before = repr(context)
+        if api == "bytes":
+            result = validate_rv_bytes(FILE, raw)
+        else:
+            with pytest.raises(RVQuotesRefused) as refused:
+                rv_quotes_facts(frozen)
+            result = refused.value.report
+        assert repr(context) == before
+    assert not result.ok
+    (issue,) = result.issues
+    assert issue.cell == f"{LETTERS[COLUMNS.index(level)]}2"
+    assert "not a supported Decimal representation" in issue.problem
+    assert issue.fix == NUMBER_FIX
+
+
+@pytest.mark.parametrize("name", [None, 123])
+@pytest.mark.parametrize("construction", ["copy", "construct"])
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
+def test_invalid_source_names_use_a_safe_refusal_label(name: int | None, construction: str) -> None:
+    frozen = quote_source(TEMPLATE.read_bytes())
+    invalid = (
+        frozen.model_copy(update={"name": name})
+        if construction == "copy"
+        else Source.model_construct(**(dict(frozen) | {"name": name}))
+    )
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(invalid)
+    (issue,) = refused.value.report.issues
+    assert issue.file == "<invalid frozen source>"
+    assert issue.cell == "A1" and "invalid frozen source identity" in issue.problem
+
+
+def test_missing_source_name_is_a_house_refusal() -> None:
+    payload = dict(quote_source(TEMPLATE.read_bytes()))
+    del payload["name"]
+    invalid = Source.model_construct(**payload)
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(invalid)
+    assert refused.value.report.issues[0].file == "<invalid frozen source>"
+
+
+def test_valid_frozen_name_remains_the_exact_diagnostic_label() -> None:
+    frozen = quote_source(numeric_cell_bytes("yield_pct", "7.5", "e"))
+    frozen = frozen.model_copy(update={"name": "synthetic-folder/custom-quotes.xlsx"})
+    with pytest.raises(RVQuotesRefused) as refused:
+        rv_quotes_facts(frozen)
+    assert refused.value.report.issues[0].file == frozen.name
+
+
+@settings(max_examples=80, deadline=None)
+@given(
+    st.sampled_from(LEVELS),
+    st.booleans(),
+    st.one_of(
+        EXPONENT_LEXEME,
+        st.sampled_from(
+            [
+                "7.50000000000000001",
+                "1e999999999999999999",
+                "-1e-999999999999999999",
+                "1e9999999999999999999",
+            ]
+        ),
+    ),
+)
+def test_numeric_boundary_is_exact_and_context_independent(
+    level: str, trap: bool, lexeme: str
+) -> None:
+    raw = numeric_cell_bytes(level, lexeme, "str")
+    frozen = quote_source(raw)
+    with localcontext() as independent:
+        independent.traps[InvalidOperation] = True
+        try:
+            expected = Decimal(lexeme)
+        except DecimalException:
+            expected = None
+    with localcontext() as caller:
+        caller.prec = 1
+        caller.Emax = 2
+        caller.Emin = -2
+        caller.clamp = 1
+        caller.rounding = "ROUND_FLOOR"
+        for signal in caller.traps:
+            caller.traps[signal] = True
+        caller.traps[InvalidOperation] = trap
+        caller.flags[Inexact] = True
+        before = repr(caller)
+        result = validate_rv_bytes(FILE, raw)
+        if expected is None:
+            assert not result.ok
+            with pytest.raises(RVQuotesRefused) as refused:
+                rv_quotes_facts(frozen)
+            assert refused.value.report == result
+        else:
+            assert result.ok
+            assert getattr(rv_quotes_facts(frozen).quotes[0], level) == expected
+        assert repr(caller) == before
+
+
+@pytest.mark.parametrize("trap", [True, False])
+@pytest.mark.parametrize(
+    "bid,ask,ordered",
+    [
+        ("7.50000000000000001", "7.50000000000000002", True),
+        ("1e999999999999999998", "1e999999999999999999", True),
+        ("1e-999999999999999999", "1e-999999999999999998", True),
+        ("7.50000000000000002", "7.50000000000000001", False),
+    ],
+)
+def test_bid_ask_order_remains_exact_in_hostile_caller_context(
+    trap: bool, bid: str, ask: str, ordered: bool
+) -> None:
+    raw = workbook_bytes(
+        [
+            {
+                "provider": "Synthetic Dealer",
+                "as_of": "2026-09-30",
+                "issuer": "Synthetic Issuer",
+                "facility_id": "F1",
+                "instrument": "Loan",
+                "quote_kind": "observed",
+                "currency": "USD",
+                "bid": bid,
+                "ask": ask,
+            }
+        ]
+    )
+    frozen = quote_source(raw)
+    with localcontext() as caller:
+        caller.prec, caller.Emax, caller.Emin = 1, 2, -2
+        for signal in caller.traps:
+            caller.traps[signal] = True
+        caller.traps[InvalidOperation] = trap
+        caller.flags[Inexact] = True
+        before = repr(caller)
+        result = validate_rv_bytes(FILE, raw)
+        assert result.ok == ordered
+        if ordered:
+            row = rv_quotes_facts(frozen).quotes[0]
+            assert row.bid == Decimal(bid) and row.ask == Decimal(ask)
+        else:
+            with pytest.raises(RVQuotesRefused) as refused:
+                rv_quotes_facts(frozen)
+            assert refused.value.report == result
+        assert repr(caller) == before

@@ -17,14 +17,14 @@ import re
 import zlib
 from collections.abc import Mapping, Sequence
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, DecimalException, InvalidOperation, localcontext
 from pathlib import Path
-from typing import Final, Literal, Self
+from typing import Final, Literal, Self, cast
 from urllib.parse import quote, unquote
 
-from pydantic import model_validator
+from pydantic import ValidationError, model_validator
 
-from deploy_vii.contracts import Contract, Span
+from deploy_vii.contracts import Citation, Contract, Hash, Identifier, Source, Span
 from deploy_vii.preparation import MAX_BYTES, SourceRequest, prepare_source
 
 SHEET = "rv_quotes"
@@ -67,6 +67,9 @@ FIX: Mapping[str, str] = {
         "enter a plain number: digits, an optional sign and one decimal point "
         "(no %, units, spaces or thousands separators)"
     ),
+    "percent": "enter the level as a plain number in General format, not a percentage format",
+    "error_cell": "replace the Excel error with a supported value",
+    "boolean_cell": "replace TRUE/FALSE with a supported value",
     "levels": "enter at least one of price, yield_pct, spread_bps, bid or ask",
     "bid_ask": "check the quote: bid must not exceed ask",
     "issuer_provider": (
@@ -98,6 +101,8 @@ DAMAGED = (zlib.error, EOFError, RuntimeError)
 # Native XLSX coordinates: bound the lexeme before integer/column arithmetic.
 ADDRESS = re.compile(r"([A-Z]{1,3})([1-9][0-9]{0,6})")
 NUMBER = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
+PERCENT_FORMATS = frozenset({"builtin:9", "builtin:10"})  # 0% and 0.00%
+LITERAL = re.compile(r'"[^"]*"|\\.')  # quoted text or an escaped character in a format code
 ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 SERIAL = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -134,6 +139,60 @@ class ValidationReport(Contract):
     def lines(self) -> tuple[str, ...]:
         summary = f"OK: {self.rows} rows" if self.ok else f"FAILED: {len(self.issues)} issues"
         return (*(issue.render() for issue in self.issues), summary)
+
+
+class RVQuotesRefused(ValueError):
+    """The frozen quote source failed the same checks as the public validator."""
+
+    def __init__(self, report: ValidationReport) -> None:
+        super().__init__(f"RV quotes workbook refused: {len(report.issues)} issues")
+        self.report = report
+
+
+class RVQuote(Contract):
+    """One eligible row, with exact frozen citations for its nonempty cells."""
+
+    row: int
+    provider: str
+    as_of: date
+    issuer: str
+    facility_id: str
+    instrument: str
+    quote_kind: Literal["observed", "indicative_talk"]
+    price: Decimal | None
+    yield_pct: Decimal | None
+    spread_bps: Decimal | None
+    bid: Decimal | None
+    ask: Decimal | None
+    currency: str
+    note: str | None
+    refs: tuple[Citation, ...]
+
+    def locator(self, column: str) -> str:
+        return f"sheet:{SHEET}!{LETTERS[COLUMNS.index(column)]}{self.row}"
+
+    def ref(self, column: str) -> Citation | None:
+        """Missing/empty cells have no citation; their typed level remains None."""
+        locator = self.locator(column)
+        return next((ref for ref in self.refs if ref.locator == locator), None)
+
+
+class RVQuotesFacts(Contract):
+    source_id: Identifier
+    source_sha256: Hash
+    limitation: str | None
+    extraction_status: Literal["complete", "degraded", "blocked"]
+    quotes: tuple[RVQuote, ...]
+
+
+def percent_formatted(span: Span) -> bool:
+    """A numeric cell scaled by 100 for display; quoted/escaped percent signs are literal."""
+    code = span.number_format
+    if span.data_type != "n" or code is None:
+        return False
+    if code.startswith("builtin:"):
+        return code in PERCENT_FORMATS
+    return "%" in LITERAL.sub("", code)
 
 
 def report(rows: int, issues: Sequence[Issue]) -> ValidationReport:
@@ -174,37 +233,133 @@ def validate_rv_bytes(file: str, raw: bytes) -> ValidationReport:
             f"({kind}: {error})"
         )
         return report(0, (issue("A1", problem, FIX["damaged"]),))
+    return read(file, source)[0]
+
+
+def rv_quotes_facts(source: Source) -> RVQuotesFacts:
+    """Read only frozen spans/coverage. Refuse the whole source on any finding.
+
+    The hash is the trusted frozen Source's raw-workbook identity, not a hash of these spans;
+    verifying it against original bytes remains the pack loader/consumer's responsibility.
+    No quote selection, price convention, authority or financial calculation is supplied.
+    """
+    name = getattr(source, "name", None)
+    file = name if isinstance(name, str) and name else "<invalid frozen source>"
+    result, facts = read(file, source)
+    if facts is None:
+        raise RVQuotesRefused(result)
+    return facts
+
+
+def read(file: str, source: Source) -> tuple[ValidationReport, RVQuotesFacts | None]:
+    """One validation/parse path for public bytes and frozen typed facts."""
+
+    def issue(cell: str, problem: str, fix: str) -> Issue:
+        return Issue(file=file, sheet=SHEET, cell=cell, problem=problem, fix=fix)
+
+    def refused(rows: int, issues: Sequence[Issue]) -> tuple[ValidationReport, None]:
+        return report(rows, issues), None
+
     if not source.coverage:
-        # `prepare_source` failed to extract: the same refusal `prepare` would freeze.
         problem = f"prepare cannot read this file as an OOXML workbook: {source.limitation}"
-        return report(0, (issue("A1", problem, FIX["workbook"]),))
-    sheets = [unquote(item.locator.removeprefix("sheet:")) for item in source.coverage]
+        return refused(0, (issue("A1", problem, FIX["workbook"]),))
+    try:
+        # Revalidate even model_copy/model_construct objects at this production input boundary.
+        source = Source.model_validate(source.model_dump())
+    except ValidationError:
+        return refused(
+            0, (issue("A1", "invalid frozen source identity or metadata", FIX["workbook"]),)
+        )
+    sheets = []
+    for item in source.coverage:
+        name = unquote(item.locator.removeprefix("sheet:"))
+        if item.locator != "sheet:" + quote(name, safe="") or not name:
+            return refused(
+                0, (issue("A1", "coverage locator is not a canonical sheet URI", FIX["workbook"]),)
+            )
+        if name == SHEET and item.status == "empty":
+            return refused(0, (issue("A1", f"sheet {SHEET} is empty", FIX["empty"]),))
+        if name == SHEET and item.status == "unreadable":
+            return refused(
+                0,
+                (
+                    issue(
+                        "A1",
+                        f"sheet {SHEET} coverage is {item.status}: {item.limitation}",
+                        FIX["workbook"],
+                    ),
+                ),
+            )
+        sheets.append(name)
     if SHEET not in sheets:
         found = ", ".join(sheets) or "none"
-        return report(0, (issue("A1", f"no sheet named {SHEET} (found: {found})", FIX["sheet"]),))
+        return refused(0, (issue("A1", f"no sheet named {SHEET} (found: {found})", FIX["sheet"]),))
+    if source.status != "ready" or source.extraction_status == "blocked":
+        problem = f"prepare cannot read this file as an OOXML workbook: {source.limitation}"
+        return refused(0, (issue("A1", problem, FIX["workbook"]),))
     grids, locator_issues = sheet_cells(source.spans, file)
     if locator_issues:
-        return report(0, locator_issues)
+        return refused(0, locator_issues)
     grid = grids.get(SHEET, {})
     if not any(span.text.strip() for span in grid.values()):
-        return report(0, (issue("A1", f"sheet {SHEET} is empty", FIX["empty"]),))
+        return refused(0, (issue("A1", f"sheet {SHEET} is empty", FIX["empty"]),))
     data = sorted({row for _, row in grid if row > 1 and nonblank(grid, row)})
     header = header_issue(grid)
     if header is not None:
-        return report(len(data), (issue(*header, FIX["header"]),))
+        return refused(len(data), (issue(*header, FIX["header"]),))
     if not data:
-        return report(0, (issue("A2", "no quote rows below the header", FIX["rows"]),))
+        return refused(0, (issue("A2", "no quote rows below the header", FIX["rows"]),))
     issues: list[Issue] = []
     seen: dict[tuple[str, ...], int] = {}
+    quotes: list[RVQuote] = []
     for row in data:
-        findings, key = row_findings(grid, row)
+        findings, key, levels = row_findings(grid, row)
         issues += [issue(*finding) for finding in findings]
         if key is not None and key in seen:
             problem = f"duplicates row {seen[key]} on facility_id, as_of, provider and quote_kind"
             issues.append(issue(f"A{row}:F{row}", problem, FIX["duplicate"]))
         elif key is not None:
             seen[key] = row
-    return report(len(data), issues)
+        if not findings:
+            values = {name: text(grid, index, row) for index, name in enumerate(COLUMNS, 1)}
+            refs = tuple(
+                Citation(
+                    source_id=source.source_id,
+                    source_sha256=cast(Hash, source.sha256),
+                    locator=span.locator,
+                    quote=span.text,
+                )
+                for index in range(1, len(COLUMNS) + 1)
+                if (span := grid.get((index, row))) is not None and span.text.strip()
+            )
+            quotes.append(
+                RVQuote(
+                    row=row,
+                    provider=values["provider"],
+                    as_of=date.fromisoformat(values["as_of"]),
+                    issuer=values["issuer"],
+                    facility_id=values["facility_id"],
+                    instrument=values["instrument"],
+                    quote_kind=cast(Literal["observed", "indicative_talk"], values["quote_kind"]),
+                    currency=values["currency"],
+                    note=values["note"] or None,
+                    refs=refs,
+                    **levels,
+                )
+            )
+    result = report(len(data), issues)
+    facts = (
+        RVQuotesFacts(
+            source_id=source.source_id,
+            source_sha256=cast(Hash, source.sha256),
+            limitation=source.limitation,
+            extraction_status=source.extraction_status,
+            quotes=tuple(quotes),
+        )
+        if result.ok
+        else None
+    )
+    return result, facts
 
 
 def sheet_cells(
@@ -289,9 +444,8 @@ def cell_letters(column: int) -> str:
 
 def row_findings(
     grid: Mapping[tuple[int, int], Span], row: int
-) -> tuple[list[tuple[str, str, str]], tuple[str, ...] | None]:
-    """One data row's findings as (cell, problem, fix), and its duplicate key when every key
-    column holds a valid value."""
+) -> tuple[list[tuple[str, str, str]], tuple[str, ...] | None, dict[str, Decimal | None]]:
+    """Cell findings, valid duplicate key and levels parsed exactly once."""
     values: dict[str, str] = {}
     findings: list[tuple[str, str, str]] = []
     flagged: set[str] = set()
@@ -304,6 +458,20 @@ def row_findings(
             )
             findings.append((f"{LETTERS[column - 1]}{row}", problem, FIX["formula"]))
             flagged.add(name)
+        elif span is not None and span.data_type in ("e", "b"):
+            problem = (
+                f"{name} holds the Excel error '{echo(values[name])}'"
+                if span.data_type == "e"
+                else f"{name} holds a TRUE/FALSE cell"
+            )
+            fix = FIX["error_cell" if span.data_type == "e" else "boolean_cell"]
+            findings.append((f"{LETTERS[column - 1]}{row}", problem, fix))
+            flagged.add(name)
+        elif span is not None and name in LEVELS and values[name] and percent_formatted(span):
+            problem = f"{name} '{echo(values[name])}' is formatted as a percentage"
+            findings.append((f"{LETTERS[column - 1]}{row}", problem, FIX["percent"]))
+            flagged.add(name)
+    levels: dict[str, Decimal | None] = dict.fromkeys(LEVELS)
     for name in COLUMNS:
         if name in flagged:
             continue
@@ -311,9 +479,19 @@ def row_findings(
         if found is not None:
             flagged.add(name)
             findings.append((f"{LETTERS[COLUMNS.index(name)]}{row}", *found))
-    findings += level_findings(values, flagged, row)
+        elif name in LEVELS and values[name]:
+            try:
+                # Parse exactly without inheriting disabled traps or changing caller flags.
+                with localcontext() as context:
+                    context.traps[InvalidOperation] = True
+                    levels[name] = Decimal(values[name])
+            except DecimalException:
+                flagged.add(name)
+                problem = f"{name} '{echo(values[name])}' is not a supported Decimal representation"
+                findings.append((f"{LETTERS[COLUMNS.index(name)]}{row}", problem, FIX["number"]))
+    findings += level_findings(values, levels, flagged, row)
     key = None if flagged & set(KEY) else tuple(values[name] for name in KEY)
-    return findings, key
+    return findings, key, levels
 
 
 def column_problem(name: str, values: Mapping[str, str]) -> tuple[str, str] | None:
@@ -346,7 +524,7 @@ def column_problem(name: str, values: Mapping[str, str]) -> tuple[str, str] | No
 
 
 def level_findings(
-    values: Mapping[str, str], flagged: set[str], row: int
+    values: Mapping[str, str], levels: Mapping[str, Decimal | None], flagged: set[str], row: int
 ) -> list[tuple[str, str, str]]:
     """At least one level per row; bid not above ask. A flagged level counts as present (its
     own finding already names it)."""
@@ -355,7 +533,16 @@ def level_findings(
         problem = "no price, yield_pct, spread_bps, bid or ask"
         return [(f"{first}{row}:{last}{row}", problem, FIX["levels"])]
     bid, ask = values["bid"], values["ask"]
-    if bid and ask and not {"bid", "ask"} & flagged and Decimal(bid) > Decimal(ask):
+    bid_number, ask_number = levels["bid"], levels["ask"]
+    if bid_number is not None and ask_number is not None:
+        try:
+            exceeds = bid_number > ask_number
+        except DecimalException:
+            return [
+                (f"J{row}:K{row}", "bid/ask cannot be compared as exact Decimals", FIX["number"])
+            ]
+        if not exceeds:
+            return []
         bid_cell, ask_cell = LETTERS[COLUMNS.index("bid")], LETTERS[COLUMNS.index("ask")]
         cell = f"{bid_cell}{row}:{ask_cell}{row}"
         return [(cell, f"bid {echo(bid)} exceeds ask {echo(ask)}", FIX["bid_ask"])]

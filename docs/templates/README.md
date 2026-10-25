@@ -39,7 +39,12 @@ level must be a plain number. The validator reads each value as a decimal from t
 stored text, never as a binary float. No two rows may share the same `facility_id`, `as_of`,
 `provider` and `quote_kind`. Enter values, not formulas: `prepare` freezes the stored values
 and never recalculates. Hidden rows, columns and sheets are read like any others, and the pack
-marks their cells hidden.
+marks their cells hidden. Excel error and TRUE/FALSE cells are refused in every column.
+Numeric levels with an explicit percentage format (such as `0.00%`) are refused: `0.075`
+stored as a fraction must not silently become a quoted yield of 7.5. Use plain numbers in
+General format. Quoted or escaped literal percent signs (`0.00"%"`, `0.00\%`) do not scale
+numbers; text cells retain the ordinary plain-number rules. Unsupported Decimal
+representations produce a cell issue; no financial magnitude cap or rounding is added.
 
 ### Check the file
 
@@ -71,6 +76,9 @@ These are the fixes it can print:
 | `quote_kind` empty or not one of the two kinds | enter observed or indicative_talk; leave out rows without a quote |
 | `currency` empty or not three upper-case letters | enter the three-letter upper-case ISO 4217 code, e.g. USD |
 | A level that is not a plain number | enter a plain number: digits, an optional sign and one decimal point (no %, units, spaces or thousands separators) |
+| A numeric level formatted as a percentage | enter the level as a plain number in General format, not a percentage format |
+| An Excel error cell | replace the Excel error with a supported value |
+| A TRUE/FALSE cell | replace TRUE/FALSE with a supported value |
 | No level in the row | enter at least one of price, yield_pct, spread_bps, bid or ask |
 | `bid` above `ask` | check the quote: bid must not exceed ask |
 | Duplicate `facility_id`, `as_of`, `provider`, `quote_kind` | keep one row per facility_id, as_of, provider and quote_kind, or correct the repeated value |
@@ -105,6 +113,28 @@ a layout it cannot trust.
    market-evidence row quotes text from one cell verbatim, by its `sheet:rv_quotes`
    locator. CP-3's rules are unchanged: talk is never worded as a level, and with no usable
    evidence the preference is Insufficient Information.
+
+### Typed frozen market facts (RV-1b)
+
+`deploy_vii.inputs.rv_quotes.rv_quotes_facts(source)` reads an already-frozen `Source`, using
+exactly the validator's checks and numeric parse path. It returns immutable `RVQuotesFacts`
+with all eligible `quotes` in worksheet row order. Each `RVQuote` retains the provider, date,
+issuer, facility, instrument, observed/indicative kind, currency, optional note and exact
+`Decimal` or `None` for each level. `row`, `locator(column)` and `ref(column)` identify the
+worksheet cell. Nonempty cells retain exact frozen `Citation` quotes with the source's
+`source_id` and `source_sha256`; missing/empty cells have no citation. Source limitations and
+extraction status are retained. Any finding refuses the whole source as `RVQuotesRefused`
+with its validation report; no partial facts escape.
+
+A valid ready Source and raw-workbook hash are required. The reader never reopens its path
+or invents a hash from spans. It validates frozen identity/metadata; independently verifying
+the original bytes is the pack loader/consumer's responsibility. Consumers must select the
+Source from their bound verified pack and recompute facts there, rather than attach facts
+from a different/stale source. This reader selects no provider/latest quote, averages no
+bid/ask, assumes no price convention, and computes no market value or position. CP-0 authority,
+run/facility/currency joins, readiness and PF-2 judgments remain consuming-owner gates.
+CP-3 policy, payload and hashes are unchanged. A representable Decimal is exact input evidence;
+a downstream calculation/formatter must fail closed if it cannot represent the result.
 
 Keep real quote files out of Git. They belong in your environment's pack root, not in this
 repository.

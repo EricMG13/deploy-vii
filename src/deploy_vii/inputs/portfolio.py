@@ -36,6 +36,7 @@ from deploy_vii.inputs.rv_quotes import (
     cell_letters,
     echo,
     iso_date,
+    percent_formatted,
     sheet_cells,
 )
 from deploy_vii.preparation import MAX_BYTES, SourceRequest, prepare_source
@@ -87,8 +88,6 @@ TOTAL = re.compile(r"\b(?:sub)?total\b")
 # numeric cell Excel shows as a percentage stores the fraction (2.5 % is stored 0.025).
 PCT_COLUMNS = frozenset({"pct_nav", "limit_pct_nav", "headroom_pct_nav"})
 PCT_NAV_ROW_COLUMNS = frozenset({"limit", "current_value", "headroom"})
-PERCENT_FORMATS = frozenset({"builtin:9", "builtin:10"})  # 0% and 0.00%
-LITERAL = re.compile(r'"[^"]*"|\\.')  # quoted text or an escaped character in a format code
 
 DATE_FIX = "enter the date as text YYYY-MM-DD (format the column as Text so Excel keeps it)"
 PCT_FIX = "enter the share of NAV in percent as a plain number (2.5 means 2.5 % NAV)"
@@ -800,17 +799,6 @@ def parse_row(
             row.flagged.add(sheet.label)
     percent_findings(sheet, grid, row, findings)
     return row
-
-
-def percent_formatted(span: Span) -> bool:
-    """A numeric cell whose number format scales it by 100 for display: builtin 9 or 10, or a
-    custom code with a `%` outside quoted text and escapes (`0.00"%"` only shows a sign)."""
-    code = span.number_format
-    if span.data_type != "n" or code is None:
-        return False
-    if code.startswith("builtin:"):
-        return code in PERCENT_FORMATS
-    return "%" in LITERAL.sub("", code)
 
 
 def percent_findings(
