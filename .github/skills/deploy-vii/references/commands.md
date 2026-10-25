@@ -22,7 +22,7 @@ Derived from the argparse definitions at origin/main 14e81d2:
 | `create` | `--pack DIR` | new journal for the pack's run |
 | `replace-pack` | `--pack DIR` | swap the evidence; stales heads; refused while an attempt is pending or if the run identity differs |
 | `status` | none | prints the snapshot |
-| `begin` | `MODULE` | opens an attempt; prints its ticket |
+| `begin` | `MODULE` | opens an attempt; prints its ticket; an unknown module exits 2 listing the valid ids |
 | `interrupt` | `--ticket ID --reason TEXT` | finishes the attempt as interrupted |
 | `cp0-submit` | `--ticket ID --review FILE` | validates and settles CP-0 |
 | `cp1-submit` | `--ticket ID --step STEP --review FILE` | STEP is one of `source_context`, `financials`, `narrative`, `readiness` |
@@ -34,8 +34,23 @@ Derived from the argparse definitions at origin/main 14e81d2:
 | `register-preview` | `--ticket ID --output DIR` | register preview |
 | `envelope` | `--module CP-1 --output DIR` | writes the promoted CP-1 envelope; refuses an existing directory |
 | `render` | `--envelope DIR --output DIR [--pathway ID]` | writes `accepted.html` or `refused.html` and `complete.json` |
+| `module-submit` | `--module CP-1A\|CP-2\|CP-3\|CP-4\|CP-5\|CP-6 --ticket ID --step STEP --review FILE` | validates and settles the module; rejected: issue lines on stderr, exit 1; unknown step: exit 2 |
+| `module-context` | `--module M --ticket ID --step STEP` | prints the step's CONTEXT JSON (`{}` and a stderr note when none) |
+| `report` | `--pathway ID --output DIR` | writes `index.html` and `report.json`; the pathway must be the run's; refuses an existing directory |
 | `cp-model-publish` | `--output DIR` | begins and settles CP-MODEL; exit 2 with a message when refused |
 | `cp-model-verify` | `--output DIR` | re-derives from the journal; exit 2 when issues |
+
+### Module steps for `module-submit` and `module-context`
+
+One step each, in `deploy-vii plan` order: CP-1A `business_context`, CP-2 `credit_synthesis`,
+CP-3 `relative_value`, CP-4 `legal_covenants`, CP-5 `integrity_review`, CP-6
+`committee_challenge` (CP-4 runs only when the run requests it). The flow per module:
+`begin MODULE`, `module-context` (the same CONTEXT JSON the development runner sends; `{}` and
+a stderr note when the step has none), write the review file, `module-submit`. A rejected review
+prints the attempt JSON on stdout and the validator's issue lines on stderr with exit 1; repair
+the review from those lines and `begin MODULE` again (one repair attempt, `resume.md`). Exit 2
+is a refusal with one line: unknown module, step or ticket, or `report` for another pathway than
+the run's. Do not run a module the journal shows blocked or stale; report it.
 
 ## `live` (development only, not a delivery route)
 
@@ -57,6 +72,5 @@ deploy-vii live module --module CP-0 --directory ./deploy-vii-out/<run-id>/journ
 ## Gaps in this surface
 
 - No `setup`/`doctor`/`resume`/`run-all`/open-report command.
-- No submit action for CP-1A or any module after CP-MODEL.
 - No fixed delivery directory (the skill's `./deploy-vii-out/<run-id>/` is only a convention).
 - `live` is not a host-model path.

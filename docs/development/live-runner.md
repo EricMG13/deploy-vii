@@ -1424,6 +1424,15 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   ruling, fix round 1); a reconcile stopped earlier says `not checked: the reconcile stopped
   before the cross-check`.
 
+## The CLI shares the module context (task M8b, 25 Oct 2026)
+
+`execution module-context` prints `live.context.module_context` for a ticket and step, with the
+runner's own serialisation (indent 1, sorted keys), so the enterprise host's agent and this runner
+are given the same module CONTEXT entries (`{}` with a stderr note for a step that has none).
+`module-submit` calls the module's `submit_<m>_step` through `module_submits.MODULE_SUBMITS`, the
+function `live.submission.MODULE_STEP_ENTRIES` also names, and `report` renders the journal through
+`report_view.build` and `render.render`. The runner is unchanged.
+
 ## Not covered here
 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep
