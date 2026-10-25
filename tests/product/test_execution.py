@@ -1707,6 +1707,60 @@ def test_scope_extension_refusals_write_nothing(tmp_path: Path) -> None:
         unchanged()
 
 
+def test_a_consumer_cp0_did_assess_is_added_and_only_its_consumers_are_staled(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1, R4: CP-0's readiness (as a 9.1b addendum would) also assesses CP-4, which the
+    run does not request; adding CP-4 is accepted and stales only CP-5, whose fan-in gains it."""
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-5")
+    pack, review = readiness_fixture()
+    pack = pack.model_copy(update={"run": pack.run.model_copy(update={"requested_modules": scope})})
+    wider = pack.model_copy(
+        update={"run": pack.run.model_copy(update={"requested_modules": (*scope, "CP-4")})}
+    )
+    consumers = tuple(
+        review.consumers[0].model_copy(update={"module_id": module_id})
+        for module_id in plan(wider.run.requested_modules)
+        if module_id not in NOT_CONSUMERS
+    )
+    gap = review.gaps[0].model_copy(
+        update={"affected_modules": tuple(item.module_id for item in consumers)}
+    )
+    review = review.model_copy(
+        update={"pack_sha256": wider.content_hash(), "consumers": consumers, "gaps": (gap,)}
+    )
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-0")
+    readiness = build_readiness(wider, review)
+    rebound_inputs = tuple(
+        Input(input_id=item.input_id, sha256=store.read().pack_sha256)
+        if item.input_id == "prepared-pack"
+        else item
+        for item in readiness.inputs
+    )
+    payload = readiness.model_copy(update={"inputs": rebound_inputs}).model_dump_json()
+    assert settled(store, store.finish(ticket.ticket_id, payload, lambda _: ())).status in (
+        "accepted",
+        "restricted",
+    )
+    assert any(c.row_id == "CP-4" for c in heads_by_id(store)["CP-0"].commands)
+    for module_id in plan(scope):
+        if module_id != "CP-0":
+            settle_module(store, module_id)
+    before = heads_by_id(store)
+
+    report = store.extend_scope((*scope, "CP-4"))
+
+    assert report.added == ("CP-4",)
+    assert [(item.module_id, item.note) for item in report.staled] == [
+        ("CP-5", "Scope extended: inputs changed (CP-4); rerun required")
+    ]
+    after = heads_by_id(store)
+    for module_id in ("CP-0", "CP-1", "CP-1A", "CP-2"):
+        assert after[module_id] == before[module_id]
+    assert store.begin("CP-4").number == 0  # authorised by CP-0's row, runnable as today
+
+
 def test_refusal_order_pairs_name_the_earlier_refusal(tmp_path: Path) -> None:
     """Fix round 1, R3: unknown before non-superset; non-superset before unassessed."""
     store = settled_store(tmp_path, ("CP-0", "CP-1", "CP-1A", "CP-2"))
