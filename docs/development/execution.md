@@ -8,7 +8,8 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
 
 - `Execution.create(directory, pack)` starts a new store for a validated frozen
   pack. Use `load_pack` first when reading an on-disk prepared pack. Run identity,
-  date, selected scope and method cannot change inside this execution.
+  date and method cannot change inside this execution; the selected scope only extends
+  (`extend_scope`, below).
 - `begin(module_id)` resolves aliases, checks current selected dependencies and
   CP-0's source-readiness command, then reserves one attempt. Only one may be
   pending. The returned ticket contains exact pack/upstream hashes and, for the
@@ -68,6 +69,33 @@ promotion (below, task 6.4). A model-supplied success flag is never a validator.
 - `view()` returns a cumulative accepted View. Stale and blocked heads expose
   status/limitations but no findings. `view(ticket_id)` returns a labelled
   candidate only when its input lineage and provenance remain current.
+- Scope extension (task 9.1, decision 0005 MC-9, 25 October 2026).
+  `extend_scope(requested)` (CLI `execution --directory D extend-scope <module...>`, the
+  full new set; refusals print one line and exit 2) extends the run's requested modules to a
+  superset. Refusals, in this order, write nothing: a pending attempt, an unknown module, a
+  set that is not a superset, and (coordinator ruling B) any module new to the dependency
+  graph, the required closure included, other than CP-0, CP-MODEL, CP-MEMO and CP-OS for which
+  the CP-0 head (settled, not stale) has no T8 `exact_command` row: `CP-0 has not assessed
+  <ids>; create a new execution`. The same set after canonicalisation is a no-op report.
+  Otherwise one transition writes `snapshot.run` with the extended set (no new contract field;
+  `execution/5` unchanged) and rebinds every settled head under the new graph without
+  running anything (`rebind_heads`): a head is kept, byte for byte with its attempts and
+  repair count, when `current_inputs` resolves exactly the inputs its settling attempt bound
+  (ids, hashes, statuses and order; `Head.inputs` can add module-owned inputs such as a
+  submission hash, so it is not the comparison); otherwise it is staled with `Scope
+  extended: inputs changed (<ids>); rerun required` and reruns as any stale module does.
+  The walk goes in plan order against the heads already updated, so staling reaches the
+  transitive consumers. In the registry today the staled branch is CP-MODEL joining CP-5's
+  fan-in (CP-5 staled, then CP-6 and CP-MEMO if settled). The report (`added`, `kept`,
+  `staled` with notes, `plan`) is printed as JSON. The pack blob is not rewritten: `pack()`
+  accepts a blob whose run equals the snapshot's except for a requested set that is a subset,
+  `replace_pack` accepts a pack carrying either the snapshot's run or the current blob's, and
+  `view()` takes not-yet-run statuses from `snapshot.run`. Limitation: readers that take scope
+  from the pack blob's run (CP-0 readiness, CP-1 consumer entries, CP-1A consumers, CP-0
+  delivery, the live runner and the views those modules build from `pack.run`) keep the
+  original scope, and a CP-1 envelope exported before the extension no longer matches the
+  journal's run. Follow-up 9.1b (a CP-0 readiness addendum for added consumers) lifts the
+  assessed-only refusal before M10 owners rely on extension.
 
 ## Claim run text (decision 0005 MC-2)
 
@@ -145,7 +173,7 @@ references that Python resolves and spells. The model never writes a number.
 
   | Blob | Bytes (canonical form) | Read with | Checked |
   | --- | --- | --- | --- |
-  | pack | `PreparedPack.model_dump_json()` UTF-8; its SHA-256 is `pack_sha256`, the hash bound as `Input("prepared-pack", ...)` | `pack(snapshot=None)` | hash; same `run` as the snapshot; bytes are exactly the canonical JSON |
+  | pack | `PreparedPack.model_dump_json()` UTF-8; its SHA-256 is `pack_sha256`, the hash bound as `Input("prepared-pack", ...)` | `pack(snapshot=None)` | hash; same `run` as the snapshot (its requested set may be a subset after `extend_scope`); bytes are exactly the canonical JSON |
   | payload | the response text, UTF-8 (module response or step response) | `payload(sha256)` | hash |
   | result | the settled `Module.model_dump_json()`, so `result_sha256 == module.content_hash()` (this is also the hash a consumer binds as an `Input`) | `result(sha256)` | hash; bytes are exactly the canonical module |
   | step output | the validator's output text, UTF-8 | `step_output(sha256)` | hash |

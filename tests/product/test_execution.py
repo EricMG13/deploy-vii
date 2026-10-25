@@ -1760,6 +1760,51 @@ def test_the_pack_blob_scope_must_lie_within_the_snapshot_scope(tmp_path: Path) 
         store.pack()  # the blob requests modules the snapshot does not
 
 
+def test_the_extend_scope_command_prints_the_report_and_refuses_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from deploy_vii.__main__ import main
+
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-5")
+    store = settled_store(tmp_path, scope)
+
+    def cli(*arguments: str) -> str:
+        argv = ["deploy-vii", "execution", "--directory", str(store.directory), *arguments]
+        monkeypatch.setattr("sys.argv", argv)
+        main()
+        return capsys.readouterr().out
+
+    pointer = current_digest(store)
+    for refused, message in (
+        ((*scope, "CP-4"), "CP-0 has not assessed CP-4; create a new execution"),
+        (("CP-0",), "Scope only extends; create a new execution to remove modules"),
+        ((*scope, "CP-99"), "Unknown r14 entry: CP-99"),
+    ):
+        with pytest.raises(SystemExit) as exit_:
+            cli("extend-scope", *refused)
+        assert exit_.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == f"extend-scope refused: {message}\n"
+        assert current_digest(store) == pointer
+
+    kept = [head.module_id for head in store.read().heads if head.module_id != "CP-5"]
+    assert json.loads(cli("extend-scope", *scope, "CP-MODEL")) == {
+        "extended": True,
+        "added": ["CP-MODEL"],
+        "kept": kept,
+        "staled": [
+            {
+                "module_id": "CP-5",
+                "note": "Scope extended: inputs changed (CP-MODEL); rerun required",
+            }
+        ],
+        "plan": list(plan((*scope, "CP-MODEL"))),
+    }
+    assert json.loads(cli("extend-scope", "CP-MODEL", *scope))["extended"] is False  # exit 0
+    begun = json.loads(cli("begin", "CP-MODEL"))  # a newly added module begins as today
+    assert begun["module_id"] == "CP-MODEL" and begun["number"] == 0
+
+
 # --- Scope extension properties (task 9.1, decision 0012: execution ordering) -----------------
 
 EdgeKind = Literal["none", "required", "optional"]

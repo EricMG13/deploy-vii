@@ -37,6 +37,17 @@ that head and drift).
 - `finish` refuses with "Ticket inputs have changed" when upstream evidence changed
   (651-655); `replace_pack` (854) is refused while an attempt is pending.
 - A concurrent writer is serialised by the journal lock (`_locked`).
+- `extend-scope <module...>` (task 9.1, MC-9) extends a finished or partly run execution to
+  a superset of its requested modules instead of starting a new one: pass the full new set.
+  It refuses while an attempt is pending, and refuses any added module (the required closure
+  included) other than CP-0, CP-MODEL, CP-MEMO and CP-OS that CP-0's head has not assessed
+  ("CP-0 has not assessed <ids>; create a new execution"); a refusal exits 2 and writes
+  nothing. Otherwise it stales only the settled heads whose resolved inputs change (note
+  "Scope extended: inputs changed (<ids>); rerun required"; today CP-5 when CP-MODEL joins its
+  fan-in, and its consumers), keeps every other head with its attempts and repair count, and
+  prints the added modules, kept and staled heads and the new plan; then `begin` the added
+  and staled modules in plan order. Readers of the pack blob (CP-0 readiness, CP-1 and CP-1A
+  consumer lists, the live runner) keep the original scope.
 
 Gap: no `resume` command and no listing of resumable tickets other than `status`.
 Not verified: behaviour after the host process is killed mid-command; the offline test

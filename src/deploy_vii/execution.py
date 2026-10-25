@@ -1070,17 +1070,12 @@ class Execution:
                     raise ValueError(f"Execution head {head.module_id} has no settling attempt")
                 bound[head.module_id] = settled_by[key]
             heads = rebind_heads(order, dependencies(extended), snapshot.heads, bound, resolve)
-            self._write(
-                snapshot.model_copy(
-                    update={"parent": snapshot.content_hash(), "run": run, "heads": heads}
-                )
-            )
             changed = {
                 new.module_id: new.notes[-1]
                 for old_head, new in zip(snapshot.heads, heads, strict=True)
                 if new != old_head
             }
-            return ExtendReport(
+            report = ExtendReport(
                 extended=True,
                 added=added,
                 kept=tuple(head.module_id for head in heads if head.module_id not in changed),
@@ -1091,6 +1086,12 @@ class Execution:
                 ),
                 plan=order,
             )
+            self._write(  # last: every refusal and failure above leaves the journal unchanged
+                snapshot.model_copy(
+                    update={"parent": snapshot.content_hash(), "run": run, "heads": heads}
+                )
+            )
+            return report
 
     def view(self, ticket_id: str | None = None) -> View:
         snapshot = self.read()

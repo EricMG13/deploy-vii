@@ -45,6 +45,9 @@ def configure(parser: argparse.ArgumentParser) -> None:
         actions.add_parser(name).add_argument("--pack", type=Path, required=True)
     actions.add_parser("status")
     actions.add_parser("begin").add_argument("module")
+    actions.add_parser(
+        "extend-scope", help="extend the requested modules to a superset (task 9.1)"
+    ).add_argument("modules", nargs="+", help="the full new requested set, aliases allowed")
     for name in ("statement-preview", "interface-preview", "register-preview"):
         preview = actions.add_parser(name)
         preview.add_argument("--ticket", required=True)
@@ -274,6 +277,12 @@ def execute(args: argparse.Namespace) -> str:
         return instructions_text(store, args)
     elif args.action == "module-context":
         return module_context_json(store, args)
+    elif args.action == "extend-scope":
+        try:
+            return store.extend_scope(tuple(args.modules)).model_dump_json()
+        except ValueError as refused:  # one line on stderr, exit 2; the journal is unchanged
+            print(f"extend-scope refused: {refused}", file=sys.stderr)
+            raise SystemExit(2) from refused
     elif args.action == "interrupt":
         return attempt_json(store, store.interrupt(args.ticket, args.reason))
     elif args.action == "cp0-submit":
