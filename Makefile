@@ -1,4 +1,4 @@
-.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage coverage-shard product-static audit secrets diff dev-check dev-test product-check
+.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage coverage-shard product-static audit secrets diff dev-check dev-test rehearsal-check product-check
 
 setup:
 	uv sync --locked
@@ -18,9 +18,13 @@ dev-check:
 	uv run --locked ruff format --check devtools tests/devtools
 	uv run --locked mypy devtools
 	$(MAKE) dev-test
+	$(MAKE) rehearsal-check
 
 dev-test:
 	uv run --locked pytest tests/devtools
+
+rehearsal-check:
+	uv run --locked python -m devtools.skill_rehearsal --help
 
 product-check: product-static
 	$(MAKE) coverage
