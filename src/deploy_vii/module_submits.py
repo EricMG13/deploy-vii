@@ -52,17 +52,17 @@ def submit_module_step(
     return submit(store, ticket_id, step_id, payload)
 
 
-def host_context(store: Execution, attempt: Attempt, step_id: str) -> dict[str, object] | None:
+def host_context(store: Execution, attempt: Attempt, step_id: str) -> dict[str, object]:
     """Every CONTEXT entry the live runner adds to the prepared-pack block for `step_id` on
-    `attempt`, composed from the runner's own functions (`live.runner.prompt_inputs`,
-    `live.prompts._context_body` and the scope block): the module context of CP-2, CP-3, CP-4
-    and CP-6; CP-1A's CP-1 facts block; CP-5's review scope under its block id. None for a step
+    `attempt`, composed from the runner's own seams (`live.runner.prompt_inputs`,
+    `live.context.module_context` and the scope block): the module context of CP-2, CP-3, CP-4
+    and CP-6; CP-1A's CP-1 facts block; CP-5's review scope under its block id. Empty for a step
     with nothing."""
     if step_id == "business_context":
         return cp1a_context_block(store.pack(), cp1_context_facts(store, attempt))
     if step_id == "integrity_review":
         return {INTEGRITY_BLOCK_ID: integrity_scope(store, attempt)}
-    return module_context(store, attempt, step_id)
+    return module_context(store, attempt, step_id) or {}
 
 
 def step_instructions(

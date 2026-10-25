@@ -210,9 +210,9 @@ def test_module_context_is_what_the_live_runner_sends_for_every_module_byte_for_
     assert out == json.dumps(expected, indent=1, sort_keys=True) + "\n"
 
 
-def test_a_step_with_no_context_entries_gets_none_as_the_runner_does(cli: Cli) -> None:
+def test_a_step_with_no_context_entries_gets_an_empty_mapping_as_the_runner_does(cli: Cli) -> None:
     attempt = next(a for a in cli.store.read().attempts if a.module_id == "CP-1")
-    assert host_context(cli.store, attempt, "source_readiness") is None
+    assert host_context(cli.store, attempt, "source_readiness") == {}
     assert runner_context(cli.store, attempt, "source_readiness") == {}
 
 
@@ -586,3 +586,10 @@ def test_a_missing_review_file_is_a_one_line_refusal_for_every_submit_command(
     code, out, err = cli(command, "--ticket", "t", *step, "--review", str(absent))
     assert code == 2 and out == "" and str(absent) in err and len(err.splitlines()) == 1
     assert err.startswith(f"{command} refused:")
+
+
+def test_the_module_docstrings_name_no_private_runner_function() -> None:
+    from deploy_vii import module_submits
+
+    assert "_context_body" not in (module_submits.__doc__ or "")
+    assert "_context_body" not in (host_context.__doc__ or "")

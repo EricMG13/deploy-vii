@@ -35,7 +35,7 @@ Derived from the argparse definitions at origin/main 14e81d2:
 | `envelope` | `--module CP-1 --output DIR` | writes the promoted CP-1 envelope; refuses an existing directory |
 | `render` | `--envelope DIR --output DIR [--pathway ID]` | writes `accepted.html` or `refused.html` and `complete.json` |
 | `module-submit` | `--module CP-1A\|CP-2\|CP-3\|CP-4\|CP-5\|CP-6 --ticket ID --step STEP --review FILE` | validates and settles the module; rejected: issue lines on stderr, exit 1; unknown step: exit 2 |
-| `module-context` | `--module M --ticket ID --step STEP` | prints the step's CONTEXT JSON (`{}` and a stderr note when none) |
+| `module-context` | `--module M --ticket ID --step STEP` | prints the step's CONTEXT entries as indent-1 JSON (CP-5's scope is compact JSON in the runner's prompt; `step-instructions --with-sources` shows the exact text) |
 | `report` | `--pathway ID --output DIR` | writes `index.html` and `report.json`; the pathway must be the run's; refuses an existing directory |
 | `cp-model-publish` | `--output DIR` | begins and settles CP-MODEL; exit 2 with a message when refused |
 | `cp-model-verify` | `--output DIR` | re-derives from the journal; exit 2 when issues |
@@ -47,7 +47,7 @@ CP-4 `legal_covenants`, CP-3 `relative_value`, CP-5 `integrity_review`, CP-6
 `committee_challenge` (CP-4 runs only when the run requests it). The flow per module:
 `begin MODULE`, `module-context` (the CONTEXT entries the development runner adds to the pack
 facts: CP-1A's CP-1 figures, CP-2/3/4/6's upstream block, CP-5's `integrity-scope`; the pack
-facts and sources themselves are not printed; `{}` and a stderr note for a step with none), write the review file, `module-submit`. A rejected review
+facts and sources themselves are not printed), write the review file, `module-submit`. A rejected review
 prints the attempt JSON on stdout and the validator's issue lines on stderr with exit 1; repair
 the review from those lines and `begin MODULE` again (one repair attempt, `resume.md`). Exit 2
 is a refusal with one line: unknown module, step or ticket, or `report` for another pathway than

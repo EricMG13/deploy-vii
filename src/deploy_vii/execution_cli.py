@@ -135,10 +135,11 @@ def settled_json(store: Execution, attempt: Attempt) -> str:
 
 def review_text(args: argparse.Namespace) -> str:
     """The `--review` file's text; a missing file is a one-line refusal, exit 2."""
+    path: Path = args.review
     try:
-        return args.review.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError as missing:
-        raise refusal_exit(f"{args.action} refused: no review file at {args.review}") from missing
+        raise refusal_exit(f"{args.action} refused: no review file at {path}") from missing
 
 
 def module_submit(store: Execution, args: argparse.Namespace) -> str:
@@ -152,8 +153,9 @@ def module_submit(store: Execution, args: argparse.Namespace) -> str:
 
 
 def module_context_json(store: Execution, args: argparse.Namespace) -> str:
-    """The CONTEXT entries the live runner sends for this step of the ticket, as it serialises
-    them (`live.prompts`); `{}` with a note on stderr for a step that has none."""
+    """The CONTEXT entries the live runner sends for this step of the ticket, as JSON with
+    indent 1 and sorted keys (how the pack CONTEXT block carries them; `step-instructions` prints
+    the exact bytes, CP-5's scope included, which the runner sends as compact JSON)."""
     attempt = next((a for a in store.read().attempts if a.ticket_id == args.ticket), None)
     if attempt is None or attempt.module_id != args.module:
         raise refusal_exit(f"module-context refused: {args.ticket} is not a {args.module} ticket")
@@ -166,9 +168,6 @@ def module_context_json(store: Execution, args: argparse.Namespace) -> str:
         entries = host_context(store, attempt, args.step)
     except ValueError as refusal:
         raise refusal_exit(f"module-context refused: {refusal}") from refusal
-    if entries is None:
-        print(f"no module context for step {args.step}", file=sys.stderr)
-        entries = {}
     return json.dumps(entries, indent=1, sort_keys=True)
 
 
