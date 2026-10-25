@@ -11,8 +11,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from deploy_vii.contracts import Claim, Module
+from deploy_vii.execution import Execution, current_inputs
 from deploy_vii.live.ledger import Ledger
+from deploy_vii.readiness import build_readiness
+from deploy_vii.registry import plan
 from devtools import skill_rehearsal as rehearsal
+from tests.product.test_readiness import readiness_fixture
 
 PY = sys.executable
 
@@ -336,3 +341,224 @@ def test_negative_or_non_finite_figures_are_refused(tmp_path: Path, bad: list[st
 
 def test_cost_needs_an_existing_rehearsal_directory(tmp_path: Path) -> None:
     assert rehearsal.main(cost_args(tmp_path / "none", tokens=(1, 1))) == 2
+
+
+# -- summary --------------------------------------------------------------------------------
+
+
+def settled_journal(tmp_path: Path, *, leave_pending: bool = False) -> Path:
+    """A synthetic journal: every in-scope module settled, or the last one left pending."""
+    pack, review = readiness_fixture()
+    store = Execution.create(tmp_path / "journal", pack)
+    order = plan(pack.run.requested_modules)
+    for module_id in order:
+        attempt = store.begin(module_id)
+        if leave_pending and module_id == order[-1]:
+            break
+        if module_id == "CP-0":
+            candidate = build_readiness(store.pack(), review)
+        else:
+            snapshot = store.read()
+            candidate = Module(
+                run_id=snapshot.run.run_id,
+                issuer_id=snapshot.run.issuer_id,
+                as_of=snapshot.run.as_of,
+                module_id=module_id,
+                attempt=0,
+                inputs=current_inputs(snapshot, module_id),
+                claims=(
+                    Claim(claim_id="synthetic", text="Synthetic", citations=(), limitation="test"),
+                ),
+                limitations=("Synthetic engine fixture",),
+            )
+        store.finish(attempt.ticket_id, candidate.model_dump_json(), lambda _: ())
+    return tmp_path / "journal"
+
+
+def tree_hashes(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): sha(p.read_bytes())
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def summarise(directory: Path, journal: Path, *extra: str) -> int:
+    return rehearsal.main(
+        ["summary", "--rehearsal", str(directory), "--journal", str(journal), *extra]
+    )
+
+
+def text_of(directory: Path) -> str:
+    return (directory / "summary.md").read_text(encoding="utf-8")
+
+
+def test_summary_of_a_clean_settled_rehearsal_exits_0(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    before = tree_hashes(journal)
+    assert summarise(directory, journal) == 0
+    assert tree_hashes(journal) == before  # the journal is only read
+    text = text_of(directory)
+    assert "Commands run: 1" in text
+    assert "Commands failed: 0" in text
+    assert "| CP-0 | restricted | settled |" in text
+    assert "| CP-6 | restricted | settled |" in text
+    assert "not_in_pathway" not in text
+    assert "Result: ACCEPTED" in text
+
+
+def test_a_pending_module_makes_the_summary_exit_1(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path, leave_pending=True)
+    directory = started(tmp_path)
+    assert summarise(directory, journal) == 1
+    text = text_of(directory)
+    assert "| CP-6 | unrun | UNSETTLED |" in text
+    assert "| CP-0 | restricted | settled |" in text
+    assert "Result: NOT ACCEPTED" in text
+
+
+def test_a_failed_command_without_a_later_success_exits_1(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    rehearsal.run_command(directory, child("raise SystemExit(5)"))
+    assert summarise(directory, journal) == 1
+    text = text_of(directory)
+    assert "Commands failed: 1" in text
+    assert "exit 5: 1" in text
+    assert "Unresolved failures" in text
+
+
+def test_a_failure_followed_by_a_success_of_the_same_argv_is_resolved(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    flag = tmp_path / "flag"
+    code = (
+        f"import pathlib, sys; f = pathlib.Path({str(flag)!r}); ok = f.exists(); f.touch(); "
+        "sys.exit(0 if ok else 3)"
+    )
+    rehearsal.run_command(directory, child(code))
+    rehearsal.run_command(directory, child(code))
+    assert summarise(directory, journal) == 0
+    assert "Commands failed: 1" in text_of(directory)
+
+
+def test_rejected_submits_are_listed_with_their_issue_lines(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    payload = json.dumps({"issues": ["step 2 cites nothing"]})
+    rehearsal.run_command(directory, child(f"print({payload!r}); raise SystemExit(1)"))
+    rehearsal.run_command(directory, child("print(1)"))
+    summarise(directory, journal)
+    text = text_of(directory)
+    assert "Rejected submits: 1" in text
+    assert "step 2 cites nothing" in text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGINT delivery is POSIX")
+def test_the_interruption_and_its_resume_are_reported(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    marker = tmp_path / "resumed"
+    slow = (
+        "import sys, time, pathlib\n"
+        f"f = pathlib.Path({str(marker)!r})\n"
+        "if f.exists():\n"
+        "    sys.exit(0)\n"
+        "f.touch()\n"
+        "try:\n"
+        "    print('go', flush=True)\n"
+        "    time.sleep(30)\n"
+        "except KeyboardInterrupt:\n"
+        "    sys.exit(130)\n"
+    )
+    rehearsal.run_command(directory, child(slow), interrupt_after=1.0)
+    rehearsal.run_command(directory, child(slow))
+    assert summarise(directory, journal) == 0
+    expected = "Interruption: command 2 interrupted (exit 130); resumed by command 3 (exit 0)"
+    assert expected in text_of(directory)
+
+
+def test_an_interruption_never_resumed_is_reported_and_fails(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    rehearsal.run_command(directory, child("import time; time.sleep(30)"), interrupt_after=1.0)
+    assert summarise(directory, journal) == 1
+    assert "not resumed" in text_of(directory)
+
+
+def test_no_interruption_is_stated(tmp_path: Path) -> None:
+    summarise(started(tmp_path), settled_journal(tmp_path))
+    assert "Interruption: none recorded" in text_of(tmp_path / "r")
+
+
+def test_the_report_path_and_hash_are_listed(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "index.html").write_bytes(b"<html>x</html>")
+    (report / "report.json").write_bytes(b"{}")
+    assert summarise(directory, journal, "--report", str(report)) == 0
+    text = text_of(directory)
+    assert str(report / "index.html") in text
+    assert sha(b"<html>x</html>") in text
+    assert sha(b"{}") in text
+
+
+def test_a_missing_report_fails_the_acceptance(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    assert summarise(directory, journal, "--report", str(tmp_path / "nowhere")) == 1
+    assert "no rendered report" in text_of(directory)
+
+
+def test_cost_figures_come_from_the_ledger(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    rehearsal.main(cost_args(directory, "--final", tokens=(1_000_000, 0)))
+    summarise(directory, journal)
+    assert "Spent: 3.1 USD; held: 0 USD" in text_of(directory)
+
+
+def test_a_reserved_but_unsettled_ledger_shows_the_hold(tmp_path: Path) -> None:
+    journal = settled_journal(tmp_path)
+    directory = started(tmp_path)
+    rehearsal.main(cost_args(directory, tokens=(1, 1)))
+    summarise(directory, journal)
+    assert "held: 12 USD" in text_of(directory)
+
+
+def test_a_rehearsal_without_cost_says_so(tmp_path: Path) -> None:
+    summarise(started(tmp_path), settled_journal(tmp_path))
+    assert "Cost: none recorded" in text_of(tmp_path / "r")
+
+
+def test_the_not_shown_list_is_fixed(tmp_path: Path) -> None:
+    summarise(started(tmp_path), settled_journal(tmp_path))
+    text = text_of(tmp_path / "r")
+    assert "Not shown by this rehearsal:" in text
+    for item in rehearsal.NOT_SHOWN:
+        assert f"- {item}" in text
+    assert rehearsal.NOT_SHOWN == (
+        "host skill loading",
+        "host permission prompts",
+        "host model behaviour",
+        "report location on the host",
+    )
+
+
+def test_an_unreadable_journal_exits_2_without_a_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = started(tmp_path)
+    assert summarise(directory, tmp_path / "no-journal") == 2
+    assert "journal" in capsys.readouterr().err
+    assert not (directory / "summary.md").exists()
+
+
+def test_summary_refuses_a_foreign_cohort(tmp_path: Path) -> None:
+    directory = tmp_path / "r"
+    directory.mkdir()
+    (directory / "rehearsal.json").write_text(json.dumps({"cohort": "sol"}), encoding="utf-8")
+    assert summarise(directory, settled_journal(tmp_path)) == 2

@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from deploy_vii.execution import Execution  # type: ignore[import-untyped]
 from deploy_vii.live.ledger import CapExceeded, Ledger, LedgerError  # type: ignore[import-untyped]
 
 COHORT = "proxy-claude"
@@ -29,6 +31,14 @@ STAMP = "%Y-%m-%dT%H:%M:%SZ"
 ATTEMPT = "rehearsal"
 EXIT_CAP = 3
 PER_MILLION = Decimal(10) ** 6
+SETTLED = frozenset({"accepted", "restricted"})
+# Fixed in the harness: what a rehearsal through the real CLI cannot show.
+NOT_SHOWN = (
+    "host skill loading",
+    "host permission prompts",
+    "host model behaviour",
+    "report location on the host",
+)
 
 
 class RehearsalError(Exception):
@@ -256,6 +266,170 @@ def _price(text: str) -> Decimal:
     return value
 
 
+def _plain(value: Decimal) -> str:
+    return format(value.normalize(), "f") if value else "0"
+
+
+def _commands(directory: Path) -> list[dict[str, Any]]:
+    log = directory / "commands.jsonl"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def _label(command: dict[str, Any]) -> str:
+    return (
+        f"- command {command['seq']} (exit {command['exit_code']}): {shlex.join(command['argv'])}"
+    )
+
+
+def _command_lines(commands: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """The commands section, and the failures no later run of the same argv resolved."""
+    failed = [c for c in commands if c["exit_code"] != 0]
+    by_code: dict[int, int] = {}
+    for command in failed:
+        by_code[command["exit_code"]] = by_code.get(command["exit_code"], 0) + 1
+    unresolved = [
+        c
+        for c in failed
+        if not any(
+            later["seq"] > c["seq"] and later["argv"] == c["argv"] and later["exit_code"] == 0
+            for later in commands
+        )
+    ]
+    lines = [f"Commands run: {len(commands)}", f"Commands failed: {len(failed)}"]
+    lines += [f"- exit {code}: {count}" for code, count in sorted(by_code.items())]
+    lines += [f"Unresolved failures: {len(unresolved)}"]
+    lines += [_label(c) for c in unresolved]
+    return lines, [
+        f"command {c['seq']} failed (exit {c['exit_code']}) and was not re-run to success"
+        for c in unresolved
+    ]
+
+
+def _rejection_lines(commands: list[dict[str, Any]]) -> list[str]:
+    rejected = [c for c in commands if c["issues"]]
+    lines = [f"Rejected submits: {len(rejected)}"]
+    for command in rejected:
+        lines.append(_label(command))
+        lines += [f"  - {issue}" for issue in command["issues"]]
+    return lines
+
+
+def _interruption_lines(commands: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    interrupted = [c for c in commands if c.get("interrupted")]
+    if not interrupted:
+        return ["Interruption: none recorded"], []
+    lines: list[str] = []
+    problems: list[str] = []
+    for command in interrupted:
+        resume = next(
+            (c for c in commands if c["seq"] > command["seq"] and c["argv"] == command["argv"]),
+            None,
+        )
+        head = f"Interruption: command {command['seq']} interrupted (exit {command['exit_code']})"
+        if resume is None:
+            lines.append(f"{head}; not resumed")
+            problems.append(f"command {command['seq']} was interrupted and not resumed")
+        else:
+            lines.append(f"{head}; resumed by command {resume['seq']} (exit {resume['exit_code']})")
+    return lines, problems
+
+
+def _module_lines(journal: Path) -> tuple[list[str], list[str]]:
+    """Per-module settle status read from the journal (read-only); the unsettled ones."""
+    try:
+        store = Execution(journal)
+        view = store.view()
+        pending = {a.module_id for a in store.read().attempts if a.status == "pending"}
+    except (OSError, ValueError) as unreadable:
+        raise RehearsalError(f"the journal {journal} cannot be read: {unreadable}") from unreadable
+    lines = ["| module | status | settle |", "| --- | --- | --- |"]
+    problems: list[str] = []
+    for module in view.modules:
+        if module.status == "not_in_pathway":
+            continue
+        settled = module.status in SETTLED and module.module_id not in pending
+        lines.append(
+            f"| {module.module_id} | {module.status} | {'settled' if settled else 'UNSETTLED'} |"
+        )
+        if not settled:
+            problems.append(f"module {module.module_id} is unsettled ({module.status})")
+    return lines, problems
+
+
+def _report_lines(report: Path | None) -> tuple[list[str], list[str]]:
+    if report is None:
+        return ["Report: not given"], []
+    page = report / "index.html"
+    if not page.is_file():
+        return [f"Report: no rendered report at {page}"], [f"no rendered report at {page}"]
+    lines = ["Report:"]
+    for name in ("index.html", "report.json"):
+        path = report / name
+        if path.is_file():
+            lines.append(f"- {path}  sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}")
+    return lines, []
+
+
+def _cost_lines(directory: Path) -> list[str]:
+    path = directory / "ledger.jsonl"
+    if not path.exists():
+        return ["Cost: none recorded"]
+    state = Ledger(path, Decimal(CAP_USD), provider=PROVIDER).state()
+    return [
+        f"Cost: Spent: {_plain(state.spent)} USD; held: {_plain(state.reserved)} USD"
+        f" (cap {CAP_USD} USD, estimated at list prices)"
+    ]
+
+
+def write_summary(directory: Path, journal: Path, report: Path | None = None) -> int:
+    """Write `summary.md`; return 0 only when every module is settled, no command failure is
+    unresolved, no interruption is left unresumed and a given report exists."""
+    open_rehearsal(directory, create=False)
+    start = json.loads((directory / "rehearsal.json").read_text(encoding="utf-8"))
+    commands = _commands(directory)
+    command_lines, failures = _command_lines(commands)
+    interruption_lines, interruption_problems = _interruption_lines(commands)
+    module_lines, unsettled = _module_lines(journal)
+    report_lines, report_problems = _report_lines(report)
+    problems = [*failures, *interruption_problems, *unsettled, *report_problems]
+    body = [
+        "# Skill rehearsal summary",
+        "",
+        f"Cohort: {start['cohort']} (pooled: {str(start['pooled']).lower()}); "
+        f"started {start['started_utc']}",
+        "",
+        "## Commands",
+        *command_lines,
+        "",
+        "## Rejected submits",
+        *_rejection_lines(commands),
+        "",
+        "## Interruption",
+        *interruption_lines,
+        "",
+        "## Modules",
+        *module_lines,
+        "",
+        "## Report",
+        *report_lines,
+        "",
+        "## Cost",
+        *_cost_lines(directory),
+        "",
+        "Not shown by this rehearsal:",
+        *[f"- {item}" for item in NOT_SHOWN],
+        "",
+        "## Result",
+        f"Result: {'NOT ACCEPTED' if problems else 'ACCEPTED'}",
+        *[f"- {problem}" for problem in problems],
+        "",
+    ]
+    (directory / "summary.md").write_text("\n".join(body), encoding="utf-8")
+    return 1 if problems else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -272,6 +446,10 @@ def build_parser() -> argparse.ArgumentParser:
     cost.add_argument("--usd-per-m-output", type=_price, required=True)
     cost.add_argument("--price-source", required=True, help="where the list prices came from")
     cost.add_argument("--final", action="store_true", help="settle the ledger at the total")
+    summary = commands.add_parser("summary", help="write summary.md, the acceptance check")
+    summary.add_argument("--rehearsal", type=Path, required=True)
+    summary.add_argument("--journal", type=Path, required=True)
+    summary.add_argument("--report", type=Path)
     return parser
 
 
@@ -288,6 +466,8 @@ def main(argv: list[str] | None = None) -> int:
                 [sys.executable, "-m", "deploy_vii", *command],
                 args.interrupt_after,
             )
+        if args.command == "summary":
+            return write_summary(args.rehearsal, args.journal, args.report)
         if args.command == "cost":
             usd = cost_usd(
                 args.input_tokens, args.output_tokens, args.usd_per_m_input, args.usd_per_m_output
