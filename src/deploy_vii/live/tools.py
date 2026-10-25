@@ -102,7 +102,9 @@ RULES = (ABSENCE, UNREAD)  # the floor is configured apart (`ToolRules.floor`)
 COVERAGE_PLACES = Decimal("0.0001")
 MAX_DISAGREEMENTS = 5
 # A fail-open of the coverage floor, stated in every rules record (task 8.12): a cell with
-# nothing extracted has no coverage to judge.
+# nothing extracted has no coverage to judge. The measure is of the cited pages only (fix round
+# 1, review F1): a statement page no line cites drops out of the denominator, and a line citing
+# another statement's page pulls that page into its cell.
 UNMEASURED_CELLS = (
     "a cell with no extracted lines is not judged by this floor (its reason is in "
     "extracted_coverage); min_statement_lines judges a cell's line count"

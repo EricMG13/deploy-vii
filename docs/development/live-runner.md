@@ -1519,6 +1519,10 @@ unchanged.
   in every rules record (`extracted_coverage_unmeasured`), and each such cell's reason is in the
   telemetry. The line-count floor (`min_statement_lines`, also off) judges a cell's line count;
   the two floors may be set together.
+- **Cited pages only (fix round 1, review F1).** The floor measures coverage of the cited
+  pages, not of the statement. A statement page the payload never cites drops out of the
+  denominator, and no rule catches it. A line citing another statement's page pulls that page
+  into its cell and lowers the ratio.
 - **Escalation.** A coverage issue starts with `Financials incomplete`, so it counts as a
   completeness-floor rejection: `completeness_floor_failed` on the submit, and escalation.
 - **Rules record.** `to_record` reports `extracted_coverage_min` and its reason when off.

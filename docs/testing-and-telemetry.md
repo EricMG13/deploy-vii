@@ -137,6 +137,14 @@ validator rejects it). Python computes it; the model-facing prompt and schema ar
   statement headers print `December 31,` with the years on another line, while a note table
   prints both years). So the pages are the cited ones alone. A comparative year therefore
   counts its statement's page even when the payload holds none of its lines.
+  The denominator is the cited pages only, which has two effects (fix round 1, review F1):
+  - A statement page the payload never cites drops out of the measure, and no rule catches
+    it. If no CFS line cited page:61, its 7 supplemental lines would simply not count.
+  - A line citing another statement's page pulls that whole page into its own statement's
+    cell and lowers the ratio (a CFS line citing the IS page adds the IS page's lines to the
+    CFS cell).
+
+  The measure, and the floor on it, is coverage of the cited pages, not of the statement.
 - **Covered.** An extracted line is covered when a payload line of the same statement, in a
   period the cell's scope matches (`scope_matches_period`; for BS, the scope's end date), cites
   the line's page with either:
@@ -144,7 +152,9 @@ validator rejects it). Python computes it; the model-facing prompt and schema ar
     is not in `140`, `4,000`, `40.5` or `(40)`), or
   - a label equal to the extracted label after whitespace normalisation.
 
-  Flagged lines count; a line holding only nil dashes is covered by its label alone.
+  Flagged lines count. A nil dash is never quote-matched, so a line holding only nil dashes
+  is covered by its label alone. Known limitation (review F3): a whole-number match can still
+  hit a small number by accident (a printed `1` matches `Note 1` in a quote).
 - **Coverage.** Covered / extracted as a Decimal string rounded down to four places. It is null
   when nothing is extracted, with the reason: no line of the statement cites a page of the
   source; no cited page was read or extracted; or the cited pages hold no extracted line.
@@ -154,21 +164,35 @@ validator rejects it). Python computes it; the model-facing prompt and schema ar
   pages it cites, is compared with the extracted lines of its label there (whitespace
   normalised):
   - `agreed`: its amount is one of their `values`; a payload 0 agrees with a printed nil dash;
-  - `sign_differs`: only its negation is. This is a `signed` expense the page prints as a
-    magnitude, or a flipped sign; Python cannot tell which;
+  - `sign_differs`: only its negation is;
   - `disagreed`: neither is (a retyped `-100` for the printed `(10)`);
   - `unmatched`: no line there has its label.
 
-  `not_on_an_extracted_page` and `without_amount` count the rest. The first five disagreements
-  and the first five sign differences are listed with their pages, label, payload value and
-  extracted values.
+  The comparison is against any column of the line, not the period's column. It checks the
+  printed sign (parentheses), not the economic sign (review F2). So a FY2025 line carrying the
+  FY2024 value agrees, and so does a `signed` expense written positive, which is a sign error
+  under the contract. Conversely, `sign_differs` is mostly the contract's own `signed`
+  normalisation of a printed magnitude (an expense written negative, as the contract asks;
+  `development/statements.md`), not an error. Follow-up, not in this task: split `sign_differs` into
+  "printed magnitude, payload negative under `signed`" (expected) and "printed
+  parenthesised, payload positive" (a likely flip). Python can compute both.
+
+  `not_on_an_extracted_page` and `without_amount` count the rest.
+- **Fields.** Each cell holds `extracted`, `covered`, `coverage`, `reason` and `pages` (the
+  cited pages counted, in page order). `overall` holds `extracted`, `covered`, `coverage` and
+  `reason`. `agreement` holds the six counts plus `disagreements` and `sign_differences`. Each
+  is a list of at most five entries, in payload order. An entry has `pages` (`[source_id,
+  locator]` pairs), `line_id`, `period_id`, `label`, `payload_value` (a Decimal string),
+  `sign_convention` and `extracted_values` (per matched extracted line, its values as Decimal
+  strings, null for a nil dash).
 
 Measured on the recorded `financials` payloads (25 Oct 2026):
 
 - hybrid-cp1-6 Sol medium (19 pages read): IS FY2025 17 of 29 lines (0.5862), CFS FY2025 40 of 48
   (0.8333), BS 2025-12-31 31 of 33 (0.9393), and 0 for each of the five comparative cells.
   Overall 88 of 297 (0.2962). Agreement: 79 agreed, 9 sign differences (expenses and cash
-  paid printed as magnitudes, written negative under `signed`), 0 disagreed, 11 unmatched (8
+  paid printed as magnitudes, written negative under `signed`: the contract's normalisation,
+  not errors), 0 disagreed, 11 unmatched (8
   renamed IS lines such as `Casino revenue` for the printed `Casino`, `Other investing cash
   flow`, `Preferred stock`, `Common stock`). The 22 uncovered current-year lines are those 11
   renamed lines, 4 per-share and share-count lines and 7 supplemental cash-flow lines on
