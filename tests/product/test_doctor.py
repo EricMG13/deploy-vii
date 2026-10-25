@@ -691,7 +691,19 @@ def test_run_preserves_first_prompt_and_delivers_journal_bound_repair(
     with pytest.raises(SystemExit) as rejected:
         run_offline(args)
     assert rejected.value.code == 1
-    review.write_text(payload)
+    with pytest.raises(SystemExit) as continued:
+        run_offline(args)
+    assert continued.value.code == 3
+    pending = next(a for a in store.read().attempts if a.status == "pending")
+    repair_review = reviews / (
+        f"{module}-{step}.{pending.ticket_id}.{len(pending.step_repairs)}.review.json"
+    )
+    before = store.read()
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3 and store.read() == before
+    assert review.read_text() == "{}"
+    repair_review.write_text(payload)
     with pytest.raises(SystemExit) as continued:
         run_offline(args)
     assert continued.value.code == 3
@@ -1057,6 +1069,8 @@ def completed_snapshot_without_model(
 @pytest.mark.parametrize("explicit_begin", [False, True], ids=["scheduler", "pending-refresh"])
 def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage_prompts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     completed_snapshot_without_model: tuple[argparse.Namespace, Execution, dict[str, BaseModel]],
     explicit_begin: bool,
 ) -> None:
@@ -1068,7 +1082,7 @@ def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage
     from deploy_vii.execution_cli import execute, run_offline
     from tests.product.test_cp5_integrity import review_all
 
-    original_args, original_store, submissions = completed_snapshot_without_model
+    original_args, original_store, _submissions = completed_snapshot_without_model
     out = tmp_path / "out"
     shutil.copytree(original_store.directory.parent, out / original_args.run)
     args = argparse.Namespace(**{**vars(original_args), "out": out})
@@ -1076,11 +1090,10 @@ def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage
     store = Execution(paths["journal"])
     canonical = store.pack()
     previous = {h.module_id: h for h in store.read().heads}
-    old_prompts = {}
+    old_prompts, old_reviews = {}, {}
     for module, step in (("CP-5", "integrity_review"), ("CP-6", "committee_challenge")):
         old_prompts[module] = (paths["reviews"] / f"{module}-{step}.instructions.txt").read_bytes()
-        review = paths["reviews"] / f"{module}-{step}.review.json"
-        review.rename(review.with_suffix(".previous.json"))
+        old_reviews[module] = (paths["reviews"] / f"{module}-{step}.review.json").read_bytes()
     paths["report"].rename(paths["report"].with_name("report-before-extension"))
     extension = store.extend_scope((*store.read().run.requested_modules, "CP-MODEL"))
     assert {h.module_id for h in extension.staled} == {"CP-5", "CP-6"}
@@ -1098,6 +1111,13 @@ def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage
     assert stopped.value.code == 3
     cp5 = store.read().attempts[-1]
     assert cp5.module_id == "CP-5" and cp5.number == 0 and cp5.repair_of is None
+    assert not cp5.steps and not cp5.step_repairs and cp5.payload_sha256 is None
+    cp5_review = paths["reviews"] / f"CP-5-integrity_review.{cp5.ticket_id}.0.review.json"
+    assert f"write {cp5_review} then rerun" in capsys.readouterr().err
+    before = store.read()
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3 and store.read() == before
     prompt = paths["reviews"] / f"CP-5-integrity_review.{cp5.ticket_id}.0.instructions.txt"
     current_prompt = prompt.read_bytes()
     assert current_prompt != old_prompts["CP-5"]
@@ -1109,21 +1129,48 @@ def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage
     assert refused.value.code == 2 and store.read() == before
     assert prompt.read_text() == "retain private conflict"
     prompt.write_bytes(current_prompt)
-    (paths["reviews"] / "CP-5-integrity_review.review.json").write_text(
-        review_all(review_scope(store, cp5)).model_dump_json()
-    )
+    cp5_review.write_text(review_all(review_scope(store, cp5)).model_dump_json())
     with pytest.raises(SystemExit) as stopped:
         run_offline(args)
     assert stopped.value.code == 3
     cp6 = store.read().attempts[-1]
     assert cp6.module_id == "CP-6" and cp6.number == 0 and cp6.repair_of is None
+    assert not cp6.steps and not cp6.step_repairs and cp6.payload_sha256 is None
+    cp6_review = paths["reviews"] / f"CP-6-committee_challenge.{cp6.ticket_id}.0.review.json"
+    assert f"write {cp6_review} then rerun" in capsys.readouterr().err
     assert (
         paths["reviews"] / f"CP-6-committee_challenge.{cp6.ticket_id}.0.instructions.txt"
     ).is_file()
-    (paths["reviews"] / "CP-6-committee_challenge.review.json").write_text(
-        submissions["CP-6"].model_dump_json()
+    # Identical judgment bytes are explicit input only when supplied for the new ticket.
+    cp6_review.write_bytes(old_reviews["CP-6"])
+    original_finish = Execution.finish
+
+    def crash(*_args: object, **_kwargs: object) -> Never:
+        raise RuntimeError("after new-lineage review validation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Execution, "finish", crash)
+        with pytest.raises(RuntimeError, match="after new-lineage"):
+            run_offline(args)
+    retained = store.read().attempts[-1]
+    assert retained.ticket_id == cp6.ticket_id and retained.steps[0].status == "valid"
+    assert store.payload(retained.steps[0].payload_sha256).encode() == old_reviews["CP-6"]
+    direct_path = tmp_path / "explicit-new-lineage"
+    shutil.copytree(store.directory, direct_path)
+    from deploy_vii.module_submits import submit_module_step
+
+    direct = submit_module_step(
+        Execution(direct_path), "CP-6", cp6.ticket_id, "committee_challenge", cp6_review.read_text()
     )
+    assert Execution.finish is original_finish
+    before = store.read()
+    cp6_review.write_text("{}")
+    with pytest.raises(SystemExit) as refused:
+        run_offline(args)
+    assert refused.value.code == 2 and store.read() == before
+    cp6_review.write_bytes(old_reviews["CP-6"])
     index = run_offline(args)
+    assert store.read().attempts[-1] == direct
     assert Path(index) == paths["report"] / "index.html"
     assert store.pack() == canonical and store.read().pack_sha256 == canonical.content_hash()
     heads = {h.module_id: h for h in store.read().heads}
@@ -1133,7 +1180,57 @@ def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage
         assert (paths["reviews"] / f"{module}-{step}.instructions.txt").read_bytes() == old_prompts[
             module
         ]
+        assert (paths["reviews"] / f"{module}-{step}.review.json").read_bytes() == old_reviews[
+            module
+        ]
     receipt = json.loads((paths["report"] / "report.json").read_bytes())
     assert not any(row["status"] == "stale" for row in receipt["modules"])
     before = store.read()
     assert run_offline(args) == index and store.read() == before
+
+
+def test_refreshed_committee_stops_before_consuming_the_previous_review(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    completed_snapshot_without_model: tuple[argparse.Namespace, Execution, dict[str, BaseModel]],
+) -> None:
+    import shutil
+
+    from deploy_vii.cp5_integrity import review_scope, submit_cp5_step
+    from deploy_vii.cp_model_workflow import publish_cp_model
+    from deploy_vii.execution_cli import run_offline
+    from tests.product.test_cp5_integrity import review_all
+
+    original_args, original_store, _ = completed_snapshot_without_model
+    out = tmp_path / "out"
+    shutil.copytree(original_store.directory.parent, out / original_args.run)
+    args = argparse.Namespace(**{**vars(original_args), "out": out})
+    paths = run_paths(out, args.run)
+    store = Execution(paths["journal"])
+    old = next(a for a in store.read().attempts if a.module_id == "CP-6")
+    old_review = paths["reviews"] / "CP-6-committee_challenge.review.json"
+    old_bytes = old_review.read_bytes()
+    paths["report"].rename(paths["report"].with_name("report-before-extension"))
+    store.extend_scope((*store.read().run.requested_modules, "CP-MODEL"))
+    publish_cp_model(store, output=store.directory.parent / "cp-model")
+    cp5 = store.begin("CP-5")
+    submit_cp5_step(
+        store,
+        cp5.ticket_id,
+        "integrity_review",
+        review_all(review_scope(store, cp5)).model_dump_json(),
+    )
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3
+    pending = store.read().attempts[-1]
+    assert pending.module_id == "CP-6" and pending.ticket_id != old.ticket_id
+    assert pending.inputs != old.inputs and pending.number == 0 and pending.repair_of is None
+    assert not pending.steps and not pending.step_repairs and pending.payload_sha256 is None
+    review = paths["reviews"] / f"CP-6-committee_challenge.{pending.ticket_id}.0.review.json"
+    assert f"write {review} then rerun" in capsys.readouterr().err
+    assert old_review.read_bytes() == old_bytes and not review.exists()
+    before = store.read()
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3 and store.read() == before

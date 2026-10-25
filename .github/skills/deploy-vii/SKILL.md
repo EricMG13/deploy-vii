@@ -26,12 +26,12 @@ deploy-vii plan CP-1 CP-2
 deploy-vii run --request <request.json> --root <source-root> --run <run-id>
 ```
 
-2. The command writes one `<module>-<step>.instructions.txt` file, then stops with exit 3 and
-   names the `<module>-<step>.review.json` file to write. Use the instructions, write the review
+2. The command writes an instructions file, then stops with exit 3 and
+   names the exact review file to write. Use the instructions, write that review
    as JSON and rerun the same command. It submits through the production validators, in plan
    order, and stops on a rejected review (exit 1) with issue lines. Exit 2 means refused input.
-   Later tickets and repairs preserve the first file and add a ticket/repair suffix. CP-MODEL publishes
-   deterministically into `cp-model/`; it does not ask for a review.
+   Later tickets and repairs add the same ticket/repair suffix to both files, preserving earlier
+   files. CP-MODEL publishes deterministically into `cp-model/`; it does not ask for a review.
 3. To inspect a pending ticket, run `deploy-vii --out <delivery-root> execution --run <run-id>
    resume`. To resubmit explicitly, add `--ticket <ticket> --review <file>`.
 4. When the run is complete, open the printed report path with `deploy-vii --out <delivery-root>

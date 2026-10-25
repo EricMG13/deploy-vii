@@ -86,6 +86,8 @@ not a host-model path.
 
 The `run` command is the compact host-review loop. These commands remain available for operators
 who need to inspect or advance one journal step directly. Global `--out` goes before the command.
+Write the exact review path printed by `run`; later tickets and repairs version both the prompt
+and its review path, preserving earlier files instead of automatically resubmitting them.
 
 ```sh
 deploy-vii doctor

@@ -357,6 +357,16 @@ def run_offline(args: argparse.Namespace) -> str:
         valid = {item.step_id for item in pending.steps if item.status == "valid"}
         step = next((item for item in chain if item not in valid), chain[-1])
         retained = next((item for item in pending.steps if item.step_id == step), None)
+        revision = (
+            f".{pending.ticket_id}.{len(pending.step_repairs)}"
+            if pending.ticket_id
+            != next(
+                (a.ticket_id for a in snapshot.attempts if a.module_id == pending.module_id),
+                pending.ticket_id,
+            )
+            or any(item.step_id == step for item in pending.step_repairs)
+            else ""
+        )
         if retained is None and pending.payload_sha256 is None:
             instructions = step_instructions(
                 store, pending.module_id, pending.ticket_id, step, with_sources=False
@@ -367,16 +377,6 @@ def run_offline(args: argparse.Namespace) -> str:
                 raise refusal_exit(
                     f"run refused: cannot create review directory {reviews}"
                 ) from error
-            revision = (
-                f".{pending.ticket_id}.{len(pending.step_repairs)}"
-                if pending.ticket_id
-                != next(
-                    (a.ticket_id for a in snapshot.attempts if a.module_id == pending.module_id),
-                    pending.ticket_id,
-                )
-                or any(item.step_id == step for item in pending.step_repairs)
-                else ""
-            )
             instruction_path = reviews / f"{pending.module_id}-{step}{revision}.instructions.txt"
             if instruction_path.is_symlink():
                 raise refusal_exit(
@@ -400,7 +400,7 @@ def run_offline(args: argparse.Namespace) -> str:
                 raise refusal_exit(
                     f"run refused: cannot write instructions at {instruction_path}"
                 ) from error
-        review_path = reviews / f"{pending.module_id}-{step}.review.json"
+        review_path = reviews / f"{pending.module_id}-{step}{revision}.review.json"
         if review_path.is_symlink():
             raise refusal_exit(f"run refused: review path must not be a symlink: {review_path}")
         if not review_path.is_file():
