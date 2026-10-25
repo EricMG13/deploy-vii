@@ -1671,3 +1671,60 @@ def test_perturbing_one_headroom_is_exactly_one_arithmetic_issue(
         (name, f"{letter}{index + 2}")
     ]
     assert "(to within 0.01)" in report.issues[0].problem
+
+
+# Fix round 1 (review F1): a number Excel shows as a percentage stores the fraction (2.5 % is
+# stored 0.025), so in a percent column it would be read 100 times too small.
+
+PERCENT_FIX = "format the cell as General and enter 2.5 for 2.5 % NAV"
+
+
+def formatted(data: dict[str, list[dict[str, Any]]], formats: dict[tuple[str, str], str]) -> bytes:
+    """`workbook(data)` with number formats set on (sheet, cell) through openpyxl."""
+    book = openpyxl.load_workbook(io.BytesIO(workbook(data)))
+    for (sheet, cell), number_format in formats.items():
+        book[sheet][cell].number_format = number_format
+    stream = io.BytesIO()
+    book.save(stream)
+    return stream.getvalue()
+
+
+def test_percent_formatted_limits_on_a_pct_nav_row_are_refused() -> None:
+    data = changed(
+        "Compliance_Monitor", 0, {"limit": 0.025, "current_value": 0.0237, "headroom": 0.0013}
+    )
+    cells = {("Compliance_Monitor", cell): "0.00%" for cell in ("D2", "I2", "J2")}
+    report = validate_portfolio_bytes(FILE, formatted(data, cells))
+    assert rendered(report) == [
+        f"{FILE}:Compliance_Monitor!D2: limit '0.025' is formatted as a percentage — fix: "
+        f"{PERCENT_FIX}",
+        f"{FILE}:Compliance_Monitor!I2: current_value '0.0237' is formatted as a percentage"
+        f" — fix: {PERCENT_FIX}",
+        f"{FILE}:Compliance_Monitor!J2: headroom '0.0013' is formatted as a percentage — fix: "
+        f"{PERCENT_FIX}",
+    ]
+
+
+@pytest.mark.parametrize("number_format", ["0%", "0.00%", "0.000%", "#,##0.0%;-0.0%"])
+def test_a_percent_formatted_pct_nav_is_one_issue(number_format: str) -> None:
+    data = changed("Rating_Distribution", 0, {"pct_nav": 0.605})
+    raw = formatted(data, {("Rating_Distribution", "B2"): number_format})
+    assert rendered(validate_portfolio_bytes(FILE, raw)) == [
+        f"{FILE}:Rating_Distribution!B2: pct_nav '0.605' is formatted as a percentage — fix: "
+        f"{PERCENT_FIX}"
+    ]
+
+
+@pytest.mark.parametrize("number_format", ['0.00"%"', "0.00\\%", "0.00", "General"])
+def test_a_literal_percent_sign_or_a_plain_format_is_accepted(number_format: str) -> None:
+    data = changed("Rating_Distribution", 0, {"pct_nav": 60.5})
+    raw = formatted(data, {("Rating_Distribution", "B2"): number_format})
+    assert rendered(validate_portfolio_bytes(FILE, raw)) == []
+
+
+def test_percent_format_is_judged_only_in_percent_columns() -> None:
+    # An amount limit in the NAV currency and a count are not percentages of NAV.
+    row = {"limit": 20000000, "limit_unit": "USD", "current_value": 15000000, "headroom": 1}
+    data = changed("Compliance_Monitor", 0, row | {"status": "Pass"})
+    cells = {("Compliance_Monitor", "D2"): "0%", ("Rating_Distribution", "C2"): "0%"}
+    assert rendered(validate_portfolio_bytes(FILE, formatted(data, cells))) == []

@@ -151,7 +151,9 @@ Every column is required unless the tables below say optional. Rules that apply 
   stored text, never as a binary float, and compares exactly.
 - **Percent of NAV** cells (`pct_nav`, `limit_pct_nav`, `headroom_pct_nav`, and `limit`,
   `current_value` and `headroom` when `limit_unit` is `% NAV`) are plain numbers in percent:
-  `2.5` means 2.5 % NAV.
+  `2.5` means 2.5 % NAV. A number cell formatted as a percentage (for example `0.00%`) is
+  refused: Excel stores 2.5 % as 0.025, which would read 100 times too small. A format that
+  only shows a literal sign (`0.00"%"`) is accepted.
 - **Dates** are text `YYYY-MM-DD` and real calendar dates. The template formats these columns
   as Text. A date Excel has turned into a serial number (such as `46171`) is rejected.
 - **Values, not formulas**: `prepare` freezes the stored values and never recalculates.
@@ -304,6 +306,7 @@ has an issue. These are the fixes it can print:
 | A cell holds a formula | replace the formula with its value (Paste Special, Values) |
 | A number that is not a plain number | enter a plain number: digits, an optional sign and one decimal point (no %, units, spaces or thousands separators) |
 | A number longer than 40 characters | enter the number with at most 40 characters (Excel keeps 15 significant digits) |
+| A number cell formatted as a percentage in a percent-of-NAV column | format the cell as General and enter 2.5 for 2.5 % NAV |
 | A date that is empty, not an ISO date, or an Excel date serial | enter the date as text YYYY-MM-DD (format the column as Text so Excel keeps it) |
 | A total or subtotal row | leave out total and subtotal rows; Python adds the rows up |
 | `Mandate` `section` empty or not one of the seven | enter one of Strategy, Key Parties, Capital Structure, Mandate Constraints, Liquidity Terms, Fees or Reporting |

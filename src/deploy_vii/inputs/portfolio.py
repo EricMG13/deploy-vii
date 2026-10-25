@@ -83,6 +83,12 @@ NUMBER = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,
 EXACT = Context(prec=2000, Emax=9999, Emin=-9999)
 CONTROL_ID = re.compile(r"^[A-Z]+-[0-9]{2}$")
 TOTAL = re.compile(r"\b(?:sub)?total\b")
+# Columns whose numbers are percent of NAV, always or on a `% NAV` Compliance_Monitor row. A
+# numeric cell Excel shows as a percentage stores the fraction (2.5 % is stored 0.025).
+PCT_COLUMNS = frozenset({"pct_nav", "limit_pct_nav", "headroom_pct_nav"})
+PCT_NAV_ROW_COLUMNS = frozenset({"limit", "current_value", "headroom"})
+PERCENT_FORMATS = frozenset({"builtin:9", "builtin:10"})  # 0% and 0.00%
+LITERAL = re.compile(r'"[^"]*"|\\.')  # quoted text or an escaped character in a format code
 
 DATE_FIX = "enter the date as text YYYY-MM-DD (format the column as Text so Excel keeps it)"
 PCT_FIX = "enter the share of NAV in percent as a plain number (2.5 means 2.5 % NAV)"
@@ -131,6 +137,7 @@ RULE_FIX: Mapping[str, str] = {
         "a breach"
     ),
     "watch": "enter Pass: Watch is for headroom under 10 % of the limit",
+    "percent": "format the cell as General and enter 2.5 for 2.5 % NAV",
 }
 REQUIRED_FIELDS: Mapping[tuple[str, str], str] = {
     ("Strategy", "fund_name"): (
@@ -766,7 +773,38 @@ def parse_row(
             )
             del row.values[sheet.label]
             row.flagged.add(sheet.label)
+    percent_findings(sheet, grid, row, findings)
     return row
+
+
+def percent_formatted(span: Span) -> bool:
+    """A numeric cell whose number format scales it by 100 for display: builtin 9 or 10, or a
+    custom code with a `%` outside quoted text and escapes (`0.00"%"` only shows a sign)."""
+    code = span.number_format
+    if span.data_type != "n" or code is None:
+        return False
+    if code.startswith("builtin:"):
+        return code in PERCENT_FORMATS
+    return "%" in LITERAL.sub("", code)
+
+
+def percent_findings(
+    sheet: Sheet, grid: Mapping[tuple[int, int], Span], row: Row, findings: Findings
+) -> None:
+    """Refuse percent-formatted numbers in percent columns: one issue per cell, and the value
+    is dropped so no rule computes with a fraction."""
+    pct_nav_row = row.raw.get("limit_unit") == PCT_NAV
+    for index, column in enumerate(sheet.columns, 1):
+        name = column.name
+        span = grid.get((index, row.number))
+        scaled = name in PCT_COLUMNS or (pct_nav_row and name in PCT_NAV_ROW_COLUMNS)
+        if span is not None and scaled and name in row.values and percent_formatted(span):
+            message = f"{name} '{echo(row.raw[name])}' is formatted as a percentage"
+            findings.add(
+                sheet.name, f"{cell_letters(index)}{row.number}", message, RULE_FIX["percent"]
+            )
+            del row.values[name]
+            row.flagged.add(name)
 
 
 def parse_number(name: str, value: str) -> tuple[Decimal, tuple[str, str] | None]:
