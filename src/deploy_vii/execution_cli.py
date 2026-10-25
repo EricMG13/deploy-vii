@@ -334,21 +334,24 @@ def run_offline(args: argparse.Namespace) -> str:
         snapshot = store.read()
         pending = next((item for item in snapshot.attempts if item.status == "pending"), None)
         if pending is None:
-            settled = {item.module_id for item in snapshot.heads}
+            settled = {item.module_id for item in snapshot.heads if item.status != "stale"}
             module_id = next((item for item in modules_to_run if item not in settled), None)
             if module_id is None:
                 report = paths["report"]
                 return report_index(store, snapshot.run.pathway, report)
-            if module_id == "CP-MODEL":
-                # The deterministic publisher owns begin and settlement, with its own receipt.
-                output = paths["journal"].parent / "cp-model"
-                if output.is_symlink():
-                    raise refusal_exit("run refused: CP-MODEL output must not be a symlink")
-                try:
-                    publish_cp_model(store, output=output)
-                except CpModelRefused as error:
-                    raise refusal_exit(f"run refused: {error}") from error
-                continue
+        else:
+            module_id = pending.module_id
+        if module_id == "CP-MODEL":
+            # The deterministic publisher owns begin and settlement, with its own receipt.
+            output = paths["journal"].parent / "cp-model"
+            if output.is_symlink():
+                raise refusal_exit("run refused: CP-MODEL output must not be a symlink")
+            try:
+                publish_cp_model(store, output=output)
+            except CpModelRefused as error:
+                raise refusal_exit(f"run refused: {error}") from error
+            continue
+        if pending is None:
             pending = store.begin(module_id)
         chain = step_chain(pending.module_id).steps
         valid = {item.step_id for item in pending.steps if item.status == "valid"}
@@ -366,7 +369,12 @@ def run_offline(args: argparse.Namespace) -> str:
                 ) from error
             revision = (
                 f".{pending.ticket_id}.{len(pending.step_repairs)}"
-                if pending.repair_of or any(item.step_id == step for item in pending.step_repairs)
+                if pending.ticket_id
+                != next(
+                    (a.ticket_id for a in snapshot.attempts if a.module_id == pending.module_id),
+                    pending.ticket_id,
+                )
+                or any(item.step_id == step for item in pending.step_repairs)
                 else ""
             )
             instruction_path = reviews / f"{pending.module_id}-{step}{revision}.instructions.txt"
@@ -447,12 +455,21 @@ def execute(args: argparse.Namespace) -> str:
             remaining = [
                 m
                 for m in plan(snapshot.run.requested_modules)
-                if m not in {h.module_id for h in snapshot.heads}
+                if m not in {h.module_id for h in snapshot.heads if h.status != "stale"}
             ]
             return "nothing to resume" + (
                 f"; next runnable module: {remaining[0]}"
                 if remaining
                 else "; no runnable modules remain"
+            )
+        if pending.module_id == "CP-MODEL":
+            if args.ticket or args.review:
+                raise refusal_exit(
+                    "resume refused: CP-MODEL takes no review; rerun run or cp-model-publish"
+                )
+            return (
+                f"ticket {pending.ticket_id}; module CP-MODEL; deterministic publication pending; "
+                "rerun run or cp-model-publish with its output directory"
             )
         chain = step_chain(pending.module_id).steps
         completed = {step.step_id for step in pending.steps if step.status == "valid"}

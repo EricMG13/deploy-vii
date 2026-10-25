@@ -3,7 +3,7 @@
 Decision 0006 DC-5: CP-MODEL publishes the promoted CP-1 financial model as the Model
 destination (an HTML page) and its calculation JSON. `publish_cp_model` builds the CP-MODEL
 `Module` in Python, writes the files into a new directory and settles the head only once
-every file is written; a failed write interrupts the attempt and leaves no head.
+every file is written; a failed fresh write interrupts the attempt and leaves no head.
 """
 
 import json
@@ -24,6 +24,7 @@ from deploy_vii.execution import (
     Head,
     Qualification,
     Validator,
+    current_inputs,
     settle,
     text_sha256,
 )
@@ -273,6 +274,29 @@ def _prepare(
     return payload, settled, {PAGE: page, CALCULATION: basis.calculation, RECEIPT: receipt}
 
 
+def _resume(store: Execution, attempt: Attempt, basis: _Basis, output: Path) -> tuple[str, Module]:
+    """Re-derive a pending deterministic ticket; never repair or overwrite existing output."""
+    if current_inputs(store.read(), MODULE_ID) != attempt.inputs:
+        raise CpModelRefused("Ticket inputs have changed")
+    if attempt.steps or attempt.step_repairs:
+        raise CpModelRefused("CP-MODEL publication cannot retain host-review steps")
+    payload, settled, files = _prepare(store, attempt, basis)
+    if attempt.payload_sha256 is not None and store.payload(attempt.payload_sha256) != payload:
+        raise CpModelRefused("Ticket already retains a different publication response")
+    if output.is_symlink():
+        raise CpModelRefused("Publication output must not be a symlink")
+    if output.exists():
+        for name, text in files.items():
+            path = output / name
+            if path.is_symlink():
+                raise CpModelRefused(f"Publication file must not be a symlink: {path}")
+            if path.read_bytes() != text.encode("utf-8"):
+                raise CpModelRefused(f"Publication file differs from trusted derivation: {path}")
+    else:
+        _write(output, files)
+    return payload, settled
+
+
 def publish_cp_model(store: Execution, *, output: Path) -> Attempt:
     """Publish the promoted CP-1 as the Model destination and its calculation JSON.
 
@@ -282,30 +306,50 @@ def publish_cp_model(store: Execution, *, output: Path) -> Attempt:
     (none pending, input set not settled). Then: begin, build the candidate in Python, settle
     it in memory (`settle`, the journal's own rule) to learn the head it will become, render the
     page for that head, write `model.html`, `calculation.json` and `receipt.json` (last), and
-    only then finish the attempt. Any failure before or at the finish interrupts the attempt
+    only then finish the attempt. A caught failure before or at the finish interrupts the attempt
     (no head from this attempt); a second consecutive failure leaves a `blocked` head, which is
     the journal's repair rule (decision 0007), not an addition here.
+
+    A pending CP-MODEL ticket instead resumes on the same inputs and exact retained payload.
+    Re-derive its candidate and receipt from the verified basis; write absent output or reuse
+    complete byte-identical files only. Partial, conflicting or symlinked output is refused
+    intact. Recovery refusals leave the pending ticket and its repair budget unchanged.
     """
     basis = _basis(store)
-    if output.exists():
+    pending = next((a for a in store.read().attempts if a.status == "pending"), None)
+    resuming = pending is not None and pending.module_id == MODULE_ID
+    if resuming:
+        assert pending is not None
+        attempt = pending
+        try:
+            payload, settled = _resume(store, attempt, basis, output)
+        except (OSError, ValueError) as error:
+            raise CpModelRefused(f"CP-MODEL recovery refused: {error}") from error
+    elif output.exists():
         raise CpModelRefused(f"Output {output} already exists; publish into a new directory")
-    try:
-        attempt = store.begin(MODULE_ID)
-    except ValueError as error:
-        raise CpModelRefused(f"CP-MODEL cannot begin: {error}") from error
+    else:
+        try:
+            attempt = store.begin(MODULE_ID)
+        except ValueError as error:
+            raise CpModelRefused(f"CP-MODEL cannot begin: {error}") from error
+        ticket = attempt.ticket_id
+        try:
+            payload, settled, files = _prepare(store, attempt, basis)
+            _write(output, files)
+        except Exception as error:
+            # Documented fail-closed: record why this attempt ends without a head, then re-raise.
+            reason = _interrupt(store, ticket, f"CP-MODEL publication failed: {error}")
+            if isinstance(error, CpModelRefused):
+                raise
+            raise CpModelRefused(reason) from error
     ticket = attempt.ticket_id
     try:
-        payload, settled, files = _prepare(store, attempt, basis)
-        _write(output, files)
-    except Exception as error:
-        # Documented fail-closed: record why this attempt ends without a head, then re-raise.
-        reason = _interrupt(store, ticket, f"CP-MODEL publication failed: {error}")
-        if isinstance(error, CpModelRefused):
-            raise
-        raise CpModelRefused(reason) from error
-    try:
         finished = store.finish(ticket, payload, _verifier(store, ticket), qualification=PUBLISHED)
-    except ValueError as error:  # e.g. the inputs changed after the files were written
+    except (OSError, ValueError) as error:  # e.g. inputs changed after the files were written
+        if resuming:
+            raise CpModelRefused(f"CP-MODEL recovery refused: {error}") from error
+        if isinstance(error, OSError):
+            raise
         raise CpModelRefused(
             _interrupt(store, ticket, f"CP-MODEL publication failed: {error}")
         ) from error

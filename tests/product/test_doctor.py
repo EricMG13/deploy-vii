@@ -1,11 +1,14 @@
+import argparse
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Never
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import BaseModel
 
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.delivery_dir import delivery_root, run_paths
@@ -479,8 +482,7 @@ def test_resume_sends_cp1_quality_to_the_promotion_workflow(
 
 
 # M11 repair regressions use the real offline workflows, with synthetic evidence only.
-def offline_args(tmp_path: Path, store: Execution) -> tuple[object, Execution]:
-    import argparse
+def offline_args(tmp_path: Path, store: Execution) -> tuple[argparse.Namespace, Execution]:
     import hashlib
     import json
     import shutil
@@ -785,9 +787,9 @@ runpy.run_module('deploy_vii', run_name='__main__')
     )
 
 
-def test_default_credit_snapshot_publishes_real_model_and_completes_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def credit_snapshot_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, with_model: bool = True
+) -> tuple[argparse.Namespace, Execution, dict[str, BaseModel]]:
     import json
 
     import tests.product.test_financials as financials
@@ -799,19 +801,16 @@ def test_default_credit_snapshot_publishes_real_model_and_completes_report(
     from deploy_vii.cp2_synthesis import CreditSynthesisSubmission
     from deploy_vii.cp3_relative_value import RelativeValueSubmission
     from deploy_vii.cp4_legal import CovenantInterpretationSubmission
-    from deploy_vii.cp5_integrity import review_scope
     from deploy_vii.cp6_committee import CommitteeSubmission
-    from deploy_vii.cp_model_workflow import verify_cp_model_publication
-    from deploy_vii.execution_cli import run_offline
-    from deploy_vii.registry import plan, step_chain
+    from deploy_vii.registry import plan
     from tests.product.test_business_context import submission_fixture
     from tests.product.test_cp1_workflow import at_ceiling, staged
-    from tests.product.test_cp5_integrity import review_all
 
+    scope = tuple(m for m in PATHWAY_MODULES["credit_snapshot"] if with_model or m != "CP-MODEL")
     monkeypatch.setattr(
         financials,
         "Run",
-        lambda **kw: Run(**{**kw, "requested_modules": PATHWAY_MODULES["credit_snapshot"]}),
+        lambda **kw: Run(**{**kw, "requested_modules": scope}),
     )
     monkeypatch.setattr(
         workflow, "plan", lambda scope: tuple(m for m in plan(scope) if m != "CP-MODEL")
@@ -931,10 +930,21 @@ def test_default_credit_snapshot_publishes_real_model_and_completes_report(
             )
         ),
     }
+    return args, store, submissions
+
+
+def drive_credit_snapshot(
+    args: argparse.Namespace, store: Execution, submissions: dict[str, BaseModel]
+) -> str:
+    from deploy_vii.cp5_integrity import review_scope
+    from deploy_vii.execution_cli import run_offline
+    from deploy_vii.registry import step_chain
+    from tests.product.test_cp5_integrity import review_all
+
+    paths = run_paths(args.out, args.run)
     for _ in range(8):
         try:
-            index = run_offline(args)
-            break
+            return run_offline(args)
         except SystemExit as stopped:
             assert stopped.code == 3
         pending = next(a for a in store.read().attempts if a.status == "pending")
@@ -946,8 +956,21 @@ def test_default_credit_snapshot_publishes_real_model_and_completes_report(
         (paths["reviews"] / f"{module}-{step_chain(module).steps[0]}.review.json").write_text(
             supplied.model_dump_json()
         )
-    else:
-        raise AssertionError("default Credit Snapshot failed to complete")
+    raise AssertionError("default Credit Snapshot failed to complete")
+
+
+def test_default_credit_snapshot_publishes_real_model_and_completes_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from deploy_vii.contracts import PATHWAY_MODULES
+    from deploy_vii.cp_model_workflow import verify_cp_model_publication
+    from deploy_vii.execution_cli import run_offline
+
+    args, store, submissions = credit_snapshot_case(tmp_path, monkeypatch)
+    paths = run_paths(args.out, args.run)
+    index = drive_credit_snapshot(args, store, submissions)
     assert Path(index) == paths["report"] / "index.html"
     assert verify_cp_model_publication(store, paths["journal"].parent / "cp-model") == ()
     receipt = json.loads((paths["report"] / "report.json").read_text())
@@ -978,3 +1001,139 @@ def test_run_keeps_canonical_pack_binding_after_effective_scope_extension(tmp_pa
         run_offline(args)
     assert stopped.value.code == 3
     assert store.pack() == pack and store.read().run.requested_modules == ("CP-1", "CP-0")
+
+
+def test_run_resumes_pending_deterministic_publication_before_review_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deploy_vii.cp1_workflow import promote_cp1
+    from deploy_vii.cp_model_workflow import publish_cp_model, verify_cp_model_publication
+    from deploy_vii.execution_cli import execute, run_offline
+
+    args, store, _ = credit_snapshot_case(tmp_path, monkeypatch)
+    paths = run_paths(args.out, args.run)
+    cp1 = store.read().attempts[-1]
+    promote_cp1(store, cp1.ticket_id, (paths["reviews"] / "CP-1-quality.review.json").read_text())
+
+    def crash(*_args: object, **_kwargs: object) -> Never:
+        raise RuntimeError("after publication before settlement")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "finish", crash)
+        with pytest.raises(RuntimeError, match="after publication"):
+            publish_cp_model(store, output=store.directory.parent / "cp-model")
+    pending = store.read().attempts[-1]
+    assert pending.module_id == "CP-MODEL" and pending.status == "pending"
+    resume_args = argparse.Namespace(
+        directory=store.directory, run=None, action="resume", ticket=None, review=None
+    )
+    assert "deterministic publication" in execute(resume_args)
+    resume_args.ticket, resume_args.review = pending.ticket_id, paths["reviews"] / "unused.json"
+    snapshot = store.read()
+    with pytest.raises(SystemExit) as refused:
+        execute(resume_args)
+    assert refused.value.code == 2 and store.read() == snapshot
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3  # the next analyst module needs its own review
+    finished = next(a for a in store.read().attempts if a.ticket_id == pending.ticket_id)
+    assert finished.status == "finished" and finished.number == pending.number == 0
+    assert verify_cp_model_publication(store, store.directory.parent / "cp-model") == ()
+    assert not list(paths["reviews"].glob("CP-MODEL*"))
+
+
+@pytest.fixture(scope="module")
+def completed_snapshot_without_model(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[argparse.Namespace, Execution, dict[str, BaseModel]]]:
+    with pytest.MonkeyPatch.context() as patch:
+        case = credit_snapshot_case(
+            tmp_path_factory.mktemp("before-model"), patch, with_model=False
+        )
+        drive_credit_snapshot(*case)
+        yield case
+
+
+@pytest.mark.parametrize("explicit_begin", [False, True], ids=["scheduler", "pending-refresh"])
+def test_scope_extension_refreshes_real_integrity_committee_and_versions_lineage_prompts(
+    tmp_path: Path,
+    completed_snapshot_without_model: tuple[argparse.Namespace, Execution, dict[str, BaseModel]],
+    explicit_begin: bool,
+) -> None:
+    import json
+    import shutil
+
+    from deploy_vii.cp5_integrity import review_scope
+    from deploy_vii.cp_model_workflow import publish_cp_model
+    from deploy_vii.execution_cli import execute, run_offline
+    from tests.product.test_cp5_integrity import review_all
+
+    original_args, original_store, submissions = completed_snapshot_without_model
+    out = tmp_path / "out"
+    shutil.copytree(original_store.directory.parent, out / original_args.run)
+    args = argparse.Namespace(**{**vars(original_args), "out": out})
+    paths = run_paths(out, args.run)
+    store = Execution(paths["journal"])
+    canonical = store.pack()
+    previous = {h.module_id: h for h in store.read().heads}
+    old_prompts = {}
+    for module, step in (("CP-5", "integrity_review"), ("CP-6", "committee_challenge")):
+        old_prompts[module] = (paths["reviews"] / f"{module}-{step}.instructions.txt").read_bytes()
+        review = paths["reviews"] / f"{module}-{step}.review.json"
+        review.rename(review.with_suffix(".previous.json"))
+    paths["report"].rename(paths["report"].with_name("report-before-extension"))
+    extension = store.extend_scope((*store.read().run.requested_modules, "CP-MODEL"))
+    assert {h.module_id for h in extension.staled} == {"CP-5", "CP-6"}
+    if explicit_begin:
+        publish_cp_model(store, output=store.directory.parent / "cp-model")
+        assert "next runnable module: CP-5" in execute(
+            argparse.Namespace(
+                directory=store.directory, run=None, action="resume", ticket=None, review=None
+            )
+        )
+        refreshed = store.begin("CP-5")
+        assert refreshed.number == 0 and refreshed.repair_of is None
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3
+    cp5 = store.read().attempts[-1]
+    assert cp5.module_id == "CP-5" and cp5.number == 0 and cp5.repair_of is None
+    prompt = paths["reviews"] / f"CP-5-integrity_review.{cp5.ticket_id}.0.instructions.txt"
+    current_prompt = prompt.read_bytes()
+    assert current_prompt != old_prompts["CP-5"]
+    # Private edits to even a legitimate new-lineage filename must not be overwritten.
+    prompt.write_text("retain private conflict")
+    before = store.read()
+    with pytest.raises(SystemExit) as refused:
+        run_offline(args)
+    assert refused.value.code == 2 and store.read() == before
+    assert prompt.read_text() == "retain private conflict"
+    prompt.write_bytes(current_prompt)
+    (paths["reviews"] / "CP-5-integrity_review.review.json").write_text(
+        review_all(review_scope(store, cp5)).model_dump_json()
+    )
+    with pytest.raises(SystemExit) as stopped:
+        run_offline(args)
+    assert stopped.value.code == 3
+    cp6 = store.read().attempts[-1]
+    assert cp6.module_id == "CP-6" and cp6.number == 0 and cp6.repair_of is None
+    assert (
+        paths["reviews"] / f"CP-6-committee_challenge.{cp6.ticket_id}.0.instructions.txt"
+    ).is_file()
+    (paths["reviews"] / "CP-6-committee_challenge.review.json").write_text(
+        submissions["CP-6"].model_dump_json()
+    )
+    index = run_offline(args)
+    assert Path(index) == paths["report"] / "index.html"
+    assert store.pack() == canonical and store.read().pack_sha256 == canonical.content_hash()
+    heads = {h.module_id: h for h in store.read().heads}
+    for module, step in (("CP-5", "integrity_review"), ("CP-6", "committee_challenge")):
+        assert heads[module].status == "restricted"
+        assert heads[module].result_sha256 != previous[module].result_sha256
+        assert (paths["reviews"] / f"{module}-{step}.instructions.txt").read_bytes() == old_prompts[
+            module
+        ]
+    receipt = json.loads((paths["report"] / "report.json").read_bytes())
+    assert not any(row["status"] == "stale" for row in receipt["modules"])
+    before = store.read()
+    assert run_offline(args) == index and store.read() == before

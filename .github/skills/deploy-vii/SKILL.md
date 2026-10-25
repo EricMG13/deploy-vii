@@ -30,7 +30,7 @@ deploy-vii run --request <request.json> --root <source-root> --run <run-id>
    names the `<module>-<step>.review.json` file to write. Use the instructions, write the review
    as JSON and rerun the same command. It submits through the production validators, in plan
    order, and stops on a rejected review (exit 1) with issue lines. Exit 2 means refused input.
-   Repair prompts preserve the first file and add a ticket/repair suffix. CP-MODEL publishes
+   Later tickets and repairs preserve the first file and add a ticket/repair suffix. CP-MODEL publishes
    deterministically into `cp-model/`; it does not ask for a review.
 3. To inspect a pending ticket, run `deploy-vii --out <delivery-root> execution --run <run-id>
    resume`. To resubmit explicitly, add `--ticket <ticket> --review <file>`.

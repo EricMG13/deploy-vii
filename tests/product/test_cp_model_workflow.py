@@ -4,6 +4,7 @@ import json
 import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Never
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -30,6 +31,7 @@ from deploy_vii.execution import (
     Execution,
     Head,
     Qualification,
+    StepSubmission,
     Validator,
     text_sha256,
 )
@@ -301,8 +303,8 @@ def test_the_model_panel_of_the_published_page_shows_the_json_link_and_provenanc
         expect(panel.locator(".chip")).to_have_text(status_display("restricted")[1])
         link = panel.locator("a", has_text="calculation.json")
         assert (
-            Path(link.evaluate("a => new URL(a.href).pathname"))
-            == (tmp_path / "model" / "calculation.json").resolve()
+            link.evaluate("a => a.href")
+            == (tmp_path / "model" / "calculation.json").resolve().as_uri()
         )
         expect(link).to_have_attribute("href", "calculation.json")
         provenance = (
@@ -360,7 +362,7 @@ def test_a_pending_attempt_is_a_refusal_the_cli_reports_with_exit_2(
     from deploy_vii.__main__ import main
 
     store = fresh(promoted, tmp_path)
-    store.begin("CP-MODEL")  # left pending
+    store.begin("CP-1A")  # a different module's pending ticket cannot be resumed by this publisher
     argv = ["deploy-vii", "execution", "--directory", str(store.directory)]
     monkeypatch.setattr("sys.argv", [*argv, "cp-model-publish", "--output", str(tmp_path / "out")])
     with pytest.raises(SystemExit) as exit_:
@@ -398,7 +400,7 @@ def test_inputs_changed_after_the_files_are_written_leaves_the_ticket_pending(
     assert "CP-MODEL" not in heads(store)
     assert [a.status for a in store.read().attempts if a.module_id == "CP-MODEL"] == ["pending"]
     monkeypatch.undo()
-    with pytest.raises(CpModelRefused, match="An attempt is pending"):
+    with pytest.raises(CpModelRefused, match="Ticket inputs have changed"):
         publish_cp_model(store, output=tmp_path / "again")
 
 
@@ -732,3 +734,229 @@ def test_verify_reports_a_head_blob_the_journal_cannot_read(
     assert verify_cp_model_publication(store, output) == (
         f"CP-MODEL cannot be re-derived from the journal: Execution blob {sha} is missing",
     )
+
+
+class PublicationCrash(BaseException):
+    """A process interruption bypasses the publisher's documented ordinary-error handling."""
+
+
+@pytest.fixture(scope="module")
+def pending_publication(
+    promoted: Execution, tmp_path_factory: pytest.TempPathFactory
+) -> tuple[Execution, Path]:
+    root = tmp_path_factory.mktemp("pending-model")
+    store = fresh(promoted, root)
+    output = root / "model"
+
+    def crash(*_args: object, **_kwargs: object) -> Never:
+        raise PublicationCrash("before finish")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(store, "finish", crash)
+        with pytest.raises(PublicationCrash):
+            publish_cp_model(store, output=output)
+    return store, output
+
+
+def pending_copy(case: tuple[Execution, Path], tmp_path: Path) -> tuple[Execution, Path]:
+    store, output = case
+    copied = fresh(store, tmp_path)
+    target = tmp_path / "model"
+    shutil.copytree(output, target)
+    return copied, target
+
+
+@pytest.mark.parametrize(
+    "phase", ["before-write", "during-write", "after-write", "retained-payload"]
+)
+def test_publication_process_interruption_keeps_the_same_ticket_and_recovery_bytes(
+    promoted: Execution, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    store = fresh(promoted, tmp_path)
+    output = tmp_path / "model"
+    original_write, original_finish = cp_model_workflow._write, store.finish
+
+    def interrupted_write(output: Path, files: dict[str, str]) -> None:
+        if phase == "before-write":
+            raise PublicationCrash(phase)
+        if phase == "during-write":
+            output.mkdir()
+            (output / "model.html").write_text(files["model.html"])
+            raise PublicationCrash(phase)
+        original_write(output, files)
+        raise PublicationCrash(phase)
+
+    def interrupted_finish(
+        ticket: str, payload: str, validator: Validator, **kwargs: object
+    ) -> Attempt:
+        def crash(_candidate: Module) -> Never:
+            raise PublicationCrash(phase)
+
+        return original_finish(ticket, payload, crash, **kwargs)
+
+    with monkeypatch.context() as patch:
+        if phase == "retained-payload":
+            patch.setattr(store, "finish", interrupted_finish)
+        else:
+            patch.setattr(cp_model_workflow, "_write", interrupted_write)
+        with pytest.raises(PublicationCrash):
+            publish_cp_model(store, output=output)
+    pending = store.read().attempts[-1]
+    assert pending.module_id == "CP-MODEL" and pending.status == "pending" and pending.number == 0
+    before = {p.name: p.read_bytes() for p in output.iterdir()} if output.exists() else {}
+    if phase == "during-write":
+        snapshot = store.read()
+        with pytest.raises(CpModelRefused):
+            publish_cp_model(store, output=output)
+        assert (
+            store.read() == snapshot
+            and {p.name: p.read_bytes() for p in output.iterdir()} == before
+        )
+        return
+    finished = publish_cp_model(store, output=output)
+    assert finished.ticket_id == pending.ticket_id and finished.number == pending.number
+    assert not finished.issues and finished.interruption is None
+    assert len([a for a in store.read().attempts if a.module_id == "CP-MODEL"]) == 1
+    if pending.payload_sha256 is not None:
+        assert finished.payload_sha256 == pending.payload_sha256
+    for name, raw in before.items():
+        assert (output / name).read_bytes() == raw
+    assert verify_cp_model_publication(store, output) == ()
+
+
+def test_complete_pending_publication_reuses_exact_files_and_matches_uninterrupted_output(
+    pending_publication: tuple[Execution, Path], promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = pending_copy(pending_publication, tmp_path)
+    pending = store.read().attempts[-1]
+    before = {p.name: p.read_bytes() for p in output.iterdir()}
+    finished = publish_cp_model(store, output=output)
+    assert finished.ticket_id == pending.ticket_id and finished.inputs == pending.inputs
+    assert finished.number == pending.number == 0 and not finished.issues
+    assert {p.name: p.read_bytes() for p in output.iterdir()} == before
+    (tmp_path / "uninterrupted").mkdir()
+    direct = fresh(promoted, tmp_path / "uninterrupted")
+    direct_output = tmp_path / "uninterrupted/model"
+    normal = publish_cp_model(direct, output=direct_output)
+    assert normal.result_sha256 == finished.result_sha256
+    for name in ("model.html", "calculation.json"):
+        assert (direct_output / name).read_bytes() == before[name]
+    resumed_receipt = json.loads(before["receipt.json"])
+    direct_receipt = json.loads((direct_output / "receipt.json").read_bytes())
+    assert resumed_receipt.pop("ticket_id") == pending.ticket_id
+    assert direct_receipt.pop("ticket_id") == normal.ticket_id
+    assert resumed_receipt == direct_receipt
+
+
+@pytest.mark.parametrize("case", ["partial", "conflict", "directory-symlink", "file-symlink"])
+def test_pending_publication_refuses_unowned_outputs_without_mutation_or_repair_consumption(
+    pending_publication: tuple[Execution, Path], tmp_path: Path, case: str
+) -> None:
+    store, output = pending_copy(pending_publication, tmp_path)
+    private = tmp_path / "private"
+    private.write_text("retain private bytes")
+    if case == "partial":
+        (output / "receipt.json").unlink()
+    elif case == "conflict":
+        (output / "receipt.json").write_bytes(b"unrelated receipt\r\n")
+    elif case == "directory-symlink":
+        saved = output.with_name("saved-model")
+        output.rename(saved)
+        output.symlink_to(saved)
+    else:
+        (output / "model.html").unlink()
+        (output / "model.html").symlink_to(private)
+    before = store.read()
+    files = {p.name: p.read_bytes() for p in output.iterdir()}
+    with pytest.raises(CpModelRefused):
+        publish_cp_model(store, output=output)
+    assert store.read() == before
+    assert {p.name: p.read_bytes() for p in output.iterdir()} == files
+    assert private.read_text() == "retain private bytes"
+    assert store.read().attempts[-1].status == "pending"
+
+
+@pytest.mark.parametrize("drift", ["pack", "basis", "payload", "host-step"])
+def test_pending_publication_refuses_changed_bindings_or_retained_payload(
+    pending_publication: tuple[Execution, Path], tmp_path: Path, drift: str
+) -> None:
+    store, output = pending_copy(pending_publication, tmp_path)
+    snapshot = store.read()
+    if drift == "pack":
+        pack = store.pack().model_copy(update={"sources": ()})
+        store._write(
+            snapshot.model_copy(update={"pack_sha256": store._store(pack.model_dump_json())})
+        )
+    elif drift == "basis":
+        head = heads(store)["CP-1"]
+        result = store.head_module(head).model_copy(update={"limitations": ("Different basis",)})
+        sha = store._store(result.model_dump_json())
+        store._write(
+            snapshot.model_copy(
+                update={
+                    "heads": tuple(
+                        h.model_copy(update={"result_sha256": sha}) if h.module_id == "CP-1" else h
+                        for h in snapshot.heads
+                    )
+                }
+            )
+        )
+    elif drift == "host-step":
+        pending = snapshot.attempts[-1]
+        step = StepSubmission(
+            step_id="untrusted", inputs=pending.inputs, payload_sha256=store._store("{}")
+        )
+        pending = pending.model_copy(update={"steps": (step,)})
+        store._write(snapshot.model_copy(update={"attempts": (*snapshot.attempts[:-1], pending)}))
+    else:
+        pending = snapshot.attempts[-1].model_copy(update={"payload_sha256": store._store("{}")})
+        store._write(snapshot.model_copy(update={"attempts": (*snapshot.attempts[:-1], pending)}))
+    before = store.read()
+    files = {p.name: p.read_bytes() for p in output.iterdir()}
+    with pytest.raises(CpModelRefused):
+        publish_cp_model(store, output=output)
+    assert store.read() == before and {p.name: p.read_bytes() for p in output.iterdir()} == files
+    assert store.read().attempts[-1].status == "pending"
+
+
+@pytest.mark.parametrize("error_type", [ValueError, OSError])
+def test_pending_publication_finish_refusal_preserves_the_ticket_for_an_exact_retry(
+    pending_publication: tuple[Execution, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[ValueError] | type[OSError],
+) -> None:
+    store, output = pending_copy(pending_publication, tmp_path)
+    before = store.read()
+
+    def refused(*_args: object, **_kwargs: object) -> Never:
+        raise error_type("causal finish refusal")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "finish", refused)
+        with pytest.raises(CpModelRefused, match="causal finish refusal"):
+            publish_cp_model(store, output=output)
+    assert store.read() == before
+    assert publish_cp_model(store, output=output).ticket_id == before.attempts[-1].ticket_id
+
+
+def test_pending_publication_write_error_keeps_the_same_ticket_and_partial_files(
+    pending_publication: tuple[Execution, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, original = pending_copy(pending_publication, tmp_path)
+    output = original.with_name("absent-output")
+    before = store.read()
+
+    def partial_write(output: Path, files: dict[str, str]) -> Never:
+        output.mkdir()
+        (output / "model.html").write_text(files["model.html"])
+        raise OSError("recovery disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cp_model_workflow, "_write", partial_write)
+        with pytest.raises(CpModelRefused, match="recovery disk full"):
+            publish_cp_model(store, output=output)
+    assert store.read() == before and (output / "model.html").is_file()
+    with pytest.raises(CpModelRefused):
+        publish_cp_model(store, output=output)
+    assert store.read() == before and not (output / "receipt.json").exists()
