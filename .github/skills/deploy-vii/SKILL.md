@@ -69,8 +69,9 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-instruct
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp1-promote --ticket <ticket> --review ./deploy-vii-out/<run-id>/reviews/cp1-quality.txt
 ```
 
-   `step-output` prints a retained output (read it before the next review);
-   `cp1-quality-inputs` prints the QA registers; `cp1-promote` settles CP-1. Repeat per step.
+   `step-output` prints a retained output; `cp1-quality-inputs` prints the QA registers;
+   `cp1-promote` settles CP-1. Repeat `step-instructions` before each `cp1-submit` step
+   (financials, narrative, readiness).
 
 6. Optional preview while CP-1 is pending (never settles a ticket):
 
@@ -96,9 +97,8 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp-model-veri
 ```
 
 9. Each later module (CP-1A, CP-2 to CP-6; names in `references/commands.md`): begin, print
-   the step's instructions (rules, JSON Schema, CONTEXT; the sources it lists are files under
-   `pack/`), write the review, submit. A rejected review prints the validator's issues on
-   stderr and exits 1: repair, then `begin` again. Exit 2 refuses.
+   its instructions (rules, JSON Schema, CONTEXT, sources), write the review, submit. A rejected
+   review prints issues on stderr, exit 1: repair, `begin` again. Exit 2 refuses.
 
 ```
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal step-instructions --module CP-2 --ticket <ticket> --step credit_synthesis
