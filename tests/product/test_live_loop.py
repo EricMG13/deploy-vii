@@ -52,6 +52,7 @@ from deploy_vii.live.settings import StepEffort, load_settings
 from deploy_vii.live.submission import STEPS
 from deploy_vii.live.tools import (
     ABSENCE,
+    INCOMPLETE,
     UNBACKED_ABSENCE,
     PackTools,
     ToolError,
@@ -62,6 +63,7 @@ from deploy_vii.preparation import PreparedPack
 from deploy_vii.registry import PACK_TOOLS, SUBMIT_ONLY, tool_set, tool_sets
 from tests.product import test_cp3_relative_value as cp3_tests
 from tests.product import test_live_modules as module_tests
+from tests.product import transcript_support
 from tests.product.live_support import catalog_of, catalog_row, make_rtf_key
 from tests.product.test_business_context import submission_fixture as cp1a_submission
 from tests.product.test_cp1_workflow import staged
@@ -1325,3 +1327,102 @@ def test_the_limits_hold_and_the_ledger_sums_the_settled_calls_on_every_new_step
 
 
 REJECTED_89 = json.dumps({"unexpected": 1})
+
+
+# --- task 8.12: the extracted-coverage floor on the recorded financials transcripts ---------
+
+FINANCIALS_TRANSCRIPTS = transcript_support.TRANSCRIPT_ROOT / "financials"
+COVERAGE_ALL = ToolRules(coverage_min=Decimal("1.00"))
+# hybrid-cp1-6 Sol medium (accepted by the harness and by the default rules): per expected cell
+# of its source_context review, (statement, scope, dates, covered, extracted, shown coverage),
+# counted from the 19 pages its financials step read (the IS on page:57, the CFS on pages
+# 60-61, the BS on page:56) against the payload's cited lines. Its lines hold FY2025 and
+# 2025-12-31 only, so every comparative cell covers none of its page's lines.
+HYBRID_CELLS = (
+    ("IS", "CZR-FY2025", "2025-01-01 to 2025-12-31", 17, 29, "0.5862"),
+    ("CFS", "CZR-FY2025", "2025-01-01 to 2025-12-31", 40, 48, "0.8333"),
+    ("IS", "CZR-FY2024", "2024-01-01 to 2024-12-31", 0, 29, "0.0000"),
+    ("CFS", "CZR-FY2024", "2024-01-01 to 2024-12-31", 0, 48, "0.0000"),
+    ("IS", "CZR-FY2023", "2023-01-01 to 2023-12-31", 0, 29, "0.0000"),
+    ("CFS", "CZR-FY2023", "2023-01-01 to 2023-12-31", 0, 48, "0.0000"),
+    ("BS", "CZR-BS2025", "2025-12-31", 31, 33, "0.9393"),
+    ("BS", "CZR-BS2024", "2024-12-31", 0, 33, "0.0000"),
+)
+HYBRID_FLOOR_ISSUES = [
+    f"{INCOMPLETE}: coverage {shown} of {statement} czr-2025-10k scope {scope} ({dates}) below "
+    f"the floor 1.00 ({covered} of {extracted} extracted lines covered)"
+    for statement, scope, dates, covered, extracted, shown in HYBRID_CELLS
+]
+HYBRID_QUOTE_ISSUE = (
+    "Quote/locator mismatch: quote not found under czr-2025-10k page:95 (normalised whitespace, "
+    'quote marks and dashes): "Reconciliation"'
+)
+
+
+def _financials_entry(name: str, tmp_path: Path) -> tuple[dict[str, Any], Path]:
+    entry: dict[str, Any] = json.loads(
+        (FINANCIALS_TRANSCRIPTS / f"{name}.json").read_text(encoding="utf-8")
+    )
+    start = transcript_support.start_journal(entry, transcript_support.REPOSITORY_ROOT, tmp_path)
+    if start is None:  # a harness entry's artifacts are absent: never a pass
+        pytest.skip(f"financials/{name}: {entry['start_journal']} is not in this checkout")
+    return entry, start
+
+
+@pytest.mark.parametrize("name", ["synthetic-search-accept", "hybrid-cp1-6-sol-medium"])
+def test_the_coverage_telemetry_leaves_the_financials_transcripts_as_recorded(
+    name: str, tmp_path: Path
+) -> None:
+    """Differential (decision 0012), floor off: each recorded financials step replays exactly as
+    recorded (requests, tool results, verdicts, submits and cost: `transcript_support.check`),
+    and every submit's record carries the additive `extracted_coverage` field."""
+    entry, start = _financials_entry(name, tmp_path)
+    assert transcript_support.check(entry, tmp_path / "check") == (transcript_support.OK, "")
+    replayed = transcript_support.replay(entry, start, tmp_path / "ruled", rules=ToolRules())
+    submits = [{"outcome": s["outcome"], "issues": s["issues"]} for s in replayed.result.submits]
+    assert submits == entry["rules"]["submits"]
+    assert all("extracted_coverage" in s for s in replayed.result.submits)
+    assert format(replayed.result.cost_usd, "f") == entry["expected"]["cost_settled_usd"]
+
+
+def test_a_full_coverage_floor_rejects_the_recorded_hybrid_financials_payload(
+    tmp_path: Path,
+) -> None:
+    """Differential: with `extracted_coverage_min = "1.00"` the payload the harness and the
+    default rules accept is rejected with one issue per expected cell (`HYBRID_FLOOR_ISSUES`),
+    its first submit with the quote issue it had and the same eight; the recorded replies then
+    run out (the step ends without a submit) and the cost is the recorded one."""
+    entry, start = _financials_entry("hybrid-cp1-6-sol-medium", tmp_path)
+    replayed = transcript_support.replay(entry, start, tmp_path / "floor", rules=COVERAGE_ALL)
+    assert [(s["outcome"], s["issues"]) for s in replayed.result.submits] == [
+        ("rejected", [HYBRID_QUOTE_ISSUE, *HYBRID_FLOOR_ISSUES]),
+        ("rejected", HYBRID_FLOOR_ISSUES),
+    ]
+    assert replayed.result.verdict == "rejected: no-submit"
+    assert format(replayed.result.cost_usd, "f") == entry["expected"]["cost_settled_usd"]
+    measured = replayed.result.submits[-1]["extracted_coverage"]
+    assert measured["overall"] == {
+        "extracted": 297,
+        "covered": 88,
+        "coverage": "0.2962",
+        "reason": None,
+    }
+    agreement = measured["agreement"]
+    counts = [agreement[k] for k in ("agreed", "sign_differs", "disagreed", "unmatched")]
+    assert counts == [79, 9, 0, 11]
+
+
+def test_a_full_coverage_floor_leaves_the_synthetic_financials_payload_accepted(
+    tmp_path: Path,
+) -> None:
+    """The synthetic step searched and read no page, so no cell has extracted lines: the floor
+    judges none (the documented fail-open, `UNMEASURED_CELLS`) and the payload stays accepted."""
+    entry, start = _financials_entry("synthetic-search-accept", tmp_path)
+    replayed = transcript_support.replay(entry, start, tmp_path / "floor", rules=COVERAGE_ALL)
+    assert [(s["outcome"], s["issues"]) for s in replayed.result.submits] == [("accepted", [])]
+    measured = replayed.result.submits[0]["extracted_coverage"]
+    assert measured["overall"]["reason"] == "none of the 0 extracted pages holds a statement line"
+    assert {key: cell["coverage"] for key, cell in measured["cells"].items()} == {
+        "IS S1 scope FY (2025-01-01 to 2025-12-31)": None,
+        "CFS S1 scope FY (2025-01-01 to 2025-12-31)": None,
+    }
