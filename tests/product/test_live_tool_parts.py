@@ -609,6 +609,10 @@ def test_the_project_settings_plan_every_tool_step_at_medium_with_a_high_ceiling
     loaded = load_settings(path)
     assert loaded.tool_loop and loaded.completeness_floor is None
     assert loaded.extracted_coverage_min is None  # task 8.12: off (user decision "C")
+    # Task 8.12 item 5: the suggested floor is the commented default; the floor stays off.
+    text = path.read_text(encoding="utf-8")
+    assert '\n# extracted_coverage_min = "0.50"\n' in text
+    assert "\nextracted_coverage_min" not in text
     assert set(loaded.step_efforts) == tool_loop_steps()
     assert set(loaded.step_efforts.values()) == {StepEffort("medium", "high")}
     table = path.read_text(encoding="utf-8").split("[model_tests.step_effort]\n", 1)[1]
