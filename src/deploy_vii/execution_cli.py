@@ -171,6 +171,8 @@ def review_text(args: argparse.Namespace) -> str:
     path: Path = args.readiness_addendum if args.action == "extend-scope" else args.review
     try:
         return path.read_text(encoding="utf-8")
+    except FileNotFoundError as missing:
+        raise refusal_exit(f"{args.action} refused: no review file at {path}") from missing
     except (OSError, UnicodeError) as error:
         raise refusal_exit(f"{args.action} refused: cannot read review file at {path}") from error
 
