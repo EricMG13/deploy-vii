@@ -115,22 +115,24 @@ def limit(
 
 
 ISSUERS = (
-    ("Alpha Example Holdings (synthetic)", "Term Loan B due 2030 (synthetic)", "B3 / B"),
-    ("Beta Sample Aerospace (synthetic)", "Term Loan B due 2031 (synthetic)", "Ba3 / BB-"),
-    ("Gamma Illustrative Media (synthetic)", "Term Loan B due 2029 (synthetic)", "B2 / B"),
-    ("Delta Placeholder Networks (synthetic)", "Term Loan due 2028 (synthetic)", "B1 / B+"),
-    ("Epsilon Demo Leisure (synthetic)", "Senior Secured Notes due 2032 (synthetic)", "B2 / B+"),
+    ("Alpha Example Holdings (synthetic)", "Term Loan B due 2030 (synthetic)", "B2 / B+"),
+    ("Beta Sample Aerospace (synthetic)", "Term Loan B due 2031 (synthetic)", "Ba2 / BB"),
+    ("Gamma Illustrative Media (synthetic)", "Term Loan B due 2029 (synthetic)", "B3 / B-"),
+    ("Delta Placeholder Networks (synthetic)", "Term Loan due 2028 (synthetic)", "B1 / B"),
+    ("Epsilon Demo Leisure (synthetic)", "Senior Secured Notes due 2032 (synthetic)", "Ba3 / BB-"),
 )
+# Illustrative positions: only the largest one's 2.37 % NAV is a design figure (C-01's current
+# value); market values are pct_nav of NAV to two places, nothing mirrors a reference row.
 POSITIONS = (  # facility_id, par, market_value, pct_nav, sector, seniority, maturity
-    ("TLB-2030", "15000000", "14951250", "2.37", "Insurance", "1st Lien", "2030-06-30"),
-    ("TLB-2031", "12100000", "12043500", "1.91", "Aerospace & Defense", "1st Lien", "2031-03-31"),
-    ("TLB-2029", "9000000", "8990625", "1.42", "Entertainment Content", "1st Lien", "2029-12-31"),
-    ("TL-2028", "6100000", "6031875", "0.96", "Cable & Satellite", "1st Lien", "2028-09-30"),
+    ("TLB-2030", "15000000", "14962500", "2.37", "Software", "1st Lien", "2030-09-30"),
+    ("TLB-2031", "11400000", "11357000", "1.80", "Business Services", "1st Lien", "2031-06-30"),
+    ("TLB-2029", "9500000", "9464000", "1.50", "Health Care Services", "1st Lien", "2029-03-31"),
+    ("TL-2028", "7000000", "6940000", "1.10", "Chemicals", "1st Lien", "2028-12-31"),
     (
         "SSN-2032",
-        "6000000",
-        "6026250",
-        "0.96",
+        "5700000",
+        "5678400",
+        "0.90",
         "Leisure Facilities & Services",
         "Senior Secured",
         "2032-07-15",
@@ -140,42 +142,43 @@ PORTFOLIO_ROWS: Mapping[str, tuple[Mapping[str, str], ...]] = {
     "Mandate": (
         mandate_row("Strategy", "fund_name", FUND, "fictional fund"),
         mandate_row("Strategy", "strategy", "CLO"),
-        mandate_row("Strategy", "non_call_period", "2025-03-15 to 2027-03-15", "2 years"),
-        mandate_row("Strategy", "legal_final_maturity", "2038-03-15"),
+        mandate_row("Strategy", "non_call_period", "2025-04-15 to 2027-04-15", "2 years"),
+        mandate_row("Strategy", "legal_final_maturity", "2038-04-15"),
         mandate_row("Key Parties", "collateral_manager", "Synthetic Asset Management LLP"),
         mandate_row("Key Parties", "trustee", "Synthetic Trustee Bank"),
         mandate_row("Capital Structure", "nav", "630928502", "collateral pool market value"),
         mandate_row("Capital Structure", "nav_currency", "USD"),
-        mandate_row("Capital Structure", "subordinated_notes", "USD 50,000,000", "first loss"),
+        mandate_row("Capital Structure", "subordinated_notes", "USD 45,000,000", "first loss"),
         mandate_row("Mandate Constraints", "constraint_schedule", "see Compliance_Monitor"),
         mandate_row("Liquidity Terms", "redemption", "none (CLO structure)", "callable after NC"),
-        mandate_row("Fees", "senior_management_fee", "15 bps p.a. on collateral balance"),
+        mandate_row("Fees", "senior_management_fee", "20 bps p.a. on collateral balance"),
         mandate_row("Reporting", "as_of", AS_OF, "NAV and compliance date"),
         mandate_row("Reporting", "investor_reporting", "monthly trustee report"),
     ),
     "Exposure_Summary": (
         metric("nav", "630928502", "USD"),
-        metric("total_par", "634000000", "USD"),
-        metric("obligors", "350", "count"),
-        metric("positions", "383", "count"),
-        metric("sectors", "52", "count"),
-        metric("war_notch", "14.3", "rating notch (B1)"),
-        metric("wa_margin", "313", "bps"),
-        metric("wa_ytm", "3.29", "%"),
-        metric("wal", "4.82", "years"),
-        metric("wa_price", "99.578", "price"),
-        metric("first_lien_pct_nav", "99.39", "% NAV"),
-        metric("top10_pct_nav", "11.05", "% NAV"),
+        metric("total_par", "635000000", "USD"),
+        metric("obligors", "300", "count"),
+        metric("positions", "320", "count"),
+        metric("sectors", "40", "count"),
+        metric("war_notch", "14.0", "rating notch"),
+        metric("wa_margin", "325", "bps"),
+        metric("wa_ytm", "3.50", "%"),
+        metric("wal", "4.50", "years"),
+        metric("wa_price", "99.50", "price"),
+        metric("first_lien_pct_nav", "99.39", "% NAV"),  # 100 minus C-10's 0.61
+        metric("top10_pct_nav", "11.00", "% NAV"),
     ),
     "Rating_Distribution": tuple(
         {"rating_bucket": bucket, "pct_nav": pct, "issuers": issuers}
         for bucket, pct, issuers in (
-            ("IG (Baa+)", "0.32", "1"),
-            ("BB (Ba)", "25.02", "70"),
-            ("B", "67.30", "259"),
-            ("CCC (Caa+)", "0.14", "1"),
-            ("Other", "3.50", "11"),
-            ("Unrated", "3.73", "10"),
+            # CCC + Other + Unrated is C-04's 7.36; Unrated is C-05's 3.73.
+            ("IG (Baa+)", "0.50", "2"),
+            ("BB (Ba)", "25.00", "60"),
+            ("B", "67.14", "225"),
+            ("CCC (Caa+)", "0.23", "2"),
+            ("Other", "3.40", "9"),
+            ("Unrated", "3.73", "8"),
         )
     ),
     "Sector_Exposure": tuple(
@@ -188,11 +191,11 @@ PORTFOLIO_ROWS: Mapping[str, tuple[Mapping[str, str], ...]] = {
             "status": "Pass",
         }
         for sector, pct, issuers, headroom in (
-            ("Health Care Facilities & Services", "7.16", "25", "2.84"),
-            ("Commercial Support Services", "6.74", "36", "3.26"),
-            ("Insurance", "5.63", "11", "4.37"),
-            ("Software", "5.31", "39", "4.69"),
-            ("Leisure Facilities & Services", "4.57", "19", "5.43"),
+            ("Health Care Services", "7.00", "20", "3.00"),
+            ("Business Services", "6.50", "30", "3.50"),
+            ("Software", "5.75", "35", "4.25"),
+            ("Chemicals", "5.25", "12", "4.75"),
+            ("Leisure Facilities & Services", "4.57", "15", "5.43"),  # SECTOR's 4.57
         )
     ),
     "Top_Holdings": tuple(
@@ -210,11 +213,11 @@ PORTFOLIO_ROWS: Mapping[str, tuple[Mapping[str, str], ...]] = {
     "Maturity_Profile": tuple(
         {"bucket": bucket, "pct_nav": pct}
         for bucket, pct in (
-            ("< 1 Year", "0.15"),
-            ("1-2 Years", "3.78"),
-            ("2-3 Years", "12.56"),
-            ("3-5 Years", "29.20"),
-            ("5-7 Years", "54.31"),
+            ("< 1 Year", "0.50"),
+            ("1-2 Years", "4.00"),
+            ("2-3 Years", "12.00"),
+            ("3-5 Years", "30.00"),
+            ("5-7 Years", "53.50"),
         )
     ),
     "Compliance_Monitor": (

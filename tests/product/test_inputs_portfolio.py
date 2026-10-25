@@ -1181,18 +1181,158 @@ def test_an_independent_reader_sees_the_template_sheets_headers_and_readme() -> 
     assert compliance[1][11] == "2026-05-29"
 
 
-def test_template_names_only_fictional_parties_issuers_and_checkers() -> None:
-    # An allow-list, so no reference name has to be written here to be kept out: every issuer
-    # and the fund are marked synthetic, every key party is a Synthetic one, every checker is
-    # the role `analyst`.
-    rows = PORTFOLIO_ROWS
-    named = [row["issuer"] for name in ("Top_Holdings", "Holdings_Detail") for row in rows[name]]
-    assert named and all(issuer.endswith("(synthetic)") for issuer in named)
-    parties = [row["value"] for row in rows["Mandate"] if row["section"] == "Key Parties"]
-    assert parties and all(party.startswith("Synthetic ") for party in parties)
-    assert {row["checked_by"] for row in rows["Compliance_Monitor"]} == {"analyst"}
-    fund = [row["value"] for row in rows["Mandate"] if row["field"] == "fund_name"]
-    assert fund == ["Test CLO I Ltd (synthetic)"]
+# Every text cell the template may hold besides its headers and README lines, written out here
+# so that any new string in the builder needs a reviewed edit of this list. Fictional names
+# only; none is a reference workbook's person, party or issuer.
+TEMPLATE_TEXT = (
+    # Mandate
+    "Strategy",
+    "Key Parties",
+    "Capital Structure",
+    "Mandate Constraints",
+    "Liquidity Terms",
+    "Fees",
+    "Reporting",
+    "fund_name",
+    "strategy",
+    "non_call_period",
+    "legal_final_maturity",
+    "collateral_manager",
+    "trustee",
+    "nav",
+    "nav_currency",
+    "subordinated_notes",
+    "constraint_schedule",
+    "redemption",
+    "senior_management_fee",
+    "as_of",
+    "investor_reporting",
+    "Test CLO I Ltd (synthetic)",
+    "CLO",
+    "2025-04-15 to 2027-04-15",
+    "2038-04-15",
+    "Synthetic Asset Management LLP",
+    "Synthetic Trustee Bank",
+    "630928502",
+    "USD",
+    "USD 45,000,000",
+    "see Compliance_Monitor",
+    "none (CLO structure)",
+    "20 bps p.a. on collateral balance",
+    "2026-05-29",
+    "monthly trustee report",
+    "fictional fund",
+    "2 years",
+    "collateral pool market value",
+    "first loss",
+    "callable after NC",
+    "NAV and compliance date",
+    # Exposure_Summary
+    "total_par",
+    "obligors",
+    "positions",
+    "sectors",
+    "war_notch",
+    "wa_margin",
+    "wa_ytm",
+    "wal",
+    "wa_price",
+    "first_lien_pct_nav",
+    "top10_pct_nav",
+    "count",
+    "rating notch",
+    "bps",
+    "%",
+    "years",
+    "price",
+    "% NAV",
+    # Rating_Distribution, Sector_Exposure, Maturity_Profile
+    "IG (Baa+)",
+    "BB (Ba)",
+    "B",
+    "CCC (Caa+)",
+    "Other",
+    "Unrated",
+    "Health Care Services",
+    "Business Services",
+    "Software",
+    "Chemicals",
+    "Leisure Facilities & Services",
+    "Pass",
+    "< 1 Year",
+    "1-2 Years",
+    "2-3 Years",
+    "3-5 Years",
+    "5-7 Years",
+    # Top_Holdings and Holdings_Detail
+    "Alpha Example Holdings (synthetic)",
+    "Beta Sample Aerospace (synthetic)",
+    "Gamma Illustrative Media (synthetic)",
+    "Delta Placeholder Networks (synthetic)",
+    "Epsilon Demo Leisure (synthetic)",
+    "Term Loan B due 2030 (synthetic)",
+    "Term Loan B due 2031 (synthetic)",
+    "Term Loan B due 2029 (synthetic)",
+    "Term Loan due 2028 (synthetic)",
+    "Senior Secured Notes due 2032 (synthetic)",
+    "B2 / B+",
+    "Ba2 / BB",
+    "B3 / B-",
+    "B1 / B",
+    "Ba3 / BB-",
+    "TLB-2030",
+    "TLB-2031",
+    "TLB-2029",
+    "TL-2028",
+    "SSN-2032",
+    "1st Lien",
+    "Senior Secured",
+    "2030-09-30",
+    "2031-06-30",
+    "2029-03-31",
+    "2028-12-31",
+    "2032-07-15",
+    # Compliance_Monitor
+    "C-01",
+    "C-04",
+    "C-05",
+    "C-10",
+    "SECTOR",
+    "Single Name",
+    "Rating - CCC Bucket",
+    "Rating - Unrated",
+    "Instrument",
+    "Sector",
+    "Max single issuer exposure",
+    "Max CCC+ and below (incl. Unrated and Other)",
+    "Max unrated exposure",
+    "Max 2nd Lien / Unsecured",
+    "Max single sector (candidate's sector: Leisure Facilities & Services)",
+    "Hard",
+    "Soft",
+    "issuer",
+    "rating_bucket",
+    "seniority",
+    "sector",
+    "Indenture §7.11 (synthetic)",
+    "Watch",
+    "analyst",
+)
+
+
+def test_every_template_text_cell_is_on_the_allow_list() -> None:
+    book = openpyxl.load_workbook(TEMPLATE, read_only=True)
+    found = {
+        value
+        for sheet in book.worksheets
+        for row in sheet.iter_rows(values_only=True)
+        for value in row
+        if isinstance(value, str)
+    }
+    headers = {column for header in BRIEF_SHEETS.values() for column in header}
+    allowed = set(TEMPLATE_TEXT) | headers | set(PORTFOLIO_README)
+    assert sorted(found - allowed) == []  # a string nobody reviewed
+    assert sorted(allowed - found) == []  # a stale entry
 
 
 def test_readme_documents_every_sheet_column_and_fix() -> None:
