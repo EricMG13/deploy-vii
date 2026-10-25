@@ -77,7 +77,8 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from functools import cached_property, partial
+from functools import cached_property, partial, reduce
+from operator import or_
 from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, create_model
@@ -1124,6 +1125,15 @@ def _part_models() -> dict[str, type[BaseModel]]:
 
 
 PART_MODELS: Mapping[str, type[BaseModel]] = _part_models()
+# The arguments of a `submit_financials_part` call, for its sent schema (`live.tools.part_spec`):
+# the part's kind and a payload of one of the five partial schemas (Python checks the one the
+# kind names; the union only shows the model each shape).
+PART_CALL: type[BaseModel] = create_model(
+    "FinancialsPartCall",
+    __base__=Contract,
+    part=(PartKind, ...),
+    payload=(reduce(or_, (PART_MODELS[kind] for kind in PART_KINDS)), ...),
+)
 
 
 def partial_schema(kind: str) -> type[BaseModel]:
@@ -1255,12 +1265,16 @@ class Parts:
     def unit(self, kind: str) -> str:
         return "lines" if kind in STATEMENT_PARTS else "entries"
 
+    def sizes(self) -> dict[str, int]:
+        """Each held part's size, in part order."""
+        return {kind: self.size(kind) for kind in PART_KINDS if kind in self.held}
+
     def listing(self) -> str:
-        """The parts held and those not sent, for the model."""
-        held = [f"{k} ({self.size(k)} {self.unit(k)})" for k in PART_KINDS if k in self.held]
+        """The parts held and those not held (never sent, or only rejected), for the model."""
+        held = [f"{k} ({n} {self.unit(k)})" for k, n in self.sizes().items()]
         missing = [kind for kind in PART_KINDS if kind not in self.held]
         return (
-            f"parts held: {', '.join(held) or 'none'}; parts not sent: "
+            f"parts held: {', '.join(held) or 'none'}; parts not held: "
             f"{', '.join(missing) or 'none'}"
         )
 

@@ -50,6 +50,14 @@ Effort: the step's row of the settings table (`LiveSettings.step_effort`), or th
 `--models ID@EFFORT`. After two rejected submits or a completeness-floor rejection, later calls
 of the step are sent one level higher, never above the row's ceiling (`StepEffort.escalated`).
 The effort sent is recorded on every call.
+
+Task 8.11 (user decision "B"): a part step (`registry.part_submit_steps`: `financials`) sends
+its JSON object in parts. `submit_<step>_part` checks one part and holds it (`live.submission.
+Parts`); it is answered `accepted part` or `rejected part` with the issues, never counts as a
+submit and never ends the step. `submit_<step>` with `{}` assembles the parts held
+(`live.submission.assemble`) and that payload is the submit, judged and entered exactly as a
+payload sent whole (which a part step still accepts: the recorded transcripts send one); a
+rejected assembly also lists the parts held. The step has 40 calls (`PART_LIMITS`).
 """
 
 import hashlib
@@ -108,9 +116,10 @@ from deploy_vii.live.runner import (
     step_repair_of,
     step_try,
 )
+from deploy_vii.live.schema import exact_json, json_object
 from deploy_vii.live.schema_check import schema_shaped
 from deploy_vii.live.settings import EFFORT_LADDER, StepEffort
-from deploy_vii.live.submission import submit_model_payload
+from deploy_vii.live.submission import PART_KINDS, Parts, assemble, submit_model_payload
 from deploy_vii.live.tools import (
     EXTRACT,
     INCOMPLETE,
@@ -126,6 +135,8 @@ from deploy_vii.live.tools import (
     completeness_drop,
     evidence_counts,
     extracted_coverage,
+    part_kind,
+    part_name,
     seen_tables,
     shrinkage,
     submit_name,
@@ -136,6 +147,7 @@ from deploy_vii.registry import (
     SUBMIT_ONLY,
     ToolSet,
     extract_tool_steps,
+    part_submit_steps,
     tool_loop_steps,
     tool_set,
 )
@@ -179,10 +191,16 @@ TOOL_SET_LIMITS: Mapping[ToolSet, ToolLimits] = {
     PACK_TOOLS: LIMITS,
     SUBMIT_ONLY: replace(LIMITS, max_calls=6),
 }
+# Task 8.11 (user decision "B"): a step whose submit is sent in parts (`registry.
+# part_submit_steps`) has 40 calls, room for five parts, three assemblies and its reads; parts
+# never count as submits, so its 3 submits and every other limit are a pack-tool step's.
+PART_LIMITS = replace(LIMITS, max_calls=40)
 
 
 def limits_for(step_id: str) -> ToolLimits:
-    """The step's limits, from its registry tool set (`registry.tool_set`)."""
+    """The step's limits: a part step's (`PART_LIMITS`), else its registry tool set's."""
+    if step_id in part_submit_steps():
+        return PART_LIMITS
     return TOOL_SET_LIMITS[tool_set(step_id)]
 
 
@@ -218,7 +236,9 @@ class Submit:
     """One judged submit: where it was made, what the model had been shown, its verdict.
     `tables` and `coverage` (task 8.12, `financials` only, else empty and None): the pages
     shown by then as extracted tables (`tools.seen_tables`) and the retained payload's
-    `tools.extracted_coverage` over them, computed once when the submit is judged."""
+    `tools.extracted_coverage` over them, computed once when the submit is judged. `parts`
+    (task 8.11): for an assembled submit, the size of each part held (`Parts.size`); None for
+    a payload sent whole."""
 
     number: int
     call: int
@@ -230,6 +250,7 @@ class Submit:
     effort_sent: str | None
     tables: tuple[ExtractedTable, ...]
     coverage: dict[str, Any] | None
+    parts: Mapping[str, int] | None = None
 
     def record(self, step_id: str) -> dict[str, Any]:
         financials = step_id == "financials"
@@ -253,6 +274,11 @@ class Submit:
                     else None,
                 }
                 if financials
+                else {}
+            ),
+            **(
+                {"assembled_from": dict(self.parts) if self.parts is not None else None}
+                if step_id in part_submit_steps()
                 else {}
             ),
         }
@@ -358,6 +384,7 @@ class _Step:
     limits: ToolLimits
     kind: ToolSet
     tools: PackTools | None  # None: a submit-only step reads nothing (task 8.9)
+    parts: Parts | None  # task 8.11: the parts held by a part step; None elsewhere
     specs: tuple[dict[str, Any], ...]
     context: SourceContextReview | None
     quality_inputs_sha256: str | None
@@ -378,6 +405,7 @@ class _Step:
     in_flight_used: bool = False
     wait_s: int | None = None  # the wait before an in-flight re-send
     counts: Counter[str] = field(default_factory=Counter)
+    part_outcomes: list[tuple[str, str]] = field(default_factory=list)  # (kind, outcome)
     journal: Attempt | None = None  # the live journal after the step's last judged submit
     started: float = 0.0
 
@@ -483,6 +511,7 @@ def _prepare(
         limits=limits,
         kind=kind,
         tools=PackTools(pack, readable) if kind == PACK_TOOLS else None,
+        parts=Parts() if kind == PACK_TOOLS and spec.step_id in part_submit_steps() else None,
         specs=tool_specs(spec.step_id, kind),
         context=context,
         quality_inputs_sha256=inputs.quality_inputs_sha256,
@@ -806,6 +835,8 @@ def _execute(
             return "ok", step.tools.read_pages(raw), None
         if name == EXTRACT and step.tools is not None and step.step_id in extract_tool_steps():
             return "ok", step.tools.extract_statements(raw), None
+        if name == part_name(step.step_id) and step.parts is not None:
+            return _part(step, part_kind(raw), arguments)
         if name != submit_name(step.step_id):
             raise ToolError(f"unknown tool {name!r}")
     except json.JSONDecodeError:
@@ -816,13 +847,40 @@ def _execute(
         step.counts["invalid"] += 1
         call.counts["invalid"] += 1
         return "error", f"error: {error}", None
-    submit = _judge(step, call, arguments)
+    # Task 8.11: on a part step, `{}` assembles the parts held; a payload sent whole is judged
+    # whole, as before (the recorded transcripts; a model that sends no parts).
+    held = step.parts if step.parts is not None and raw == {} else None
+    payload = arguments if held is None else assemble(held)
+    submit = _judge(step, call, payload, None if held is None else held.sizes())
     verdict = {"submit": submit.number, "outcome": submit.outcome, "issues": list(submit.issues)}
     if submit.outcome == "accepted":
         return "accepted", "accepted", verdict
     listed = "\n".join(f"- {issue}" for issue in submit.issues)
     left = step.limits.max_submits - submit.number
-    return "rejected", f"rejected ({left} submits left):\n{listed}", verdict
+    named = "" if held is None else f"\n{held.listing()}"
+    return "rejected", f"rejected ({left} submits left):\n{listed}{named}", verdict
+
+
+PART_ACCEPTED, PART_REJECTED = "part accepted", "part rejected"
+
+
+def _part(step: _Step, kind: str, arguments: str) -> tuple[str, str, dict[str, Any]]:
+    """Task 8.11: one part checked and, without issues, held (`Parts.submit`); never a submit.
+    The arguments are read again with exact numbers (`json_object`), so the part keeps the
+    digits the model sent, as a whole payload does."""
+    assert step.parts is not None
+    document = json_object(arguments)
+    if document is None:  # `json.loads` read it, so only a NaN or an infinity is left
+        raise ToolError("bad arguments: a number is not finite")
+    issues = step.parts.submit(kind, exact_json(document["payload"]))
+    outcome = "rejected" if issues else "accepted"
+    step.part_outcomes.append((kind, outcome))
+    record = {"part": kind, "outcome": outcome, "issues": list(issues)}
+    if issues:
+        listed = "\n".join(f"- {issue}" for issue in issues)
+        return PART_REJECTED, f"rejected part {kind}:\n{listed}\n{step.parts.listing()}", record
+    size = f"{step.parts.size(kind)} {step.parts.unit(kind)}"
+    return PART_ACCEPTED, f"accepted part {kind} ({size})", record
 
 
 def _rules(
@@ -843,8 +901,9 @@ def _tables(step: _Step, seen: Seen) -> tuple[ExtractedTable, ...]:
     return seen_tables(step.tools, seen, step.context)
 
 
-def _judge(step: _Step, call: Call, payload: str) -> Submit:
-    """Judge one submit as the step's current try, in a scratch copy of its starting journal."""
+def _judge(step: _Step, call: Call, payload: str, parts: Mapping[str, int] | None = None) -> Submit:
+    """Judge one submit as the step's current try, in a scratch copy of its starting journal
+    (`parts`: the sizes of the parts an assembled `payload` holds)."""
     number = len(step.submits) + 1
     seen = step.tools.seen() if step.tools is not None else Seen()
     tables = _tables(step, seen)
@@ -872,6 +931,7 @@ def _judge(step: _Step, call: Call, payload: str) -> Submit:
         call.effort.sent,
         tables,
         coverage,
+        parts,
     )
     step.submits.append(submit)
     call.status, call.output, call.issues = outcome, payload, issues
@@ -1008,6 +1068,14 @@ def _money(step: _Step) -> tuple[Decimal, Decimal]:
     )
 
 
+def _part_counts(step: _Step) -> dict[str, dict[str, int]]:
+    counted = Counter(step.part_outcomes)
+    return {
+        kind: {outcome: counted[(kind, outcome)] for outcome in ("accepted", "rejected")}
+        for kind in PART_KINDS
+    }
+
+
 def telemetry(step: _Step, call: Call) -> dict[str, Any]:
     """The tool-loop fields of a call's metrics (task 8.0d item 9): this call's tool calls and
     effort, and the step as of this call (pages read, searches, submits, shrink and
@@ -1041,6 +1109,11 @@ def telemetry(step: _Step, call: Call) -> dict[str, Any]:
             "searches_run": len(tools.searched) if tools is not None else None,
             "spans_surfaced_by_search": len(tools.surfaced) if tools is not None else None,
             "submits": records,
+            # Task 8.11: per part kind, the parts accepted and rejected; the assembled submits.
+            "parts_submitted": _part_counts(step) if step.parts is not None else None,
+            "assemblies": sum(s.parts is not None for s in step.submits)
+            if step.parts is not None
+            else None,
             "first_submit_accepted": records[0]["outcome"] == "accepted" if records else None,
             "submit_shrinkage": shrinkage(records),
             "completeness_drop": completeness_drop(records) if financials else None,

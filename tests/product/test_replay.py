@@ -1018,12 +1018,15 @@ def test_only_the_financials_entries_name_an_added_tool() -> None:
         f"{path.parent.name}/{path.stem}": load_entry(path).get("tools_added")
         for path in TRANSCRIPTS
     }
+    added = ["extract_statements", "submit_financials_part"]
     assert {key: value for key, value in named.items() if value is not None} == {
-        "financials/hybrid-cp1-6-sol-medium": ["extract_statements"],
-        "financials/synthetic-search-accept": ["extract_statements"],
+        "financials/hybrid-cp1-6-sol-medium": added,
+        "financials/synthetic-search-accept": added,
     }
     for path in FINANCIALS_TRANSCRIPTS.glob("*.json"):
-        assert load_entry(path)["tools_added_by"].startswith("task 8.10b (25 Oct 2026)")
+        reason = load_entry(path)["tools_added_by"]
+        assert reason.startswith("task 8.10b (25 Oct 2026)")
+        assert "; task 8.11 (25 Oct 2026): submit_financials_part" in reason
 
 
 def test_a_changed_tool_list_without_a_named_tool_still_fails(tmp_path: Path) -> None:
@@ -1063,6 +1066,65 @@ def test_a_named_tool_needs_its_dated_reason(tmp_path: Path) -> None:
     del entry["tools_added_by"]
     status, reason = transcript_support.check(entry, tmp_path)
     assert (status, reason) == ("entry-invalid", "tools_added needs tools_added_by")
+
+
+# --- task 8.11: the financials submit's spec changed after the recording ----------------------
+
+
+def test_only_the_financials_entries_name_a_changed_submit() -> None:
+    named = {
+        f"{path.parent.name}/{path.stem}": load_entry(path).get("tools_changed")
+        for path in TRANSCRIPTS
+    }
+    assert {key: value for key, value in named.items() if value is not None} == {
+        "financials/hybrid-cp1-6-sol-medium": ["submit_financials"],
+        "financials/synthetic-search-accept": ["submit_financials"],
+    }
+    for path in FINANCIALS_TRANSCRIPTS.glob("*.json"):
+        assert load_entry(path)["tools_changed_by"].startswith("task 8.11 (25 Oct 2026)")
+
+
+def test_a_changed_submit_spec_without_its_name_still_fails(tmp_path: Path) -> None:
+    """Without `tools_changed` the new `submit_financials` spec (`{}`) is a request change,
+    even with the added tools stripped."""
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    for key in ("tools_changed", "tools_changed_by"):
+        del entry[key]
+    status, reason = transcript_support.check(entry, tmp_path)
+    assert (status, reason) == ("request-changed", "call 1: the conversation, tools or parameters")
+
+
+def test_a_changed_tool_is_the_steps_own_submit_and_needs_its_dated_reason(tmp_path: Path) -> None:
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    del entry["tools_changed_by"]
+    assert transcript_support.check(entry, tmp_path / "a") == (
+        "entry-invalid",
+        "tools_changed needs tools_changed_by",
+    )
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["tools_changed"] = ["read_pages"]
+    assert transcript_support.check(entry, tmp_path / "b") == (
+        "entry-invalid",
+        "tools_changed names only the step's own submit tool",
+    )
+
+
+def test_a_changed_submit_that_did_not_change_or_is_stripped_fails(tmp_path: Path) -> None:
+    """The named submit's spec must differ from the one-shot spec the check puts back (stale
+    metadata on a step whose submit is unchanged fails), and stripping it as an added tool
+    instead leaves the request unlike the recorded one."""
+    context = load_entry(SYNTHETIC_TRANSCRIPT / "synthetic-search-reject-accept.json")
+    context |= {"tools_changed": ["submit_source_context"], "tools_changed_by": "a test"}
+    assert transcript_support.check(context, tmp_path / "a") == (
+        "request-changed",
+        "call 1: tools_changed names a spec that is unchanged",
+    )
+    entry = load_entry(SYNTHETIC_FINANCIALS)
+    entry["tools_added"] = [*entry["tools_added"], "submit_financials"]
+    assert transcript_support.check(entry, tmp_path / "b") == (
+        "request-changed",
+        "call 1: the conversation, tools or parameters",
+    )
 
 
 # The financials system prompt's hash after task 7.19 and before 8.10b's rule k: what the

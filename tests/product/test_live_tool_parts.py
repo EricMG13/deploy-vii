@@ -22,6 +22,7 @@ from deploy_vii.financial_contracts import FinancialBook, FinancialReview
 from deploy_vii.live import corpus
 from deploy_vii.live.client import ChatClient, ChatRequest, Response
 from deploy_vii.live.ledger import OPENROUTER, Ledger, LedgerError, opening_provider
+from deploy_vii.live.loop import ToolStepResult
 from deploy_vii.live.prompts import (
     EXTRACT_RULE,
     NO_TOOLS_RULE,
@@ -37,6 +38,7 @@ from deploy_vii.live.schema import exact_json, json_object, strict_schema
 from deploy_vii.live.settings import EFFORT_LADDER, SettingsError, StepEffort, load_settings
 from deploy_vii.live.submission import (
     BOOK_PARTS,
+    PART_CALL,
     PART_KINDS,
     STEPS,
     Parts,
@@ -66,6 +68,7 @@ from deploy_vii.live.tools import (
     extracted_coverage,
     fiscal_year,
     seen_tables,
+    submit_spec,
     tool_specs,
     unread_citation_issues,
 )
@@ -90,7 +93,7 @@ from tests.product import test_cp4_legal as cp4_tests
 from tests.product import test_source_context as source_context_tests
 from tests.product.live_support import FAKE_KEY, make_rtf_key
 from tests.product.test_live_cli_batches import SETTINGS as CLI_SETTINGS
-from tests.product.test_live_loop import Rig, step_rig, tool_pool, tool_reply
+from tests.product.test_live_loop import Rig, step_rig, tool_messages, tool_pool, tool_reply
 from tests.product.test_statement_extract import _FILLER, _row
 from tests.product.test_workflow import cp1_case
 
@@ -209,7 +212,7 @@ def test_a_request_with_tools_drops_the_response_format_and_copies_the_conversat
     body = request.body()
     assert "response_format" not in body and body["tool_choice"] == "required"
     assert body["messages"][1] == turn and body["messages"][1] is not turn
-    assert body["tools"][3]["function"]["name"] == "submit_financials"
+    assert body["tools"][4]["function"]["name"] == "submit_financials"
     with pytest.raises(ValueError, match="together"):
         replace(request, tool_choice=None)
     with pytest.raises(ValueError, match="together"):
@@ -737,6 +740,7 @@ def test_only_financials_is_offered_extract_statements() -> None:
         "search_pack",
         "read_pages",
         EXTRACT,
+        "submit_financials_part",
         "submit_financials",
     ]
     for step in tool_sets():
@@ -1155,7 +1159,7 @@ def test_the_financials_loop_extracts_then_submits_to_the_same_accepted_state(
         bodies = script.bodies()
         assert all(
             [t["function"]["name"] for t in body["tools"]]
-            == ["search_pack", "read_pages", EXTRACT, "submit_financials"]
+            == ["search_pack", "read_pages", EXTRACT, "submit_financials_part", "submit_financials"]
             for body in bodies
         )
         if name == "extract":
@@ -2035,7 +2039,7 @@ def test_a_rejected_part_changes_nothing_held_and_a_resent_one_replaces_it(case:
     assert held.submit("IS", exact_json(fewer)) == ()
     assert held.held["IS"] == fewer
     assert held.listing() == (
-        "parts held: frame (11 entries), IS (2 lines); parts not sent: CFS, BS, other"
+        "parts held: frame (11 entries), IS (2 lines); parts not held: CFS, BS, other"
     )
 
 
@@ -2084,3 +2088,159 @@ def test_the_part_submit_steps_are_financials_and_quote_the_pack() -> None:
     assert all(not chain.part_submits for chain in STEP_CHAINS if chain.module_id != "CP-1")
     with pytest.raises(ValueError, match="submits narrative in parts, not one of its steps"):
         StepChain(**{**cp1.__dict__, "part_submits": frozenset({"narrative"})})
+
+
+# --- item 2: the two tools in the financials loop ----------------------------------------------
+
+ASSEMBLE_PARAMETERS = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+def test_only_financials_is_offered_the_part_tool_and_its_submit_takes_no_payload() -> None:
+    """Pin (item 2): `financials` alone is offered `submit_financials_part` (the five partial
+    schemas, one per `part`) and a `submit_financials` of no arguments; every other step keeps
+    its one-shot `submit_<step>` spec, unchanged."""
+    specs = {spec["function"]["name"]: spec["function"] for spec in tool_specs("financials")}
+    part = specs["submit_financials_part"]["parameters"]
+    assert part == strict_schema(PART_CALL)
+    assert part["required"] == ["part", "payload"] and part["additionalProperties"] is False
+    assert part["properties"]["part"]["enum"] == list(PART_KINDS)
+    refs = [branch["$ref"].rsplit("/", 1)[1] for branch in part["properties"]["payload"]["anyOf"]]
+    assert refs == [partial_schema(kind).__name__ for kind in PART_KINDS]
+    assert specs["submit_financials"]["parameters"] == ASSEMBLE_PARAMETERS
+    for step in tool_sets():
+        if step in part_submit_steps():
+            continue
+        assert not any(name.endswith("_part") for name in names(tool_specs(step))), step
+        assert tool_specs(step)[-1] == submit_spec(step), step
+    assert tool_specs("financials", SUBMIT_ONLY) == (submit_spec("financials"),)
+
+
+def part_call(ident: str, kind: str, payload: str) -> tuple[str, str, str]:
+    return ident, "submit_financials_part", f'{{"part": {json.dumps(kind)}, "payload": {payload}}}'
+
+
+def transcript(rig: Rig, result: ToolStepResult) -> list[dict[str, Any]]:
+    """Every tool call the step ran, in order, from each call's `tool-calls.jsonl`."""
+    return [
+        json.loads(line)
+        for attempt in result.attempt_ids
+        for line in (rig.directory(attempt) / "tool-calls.jsonl").read_text().splitlines()
+    ]
+
+
+def results(rig: Rig, result: ToolStepResult) -> list[str]:
+    return [entry["result"] for entry in transcript(rig, result) if "result" in entry]
+
+
+def test_the_loop_holds_each_part_on_arrival_and_judges_the_assembly_as_a_submit(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 2: a part is answered on arrival and never counts as a submit or ends the step; a
+    rejected one holds nothing; `submit_financials` with `{}` assembles the held parts and is
+    the step's one judged submit; telemetry counts the parts and assemblies."""
+    parts = split(paged_case.payload)
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(
+        tool_reply(
+            search, part_call("p-1", "frame", parts["frame"]), part_call("p-2", "IS", parts["CFS"])
+        ),
+        tool_reply(
+            part_call("p-3", "IS", parts["IS"]),
+            part_call("p-4", "CFS", parts["CFS"]),
+            part_call("p-5", "BS", parts["BS"]),
+            part_call("p-6", "other", parts["other"]),
+            part_call("p-7", "KPI", "{}"),
+            ("p-8", "submit_financials_part", '{"part": "IS"}'),
+            ("c-1", "submit_financials", "{}"),
+        ),
+    )
+    result = rig.run(script, step_id="financials")
+    assert (result.status, result.verdict) == ("accepted", "accepted")
+    assert [s["outcome"] for s in result.submits] == ["accepted"]
+    held = {"frame": 11, "IS": 5, "CFS": 30, "BS": 6, "other": 195}
+    assert result.submits[0]["assembled_from"] == held
+    texts = results(rig, result)
+    rejected = texts[2]
+    assert texts[1] == "accepted part frame (11 entries)"
+    assert rejected.startswith("rejected part IS:\n- books.0.cash_movement_bridges: Extra inputs")
+    assert rejected.endswith("\nparts held: frame (11 entries); parts not held: IS, CFS, BS, other")
+    assert texts[3:] == [
+        "accepted part IS (5 lines)",
+        "accepted part CFS (30 lines)",
+        "accepted part BS (6 lines)",
+        "accepted part other (195 entries)",
+        "error: bad arguments: part must be one of frame, IS, CFS, BS, other",
+        "error: bad arguments: missing ['payload'], unexpected []",
+        "accepted",
+    ]
+    assembled = assemble(held_parts(parts, PART_KINDS))
+    assert (rig.directory(result.attempt_id) / "output.md").read_text() == assembled
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["parts_submitted"] == {
+        "frame": {"accepted": 1, "rejected": 0},
+        "IS": {"accepted": 1, "rejected": 1},
+        "CFS": {"accepted": 1, "rejected": 0},
+        "BS": {"accepted": 1, "rejected": 0},
+        "other": {"accepted": 1, "rejected": 0},
+    }
+    assert step["assemblies"] == 1 and step["tool_calls"]["invalid"] == 2
+    assert step["tool_calls"]["submit_financials_part"] == 6
+    assert step["limits"]["max_calls"] == 40
+    statuses = [(e["name"], e["status"], e.get("outcome")) for e in transcript(rig, result)]
+    assert statuses == [
+        ("search_pack", "ok", None),
+        ("submit_financials_part", "part accepted", "accepted"),
+        ("submit_financials_part", "part rejected", "rejected"),
+        *[("submit_financials_part", "part accepted", "accepted")] * 4,
+        ("submit_financials_part", "error", None),
+        ("submit_financials_part", "error", None),
+        ("submit_financials", "accepted", "accepted"),
+    ]
+    assert _state(rig) == [("source_context", "valid", ()), ("financials", "valid", ())]
+
+
+def test_an_assembly_the_validators_reject_lists_the_parts_held(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """A rejected assembly answers as any rejected submit, then names the parts held and those
+    not sent; a whole payload sent to `submit_financials` is judged whole, as before 8.11, and
+    its rejection names no part."""
+    parts = split(paged_case.payload)
+    rig = paged_rig(tmp_path, paged_case)
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    script = rig.script(
+        tool_reply(
+            search, part_call("p-1", "frame", parts["frame"]), ("c-1", "submit_financials", "{}")
+        ),
+        tool_reply(("c-2", "submit_financials", json.dumps({"financial": 1}))),
+        tool_reply(("c-3", "submit_financials", paged_case.payload)),
+    )
+    result = rig.run(script, step_id="financials")
+    assert [s["outcome"] for s in result.submits] == ["rejected", "rejected", "accepted"]
+    assert [s["assembled_from"] for s in result.submits] == [{"frame": 11}, None, None]
+    texts = results(rig, result)
+    assert texts[2].startswith("rejected (2 submits left):\n- ")
+    assert texts[2].endswith("\nparts held: frame (11 entries); parts not held: IS, CFS, BS, other")
+    assert "parts held" not in texts[3] and texts[3].startswith("rejected (1 submits left):\n- ")
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["assemblies"] == 1
+
+
+def test_a_step_without_parts_is_refused_the_part_tool(tmp_path: Path) -> None:
+    rig = step_rig(tmp_path, "business_context")
+    call = ("c-p", "submit_business_context_part", json.dumps({"part": "frame", "payload": {}}))
+    script = rig.script(tool_reply(call, ("c-f", "submit_financials_part", "{}")), tool_reply())
+    result = rig.run(script, step_id="business_context", rules=ToolRules(checked=()))
+    assert not result.submits
+    assert tool_messages(script) == [
+        "error: unknown tool 'submit_business_context_part'",
+        "error: unknown tool 'submit_financials_part'",
+    ]
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert (step["parts_submitted"], step["assemblies"]) == (None, None)

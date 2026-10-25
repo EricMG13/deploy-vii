@@ -127,8 +127,13 @@
   "recorded_sha256": "00fd6684d8c7eb76dbdc15f6bb35104799feedaa3e11d790f5472412f7fe9050"
  },
  "tools_added": [
-  "extract_statements"
+  "extract_statements",
+  "submit_financials_part"
  ],
- "tools_added_by": "task 8.10b (25 Oct 2026): extract_statements, the financials loop's fourth tool (user decision \"A\" phase 2), offered after this recording; no reply or verdict used it",
+ "tools_added_by": "task 8.10b (25 Oct 2026): extract_statements, the financials loop's fourth tool (user decision \"A\" phase 2), offered after this recording; no reply or verdict used it; task 8.11 (25 Oct 2026): submit_financials_part, the financials submit in parts (user decision \"B\"), offered after this recording; no reply used it",
+ "tools_changed": [
+  "submit_financials"
+ ],
+ "tools_changed_by": "task 8.11 (25 Oct 2026): submit_financials takes {} and assembles the parts held (user decision \"B\"); recorded as the one-shot submit_spec(financials), which the check puts back; the recorded replies send it a whole payload, still judged whole",
  "transcript": "artifacts/model-tests/hybrid-cp1-6/sol-medium/financials"
 }

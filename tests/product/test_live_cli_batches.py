@@ -2299,7 +2299,13 @@ def test_the_tool_loop_line_states_a_set_completeness_floor() -> None:
     plan = cli.ToolLoop({"financials": StepEffort.of("high")}, ToolRules(floor=3))
     (line,) = cli._tool_loop_lines(plan)
     assert line.endswith("; completeness floor: 3 statement lines per expected cell")
-    # Task 8.9 fix round 1: the call limit is the tool set's.
+    # Task 8.9 fix round 1: the call limit is the tool set's; task 8.11: a part step's own.
+    assert (
+        "; per step at most 30 calls on pack-tool steps (40 on financials, its submit in parts) "
+        "and 6 on submit-only steps, "
+    ) in line
+    plan = cli.ToolLoop({"source_context": StepEffort.of("high")}, ToolRules(floor=3))
+    (line,) = cli._tool_loop_lines(plan)
     assert "; per step at most 30 calls on pack-tool steps and 6 on submit-only steps, " in line
     assert cli._tool_loop_lines(None) == []
 

@@ -63,6 +63,7 @@ from deploy_vii.live.loop import (
     TOOL_SET_LIMITS,
     TOOL_STEPS,
     ToolStepResult,
+    limits_for,
     run_tool_step,
 )
 from deploy_vii.live.prompts import schema_text
@@ -126,6 +127,7 @@ from deploy_vii.registry import (
     canonical,
     module_route,
     modules,
+    part_submit_steps,
     regression_cases,
     step_chain,
     tool_sets,
@@ -880,8 +882,15 @@ def _tool_loop_lines(tool_loop: ToolLoop | None) -> list[str]:
             f"; extracted-coverage floor: {coverage} of each expected cell's extracted "
             "statement lines"
         )
+    # Task 8.11: a planned step whose submit is sent in parts has its own call limit.
+    parts = [
+        f"{limits_for(step).max_calls} on {step}, its submit in parts"
+        for step in tool_loop.efforts
+        if step in part_submit_steps()
+    ]
     calls = (
-        f"{TOOL_SET_LIMITS[PACK_TOOLS].max_calls} calls on pack-tool steps and "
+        f"{TOOL_SET_LIMITS[PACK_TOOLS].max_calls} calls on pack-tool steps"
+        f"{f' ({"; ".join(parts)})' if parts else ''} and "
         f"{TOOL_SET_LIMITS[SUBMIT_ONLY].max_calls} on submit-only steps"
     )
     return [
