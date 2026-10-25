@@ -476,6 +476,9 @@ Scope = Literal[
 
 
 class ComplianceRow(SheetRow):
+    """One Compliance_Monitor row. Every limit is a maximum (there is no direction field).
+    Consumers compute room as `limit - current_value` and never read `headroom` for it."""
+
     SHEET: ClassVar[str] = COMPLIANCE.name
     id: str
     constraint_category: str
@@ -487,6 +490,8 @@ class ComplianceRow(SheetRow):
     source_document: str
     current_value: Decimal
     headroom: Decimal
+    """The sheet's stated headroom, never used for room: checked to within 0.01 of
+    `limit - current_value` on `% NAV` rows and unchecked on currency rows."""
     status: Status
     last_checked: date
     checked_by: str
@@ -618,7 +623,11 @@ def validate_portfolio_bytes(file: str, raw: bytes) -> PortfolioReport:
 def portfolio_facts(source: Source) -> PortfolioFacts:
     """The typed rows of a prepared portfolio source (a pack `Source` or `prepare_source`'s
     result). Pure: reads only the source's spans and coverage. Raises `PortfolioRefused`, with
-    the validator's report, unless the workbook passes."""
+    the validator's report, unless the workbook passes.
+
+    `ComplianceRow.headroom` and `SectorExposure.headroom_pct_nav` are the stated figures:
+    checked to within 0.01 on `% NAV` rows and unchecked on currency rows. A consumer computes
+    room as `limit - current_value` (or `limit_pct_nav - pct_nav`) and never reads headroom."""
     result, typed_facts = read(source.name, source)
     if typed_facts is None:
         raise PortfolioRefused(result)
