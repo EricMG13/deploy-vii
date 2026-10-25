@@ -17,6 +17,7 @@ from deploy_vii.cp0_workflow import build_readiness
 from deploy_vii.execution import Execution
 from deploy_vii.live.context import module_context
 from deploy_vii.module_submits import MODULE_SUBMITS, submit_module_step
+from deploy_vii.report_view import pathways
 from tests.product.test_business_context import cp1_fact, submission_fixture
 from tests.product.test_cp2_synthesis import journal, synthesis
 from tests.product.test_readiness import readiness_fixture
@@ -179,3 +180,40 @@ def test_a_step_with_no_context_prints_empty_json_and_says_so_on_stderr(cli: Cli
         "module-context", *("--module", "CP-1A", "--ticket", attempt.ticket_id, "--step", step)
     )
     assert code == 0 and json.loads(out) == {} and "no module context" in err
+
+
+# --- item 3: report ---
+
+
+def test_report_writes_the_front_page_with_every_pathway_block_and_a_receipt(
+    cli: Cli, tmp_path: Path
+) -> None:
+    pathway_id = cli.store.read().run.pathway
+    pathway = next(p for p in pathways() if p.id == pathway_id)
+    out_dir = tmp_path / "report"
+    code, out, _ = cli("report", "--pathway", pathway_id, "--output", str(out_dir))
+    html = (out_dir / "index.html").read_text()
+    receipt = json.loads((out_dir / "report.json").read_text())
+    assert code == 0 and json.loads(out) == receipt
+    assert all(block in html for block in pathway.blocks)
+    assert receipt["pathway"] == pathway_id
+    heads = {m["module_id"]: m["status"] for m in receipt["modules"]}
+    assert heads["CP-0"] == "restricted" and "CP-6" in heads  # unrun modules show their state
+    assert receipt["call_state"]["state"] in {"populated", "no-judgement", "blocked", "outside"}
+
+
+def test_report_refuses_an_unknown_pathway_and_the_runs_other_pathways(
+    cli: Cli, tmp_path: Path
+) -> None:
+    code, _, err = cli("report", "--pathway", "nope", "--output", str(tmp_path / "a"))
+    assert code == 2 and "credit_snapshot" in err
+    run_pathway = cli.store.read().run.pathway
+    other = next(p.id for p in pathways() if p.id != run_pathway)
+    code, _, err = cli("report", "--pathway", other, "--output", str(tmp_path / "b"))
+    assert code == 2 and run_pathway in err and not (tmp_path / "b").exists()
+
+
+def test_report_refuses_an_existing_output_directory(cli: Cli, tmp_path: Path) -> None:
+    pathway_id = cli.store.read().run.pathway
+    code, _, err = cli("report", "--pathway", pathway_id, "--output", str(tmp_path))
+    assert code == 2 and "exists" in err

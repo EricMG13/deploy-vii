@@ -4,9 +4,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import get_args
 
-from deploy_vii.contracts import PathwayId
+from deploy_vii.bindings.shipped import SHIPPED_MAPS
 from deploy_vii.cp0_workflow import submit_cp0_review
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.cp1_render import render_cp1_envelope
@@ -29,6 +28,10 @@ from deploy_vii.live.context import module_context
 from deploy_vii.module_submits import MODULE_SUBMITS, submit_module_step
 from deploy_vii.preparation import load_pack
 from deploy_vii.registry import canonical, modules, step_chain
+from deploy_vii.render import render as render_view
+from deploy_vii.report_view import build, call_state, pathways
+
+PATHWAY_IDS = tuple(item.id for item in pathways())
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
@@ -48,7 +51,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     render = actions.add_parser("render")
     render.add_argument("--envelope", type=Path, required=True)
     render.add_argument("--output", type=Path, required=True)
-    render.add_argument("--pathway", choices=get_args(PathwayId))
+    render.add_argument("--pathway", choices=PATHWAY_IDS)
     for name in ("cp-model-publish", "cp-model-verify"):
         actions.add_parser(name).add_argument("--output", type=Path, required=True)
     submit = actions.add_parser("module-submit")
@@ -60,6 +63,9 @@ def configure(parser: argparse.ArgumentParser) -> None:
     context.add_argument("--step", required=True)
     for name in (submit, context):
         name.add_argument("--ticket", required=True)
+    report = actions.add_parser("report")
+    report.add_argument("--pathway", required=True, choices=PATHWAY_IDS)
+    report.add_argument("--output", type=Path, required=True)
     actions.add_parser("cp1-quality-inputs").add_argument("--ticket", required=True)
     for name in ("interrupt", "cp0-submit", "cp1-submit", "cp1-promote", "step-output"):
         action = actions.add_parser(name)
@@ -135,6 +141,41 @@ def module_context_json(store: Execution, args: argparse.Namespace) -> str:
     return json.dumps(entries, indent=1, sort_keys=True)
 
 
+def write_report(store: Execution, pathway_id: str, output: Path) -> str:
+    """Render the journal's accepted heads as the run's Pathway into `output`: `index.html` and
+    the `report.json` receipt (modules by status, the call band's state). A module that has not
+    run or is blocked renders in its own state, never as an error."""
+    view = store.view()
+    if pathway_id != view.run.pathway:
+        raise refusal_exit(
+            f"report refused: the run's Pathway is {view.run.pathway}; "
+            f"its scope is immutable, not {pathway_id}"
+        )
+    pathway = next(item for item in pathways() if item.id == pathway_id)
+    report = build(view, pathway, SHIPPED_MAPS)
+    html = render_view(view, report)
+    state, words = call_state(report)
+    receipt = {
+        "schema_version": "report/1",
+        "pathway": pathway_id,
+        "modules": [
+            {"module_id": m.module_id, "status": m.status, "artifact_sha256": m.artifact_sha256}
+            for m in view.modules
+        ],
+        "call_state": {
+            "state": state,
+            "words": None if words is None else {"glyph": words[0], "word": words[1]},
+        },
+    }
+    try:
+        output.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exists:
+        raise refusal_exit(f"report refused: {output} already exists") from exists
+    (output / "index.html").write_text(html, encoding="utf-8")
+    (output / "report.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    return json.dumps(receipt)
+
+
 def execute(args: argparse.Namespace) -> str:
     if args.action == "create":
         return Execution.create(args.directory, load_pack(args.pack)).read().model_dump_json()
@@ -183,6 +224,8 @@ def execute(args: argparse.Namespace) -> str:
                 f"begin refused: {args.module} is not a module; choose one of {valid}"
             ) from unknown
         return attempt_json(store, store.begin(module_id))
+    elif args.action == "report":
+        return write_report(store, args.pathway, args.output)
     elif args.action == "module-submit":
         return module_submit(store, args)
     elif args.action == "module-context":
