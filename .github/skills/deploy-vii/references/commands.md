@@ -43,7 +43,7 @@ Derived from the argparse definitions at origin/main 14e81d2:
 ### Module steps for `module-submit` and `module-context`
 
 One step each, in `deploy-vii plan` order: CP-1A `business_context`, CP-2 `credit_synthesis`,
-CP-3 `relative_value`, CP-4 `legal_covenants`, CP-5 `integrity_review`, CP-6
+CP-4 `legal_covenants`, CP-3 `relative_value`, CP-5 `integrity_review`, CP-6
 `committee_challenge` (CP-4 runs only when the run requests it). The flow per module:
 `begin MODULE`, `module-context` (the CONTEXT entries the development runner adds to the pack
 facts: CP-1A's CP-1 figures, CP-2/3/4/6's upstream block, CP-5's `integrity-scope`; the pack
