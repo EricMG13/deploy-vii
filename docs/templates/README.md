@@ -79,7 +79,7 @@ These are the fixes it can print:
 | Header but no quote rows | add one row per quote, starting in row 2 |
 | Sheet `rv_quotes` empty | copy the header row from docs/templates/rv-quotes.template.xlsx and add one row per quote |
 | No sheet `rv_quotes` | name the quote sheet rv_quotes, as in docs/templates/rv-quotes.template.xlsx |
-| Not an OOXML workbook (for example CSV or legacy `.xls`), or too large to prepare | save the file as an Excel Workbook (.xlsx) and validate again |
+| Not an OOXML workbook (for example CSV or legacy `.xls`), too large to prepare, or two sheets with the same name | save the file as an Excel Workbook (.xlsx) and validate again |
 | A damaged ZIP member (corrupt compressed data, a truncated member or an encrypted member) | save the file again as an Excel Workbook (.xlsx) and validate again; prepare would also refuse this file |
 | File cannot be read | check the path and that the file is readable |
 
@@ -292,10 +292,9 @@ has an issue. These are the fixes it can print:
 | Finding | Fix printed |
 | --- | --- |
 | File cannot be read | check the path and that the file is readable |
-| Not an OOXML workbook (for example CSV or legacy `.xls`), or too large to prepare | save the file as an Excel Workbook (.xlsx) and validate again |
+| Not an OOXML workbook (for example CSV or legacy `.xls`), too large to prepare, or two sheets with the same name | save the file as an Excel Workbook (.xlsx) and validate again |
 | A damaged ZIP member (corrupt compressed data, a truncated member or an encrypted member) | save the file again as an Excel Workbook (.xlsx) and validate again; prepare would also refuse this file |
 | A sheet that is not in the contract | delete the sheet or move it to another workbook; keep only Mandate, Exposure_Summary, Rating_Distribution, Sector_Exposure, Top_Holdings, Maturity_Profile, Compliance_Monitor, Holdings_Detail (optional) and README (optional) |
-| Two sheets with the same name | keep one sheet of each name |
 | Sheets out of order | order the sheets as in docs/templates/portfolio.template.xlsx: Mandate, Exposure_Summary, Rating_Distribution, Sector_Exposure, Top_Holdings, Maturity_Profile, Compliance_Monitor, Holdings_Detail (optional) and README (optional) |
 | A required sheet is missing | add the sheet `<sheet>` with its header row, as in docs/templates/portfolio.template.xlsx |
 | A sheet is empty | copy the header row of `<sheet>` from docs/templates/portfolio.template.xlsx and add one row per `<one row per>` |

@@ -106,7 +106,6 @@ RULE_FIX: Mapping[str, str] = {
     "workbook": FIX["workbook"],
     "damaged": FIX["damaged"],
     "unknown_sheet": f"delete the sheet or move it to another workbook; keep only {SHEET_LIST}",
-    "duplicate_sheet": "keep one sheet of each name",
     "order": f"order the sheets as in {TEMPLATE}: {SHEET_LIST}",
     "duplicate": "keep one row per {key}, or correct the repeated value",
     "total": "leave out total and subtotal rows; Python adds the rows up",
@@ -624,12 +623,13 @@ def read(file: str, source: Source) -> tuple[PortfolioReport, PortfolioFacts | N
         problem = f"prepare cannot read this file as an OOXML workbook: {source.limitation}"
         findings.add(WORKBOOK_SHEET, "A1", problem, RULE_FIX["workbook"])
         return report(0, findings.issues), None
+    # Sheet names are unique: `xlsx_content` refuses a repeated one (duplicate coverage).
     names = [unquote(item.locator.removeprefix("sheet:")) for item in source.coverage]
-    duplicated = sheet_list_findings(names, findings)
+    sheet_list_findings(names, findings)
     grids = sheet_cells(source.spans)
     tables: dict[str, Table] = {}
     for sheet in SHEETS:
-        if sheet.name in names and sheet.name not in duplicated:
+        if sheet.name in names:
             table = load_table(sheet, grids.get(sheet.name, {}), findings)
             if table is not None:
                 tables[sheet.name] = table
@@ -641,29 +641,23 @@ def read(file: str, source: Source) -> tuple[PortfolioReport, PortfolioFacts | N
     return result, (build_facts(tables) if result.ok else None)
 
 
-def sheet_list_findings(names: Sequence[str], findings: Findings) -> set[str]:
-    """Unknown, repeated, missing and out-of-order sheets; returns the repeated names, whose
-    cells cannot be told apart."""
+def sheet_list_findings(names: Sequence[str], findings: Findings) -> None:
+    """Unknown, missing and out-of-order sheets."""
     known = {*BY_NAME, README_SHEET}
-    for name in dict.fromkeys(names):
+    for name in names:
         if name not in known:
             findings.add(name, "A1", f"unknown sheet '{echo(name)}'", RULE_FIX["unknown_sheet"])
-    duplicated = {name for name in names if names.count(name) > 1}
-    for name in sorted(duplicated):
-        problem = f"sheet {echo(name)} appears {names.count(name)} times"
-        findings.add(name, "A1", problem, RULE_FIX["duplicate_sheet"])
     found = ", ".join(echo(name) for name in names) or "none"
     for sheet in SHEETS:
         if not sheet.optional and sheet.name not in names:
             problem = f"no sheet named {sheet.name} (found: {found})"
             findings.add(sheet.name, "A1", problem, sheet.fixes()[3])
-    order = [name for name in dict.fromkeys(names) if name in BY_NAME]
+    order = [name for name in names if name in BY_NAME]
     for before, after in pairwise(order):
         if SHEETS.index(BY_NAME[after]) < SHEETS.index(BY_NAME[before]):
             problem = f"sheet {after} comes after {before}"
             findings.add(after, "A1", problem, RULE_FIX["order"])
             break
-    return duplicated
 
 
 def sheet_cells(spans: Sequence[Span]) -> dict[str, dict[tuple[int, int], Span]]:

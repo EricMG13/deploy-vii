@@ -6,16 +6,20 @@ issuers, no market or fund data.
 """
 
 import io
+import shutil
 import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import openpyxl
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
-from deploy_vii.contracts import Source
+from deploy_vii.contracts import Run, Source
 from deploy_vii.inputs.portfolio import (
     FIXES,
     MEDIA_TYPE,
@@ -26,12 +30,20 @@ from deploy_vii.inputs.portfolio import (
     validate_portfolio,
     validate_portfolio_bytes,
 )
-from deploy_vii.preparation import SourceRequest, prepare_source
+from deploy_vii.preparation import (
+    PreparationRequest,
+    SourceRequest,
+    load_pack,
+    prepare,
+    prepare_source,
+)
 from scripts.build_templates import (
     PORTFOLIO_README,
     PORTFOLIO_ROWS,
     build_portfolio,
+    package,
     portfolio_bytes,
+    table_sheet,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1165,3 +1177,470 @@ def test_readme_documents_every_sheet_column_and_fix() -> None:
     assert "deploy-vii validate-input portfolio" in section
     assert "sheet:Compliance_Monitor" in section
     assert "OK: 8 sheets, 5 compliance rows" in section
+
+
+# Workbook structure: sheets, order and header pins.
+
+SHEETS_FIX = (
+    "delete the sheet or move it to another workbook; keep only Mandate, Exposure_Summary, "
+    "Rating_Distribution, Sector_Exposure, Top_Holdings, Maturity_Profile, Compliance_Monitor, "
+    "Holdings_Detail (optional) and README (optional)"
+)
+ORDER_FIX = (
+    f"order the sheets as in {TEMPLATE_PATH}: Mandate, Exposure_Summary, Rating_Distribution, "
+    "Sector_Exposure, Top_Holdings, Maturity_Profile, Compliance_Monitor, Holdings_Detail "
+    "(optional) and README (optional)"
+)
+
+
+def test_a_ninth_unknown_sheet_is_refused() -> None:
+    data = valid() | {"Holdings_Detail": [HOLDING], "Source Map": [{"Control": "Status"}]}
+    report = check(data, headers={"Source Map": ("Control",)})
+    assert rendered(report) == [
+        f"{FILE}:Source Map!A1: unknown sheet 'Source Map' — fix: {SHEETS_FIX}"
+    ]
+    assert report.sheets == 8
+
+
+def test_a_readme_sheet_is_accepted_anywhere() -> None:
+    data = {"README": [{"note": "synthetic"}]} | valid()
+    assert rendered(check(data, headers={"README": ("note",)})) == []
+
+
+def test_a_missing_optional_sheet_is_accepted_and_a_missing_required_one_is_not() -> None:
+    assert rendered(check(valid())) == []
+    data = valid()
+    del data["Top_Holdings"]
+    found = "Mandate, Exposure_Summary, Rating_Distribution, Sector_Exposure, Maturity_Profile, "
+    found += "Compliance_Monitor"
+    assert rendered(check(data)) == [
+        f"{FILE}:Top_Holdings!A1: no sheet named Top_Holdings (found: {found}) — fix: add the "
+        f"sheet Top_Holdings with its header row, as in {TEMPLATE_PATH}"
+    ]
+
+
+def test_sheets_out_of_order_are_one_issue() -> None:
+    data = valid()
+    swapped = {"Exposure_Summary": data.pop("Exposure_Summary")} | data
+    assert rendered(check(swapped)) == [
+        f"{FILE}:Mandate!A1: sheet Mandate comes after Exposure_Summary — fix: {ORDER_FIX}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "second, refusal",
+    [("cells", "Duplicate extracted locators"), ("empty", "Duplicate extraction coverage")],
+)
+def test_a_repeated_sheet_name_is_prepares_refusal(second: str, refusal: str) -> None:
+    sheets = [
+        (sheet.name, table_sheet(sheet.names, (), PORTFOLIO_ROWS[sheet.name], {}))
+        for sheet in SHEETS
+    ]
+    empty = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+    repeated = sheets[0] if second == "cells" else ("Mandate", empty)
+    (issue,) = validate_portfolio_bytes(FILE, package([sheets[0], repeated, *sheets[1:]])).issues
+    assert (issue.sheet, issue.cell, issue.fix) == ("Mandate", "A1", NOT_OOXML_FIX)
+    assert issue.problem.startswith("prepare cannot read this file as an OOXML workbook")
+    assert refusal in issue.problem
+
+
+def test_an_empty_sheet_and_a_header_only_sheet_are_one_issue_each() -> None:
+    data = valid() | {"Maturity_Profile": []}
+    report = check(data, headers={"Maturity_Profile": ()})
+    assert rendered(report) == [
+        f"{FILE}:Maturity_Profile!A1: sheet Maturity_Profile is empty — fix: copy the header "
+        f"row of Maturity_Profile from {TEMPLATE_PATH} and add one row per maturity bucket"
+    ]
+    assert rendered(check(valid() | {"Compliance_Monitor": []})) == [
+        f"{FILE}:Compliance_Monitor!A2: no rows below the header — fix: add one row per "
+        "constraint, starting in row 2"
+    ]
+
+
+def header_fix(name: str) -> str:
+    header = BRIEF_SHEETS[name]
+    last = "ABCDEFGHIJKLM"[len(header) - 1]
+    return f"set row 1 to exactly: {', '.join(header)} (A1 to {last}1, nothing after {last}1)"
+
+
+@pytest.mark.parametrize("name", list(BRIEF_SHEETS))
+def test_each_sheets_header_is_pinned(name: str) -> None:
+    header = BRIEF_SHEETS[name]
+    last = "ABCDEFGHIJKLM"[len(header) - 1]
+    base = valid() | {"Holdings_Detail": [HOLDING]}
+    swapped = (header[1], header[0], *header[2:])
+    cases = [
+        (swapped, "A1", f"header is '{header[1]}', expected '{header[0]}'"),
+        (header[:-1], f"{last}1", f"header is empty, expected '{header[-1]}'"),
+        (
+            (*header, "extra"),
+            "ABCDEFGHIJKLMN"[len(header)] + "1",
+            f"header is 'extra', expected nothing after {last}1",
+        ),
+    ]
+    for pinned, cell, problem in cases:
+        report = check(base, headers={name: pinned})
+        assert rendered(report) == [f"{FILE}:{name}!{cell}: {problem} — fix: {header_fix(name)}"]
+
+
+# Hostile inputs: one issue each, never a traceback.
+
+NOT_OOXML_FIX = "save the file as an Excel Workbook (.xlsx) and validate again"
+DAMAGED_FIX = (
+    "save the file again as an Excel Workbook (.xlsx) and validate again; prepare would also "
+    "refuse this file"
+)
+
+
+def zip_with_workbook_member(payload: bytes, *, deflated: bool, encrypted: bool) -> bytes:
+    """A one-member ZIP whose `xl/workbook.xml` header is patched to claim deflate
+    compression or ZipCrypto encryption that its bytes do not honour (as in RV-1's tests)."""
+    stream = io.BytesIO()
+    with ZipFile(stream, "w", ZIP_STORED) as archive:
+        archive.writestr("xl/workbook.xml", payload)
+    raw = bytearray(stream.getvalue())
+    central = raw.index(b"PK\x01\x02")
+    if deflated:
+        raw[8:10] = raw[central + 10 : central + 12] = ZIP_DEFLATED.to_bytes(2, "little")
+    if encrypted:
+        raw[6] |= 1
+        raw[central + 8] |= 1
+    return bytes(raw)
+
+
+def zip_of(name: str, payload: str) -> bytes:
+    stream = io.BytesIO()
+    with ZipFile(stream, "w") as archive:
+        archive.writestr(name, payload)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "raw, problem, fix",
+    [
+        (
+            b"section,field\nStrategy,fund_name\n",
+            "Preparation failed (BadZipFile): File is not a zip file",
+            NOT_OOXML_FIX,
+        ),
+        (
+            zip_of("notes.txt", "synthetic, not a workbook"),
+            "Preparation failed (KeyError): \"There is no item named 'xl/workbook.xml' in the "
+            'archive"',
+            NOT_OOXML_FIX,
+        ),
+        (
+            zip_with_workbook_member(b"\xff" * 64, deflated=True, encrypted=False),
+            "damaged ZIP member (zlib.error: Error -3 while decompressing data: invalid block "
+            "type)",
+            DAMAGED_FIX,
+        ),
+        (
+            zip_with_workbook_member(b"<workbook/>", deflated=False, encrypted=True),
+            "damaged ZIP member (RuntimeError: File 'xl/workbook.xml' is encrypted, password "
+            "required for extraction)",
+            DAMAGED_FIX,
+        ),
+    ],
+    ids=["not-a-zip", "zip-not-ooxml", "corrupt-deflate", "encrypted-member"],
+)
+def test_a_file_prepare_cannot_read_is_one_issue_not_a_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw: bytes,
+    problem: str,
+    fix: str,
+) -> None:
+    path = tmp_path / FILE
+    path.write_bytes(raw)
+    expected = (
+        f"{FILE}:Mandate!A1: prepare cannot read this file as an OOXML workbook: {problem}"
+        f" — fix: {fix}"
+    )
+    assert rendered(validate_portfolio(path)) == [expected]
+    assert run_cli(["portfolio", str(path)], monkeypatch) == 1
+    assert capsys.readouterr().out.splitlines() == [expected, "FAILED: 1 issues"]
+
+
+def test_portfolio_facts_refuses_an_unreadable_source() -> None:
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(source(b"not a workbook"))
+    assert [issue.fix for issue in refused.value.report.issues] == [NOT_OOXML_FIX]
+
+
+def test_a_file_too_large_to_prepare_is_one_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deploy_vii import preparation
+
+    monkeypatch.setattr(preparation, "MAX_BYTES", 4)
+    assert rendered(validate_portfolio(TEMPLATE)) == [
+        "portfolio.template.xlsx:Mandate!A1: prepare cannot read this file as an OOXML"
+        " workbook: Preparation failed (ValueError): Source exceeds extraction byte limit"
+        f" — fix: {NOT_OOXML_FIX}"
+    ]
+
+
+def test_a_formula_in_a_header_or_label_cell_is_refused() -> None:
+    report = check(changed("Rating_Distribution", 0, {"rating_bucket": '="B"'}))
+    assert rendered(report) == [
+        f"{FILE}:Rating_Distribution!A2: rating_bucket holds a formula; prepare freezes stored "
+        f"values and never recalculates — fix: {FORMULA_FIX}"
+    ]
+
+
+def test_a_long_or_multiline_value_is_echoed_to_80_characters_on_one_line() -> None:
+    long = "X" * 32000
+    (issue,) = check(changed("Compliance_Monitor", 0, {"scope": long})).issues
+    assert issue.problem.startswith(f"scope '{'X' * 80}…' is not one of")
+    # The 80-character echo plus the twelve scopes in the problem and the fix.
+    assert len(issue.render()) < 500
+    (issue,) = check(changed("Compliance_Monitor", 0, {"breach_type": "Ha\nrd"})).issues
+    assert "\n" not in issue.render()
+    assert "breach_type 'Ha\\nrd' is not Hard or Soft" in issue.render()
+
+
+# `prepare` round trip: the pack freezes every sheet under its `sheet:<name>` locators and the
+# typed reader's locators name the frozen cells.
+
+
+def test_prepare_freezes_the_template_with_a_locator_for_every_sheet(tmp_path: Path) -> None:
+    shutil.copy(TEMPLATE, tmp_path / "portfolio.xlsx")
+    run = Run(
+        run_id="portfolio-template",
+        issuer_id="example-holdings",
+        issuer_name="Example Holdings Ltd (synthetic)",
+        as_of=date(2026, 5, 29),
+        case_kind="synthetic",
+    )
+    request = PreparationRequest(
+        run=run,
+        sources=(
+            SourceRequest(source_id="portfolio", path="portfolio.xlsx", media_type=MEDIA_TYPE),
+        ),
+    )
+    pack = prepare(request, tmp_path, tmp_path / "pack")
+    assert load_pack(tmp_path / "pack") == pack
+    (frozen,) = pack.sources
+    assert frozen.status == "ready"
+    spans = {span.locator: span for span in frozen.spans}
+    for name, header in BRIEF_SHEETS.items():
+        letters = "ABCDEFGHIJKLM"[: len(header)]
+        assert [spans[f"sheet:{name}!{letter}1"].text for letter in letters] == list(header)
+        stored = sum(1 for row in PORTFOLIO_ROWS[name] for value in row.values() if value)
+        assert sum(1 for locator in spans if locator.startswith(f"sheet:{name}!")) == (
+            len(header) + stored
+        )
+    assert not any(span.hidden or span.formula for span in frozen.spans)
+    facts = portfolio_facts(frozen)
+    assert facts == portfolio_facts(source(TEMPLATE.read_bytes(), TEMPLATE.name))
+    assert spans[facts.mandate.locator("nav")].text == "630928502"
+    for row in facts.compliance:
+        assert Decimal(spans[row.locator("limit")].text) == row.limit
+        assert Decimal(spans[row.locator("current_value")].text) == row.current_value
+        assert spans[row.locator("id")].text == row.id
+    for holding in facts.top_holdings:
+        assert spans[holding.locator("issuer")].text == holding.issuer
+    assert facts.holdings is not None
+    for position in facts.holdings:
+        assert spans[position.locator("maturity")].text == position.maturity.isoformat()
+
+
+# Properties (decision 0012): generated valid workbooks pass through two independent writers;
+# blanking one required cell is exactly one issue naming it; perturbing one headroom is exactly
+# one arithmetic issue.
+
+WORD = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .&()'-",
+    min_size=1,
+    max_size=20,
+).filter(lambda value: value.strip() and "total" not in value.casefold())
+
+
+def amount(low: str, high: str) -> st.SearchStrategy[Decimal]:
+    return st.decimals(
+        min_value=Decimal(low),
+        max_value=Decimal(high),
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    )
+
+
+def status_for(limit: Decimal, current: Decimal, watch: bool) -> str:
+    if current > limit:
+        return "Breach"
+    return "Watch" if watch and limit - current < limit * Decimal("0.1") else "Pass"
+
+
+Rows = dict[str, list[dict[str, str]]]
+
+
+@st.composite
+def portfolios(draw: st.DrawFn) -> Rows:
+    """Valid synthetic portfolios: every rule's arithmetic and statuses consistent."""
+    as_of = draw(st.dates(date(2000, 1, 1), date(2099, 12, 31))).isoformat()
+    nav = str(draw(amount("1", "1000000000")))
+    currency = draw(st.from_regex(r"[A-Z]{3}", fullmatch=True))
+    mandate_rows = [
+        {"section": "Strategy", "field": "fund_name", "value": "Fund " + draw(WORD)},
+        {
+            "section": "Strategy",
+            "field": "strategy",
+            "value": draw(st.sampled_from(("CLO", "Indexed Loans", "Indexed HY", "Other"))),
+        },
+        {"section": "Capital Structure", "field": "nav", "value": nav},
+        {"section": "Capital Structure", "field": "nav_currency", "value": currency},
+        {"section": "Reporting", "field": "as_of", "value": as_of},
+    ]
+    for index in range(draw(st.integers(0, 3))):
+        mandate_rows.append(
+            {
+                "section": draw(st.sampled_from(SECTIONS.replace(" or ", ", ").split(", "))),
+                "field": f"extra_{index}",
+                "value": draw(WORD),
+                "notes": draw(st.one_of(st.just(""), WORD)),
+            }
+        )
+    exposure = [{"metric": "nav", "value": nav, "unit": currency, "as_of": as_of}]
+    for index in range(draw(st.integers(0, 3))):
+        exposure.append(
+            {
+                "metric": f"metric_{index}",
+                "value": str(draw(amount("-1000", "1000"))),
+                "unit": draw(WORD),
+                "as_of": as_of,
+            }
+        )
+    shares = [draw(amount("0", "20")) for _ in range(draw(st.integers(0, 4)))]
+    shares.append(Decimal(100) - sum(shares, Decimal(0)) + draw(amount("-1", "1")))
+    ratings = [
+        {"rating_bucket": f"R{index}", "pct_nav": str(share), "issuers": str(index)}
+        for index, share in enumerate(shares)
+    ]
+    sectors = []
+    for index in range(draw(st.integers(1, 4))):
+        share = draw(amount("0", "20"))
+        row = {"sector": f"Sector {index}", "pct_nav": str(share), "issuers": str(index)}
+        if draw(st.booleans()):
+            ceiling = draw(amount("0", "30"))
+            row["limit_pct_nav"] = str(ceiling)
+            if draw(st.booleans()):
+                row["headroom_pct_nav"] = str(ceiling - share)
+            if draw(st.booleans()):
+                row["status"] = status_for(ceiling, share, draw(st.booleans()))
+        sectors.append(row)
+    top = [
+        {
+            "rank": str(rank),
+            "issuer": "Issuer " + draw(WORD),
+            "instrument": draw(WORD),
+            "pct_nav": str(draw(amount("0", "5"))),
+            "rating": draw(WORD),
+        }
+        for rank in range(1, draw(st.integers(1, 5)) + 1)
+    ]
+    maturities = [
+        {"bucket": f"Bucket {index}", "pct_nav": str(draw(amount("0", "60")))}
+        for index in range(draw(st.integers(1, 4)))
+    ]
+    compliance = []
+    for index in range(draw(st.integers(1, 5))):
+        ceiling, current = draw(amount("0", "50")), draw(amount("0", "60"))
+        compliance.append(
+            {
+                "id": f"C-{index:02d}" if index else "SECTOR",
+                "constraint_category": draw(WORD),
+                "parameter": draw(WORD),
+                "limit": str(ceiling),
+                "limit_unit": "% NAV" if index == 0 or draw(st.booleans()) else currency,
+                "breach_type": draw(st.sampled_from(("Hard", "Soft"))),
+                "scope": draw(st.sampled_from(("issuer", "sector", "rating_bucket", "other"))),
+                "source_document": draw(WORD),
+                "current_value": str(current),
+                "headroom": str(ceiling - current),
+                "status": status_for(ceiling, current, draw(st.booleans())),
+                "last_checked": as_of,
+                "checked_by": "analyst",
+            }
+        )
+    data: Rows = {
+        "Mandate": mandate_rows,
+        "Exposure_Summary": exposure,
+        "Rating_Distribution": ratings,
+        "Sector_Exposure": sectors,
+        "Top_Holdings": top,
+        "Maturity_Profile": maturities,
+        "Compliance_Monitor": compliance,
+    }
+    if draw(st.booleans()):
+        data["Holdings_Detail"] = [
+            HOLDING | {"facility_id": f"F{index}", "pct_nav": str(draw(amount("0", "5")))}
+            for index in range(draw(st.integers(1, 3)))
+        ]
+    return data
+
+
+@settings(max_examples=40, deadline=None)
+@given(portfolios())
+def test_valid_generated_workbooks_are_ok_through_two_writers(data: Rows) -> None:
+    report = validate_portfolio_bytes(FILE, portfolio_bytes(data))
+    assert rendered(report) == []
+    assert report.sheets == len(data)
+    assert report.compliance_rows == len(data["Compliance_Monitor"])
+    # Differential: an independent writer (openpyxl, every value a text cell) reads the same.
+    assert validate_portfolio_bytes(FILE, workbook(dict(data))) == report
+
+
+def required_cells(data: Rows) -> list[tuple[str, int, str]]:
+    """Every required cell whose blanking can only be its own issue: the section and field of
+    the five required Mandate rows and the metric of the nav row identify a required row, so
+    blanking them also reports the row missing (tested separately)."""
+    optional = {name: OPTIONAL_COLUMNS.get(name, set()) for name in BRIEF_SHEETS}
+    return [
+        (name, index, column)
+        for name, rows in data.items()
+        for index, row in enumerate(rows)
+        for column in BRIEF_SHEETS[name]
+        if column not in optional[name]
+        and not (name == "Mandate" and index < 5 and column in ("section", "field"))
+        and not (name == "Exposure_Summary" and index == 0 and column == "metric")
+    ]
+
+
+@settings(max_examples=60, deadline=None)
+@given(portfolios(), st.data())
+def test_blanking_one_required_cell_is_exactly_one_issue_naming_it(
+    data: Rows, choice: st.DataObject
+) -> None:
+    name, index, column = choice.draw(st.sampled_from(required_cells(data)))
+    data[name][index] = data[name][index] | {column: ""}
+    report = validate_portfolio_bytes(FILE, portfolio_bytes(data))
+    letter = "ABCDEFGHIJKLM"[BRIEF_SHEETS[name].index(column)]
+    assert [(issue.sheet, issue.cell, issue.problem) for issue in report.issues] == [
+        (name, f"{letter}{index + 2}", f"{column} is empty")
+    ]
+
+
+@settings(max_examples=60, deadline=None)
+@given(portfolios(), st.data())
+def test_perturbing_one_headroom_is_exactly_one_arithmetic_issue(
+    data: Rows, choice: st.DataObject
+) -> None:
+    targets = [
+        ("Compliance_Monitor", index, "headroom", "J")
+        for index, row in enumerate(data["Compliance_Monitor"])
+        if row["limit_unit"] == "% NAV"
+    ] + [
+        ("Sector_Exposure", index, "headroom_pct_nav", "E")
+        for index, row in enumerate(data["Sector_Exposure"])
+        if row.get("headroom_pct_nav")
+    ]
+    name, index, column, letter = choice.draw(st.sampled_from(targets))
+    shift = choice.draw(st.one_of(amount("0.02", "100"), amount("-100", "-0.02")))
+    row = data[name][index]
+    data[name][index] = row | {column: str(Decimal(row[column]) + shift)}
+    report = validate_portfolio_bytes(FILE, portfolio_bytes(data))
+    assert [(issue.sheet, issue.cell) for issue in report.issues] == [
+        (name, f"{letter}{index + 2}")
+    ]
+    assert "(to within 0.01)" in report.issues[0].problem
