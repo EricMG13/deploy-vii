@@ -20,10 +20,12 @@ from deploy_vii.contracts import (
     Contract,
     Hash,
     Identifier,
+    Input,
     Module,
     Run,
     Text,
 )
+from deploy_vii.cp0_workflow import _original_review
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.downstream_readiness import (
     DownstreamInputs,
@@ -46,6 +48,8 @@ from deploy_vii.execution import (
     Qualification,
     StepValidation,
     current_inputs,
+    head_of,
+    settle,
     text_sha256,
 )
 from deploy_vii.financial_contracts import FinancialReview
@@ -66,7 +70,7 @@ from deploy_vii.quality import (
     validate_quality_review,
 )
 from deploy_vii.readiness import shape_issues
-from deploy_vii.registry import plan, step_chain
+from deploy_vii.registry import canonical, plan, step_chain
 from deploy_vii.source_context import SourceContextReview, source_context, validate_source_context
 from deploy_vii.statement_view import write_statement_preview
 
@@ -538,6 +542,157 @@ def _recheck_handoff(
                 f"CP-1 handoff {name} renders as {text_sha256(raw)}, not as the "
                 f"{recorded} its promotion recorded"
             )
+
+
+class FrozenCP1Producer(Contract):
+    """Authenticated immutable contracts of the CP-1 head one consumer actually binds."""
+
+    ticket_id: Identifier
+    result_sha256: Hash
+    status: Literal["accepted", "restricted"]
+    inputs: tuple[Input, ...]
+    step_sha256s: tuple[Hash, ...]
+    context: SourceContextReview
+    financial: FinancialSubmission
+    narrative: NarrativeReview
+    registers: CanonicalTables
+    handoff: CP1Handoff
+    limitations: tuple[Text, ...]
+
+
+def cp1_frozen_producer(
+    store: Execution, snapshot: ExecutionSnapshot, owner: Attempt
+) -> FrozenCP1Producer:
+    """Read a current consumer's frozen producer without requiring today's producer inputs.
+
+    The caller supplies its locked snapshot; no journal pointer is reread. Existing
+    current-attempt APIs retain their stricter producer-input check.
+    """
+    if canonical(owner.module_id) != owner.module_id or owner not in snapshot.attempts:
+        raise ValueError("Consumer is not an actual canonical attempt in the supplied snapshot")
+    if current_inputs(snapshot, owner.module_id) != owner.inputs:
+        raise ValueError("Consumer inputs are stale")
+    bound = tuple(i for i in owner.inputs if i.input_id == "CP-1")
+    heads = tuple(h for h in snapshot.heads if h.module_id == "CP-1")
+    if len(bound) != 1 or len(heads) != 1:
+        raise ValueError("Consumer must bind exactly one CP-1 head")
+    head = heads[0]
+    if head.status not in {"accepted", "restricted"} or (bound[0].sha256, bound[0].status) != (
+        head.result_sha256,
+        head.status,
+    ):
+        raise ValueError("Consumer does not bind the usable CP-1 head")
+    producers = tuple(
+        a
+        for a in snapshot.attempts
+        if a.module_id == "CP-1"
+        and a.status == "finished"
+        and a.result_sha256 == head.result_sha256
+    )
+    if len(producers) != 1:
+        raise ValueError("CP-1 head has no unique finished producing attempt")
+    attempt = producers[0]
+    if (
+        attempt.issues
+        or attempt.interruption is not None
+        or tuple(s.step_id for s in attempt.steps) != CP1_PROMOTION
+        or any(
+            s.status != "valid"
+            or s.inputs
+            != (
+                *attempt.inputs,
+                *(
+                    Input(input_id="step:" + prior.step_id, sha256=prior.content_hash())
+                    for prior in attempt.steps[:index]
+                ),
+            )
+            for index, s in enumerate(attempt.steps)
+        )
+        or head.qualification != PROMOTED
+    ):
+        raise ValueError("CP-1 head was not promoted through a verified handoff")
+    pack = store.pack(snapshot)
+    if not attempt.inputs or attempt.inputs[0] != Input(
+        input_id="prepared-pack", sha256=snapshot.pack_sha256
+    ):
+        raise ValueError("CP-1 producer binds another prepared pack")
+    for retained in attempt.steps:
+        if retained.output_sha256 is None:
+            raise ValueError("CP-1 producer retains no step output")
+        store.step_output(retained.output_sha256)
+    source_inputs = tuple(i for i in attempt.inputs if i.input_id == "CP-0")
+    if len(source_inputs) != 1:
+        raise ValueError("CP-1 producer does not bind exactly one original CP-0")
+    source = store.result(source_inputs[0].sha256)
+    if source.module_id != "CP-0" or source.status != source_inputs[0].status:
+        raise ValueError("CP-1 original CP-0 binding differs from its result")
+    grants = tuple(i for i in attempt.inputs if i.input_id == "readiness-addendum")
+    if len(grants) > 1:
+        raise ValueError("CP-1 producer binds multiple source grants")
+    refs = tuple(r for r in snapshot.readiness_addenda if grants and r.sha256 == grants[0].sha256)
+    if grants and len(refs) != 1:
+        raise ValueError("CP-1 producer source grant is unavailable")
+    addendum = store._verified_addenda(snapshot)[refs[0].sha256] if refs else None
+    scope = addendum.context.target_requested_modules if addendum else pack.run.requested_modules
+    historical = snapshot.model_copy(
+        update={
+            "run": snapshot.run.model_copy(update={"requested_modules": scope}),
+            "heads": (head_of(source),),
+            "readiness_addenda": refs,
+        }
+    )
+    original_review = _original_review(store, historical)
+    if addendum is not None and addendum.context.original_review != original_review:
+        raise ValueError("CP-1 source grant differs from its original CP-0 review")
+    if current_inputs(historical, "CP-1") != attempt.inputs:
+        raise ValueError("CP-1 producer inputs differ from its original source authority")
+    registers = _stage_registers(store, pack, attempt)
+    quality, candidate = _quality_stage(store, pack, attempt)
+    step = attempt.steps[-1]
+    if (
+        quality.issues
+        or quality.output is None
+        or candidate is None
+        or not quality.retained_as(step)
+    ):
+        raise ValueError("CP-1 quality handoff differs from trusted recomputation")
+    handoff = CP1Handoff.model_validate_json(quality.output)
+    _recheck_handoff(store, snapshot, attempt, handoff)
+    if attempt.payload_sha256 is None:
+        raise ValueError("CP-1 producer retains no candidate")
+    payload = store.payload(attempt.payload_sha256)
+    if Module.model_validate_json(payload) != candidate:
+        raise ValueError("CP-1 retained candidate differs from trusted recomputation")
+    module = store.head_module(head)
+    _, recomputed = settle(
+        historical,
+        attempt,
+        payload,
+        lambda supplied: () if supplied == candidate else ("CP-1 candidate differs",),
+        pack=pack,
+        load=store.head_module,
+    )
+    if recomputed != module:
+        raise ValueError("CP-1 settled head differs from its verified candidate")
+    return FrozenCP1Producer(
+        ticket_id=attempt.ticket_id,
+        result_sha256=head.result_sha256,
+        status=head.status,
+        inputs=attempt.inputs,
+        step_sha256s=tuple(s.content_hash() for s in attempt.steps),
+        context=SourceContextReview.model_validate_json(
+            store.payload(attempt.steps[0].payload_sha256)
+        ),
+        financial=FinancialSubmission.model_validate_json(
+            store.payload(attempt.steps[1].payload_sha256)
+        ),
+        narrative=NarrativeReview.model_validate_json(
+            store.payload(attempt.steps[2].payload_sha256)
+        ),
+        registers=registers,
+        handoff=handoff,
+        limitations=tuple(dict.fromkeys((*module.limitations, *module.inherited_limitations))),
+    )
 
 
 def write_cp1_envelope(store: Execution, destination: Path) -> Path:
