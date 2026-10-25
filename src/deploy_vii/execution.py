@@ -783,8 +783,8 @@ class Execution:
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
-    def read(self) -> ExecutionSnapshot:
-        """Return the current snapshot after checking its hash; blobs are checked on access."""
+    def _snapshot(self) -> ExecutionSnapshot:
+        """Read metadata without following addendum refs; their verifier must not recurse."""
         digest = _require_hash(
             (self.directory / "current").read_text(encoding="ascii").strip(), "execution pointer"
         )
@@ -798,13 +798,81 @@ class Execution:
                 f"Unsupported execution store schema {version!r}; this version reads {SCHEMA}. "
                 "Retain the old store and create a new execution directory; nothing is migrated."
             )
-        snapshot = ExecutionSnapshot.model_validate_json(raw)
-        for ref in snapshot.readiness_addenda:
-            self.readiness_addendum(ref)
+        return ExecutionSnapshot.model_validate_json(raw)
+
+    def read(self) -> ExecutionSnapshot:
+        """Verify snapshot metadata and the complete retained addendum authority chain."""
+        snapshot = self._snapshot()
+        self._verified_addenda(snapshot)
         return snapshot
 
     def readiness_addendum(self, ref: ReadinessAddendumRef) -> ReadinessAddendum:
-        """Verify the retained contract and every cached authorization field before use."""
+        """A grant is authority only as a member of the authenticated snapshot history."""
+        snapshot = self._snapshot()
+        if snapshot.readiness_addenda.count(ref) != 1:
+            raise ValueError("Source-readiness addendum ref is absent or ambiguous")
+        return self._verified_addenda(snapshot)[ref.sha256]
+
+    def _verified_addenda(self, snapshot: ExecutionSnapshot) -> dict[str, ReadinessAddendum]:
+        from deploy_vii.cp0_workflow import _original_review
+
+        verified: dict[str, ReadinessAddendum] = {}
+        for ref in snapshot.readiness_addenda:
+            if ref.sha256 in verified:
+                raise ValueError("Duplicate source-readiness addendum history")
+            addendum = self._read_addendum(ref)
+            context = addendum.context
+            pack = PreparedPack.model_validate_json(self._load(context.pack_sha256))
+            if not scope_within(pack.run, snapshot.run):
+                raise ValueError("Source-readiness addendum belongs to a different run or scope")
+            # Historical grants keep their own pack/producer, even after a legitimate refresh.
+            producer = self.result(context.cp0_result_sha256)
+            baseline = snapshot.model_copy(
+                update={
+                    "run": pack.run,
+                    "pack_sha256": context.pack_sha256,
+                    "heads": (head_of(producer),),
+                    "readiness_addenda": (),
+                }
+            )
+            if _original_review(self, baseline) != context.original_review:
+                raise ValueError("Source-readiness addendum differs from its retained CP-0 review")
+            prior = tuple(
+                a
+                for a in verified.values()
+                if a.context.pack_sha256 == context.pack_sha256
+                and a.context.cp0_result_sha256 == context.cp0_result_sha256
+            )
+            if (
+                context.previous_addenda != tuple(a.content_hash() for a in prior)
+                or context.prior_consumers != tuple(c for a in prior for c in a.consumers)
+                or context.prior_gaps != tuple(g for a in prior for g in a.gaps)
+                or context.prior_analysis != tuple(c for a in prior for c in a.analysis)
+            ):
+                raise ValueError("Source-readiness addendum history or projection differs")
+            held = {canonical(m) for m in context.base_requested_modules}
+            wanted = tuple(dict.fromkeys(canonical(m) for m in context.target_requested_modules))
+            extended = (*context.base_requested_modules, *(m for m in wanted if m not in held))
+            added = tuple(
+                m for m in plan(extended) if m not in dependencies(context.base_requested_modules)
+            )
+            if (
+                not held < set(wanted)
+                or extended != context.target_requested_modules
+                or added != context.added_modules
+                or not {canonical(m) for m in pack.run.requested_modules} <= held
+                or not set(wanted) <= {canonical(m) for m in snapshot.run.requested_modules}
+                or any(
+                    not {canonical(m) for m in a.context.target_requested_modules} <= held
+                    for a in prior
+                )
+            ):
+                raise ValueError("Source-readiness addendum scope or closure differs")
+            verified[ref.sha256] = addendum
+        return verified
+
+    def _read_addendum(self, ref: ReadinessAddendumRef) -> ReadinessAddendum:
+        """Check retained bytes/composition; authority additionally needs the verified history."""
         from deploy_vii.cp0_workflow import _check_addendum
 
         addendum = ReadinessAddendum.model_validate_json(self._load(ref.sha256))

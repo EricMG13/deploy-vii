@@ -1524,3 +1524,213 @@ def test_removed_prior_addendum_ref_and_blob_cannot_leave_a_runnable_descendant(
         reopened = Execution(store.directory)
         reopened.read()
         reopened.begin("CP-1A")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "baseline",
+        "missing-prior",
+        "duplicate-prior",
+        "forward-prior",
+        "cyclic-prior",
+        "consumer-projection",
+        "gap-projection",
+        "analysis-projection",
+        "scope",
+        "closure",
+        "duplicate-ref",
+        "reverse-refs",
+        "producer-blob",
+        "producer-payload",
+        "ambiguous-producer",
+        "missing-producer",
+    ],
+)
+def test_read_use_authenticates_every_historical_authority_projection(
+    original_store: Execution,
+    mutation: str,
+) -> None:
+    from deploy_vii.execution import addendum_ref
+
+    store = original_store
+    requested = ("CP-1", "CP-4")
+    raw, digest = payload(store, requested)
+    document = json.loads(raw)
+    document["gaps"] = [
+        {
+            "gap_id": "first-gap",
+            "kind": "scope",
+            "severity": "minor",
+            "description": "Synthetic first-grant scope limit",
+            "affected_modules": ["CP-4"],
+            "remediation": "Review full covenant evidence",
+            "citations": [],
+        }
+    ]
+    submit_cp0_addendum(store, requested, json.dumps(document), context_sha256=digest)
+    requested = (*requested, "CP-1A")
+    raw, digest = payload(store, requested)
+    submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+    snapshot = store.read()
+    prior, descendant = snapshot.readiness_addenda
+    retained = store.readiness_addendum(descendant)
+    context = retained.context
+    queried = descendant
+    if mutation == "duplicate-ref":
+        store._write(
+            snapshot.model_copy(
+                update={"readiness_addenda": (*snapshot.readiness_addenda, descendant)}
+            )
+        )
+    elif mutation == "reverse-refs":
+        store._write(snapshot.model_copy(update={"readiness_addenda": (descendant, prior)}))
+    elif mutation in {"producer-blob", "producer-payload"}:
+        digest = (
+            context.cp0_result_sha256
+            if mutation == "producer-blob"
+            else snapshot.attempts[0].steps[0].payload_sha256
+        )
+        (store.directory / "blobs" / digest).unlink()
+    elif mutation in {"ambiguous-producer", "missing-producer"}:
+        attempts = (
+            (*snapshot.attempts, snapshot.attempts[0]) if mutation == "ambiguous-producer" else ()
+        )
+        store._write(snapshot.model_copy(update={"attempts": attempts}))
+    else:
+        if mutation == "baseline":
+            context = context.model_copy(
+                update={
+                    "original_review": context.original_review.model_copy(
+                        update={"objective": "Forged baseline objective"}
+                    )
+                }
+            )
+        elif mutation in {"missing-prior", "duplicate-prior", "forward-prior", "cyclic-prior"}:
+            hashes = (
+                ()
+                if mutation == "missing-prior"
+                else (prior.sha256, prior.sha256)
+                if mutation == "duplicate-prior"
+                else (descendant.sha256, prior.sha256, descendant.sha256)
+                if mutation == "cyclic-prior"
+                else (descendant.sha256,)
+            )
+            context = context.model_copy(update={"previous_addenda": hashes})
+        elif mutation == "consumer-projection":
+            context = context.model_copy(
+                update={
+                    "prior_consumers": tuple(
+                        c.model_copy(update={"rationale": "Forged prior rationale"})
+                        for c in context.prior_consumers
+                    )
+                }
+            )
+        elif mutation == "gap-projection":
+            context = context.model_copy(
+                update={
+                    "prior_gaps": tuple(
+                        g.model_copy(update={"description": "Forged prior gap"})
+                        for g in context.prior_gaps
+                    )
+                }
+            )
+        elif mutation == "analysis-projection":
+            context = context.model_copy(
+                update={
+                    "prior_analysis": tuple(
+                        c.model_copy(update={"text": "Forged prior analytical judgment"})
+                        for c in context.prior_analysis
+                    )
+                }
+            )
+        elif mutation == "scope":
+            context = context.model_copy(
+                update={"base_requested_modules": ("CP-1", "CP-4", "CP-1A")}
+            )
+        else:
+            context = context.model_copy(update={"added_modules": ("CP-1A", "CP-0")})
+        forged = retained.model_copy(update={"context": context})
+        store._store(context.model_dump_json())
+        store._store(forged.model_dump_json())
+        queried = addendum_ref(forged)
+        store._write(snapshot.model_copy(update={"readiness_addenda": (prior, queried)}))
+    with pytest.raises(ValueError):
+        Execution(store.directory).read()
+    with pytest.raises(ValueError):
+        Execution(store.directory).readiness_addendum(queried)
+
+
+@settings(max_examples=4, deadline=None)
+@given(st.permutations(("CP-4", "CP-1A")), st.booleans())
+def test_historical_grants_remain_readable_after_real_pack_and_cp0_refresh(
+    original: Path,
+    order: tuple[str, ...],
+    full_scope: bool,
+) -> None:
+    import tempfile
+
+    from deploy_vii.execution import NotAuthorized
+    from deploy_vii.readiness import NOT_CONSUMERS
+    from deploy_vii.registry import plan
+
+    with tempfile.TemporaryDirectory() as directory:
+        shutil.copytree(original, Path(directory) / "journal")
+        store = Execution(Path(directory) / "journal")
+        requested = store.read().run.requested_modules
+        for module in order:
+            requested = (*requested, module)
+            raw, digest = payload(store, requested)
+            submit_cp0_addendum(store, requested, raw, context_sha256=digest)
+        before = store.read()
+        old = {ref.sha256: store.readiness_addendum(ref) for ref in before.readiness_addenda}
+        old_bytes = {p: p.read_bytes() for p in (store.directory / "blobs").iterdir()}
+        original_review = next(iter(old.values())).context.original_review
+        pack = store.pack()
+        refreshed = pack.model_copy(
+            update={
+                "run": before.run if full_scope else pack.run,
+                "sources": tuple(
+                    s.model_copy(update={"name": "Refreshed synthetic source metadata"})
+                    for s in pack.sources
+                ),
+            }
+        )
+        store.replace_pack(refreshed)
+        reopened = Execution(store.directory)
+        assert reopened.read().readiness_addenda == before.readiness_addenda
+        assert all(
+            reopened.readiness_addendum(ref) == old[ref.sha256] for ref in before.readiness_addenda
+        )
+        review = original_review.model_copy(
+            update={
+                "pack_sha256": refreshed.content_hash(),
+                "consumers": tuple(
+                    original_review.consumers[0].model_copy(update={"module_id": m})
+                    for m in plan(refreshed.run.requested_modules)
+                    if m not in NOT_CONSUMERS
+                ),
+            }
+        )
+        done = submit_cp0_review(
+            reopened,
+            reopened.begin("CP-0").ticket_id,
+            json.dumps(review.model_dump(mode="json"), indent=2),
+        )
+        assert not done.issues
+        current = reopened.read()
+        assert all(
+            reopened.readiness_addendum(ref) == old[ref.sha256] for ref in before.readiness_addenda
+        )
+        assert all(p.read_bytes() == raw for p, raw in old_bytes.items())
+        if full_scope:
+            assert all(i.input_id != "readiness-addendum" for i in current_inputs(current, "CP-1A"))
+            next_scope = (*requested, "CP-2")
+            context = cp0_addendum_context(reopened, next_scope)
+            assert context.previous_addenda == () and context.prior_consumers == ()
+            raw, digest = payload(reopened, next_scope)
+            submit_cp0_addendum(reopened, next_scope, raw, context_sha256=digest)
+            assert len(reopened.read().readiness_addenda) == 3
+        else:
+            with pytest.raises(NotAuthorized):
+                current_inputs(current, "CP-1A")

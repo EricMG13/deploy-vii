@@ -134,8 +134,13 @@ failed final write by resubmitting the same context/payload if still current; un
 blobs are harmless. An already-applied target remains the ordinary no-op.
 
 `execution/5` optionally carries `readiness_addenda` refs, omitted when empty; ordinary
-reports likewise omit the absent addendum hash. Reads verify retained blobs, canonical
-composition and cached commands/restrictions. Original CP-0 rows always take priority.
+reports likewise omit the absent addendum hash. Reads authenticate each grant against
+its retained producing CP-0 attempt and historical pack, then verify every earlier
+applicable attestation and its exact consumer/gap/analysis projection in order. Missing,
+duplicate, forward/cyclic or forged history refuses; self-consistent cached metadata is
+insufficient. Historical grants remain readable after refresh, with their old bindings
+inapplicable. Canonical blobs/composition and commands/restrictions are also checked.
+Original CP-0 rows always take priority.
 Exactly one matching pack/current-CP-0 grant can authorize an originally absent consumer;
 only READY or READY_WITH_LIMITATIONS can begin. Its ticket appends an accepted/restricted
 `readiness-addendum` input, and its context and descendants retain consumer-local limits
