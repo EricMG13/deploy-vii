@@ -27,6 +27,11 @@ that head and drift).
   the next `begin` is the repair (`number` 1, `repair_of` the interrupted ticket). A second
   finished attempt for the same inputs (`len(previous) >= 2`) is refused, as is a first
   attempt that finished without issues (settled).
+- Every submit command (`cp0-submit`, `cp1-submit`, `cp1-promote`, `module-submit`) prints the
+  attempt JSON on stdout and exits 1 with the validator's issue lines on stderr when the review
+  was rejected, including a first rejection kept for the step's one repair (the attempt is still
+  `pending`: submit the corrected review for the same step on the same ticket). Exit 0 means the
+  review was accepted; exit 2 is a one-line refusal (missing review file, unknown module or step).
 - `interrupt` (848) finishes a pending attempt with a reason. It records an interruption
   in the journal; it does not stop a host process or a running command.
 - `finish` refuses with "Ticket inputs have changed" when upstream evidence changed

@@ -27,6 +27,7 @@ from deploy_vii.live.runner import StepSpec, prompt_inputs, repair_prompt
 from deploy_vii.module_submits import MODULE_SUBMITS, host_context, submit_module_step
 from deploy_vii.report_view import pathways
 from tests.product.test_business_context import cp1_fact, submission_fixture
+from tests.product.test_cp1_workflow import staged
 from tests.product.test_cp2_synthesis import journal, synthesis
 from tests.product.test_execution import step_text
 from tests.product.test_live_modules import CASES, SCHEMAS, cp0_case, cp1a_case
@@ -520,3 +521,68 @@ def test_the_live_runner_imports_without_a_credential_or_a_network() -> None:
         check=False,
     )
     assert done.returncode == 0, done.stderr
+
+
+# --- M8c item 2: a rejected review exits 1 from every submit command ---
+
+
+def rejected_exit(code: int, out: str, err: str) -> list[str]:
+    """The attempt JSON on stdout, the validator's issue lines on stderr, exit 1."""
+    issues = json.loads(out)["issues"] or next(
+        s["issues"] for s in json.loads(out)["step_repairs"] if s["issues"]
+    )
+    assert code == 1 and issues and "Traceback" not in err
+    assert err.splitlines() == issues
+    return issues
+
+
+def test_cp0_submit_exits_1_on_a_rejected_review_and_0_on_an_accepted_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, _ = cp0_case(tmp_path)
+    cli = Cli(store, monkeypatch, capsys)
+    ticket = json.loads(cli("begin", "CP-0")[1])["ticket_id"]
+    review = tmp_path / "review.json"
+    review.write_text("not json")
+    rejected_exit(*cli("cp0-submit", "--ticket", ticket, "--review", str(review)))
+    repair = json.loads(cli("begin", "CP-0")[1])["ticket_id"]
+    review.write_text(readiness_fixture()[1].model_dump_json())
+    code, out, err = cli("cp0-submit", "--ticket", repair, "--review", str(review))
+    assert code == 0 and err == "" and json.loads(out)["status"] == "finished"
+
+
+def test_cp1_submit_exits_1_on_a_rejected_review_kept_for_repair_and_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, ticket, _ = cp1_case(tmp_path)
+    cli = Cli(store, monkeypatch, capsys)
+    review = tmp_path / "review.json"
+    review.write_text("not json")
+    submit = ("cp1-submit", "--ticket", ticket.ticket_id, "--step", "financials")
+    code, out, err = cli(*submit, "--review", str(review))
+    assert json.loads(out)["status"] == "pending"  # kept for the step's one repair
+    rejected_exit(code, out, err)
+    code, out, err = cli(*submit, "--review", str(review))
+    assert json.loads(out)["status"] == "finished"
+    rejected_exit(code, out, err)
+
+
+def test_cp1_promote_exits_1_on_a_rejected_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, attempt = staged(tmp_path)
+    cli = Cli(store, monkeypatch, capsys)
+    review = tmp_path / "review.json"
+    review.write_text("not json")
+    rejected_exit(*cli("cp1-promote", "--ticket", attempt.ticket_id, "--review", str(review)))
+
+
+@pytest.mark.parametrize("command", ["cp0-submit", "cp1-submit", "cp1-promote"])
+def test_a_missing_review_file_is_a_one_line_refusal_for_every_submit_command(
+    cli: Cli, tmp_path: Path, command: str
+) -> None:
+    absent = tmp_path / "absent.json"
+    step = ("--step", "source_context") if command == "cp1-submit" else ()
+    code, out, err = cli(command, "--ticket", "t", *step, "--review", str(absent))
+    assert code == 2 and out == "" and str(absent) in err and len(err.splitlines()) == 1
+    assert err.startswith(f"{command} refused:")

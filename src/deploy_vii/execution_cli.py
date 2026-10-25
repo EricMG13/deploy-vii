@@ -120,23 +120,35 @@ def issue_lines(attempt: Attempt) -> tuple[str, ...]:
     return waiting[-1].issues if waiting else ()
 
 
-def module_submit(store: Execution, args: argparse.Namespace) -> str:
-    """Submit the review file as the module's step: the attempt record on stdout, and when the
-    validator rejected it each issue line on stderr and exit 1 (the host agent repairs on them)."""
+def settled_json(store: Execution, attempt: Attempt) -> str:
+    """The attempt record on stdout. When the validator rejected the review (or kept the step's
+    first try for its one repair) each issue line goes to stderr and the exit is 1, so the host
+    agent branches on the exit code; 0 only for an accepted review."""
+    shown = attempt_json(store, attempt)
+    issues = issue_lines(attempt)
+    if issues:
+        print(shown)
+        print("\n".join(issues), file=sys.stderr)
+        raise SystemExit(1)
+    return shown
+
+
+def review_text(args: argparse.Namespace) -> str:
+    """The `--review` file's text; a missing file is a one-line refusal, exit 2."""
     try:
-        review = args.review.read_text(encoding="utf-8")
+        return args.review.read_text(encoding="utf-8")
     except FileNotFoundError as missing:
-        raise refusal_exit(f"module-submit refused: no review file at {args.review}") from missing
+        raise refusal_exit(f"{args.action} refused: no review file at {args.review}") from missing
+
+
+def module_submit(store: Execution, args: argparse.Namespace) -> str:
+    """Submit the review file as the module's step (`settled_json`: exit 1 on a rejection)."""
+    review = review_text(args)
     try:
         attempt = submit_module_step(store, args.module, args.ticket, args.step, review)
     except ValueError as refusal:
         raise refusal_exit(f"module-submit refused: {refusal}") from refusal
-    issues = issue_lines(attempt)
-    if issues:
-        print(attempt_json(store, attempt))
-        print("\n".join(issues), file=sys.stderr)
-        raise SystemExit(1)
-    return attempt_json(store, attempt)
+    return settled_json(store, attempt)
 
 
 def module_context_json(store: Execution, args: argparse.Namespace) -> str:
@@ -216,8 +228,7 @@ def execute(args: argparse.Namespace) -> str:
     elif args.action == "cp1-quality-inputs":
         return cp1_quality_inputs(cp1_registers(store, args.ticket)).model_dump_json()
     elif args.action == "cp1-promote":
-        review = args.review.read_text(encoding="utf-8")
-        return attempt_json(store, promote_cp1(store, args.ticket, review))
+        return settled_json(store, promote_cp1(store, args.ticket, review_text(args)))
     elif args.action == "cp-model-publish":
         try:
             return attempt_json(store, publish_cp_model(store, output=args.output))
@@ -267,14 +278,10 @@ def execute(args: argparse.Namespace) -> str:
     elif args.action == "interrupt":
         return attempt_json(store, store.interrupt(args.ticket, args.reason))
     elif args.action == "cp0-submit":
-        return attempt_json(
-            store,
-            submit_cp0_review(store, args.ticket, args.review.read_text(encoding="utf-8")),
-        )
+        return settled_json(store, submit_cp0_review(store, args.ticket, review_text(args)))
     elif args.action == "cp1-submit":
-        return attempt_json(
-            store,
-            submit_cp1_step(store, args.ticket, args.step, args.review.read_text(encoding="utf-8")),
+        return settled_json(
+            store, submit_cp1_step(store, args.ticket, args.step, review_text(args))
         )
     elif args.action == "step-output":
         step = next(

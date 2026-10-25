@@ -24,10 +24,10 @@ Derived from the argparse definitions at origin/main 14e81d2:
 | `status` | none | prints the snapshot |
 | `begin` | `MODULE` | opens an attempt; prints its ticket; an unknown module exits 2 listing the valid ids |
 | `interrupt` | `--ticket ID --reason TEXT` | finishes the attempt as interrupted |
-| `cp0-submit` | `--ticket ID --review FILE` | validates and settles CP-0 |
-| `cp1-submit` | `--ticket ID --step STEP --review FILE` | STEP is one of `source_context`, `financials`, `narrative`, `readiness` |
+| `cp0-submit` | `--ticket ID --review FILE` | validates and settles CP-0; rejected: attempt JSON on stdout, issue lines on stderr, exit 1; missing file: exit 2 |
+| `cp1-submit` | `--ticket ID --step STEP --review FILE` | STEP is one of `source_context`, `financials`, `narrative`, `readiness`; a rejected review (kept for the step's one repair or final) exits 1 as `cp0-submit` |
 | `cp1-quality-inputs` | `--ticket ID` | prints the registers for the QA review |
-| `cp1-promote` | `--ticket ID --review FILE` | retains the QA review and settles CP-1 |
+| `cp1-promote` | `--ticket ID --review FILE` | retains the QA review and settles CP-1; a rejected review exits 1 as `cp0-submit` |
 | `step-output` | `--ticket ID --step STEP` | prints a retained valid step output |
 | `statement-preview` | `--ticket ID --output DIR` | statement preview; never settles |
 | `interface-preview` | `--ticket ID --output DIR` | statement preview with interface |
