@@ -55,6 +55,7 @@ from deploy_vii.live.tools import (
     expected_cells,
     extracted_coverage,
     fiscal_year,
+    seen_tables,
     tool_specs,
     unread_citation_issues,
 )
@@ -1444,3 +1445,92 @@ def test_coverage_properties(
     assert after["extracted"] == before["extracted"] == 6
     assert after["covered"] >= before["covered"]
     assert Decimal(after["coverage"]) >= Decimal(before["coverage"])
+
+
+def test_the_coverage_tables_are_the_shown_pages_of_the_financial_sources(case: Case) -> None:
+    """Item 2: the loop extracts, per submit, only the page:N spans of the review's financial
+    sources the model had been shown (read or extracted), in page order; never another page."""
+    tools = PackTools(statement_pack(case.store))
+    assert [s.source_id for s in case.context.sources if s.classification == "financial"] == ["S1"]
+    seen = Seen(read=frozenset({("S1", "page:5"), ("S1", "page:2"), ("deck", "page:1")}))
+    tables = seen_tables(tools, seen, case.context)
+    assert [(t.source_id, t.locator, len(t.lines)) for t in tables] == [
+        ("S1", "page:2", 4),
+        ("S1", "page:5", 0),
+    ]
+    assert tables[0] == extract_statement_lines(STATEMENT_PAGE, "page:2", source_id="S1")
+    assert seen_tables(tools, Seen(), case.context) == ()
+
+
+def test_the_overall_reason_says_when_no_shown_page_holds_a_statement_line(
+    paged_case: PagedCase,
+) -> None:
+    payload = json.dumps(built(paged_case))
+    prose = replace(CFS_TABLE, lines=())
+    measured = extracted_coverage(payload, paged_case.context, (prose,))
+    assert measured is not None
+    assert measured["overall"]["reason"] == "none of the 1 extracted pages holds a statement line"
+    measured = extracted_coverage(payload, paged_case.context, ())
+    assert measured is not None
+    assert measured["overall"]["reason"] == "none of the 0 extracted pages holds a statement line"
+
+
+def test_every_financials_submit_records_its_extracted_coverage(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Item 2: next to `completeness`, every financials submit's record holds
+    `extracted_coverage` of the retained (pre-filled) payload over the pages shown by then;
+    the case's own payload cites no page (every cell None with its reason), the built one
+    covers the extracted page; the verdicts are those without the field."""
+    search = ("c-s", "search_pack", json.dumps({"query": "cash"}))
+    extract = ("c-e", EXTRACT, json.dumps({"source_id": "S1", "locators": ["page:1"]}))
+    built_payload = from_extracted(paged_case.payload, PackTools(paged_case.store.pack()))
+    rig = paged_rig(tmp_path, paged_case)
+    # The first submit (before the extract) cites page:1 unread: rejected by the cited-page rule.
+    script = rig.script(
+        tool_reply(search),
+        tool_reply(("c-0", "submit_financials", built_payload)),
+        tool_reply(extract),
+        tool_reply(("c-1", "submit_financials", built_payload)),
+    )
+    result = rig.run(script, step_id="financials")
+    assert [s["outcome"] for s in result.submits] == ["rejected", "accepted"]
+    first, second = (s["extracted_coverage"] for s in result.submits)
+    assert cell(first)["reason"] == (
+        "no page of S1 the CFS lines cite has an extracted table (read or extracted)"
+    )
+    assert first["overall"]["reason"] == "none of the 0 extracted pages holds a statement line"
+    assert cell(second) == {
+        "extracted": 6,
+        "covered": 6,
+        "coverage": "1.0000",
+        "reason": None,
+        "pages": ["page:1"],
+    }
+    assert second["agreement"]["agreed"] == 30
+    assert all(s["extracted_coverage_reason"] is None for s in result.submits)
+    recorded = rig.metrics(result.attempt_id)["tool_loop"]["step"]["submits"]
+    assert [s["extracted_coverage"] for s in recorded] == [first, second]
+    assert all("completeness" in s for s in recorded)
+
+
+def test_a_financials_submit_that_does_not_parse_records_no_coverage_with_the_reason(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(tool_reply(("c-1", "submit_financials", json.dumps({"financial": 1}))))
+    result = rig.run(script, step_id="financials", rules=ToolRules(checked=()))
+    (record, *_) = result.submits
+    assert record["outcome"] == "rejected" and record["extracted_coverage"] is None
+    assert record["extracted_coverage_reason"] == (
+        "the retained payload does not parse as a financials submission (the stage validator "
+        "rejects it)"
+    )
+
+
+def test_a_step_other_than_financials_records_no_coverage(tmp_path: Path) -> None:
+    rig = step_rig(tmp_path, "business_context")
+    script = rig.script(tool_reply(("c-1", "submit_business_context", "{}")))
+    result = rig.run(script, step_id="business_context", rules=ToolRules(checked=()))
+    (record, *_) = result.submits
+    assert "extracted_coverage" not in record and "completeness" not in record

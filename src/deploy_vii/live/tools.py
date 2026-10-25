@@ -884,16 +884,45 @@ def extracted_coverage(
         cells[cell_key(cell)] = _cell_coverage(cell, books, pages)
     extracted = sum(item["extracted"] for item in cells.values())
     covered = sum(item["covered"] for item in cells.values())
+    reason = None
+    if not any(table.lines for table in tables):
+        reason = f"none of the {len(tables)} extracted pages holds a statement line"
+    elif not extracted:
+        reason = "no expected cell has extracted lines"
     return {
         "cells": cells,
         "overall": {
             "extracted": extracted,
             "covered": covered,
             "coverage": _ratio(covered, extracted),
-            "reason": None if extracted else "no expected cell has extracted lines",
+            "reason": reason,
         },
         "agreement": _agreement(submission.financial.books, pages),
     }
+
+
+def seen_tables(
+    tools: PackTools, seen: Seen, context: SourceContextReview
+) -> tuple[ExtractedTable, ...]:
+    """The extracted tables `extracted_coverage` reads for one `financials` submit (task 8.12):
+    one per `page:N` span of a financial source of `context` (`classification: financial`) that
+    the model had been shown by then (`seen.read`: through `read_pages` or
+    `extract_statements`), in pack then page order. Never a page the model was not shown, so
+    the work is bounded by what the step read, never the whole filing."""
+    financial = {item.source_id for item in context.sources if item.classification == "financial"}
+    tables: list[ExtractedTable] = []
+    for source_id, source in tools.ready.items():
+        if source_id not in financial:
+            continue
+        spans = {span.locator: span for span in source.spans if _PAGE.fullmatch(span.locator)}
+        shown = sorted(
+            (loc for ident, loc in seen.read if ident == source_id and loc in spans),
+            key=_page_order,
+        )
+        tables += [
+            extract_statement_lines(spans[loc].text, loc, source_id=source_id) for loc in shown
+        ]
+    return tuple(tables)
 
 
 def _walk(node: object, path: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
