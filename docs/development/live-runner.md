@@ -1447,7 +1447,8 @@ dash nil with the raw token kept, single-cell continuation lines joined, colon s
 not joined), each with its 1-based line number, indent, raw cells, exact `Decimal` values and
 the last all-caps caption above it, plus the raw year/month header lines above the first data
 line; `extract_pack_statements` does that for every span of a pack's sources (or the given
-locators) and refuses a locator two sources share or one no span has. It is pure Python and
+locators, or one source's), names each table's source (task 8.10b) and refuses a locator twice
+in one source or one no span has; two sources may share a locator. It is pure Python and
 stdlib only. It does not round, compute, or assign a statement, period, item, unit, line kind
 or sign convention; it does not tell a statement page from a note table; and a line it cannot
 parse (trailing text, one value, numbers on their own line, a label with no letter) is left
