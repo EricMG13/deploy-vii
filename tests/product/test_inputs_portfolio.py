@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, get_args
+from xml.sax.saxutils import quoteattr
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import openpyxl
@@ -1917,3 +1918,211 @@ def test_error_and_boolean_cells_are_one_issue_each(
     assert rendered(validate_portfolio_bytes(FILE, raw)) == [
         f"{FILE}:{sheet}!{cell}: {problem} — fix: {fix}"
     ]
+
+
+# Fix round 2: projection must never change the frozen cell identity.
+def appended_cells(addresses: tuple[tuple[str, str], ...]) -> bytes:
+    raw = workbook(valid())
+    stream = io.BytesIO()
+    with ZipFile(io.BytesIO(raw)) as original, ZipFile(stream, "w") as rewritten:
+        for member in original.infolist():
+            content = original.read(member)
+            if member.filename == "xl/worksheets/sheet7.xml":
+                cells = "".join(
+                    f"<c r={quoteattr(address)}><v>{value}</v></c>" for address, value in addresses
+                )
+                content = content.replace(
+                    b"</sheetData>", f'<row r="2">{cells}</row></sheetData>'.encode()
+                )
+            rewritten.writestr(member, content)
+    return stream.getvalue()
+
+
+def test_newline_cell_aliases_cannot_replace_frozen_financial_cells() -> None:
+    raw = appended_cells((("D2\n", "250"), ("I2\n", "237"), ("J2\n", "13")))
+    frozen = source(raw)
+    spans = {span.locator: span.text for span in frozen.spans}
+    assert spans["sheet:Compliance_Monitor!D2"] == "2.5"
+    assert spans["sheet:Compliance_Monitor!D2\n"] == "250"
+    result = validate_portfolio_bytes(FILE, raw)
+    assert not result.ok
+    assert "canonical" in result.issues[0].problem
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(frozen)
+    assert refused.value.report == result
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["D" + "1" * 4301, "A" * 4301 + "2", "D1048577", "XFE2", "D02", "D0", "d2", " D2", "D2 "],
+    ids=[
+        "huge-row",
+        "huge-column",
+        "row-limit",
+        "column-limit",
+        "leading-zero",
+        "zero",
+        "lower",
+        "leading-space",
+        "trailing-space",
+    ],
+)
+def test_noncanonical_coordinates_return_a_report_not_a_traceback(address: str) -> None:
+    raw = appended_cells(((address, "250"),))
+    result = validate_portfolio_bytes(FILE, raw)
+    assert not result.ok
+    assert "canonical" in result.issues[0].problem
+    with pytest.raises(PortfolioRefused):
+        portfolio_facts(source(raw))
+
+
+@pytest.mark.parametrize("address", ["A1", "XFD1048576"])
+def test_native_boundary_cells_have_their_exact_frozen_identity(address: str) -> None:
+    # A1 already exists, so use an uncontracted README sheet for the first native cell.
+    frozen = source(workbook(valid()))
+    payload = frozen.model_dump()
+    payload["spans"] += ({"locator": f"sheet:README!{address}", "text": "ignored"},)
+    payload["coverage"] += ({"locator": "sheet:README", "status": "retained"},)
+    assert portfolio_facts(Source.model_validate(payload)).compliance[0].limit == Decimal("2.5")
+    if address.startswith("XFD"):
+        assert validate_portfolio_bytes(FILE, appended_cells(((address, "250"),))).ok
+
+
+@pytest.mark.parametrize("target", ["spans", "coverage", "both", "collision"])
+def test_noncanonical_sheet_uris_cannot_alias_frozen_cells(target: str) -> None:
+    payload = source(workbook(valid())).model_dump()
+    alias = "sheet:%43ompliance_Monitor"
+    if target in ("spans", "both"):
+        payload["spans"] = tuple(
+            span | {"locator": span["locator"].replace("sheet:Compliance_Monitor", alias)}
+            for span in payload["spans"]
+        )
+    if target in ("coverage", "both"):
+        payload["coverage"] = tuple(
+            item | {"locator": item["locator"].replace("sheet:Compliance_Monitor", alias)}
+            for item in payload["coverage"]
+        )
+    if target == "collision":
+        payload["spans"] += ({"locator": alias + "!D2", "text": "250"},)
+        payload["coverage"] += ({"locator": alias, "status": "retained"},)
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(Source.model_validate(payload))
+    assert "canonical" in refused.value.report.issues[0].problem
+
+
+@pytest.mark.parametrize("status", ["missing", "unreadable"])
+def test_unavailable_prepared_source_is_refused(status: str) -> None:
+    payload = source(workbook(valid())).model_dump()
+    payload.update(status=status, extraction_status="blocked", limitation="synthetic failure")
+    if status == "missing":
+        payload.update(sha256=None, spans=())
+    frozen = Source.model_validate(payload)
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(frozen)
+    assert "cannot read" in refused.value.report.issues[0].problem
+
+
+@pytest.mark.parametrize("name", list(BRIEF_SHEETS))
+def test_unreadable_contracted_sheet_coverage_is_refused(name: str) -> None:
+    payload = source(workbook(valid() | {"Holdings_Detail": [HOLDING]})).model_dump()
+    payload["coverage"] = tuple(
+        item
+        | (
+            {"status": "unreadable", "limitation": "synthetic failure"}
+            if item["locator"] == f"sheet:{name}"
+            else {}
+        )
+        for item in payload["coverage"]
+    )
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(Source.model_validate(payload))
+    assert refused.value.report.issues[0].sheet == name
+    assert "unreadable" in refused.value.report.issues[0].problem
+
+
+def test_empty_coverage_cannot_supply_frozen_data_rows() -> None:
+    payload = source(workbook(valid())).model_dump()
+    payload["coverage"] = tuple(
+        item | ({"status": "empty"} if item["locator"] == "sheet:Compliance_Monitor" else {})
+        for item in payload["coverage"]
+    )
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(Source.model_validate(payload))
+    assert "sheet Compliance_Monitor is empty" in refused.value.report.issues[0].problem
+
+
+def test_degraded_source_and_unreadable_optional_readme_remain_valid() -> None:
+    payload = source(workbook(valid())).model_dump()
+    assert payload["status"] == "ready" and payload["extraction_status"] == "degraded"
+    payload["coverage"] += ({"locator": "sheet:README", "status": "unreadable"},)
+    assert portfolio_facts(Source.model_validate(payload)).holdings is None
+    raw = workbook(valid() | {"Holdings_Detail": []}, headers={"Holdings_Detail": ()})
+    with pytest.raises(PortfolioRefused) as refused:
+        portfolio_facts(source(raw))
+    assert "sheet Holdings_Detail is empty" in refused.value.report.issues[0].problem
+
+
+def test_cli_refuses_noncanonical_cells_with_exit_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / FILE
+    path.write_bytes(appended_cells((("D2\n", "250"),)))
+    assert run_cli(["portfolio", str(path)], monkeypatch) == 1
+    assert "FAILED:" in capsys.readouterr().out
+
+
+@settings(max_examples=40, deadline=None)
+@given(portfolios())
+def test_generated_typed_fields_resolve_to_the_actual_frozen_cells(data: Rows) -> None:
+    frozen = source(portfolio_bytes(data))
+    facts = portfolio_facts(frozen)
+    for name in ("fund_name", "strategy", "nav", "nav_currency", "as_of"):
+        (span,) = (span for span in frozen.spans if span.locator == facts.mandate.locator(name))
+        value = getattr(facts.mandate, name)
+        if isinstance(value, Decimal):
+            assert value == Decimal(span.text.strip())
+        elif isinstance(value, date):
+            assert value == date.fromisoformat(span.text.strip())
+        else:
+            assert value == span.text.strip()
+    groups = (
+        facts.mandate.fields,
+        facts.exposures,
+        facts.ratings,
+        facts.sectors,
+        facts.top_holdings,
+        facts.maturities,
+        facts.compliance,
+        facts.holdings or (),
+    )
+    for rows in groups:
+        for row in rows:
+            expected_row = data[row.SHEET][row.row - 2]
+            for index, column in enumerate(BRIEF_SHEETS[row.SHEET], 1):
+                locator = f"sheet:{row.SHEET}!{'ABCDEFGHIJKLM'[index - 1]}{row.row}"
+                assert row.locator(column) == locator
+                matches = [span for span in frozen.spans if span.locator == locator]
+                expected = expected_row.get(column, "").strip()
+                value = getattr(row, column)
+                if not expected:
+                    assert value is None
+                    continue
+                assert len(matches) == 1 and matches[0].text.strip() == expected
+                actual = matches[0].text.strip()
+                if isinstance(value, Decimal):
+                    assert value == Decimal(actual)
+                elif isinstance(value, int):
+                    assert value == int(actual)
+                elif isinstance(value, date):
+                    assert value == date.fromisoformat(actual)
+                else:
+                    assert value == actual
+
+
+@settings(max_examples=40, deadline=None)
+@given(portfolios(), st.sampled_from(["\n", " ", "\r", "1" * 4301, "!D2"]))
+def test_generated_aliases_cannot_overwrite_typed_frozen_values(data: Rows, suffix: str) -> None:
+    payload = source(portfolio_bytes(data)).model_dump()
+    payload["spans"] += ({"locator": "sheet:Compliance_Monitor!D2" + suffix, "text": "999"},)
+    with pytest.raises(PortfolioRefused):
+        portfolio_facts(Source.model_validate(payload))

@@ -165,6 +165,13 @@ Every column is required unless the tables below say optional. Rules that apply 
   is refused too: rename it without the word (for example `TR Swaps`).
 - Hidden rows, columns and sheets are read like any others, and the pack marks their cells
   hidden.
+- Cell addresses must be canonical uppercase A1 coordinates within A1:XFD1048576, with no
+  spaces, line breaks or leading row zeroes. Sheet locators must retain their canonical
+  URI spelling so typed values quote the exact frozen cell. Invalid addresses or locators
+  are refused: save the file as an Excel Workbook (.xlsx) and validate again.
+- The typed reader requires a ready source and retained coverage for each contracted data
+  sheet. Unavailable sources, blocked extraction, and unreadable or empty data sheets are
+  refused. Normal degraded XLSX extraction and an unreadable optional README remain valid.
 
 #### `Mandate`
 

@@ -25,7 +25,6 @@ from urllib.parse import quote, unquote
 
 from deploy_vii.contracts import Contract, Source, Span
 from deploy_vii.inputs.rv_quotes import (
-    ADDRESS,
     CURRENCY,
     DAMAGED,
     FIX,
@@ -37,6 +36,7 @@ from deploy_vii.inputs.rv_quotes import (
     cell_letters,
     echo,
     iso_date,
+    sheet_cells,
 )
 from deploy_vii.preparation import MAX_BYTES, SourceRequest, prepare_source
 
@@ -636,15 +636,36 @@ def portfolio_facts(source: Source) -> PortfolioFacts:
 
 def read(file: str, source: Source) -> tuple[PortfolioReport, PortfolioFacts | None]:
     findings = Findings(file)
-    if not source.coverage:
+    if source.status != "ready" or source.extraction_status == "blocked" or not source.coverage:
         # `prepare_source` failed to extract: the same refusal `prepare` would freeze.
         problem = f"prepare cannot read this file as an OOXML workbook: {source.limitation}"
         findings.add(WORKBOOK_SHEET, "A1", problem, RULE_FIX["workbook"])
         return report(0, findings.issues), None
-    # Sheet names are unique: `xlsx_content` refuses a repeated one (duplicate coverage).
-    names = [unquote(item.locator.removeprefix("sheet:")) for item in source.coverage]
+    names = []
+    for item in source.coverage:
+        name = unquote(item.locator.removeprefix("sheet:"))
+        if not name or item.locator != "sheet:" + quote(name, safe=""):
+            findings.add(
+                WORKBOOK_SHEET,
+                "A1",
+                "coverage locator is not a canonical sheet URI",
+                RULE_FIX["workbook"],
+            )
+        elif name in BY_NAME and item.status == "unreadable":
+            findings.add(
+                name,
+                "A1",
+                f"sheet {name} coverage is unreadable: {item.limitation}",
+                RULE_FIX["workbook"],
+            )
+        elif name in BY_NAME and item.status == "empty":
+            findings.add(name, "A1", f"sheet {name} is empty", BY_NAME[name].fixes()[1])
+        names.append(name)
+    grids, locator_issues = sheet_cells(source.spans, file)
+    findings.issues.extend(locator_issues)
+    if findings.issues:
+        return report(0, findings.issues), None
     sheet_list_findings(names, findings)
-    grids = sheet_cells(source.spans)
     tables: dict[str, Table] = {}
     for sheet in SHEETS:
         if sheet.name in names:
@@ -676,24 +697,6 @@ def sheet_list_findings(names: Sequence[str], findings: Findings) -> None:
             problem = f"sheet {after} comes after {before}"
             findings.add(after, "A1", problem, RULE_FIX["order"])
             break
-
-
-def sheet_cells(spans: Sequence[Span]) -> dict[str, dict[tuple[int, int], Span]]:
-    """Cell spans by sheet name, then (column number, row number); merged-range metadata and
-    comment parts are not cells."""
-    grids: dict[str, dict[tuple[int, int], Span]] = {}
-    for span in spans:
-        if not span.locator.startswith("sheet:"):
-            continue
-        sheet, _, address = span.locator.removeprefix("sheet:").partition("!")
-        match = ADDRESS.match(address)
-        if match is None:
-            continue
-        column = 0
-        for char in match.group(1):
-            column = column * 26 + ord(char) - ord("A") + 1
-        grids.setdefault(unquote(sheet), {})[column, int(match.group(2))] = span
-    return grids
 
 
 def stored(grid: Mapping[tuple[int, int], Span], column: int, row: int) -> str:

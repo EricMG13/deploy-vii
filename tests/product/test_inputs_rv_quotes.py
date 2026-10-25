@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import quoteattr
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import openpyxl
@@ -19,7 +20,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from deploy_vii.contracts import Run
+from deploy_vii.contracts import Run, Span
 from deploy_vii.inputs.rv_quotes import (
     COLUMNS,
     FIX,
@@ -28,6 +29,7 @@ from deploy_vii.inputs.rv_quotes import (
     MEDIA_TYPE,
     Issue,
     ValidationReport,
+    sheet_cells,
     validate_rv_bytes,
     validate_rv_quotes,
 )
@@ -113,6 +115,52 @@ def test_contract_is_the_briefs() -> None:
     assert LEVELS == ("price", "yield_pct", "spread_bps", "bid", "ask")
     assert LETTERS == tuple("ABCDEFGHIJKLM")
     assert MEDIA_TYPE == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["G2\n", "G" + "1" * 4301, "XFE2", "g2", "G02"],
+    ids=["newline", "huge-row", "column-limit", "lowercase", "leading-zero"],
+)
+def test_shared_cell_parser_refuses_noncanonical_rv_coordinates(
+    tmp_path: Path, address: str
+) -> None:
+    raw = write(tmp_path, [VALID]).read_bytes()
+    stream = io.BytesIO()
+    with ZipFile(io.BytesIO(raw)) as original, ZipFile(stream, "w") as rewritten:
+        for member in original.infolist():
+            content = original.read(member)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                extra = f'<row r="2"><c r={quoteattr(address)}><v>999</v></c></row>'
+                content = content.replace(
+                    b"</sheetData>",
+                    (extra + "</sheetData>").encode(),
+                )
+            rewritten.writestr(member, content)
+    result = validate_rv_bytes(FILE, stream.getvalue())
+    assert not result.ok
+    assert "canonical" in result.issues[0].problem
+
+
+def test_shared_cell_parser_preserves_native_bounds_and_separates_metadata() -> None:
+    first = Span(locator="sheet:rv_quotes!A1", text="provider")
+    last = Span(locator="sheet:rv_quotes!XFD1048576", text="ignored data")
+    named = Span(locator="sheet:A%20B%21!B2", text="distinct sheet")
+    merged = Span(locator="sheet:rv_quotes!merged:N2:N3", text="", data_type="metadata")
+    comment = Span(locator="part:xl%2Fcomments%2Fcomment1.xml!G2\n", text="comment")
+    grids, issues = sheet_cells((first, last, named, merged, comment), FILE)
+    assert issues == []
+    assert grids == {"rv_quotes": {(1, 1): first, (16384, 1048576): last}, "A B!": {(2, 2): named}}
+    assert grids["rv_quotes"][16384, 1048576] is last
+    _, repeated = sheet_cells((first, first), FILE)
+    assert len(repeated) == 1 and "repeats" in repeated[0].problem
+
+
+def test_shared_cell_parser_refuses_sheet_uri_aliases() -> None:
+    canonical = Span(locator="sheet:rv_quotes!G2", text="98.75")
+    alias = Span(locator="sheet:%72v_quotes!G2", text="999")
+    _, issues = sheet_cells((canonical, alias), FILE)
+    assert len(issues) == 1 and "canonical sheet URI" in issues[0].problem
 
 
 def test_issue_renders_file_sheet_cell_problem_and_fix() -> None:
