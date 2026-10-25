@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import webbrowser
 from pathlib import Path
 
 from deploy_vii.bindings.shipped import SHIPPED_MAPS
@@ -28,6 +29,7 @@ from deploy_vii.cp_model_workflow import (
     publish_cp_model,
     verify_cp_model_publication,
 )
+from deploy_vii.delivery_dir import run_paths
 from deploy_vii.execution import Attempt, Execution
 from deploy_vii.live.prompts import readiness_addendum_instructions
 from deploy_vii.module_submits import (
@@ -36,8 +38,8 @@ from deploy_vii.module_submits import (
     step_instructions,
     submit_module_step,
 )
-from deploy_vii.preparation import load_pack
-from deploy_vii.registry import STEP_CHAINS, canonical, modules, step_chain
+from deploy_vii.preparation import PreparationRequest, load_pack, prepare
+from deploy_vii.registry import STEP_CHAINS, canonical, modules, plan, step_chain
 from deploy_vii.render import render as render_view
 from deploy_vii.report_view import build, call_state, pathways
 
@@ -45,10 +47,13 @@ PATHWAY_IDS = tuple(item.id for item in pathways())
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--run", help="derive run paths under --out / DEPLOY_VII_OUT")
     actions = parser.add_subparsers(dest="action", required=True)
-    for name in ("create", "replace-pack"):
-        actions.add_parser(name).add_argument("--pack", type=Path, required=True)
+    create = actions.add_parser("create")
+    create.add_argument("--pack", type=Path)
+    create.add_argument("--run", dest="create_run", help="derive pack and journal paths")
+    actions.add_parser("replace-pack").add_argument("--pack", type=Path, required=True)
     actions.add_parser("status")
     actions.add_parser("begin").add_argument("module")
     extension = actions.add_parser(
@@ -67,8 +72,9 @@ def configure(parser: argparse.ArgumentParser) -> None:
     envelope.add_argument("--output", type=Path, required=True)
     render = actions.add_parser("render")
     render.add_argument("--envelope", type=Path, required=True)
-    render.add_argument("--output", type=Path, required=True)
+    render.add_argument("--output", type=Path)
     render.add_argument("--pathway", choices=PATHWAY_IDS)
+    render.add_argument("--run", dest="render_run", help="derive the report directory")
     for name in ("cp-model-publish", "cp-model-verify"):
         actions.add_parser(name).add_argument("--output", type=Path, required=True)
     submit = actions.add_parser("module-submit")
@@ -87,9 +93,16 @@ def configure(parser: argparse.ArgumentParser) -> None:
     instructions.add_argument("--ticket", required=True)
     instructions.add_argument("--step", required=True)
     instructions.add_argument("--with-sources", action="store_true")
+    resume = actions.add_parser("resume", help="show or resubmit the pending host review")
+    resume.add_argument("--ticket")
+    resume.add_argument("--review", type=Path)
     report = actions.add_parser("report")
     report.add_argument("--pathway", required=True, choices=PATHWAY_IDS)
-    report.add_argument("--output", type=Path, required=True)
+    report.add_argument("--output", type=Path)
+    report.add_argument("--run", dest="report_run", help="derive the report directory")
+    report_open = actions.add_parser("report-open")
+    report_open.add_argument("--pathway", choices=PATHWAY_IDS)
+    report_open.add_argument("--browser", action="store_true")
     actions.add_parser("cp1-quality-inputs").add_argument("--ticket", required=True)
     for name in ("interrupt", "cp0-submit", "cp1-submit", "cp1-promote", "step-output"):
         action = actions.add_parser(name)
@@ -116,6 +129,13 @@ def refusal_exit(message: str) -> SystemExit:
     """A one-line refusal on stderr, exit code 2 (raise the result)."""
     print(message, file=sys.stderr)
     return SystemExit(2)
+
+
+def read_review_file(path: Path, action: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise refusal_exit(f"{action} refused: cannot read review file at {path}") from error
 
 
 def issue_lines(attempt: Attempt) -> tuple[str, ...]:
@@ -147,12 +167,19 @@ def settled_json(store: Execution, attempt: Attempt) -> str:
 
 
 def review_text(args: argparse.Namespace) -> str:
-    """The `--review` file's text; a missing file is a one-line refusal, exit 2."""
+    """The `--review` text; a missing or unreadable file is a one-line refusal, exit 2."""
     path: Path = args.readiness_addendum if args.action == "extend-scope" else args.review
     try:
         return path.read_text(encoding="utf-8")
-    except FileNotFoundError as missing:
-        raise refusal_exit(f"{args.action} refused: no review file at {path}") from missing
+    except (OSError, UnicodeError) as error:
+        raise refusal_exit(f"{args.action} refused: cannot read review file at {path}") from error
+
+
+def read_request(path: Path) -> PreparationRequest:
+    try:
+        return PreparationRequest.model_validate_json(path.read_bytes())
+    except (OSError, ValueError) as error:
+        raise refusal_exit(f"run refused: request is unreadable or invalid at {path}") from error
 
 
 def module_submit(store: Execution, args: argparse.Namespace) -> str:
@@ -229,10 +256,172 @@ def write_report(store: Execution, pathway_id: str, output: Path) -> str:
     return json.dumps(receipt)
 
 
+def run_offline(args: argparse.Namespace) -> str:
+    """Advance exactly one host review at a time; all model judgments remain supplied files."""
+    try:
+        paths = run_paths(getattr(args, "out", None), args.run)
+    except ValueError as error:
+        raise refusal_exit(f"run refused: {error}") from error
+    pack_path = paths["pack"]
+    journal = paths["journal"]
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    reviews = args.reviews or paths["reviews"]
+    request = read_request(args.request)
+    requested = tuple(args.modules or request.run.requested_modules)
+    if args.modules:
+        request = request.model_copy(
+            update={"run": request.run.model_copy(update={"requested_modules": requested})}
+        )
+    if not pack_path.exists():
+        prepare(request, args.root, pack_path)
+    pack = load_pack(pack_path)
+    if tuple(pack.run.requested_modules) != requested:
+        raise refusal_exit(
+            "run refused: existing pack has a different requested module plan; choose a new run id"
+        )
+    if not journal.exists():
+        store = Execution.create(journal, pack)
+    else:
+        store = Execution(journal)
+        if tuple(store.read().run.requested_modules) != requested:
+            raise refusal_exit(
+                "run refused: existing journal has a different requested module plan; "
+                "choose a new run id"
+            )
+    modules_to_run = ("CP-0", *plan(requested))
+    if reviews.is_symlink():
+        raise refusal_exit(f"run refused: review directory must not be a symlink: {reviews}")
+    while True:
+        snapshot = store.read()
+        pending = next((item for item in snapshot.attempts if item.status == "pending"), None)
+        if pending is None:
+            settled = {item.module_id for item in snapshot.heads}
+            module_id = next((item for item in modules_to_run if item not in settled), None)
+            if module_id is None:
+                report = paths["report"]
+                if (report / "index.html").is_file():
+                    return str((report / "index.html").resolve())
+                return write_report(store, store.read().run.pathway, report)
+            pending = store.begin(module_id)
+        chain = step_chain(pending.module_id).steps
+        valid = {item.step_id for item in pending.steps if item.status == "valid"}
+        step = next((item for item in chain if item not in valid), chain[-1])
+        instructions = step_instructions(
+            store, pending.module_id, pending.ticket_id, step, with_sources=False
+        )
+        try:
+            reviews.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise refusal_exit(f"run refused: cannot create review directory {reviews}") from error
+        instruction_path = reviews / f"{pending.module_id}-{step}.instructions.txt"
+        if instruction_path.is_symlink():
+            raise refusal_exit(
+                f"run refused: instructions path must not be a symlink: {instruction_path}"
+            )
+        try:
+            with instruction_path.open("x", encoding="utf-8") as stream:
+                stream.write(instructions)
+        except FileExistsError:
+            try:
+                existing_instructions = instruction_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                raise refusal_exit(
+                    f"run refused: cannot read existing instructions at {instruction_path}"
+                ) from error
+            if existing_instructions != instructions:
+                raise refusal_exit(
+                    f"run refused: conflicting instructions file at {instruction_path}"
+                ) from None
+        except OSError as error:
+            raise refusal_exit(
+                f"run refused: cannot write instructions at {instruction_path}"
+            ) from error
+        review_path = reviews / f"{pending.module_id}-{step}.review.json"
+        if review_path.is_symlink():
+            raise refusal_exit(f"run refused: review path must not be a symlink: {review_path}")
+        if not review_path.is_file():
+            print(f"write {review_path} then rerun", file=sys.stderr)
+            raise SystemExit(3)
+        payload = read_review_file(review_path, "run")
+        if pending.module_id == "CP-0":
+            attempt = submit_cp0_review(store, pending.ticket_id, payload)
+        elif pending.module_id == "CP-1" and step == "quality":
+            attempt = promote_cp1(store, pending.ticket_id, payload)
+        elif pending.module_id == "CP-1":
+            attempt = submit_cp1_step(store, pending.ticket_id, step, payload)
+        else:
+            attempt = submit_module_step(store, pending.module_id, pending.ticket_id, step, payload)
+        settled_json(store, attempt)
+
+
 def execute(args: argparse.Namespace) -> str:
+    run_id = (
+        args.run
+        or getattr(args, "create_run", None)
+        or getattr(args, "report_run", None)
+        or getattr(args, "render_run", None)
+    )
+    if args.directory is None and not run_id:
+        raise SystemExit("execution requires --directory or --run")
+    if run_id:
+        try:
+            paths = run_paths(getattr(args, "out", None), run_id)
+        except ValueError as error:
+            raise refusal_exit(f"execution refused: {error}") from error
+        args.directory = args.directory or paths["journal"]
+    else:
+        paths = {}
     if args.action == "create":
-        return Execution.create(args.directory, load_pack(args.pack)).read().model_dump_json()
+        pack = args.pack or paths.get("pack")
+        if pack is None:
+            raise SystemExit("execution create requires --pack or --run")
+        if run_id:
+            args.directory.parent.mkdir(parents=True, exist_ok=True)
+        return Execution.create(args.directory, load_pack(pack)).read().model_dump_json()
     store = Execution(args.directory)
+    if args.action == "resume":
+        snapshot = store.read()
+        pending = next((item for item in snapshot.attempts if item.status == "pending"), None)
+        if pending is None:
+            remaining = [
+                m
+                for m in plan(snapshot.run.requested_modules)
+                if m not in {h.module_id for h in snapshot.heads}
+            ]
+            return "nothing to resume" + (
+                f"; next runnable module: {remaining[0]}"
+                if remaining
+                else "; no runnable modules remain"
+            )
+        chain = step_chain(pending.module_id).steps
+        completed = {step.step_id for step in pending.steps if step.status == "valid"}
+        current = next((step for step in chain if step not in completed), chain[-1])
+        retained = next((step for step in pending.steps if step.step_id == current), None)
+        retained_status = "yes" if retained else "no"
+        message = (
+            f"ticket {pending.ticket_id}; module {pending.module_id}; next step {current}; "
+            f"retained response: {retained_status}; resubmit {current} with the same bytes "
+            "if retained"
+        )
+        if not args.review and not args.ticket:
+            return message
+        if args.ticket != pending.ticket_id or args.review is None:
+            raise refusal_exit("resume requires the pending --ticket and --review together")
+        if args.review.is_symlink():
+            raise refusal_exit(f"resume refused: review path must not be a symlink: {args.review}")
+        args.module, args.step, args.action = pending.module_id, current, ""
+        submitted = read_review_file(args.review, "resume")
+        if pending.module_id == "CP-0":
+            attempt = submit_cp0_review(store, pending.ticket_id, submitted)
+        elif pending.module_id == "CP-1" and current == "quality":
+            attempt = promote_cp1(store, pending.ticket_id, submitted)
+        elif pending.module_id == "CP-1":
+            attempt = submit_cp1_step(store, pending.ticket_id, current, submitted)
+        else:
+            attempt = submit_module_step(
+                store, pending.module_id, pending.ticket_id, current, submitted
+            )
+        return settled_json(store, attempt)
     if args.action == "replace-pack":
         store.replace_pack(load_pack(args.pack))
     elif args.action == "register-preview":
@@ -256,7 +445,10 @@ def execute(args: argparse.Namespace) -> str:
     elif args.action == "envelope":
         return str(write_cp1_envelope(store, args.output))
     elif args.action == "render":
-        receipt = render_cp1_envelope(store, args.envelope, args.output, pathway=args.pathway)
+        output = args.output or (paths["report"] if (args.render_run or args.run) else None)
+        if output is None:
+            raise SystemExit("render requires --output or --run")
+        receipt = render_cp1_envelope(store, args.envelope, output, pathway=args.pathway)
         return json.dumps(receipt)
     elif args.action in {"statement-preview", "interface-preview"}:
         return str(
@@ -280,7 +472,21 @@ def execute(args: argparse.Namespace) -> str:
         except ValueError as refusal:
             raise refusal_exit(f"begin refused: {refusal}") from refusal
     elif args.action == "report":
-        return write_report(store, args.pathway, args.output)
+        output = args.output or (paths["report"] if (args.report_run or args.run) else None)
+        if output is None:
+            raise SystemExit("report requires --output or --run")
+        return write_report(store, args.pathway, output)
+    elif args.action == "report-open":
+        output = paths.get("report", args.directory.parent / "report")
+        index = output / "index.html"
+        if output.is_symlink() or index.is_symlink():
+            raise refusal_exit("report-open refused: report paths must not be symlinks")
+        if not index.is_file():
+            write_report(store, args.pathway or store.read().run.pathway, output)
+        absolute = index.resolve()
+        if args.browser:
+            webbrowser.open(absolute.as_uri())
+        return str(absolute)
     elif args.action == "module-submit":
         return module_submit(store, args)
     elif args.action == "step-instructions":

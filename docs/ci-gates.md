@@ -70,6 +70,13 @@ memory-heavy bindings tests peak near 2.3 GiB, so a single pytest process was ki
 (exit 137) in a 3.8 GiB Docker VM; give the VM more memory or run one process per test
 file with `--cov-append`.
 
+### Linux parity (local only)
+
+Run `make linux-parity` after committing the candidate. The target archives `HEAD`, creates the
+temporary container recipe described above, and runs the hosted `product-check` gates in Ubuntu
+24.04. It needs Docker, network access for image/packages and enough memory for coverage. This
+target is local-only and adds no work or budget to CI.
+
 **Parallel execution.** `make coverage` runs `pytest -n auto --dist loadfile` (decision
 [0011](decisions/0011-parallel-test-execution.md)): one worker per CPU, all tests of a file on
 one worker. The 90% floor applies to the single combined TOTAL report. Debug serially with
