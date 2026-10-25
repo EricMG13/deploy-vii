@@ -512,3 +512,14 @@ extraction"). The model-facing contract is unchanged in phase 1: `FinancialSubmi
 extractor into the tool loop is phase 2 (task 8.10b).
 
 Not verified: other issuers' layouts; the extractor in the tool loop; live use.
+
+## Amendment, 25 Oct 2026 (task 8.10b)
+
+Decision "A", phase 2: the `financials` tool loop offers `extract_statements`, the Python-extracted
+statement lines of up to eight pages of one declared source, and its rule k tells the model to
+map and cite those lines and never retype a printed amount (docs/development/live-runner.md,
+"Statement extraction"). The model-facing shape is unchanged: `FinancialSubmission`,
+`StatementLine` and the sent `financials` schema are as before. Only the tool list and one
+prompt rule are added. Task 8.11 (per-statement submits) will change the shape.
+
+Not verified: live use; Sol's actual use of the tool; other issuers' layouts.

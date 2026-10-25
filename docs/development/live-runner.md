@@ -65,7 +65,7 @@ one more record plus its schemas, composer and prompt contract.
 | `runner.py` | `StepSpec`, `dispatch`, `DispatchResult`, `prompt_token_bound`, `repair_prompt`. |
 | `schema_check.py` | `live schema-check` (task 2.11; moved out of `runner.py` in task 8.0c): `check_schema`, `schema_rejections`, `SchemaCheck`, `schema_shaped`, `schema_check_request`, the `SCHEMA_CHECK_*` and `SCHEMA_BISECT_*` constants. It reuses the runner's cost, ledger and attempt-id helpers; `dispatch` sees only the `schema_rejections` mapping the caller passes. |
 | `loop.py` | Task 8.0d; task 8.9: every live step ([every step a tool loop](#every-step-a-tool-loop-task-89)). `run_tool_step` (one step as a tool loop, ported from `devtools/hybrid_cp1.py`; one attempt directory and ledger attempt per call; `tool-calls.jsonl` beside `output.md`), `ToolLimits`, `ToolStepResult`, `call_nudge`, `transient`. Schema-check rejections do not apply to tool-loop steps (their schema is sent as the submit tool's parameters); a runtime 400 that names the schema ends the step as `provider-schema-error`. |
-| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`; task 8.9: bounded to a step's declared sources), `tool_specs` (task 8.9: by tool set; a submit-only step gets its submit alone), `applicable_rules` (task 8.9), the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
+| `tools.py` | Task 8.0d: `PackTools` (`search_pack`, `read_pages`, and what the model was shown, `Seen`; task 8.9: bounded to a step's declared sources; task 8.10b: `extract_statements` for `financials`, see "Statement extraction"), `tool_specs` (task 8.9: by tool set; a submit-only step gets its submit alone), `applicable_rules` (task 8.9), the evidence measures (`completeness`, `shrinkage`, `completeness_drop`, `evidence_counts`) and `ToolRules` (absence, cited-pages-read and the `financials` completeness floor; decision 0005 rows 8.0d). The floor stays off (user decision, 24 Oct 2026: `[model_tests.completeness_floor]` is not set until it is revisited after the cheaper-model choice and the CP-1 handoff comparison); the batch report's tool-loop line says `completeness floor: off (user decision 24 Oct 2026)`. |
 
 ### Per-module context (task 8.6)
 
@@ -1454,6 +1454,44 @@ parse (trailing text, one value, numbers on their own line, a label with no lett
 out, never stubbed. On the CZR pack it yields 33 lines on `page:56` (BS), 29 on `page:57` (IS),
 38 on `page:60` (CFS) and none on prose. Phase 1 changes no step, prompt, tool or contract;
 phase 2 (task 8.10b) wires it into the `financials` tool loop.
+
+25 Oct 2026 (task 8.10b, phase 2): the extractor is the `financials` loop's fourth tool.
+
+- **Who gets it.** Registry `StepChain.extract_tools` (CP-1: `financials`; it must lie within
+  the chain's `pack_sources`) and `extract_tool_steps()`. `tools.tool_specs("financials")` is
+  `search_pack`, `read_pages`, `extract_statements`, `submit_financials`; no other step is
+  offered it, and the loop answers any other step's call to it `error: unknown tool ...`.
+- **The call.** `extract_statements {source_id, locators: ["page:N", ...]}`, at most eight
+  pages (`MAX_PAGES_PER_EXTRACT`; `read_pages` keeps five). A source outside the step's
+  declared sources, a locator the source does not hold (exactly as written: `page:02` is not
+  `page:2`), more than eight pages, a repeated page or locators that are not a list of `page:N`
+  strings are a refused call (`error: ...`, counted invalid, nothing recorded).
+- **The result.** One SOURCE block per page, delimited data like `read_pages`' output: the
+  locator, each raw header line (`header: ...`), then one row per extracted line,
+  `line_no | label | caption | raw_values | flags`. `raw_values` are the printed tokens,
+  space-separated (`$` dropped, `(n)` negative, a dash nil); `-` stands for no caption or no
+  flag. On CZR `page:56` the block is 3,034 bytes against 7,717 for `read_pages`.
+- **What the model does with it.** The added `financials` rule k (`prompts.EXTRACT_RULE`):
+  statement lines come from the tool with labels and printed amounts verbatim; the model maps
+  `item_id` and `period_id`, chooses `line_kind` and `sign_convention`, cites the page, never
+  retypes a printed amount, and enters a value no extracted line holds as `other:` with a
+  limitation. The `FinancialSubmission` payload is unchanged (per-statement submits are task
+  8.11).
+- **Read for the cited-page rule.** A page `extract_statements` returned counts as read: the
+  model saw its printed lines, so citing it is not an unread citation.
+- **Flags** (`ExtractedLine.flags`; they inform and never drop a line):
+  `more_values_than_header_years` when a line has more values than its header lines name
+  years (a footnote marker such as `(1)` can read as a value), and `label_ends_numeric` when the
+  label ends in a number (two values one space apart stay in the label; a label ending in a
+  year is flagged too). No line of the CZR statement pages is flagged.
+- **Sources.** Each extracted table carries its `source_id`; `extract_pack_statements` binds
+  locators per source, so two sources may share `page:1`, and refuses only a locator twice in
+  one source. A line whose values are all bare four-digit years is still omitted as a header.
+- **I2.** The two `financials` transcript entries predate the tool. Each names it
+  (`tools_added: ["extract_statements"]`, `tools_added_by`, dated) and the check strips only
+  the named specs before hashing, so every recorded request still matches exactly; rule k is
+  named the same way through `system_prompt.changed_by`. Verdicts, tool results and costs
+  replay as recorded.
 
 ## Not covered here
 
