@@ -996,6 +996,9 @@ def test_extracted_and_typed_payloads_get_the_same_verdicts(
     tools = PackTools(paged_case.store.pack())
     extracted = from_extracted(paged_case.payload, tools)
     typed = by_hand(paged_case.payload)
+    # The real claim (review m2): extraction reproduces the typed payload byte for byte, so the
+    # verdicts below compare the extract-read path with the read_pages path.
+    assert extracted == typed
     read = PackTools(paged_case.store.pack())
     read.read_pages({"source_id": "S1", "first_page": 1, "last_page": 1})
     assert tools.seen().read == read.seen().read == {("S1", "page:1")}
@@ -1020,6 +1023,25 @@ def test_extracted_and_typed_payloads_get_the_same_verdicts(
         assert one[0] == "rejected" and f"{UNREAD_PAGE}: S1 page:1" in one[1]
     if mutate == "wrong-quote":
         assert one[0] == "rejected"
+
+
+def test_a_typed_amount_that_differs_from_the_extracted_one_changes_the_verdict(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    """Review m2: the differential is not tautological. A retyping slip (FY cash from operations
+    2400 for the printed 240) is judged differently from the extracted line: the extracted
+    payload is accepted, the mistyped one rejected by the statement/account check."""
+    tools = PackTools(paged_case.store.pack())
+    extracted = from_extracted(paged_case.payload, tools)
+    slip = {**TYPED, "cfo": ("Synthetic cfo", ("60", "60", "60", "60", "2400"))}
+    typed = _cited(json.loads(paged_case.payload), slip)
+    assert extracted != typed
+    seen = Seen(read=tools.seen().read, searched=(None,))
+    assert verdict(paged_case, tmp_path / "extracted", extracted, seen) == ("accepted", ())
+    assert verdict(paged_case, tmp_path / "typed", typed, seen) == (
+        "rejected",
+        ("consolidated: Statement/account disagreement requires explicit conflict: cfo_ncfo FY",),
+    )
 
 
 def paged_rig(root: Path, case: PagedCase) -> Rig:
