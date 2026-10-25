@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -41,7 +41,7 @@ from deploy_vii.contracts import (
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.prose import prose_issues
-from deploy_vii.readiness import citation_issues
+from deploy_vii.readiness import NOT_CONSUMERS, citation_issues
 from deploy_vii.registry import (
     canonical,
     dependencies,
@@ -201,7 +201,9 @@ def head_of(result: Module, qualification: Qualification | None = None) -> Head:
 class ExecutionSnapshot(Contract):
     schema_version: Literal["execution/5"] = "execution/5"
     parent: Hash | None = None
-    run: Run  # identity and scope are immutable; the pack blob must carry the same run
+    # Identity is immutable. `requested_modules` is the run's effective scope: it only extends
+    # (`extend_scope`, task 9.1), so the pack blob carries the same run with a subset of it.
+    run: Run
     pack_sha256: Hash  # SHA-256 of the canonical-JSON pack blob
     attempts: tuple[Attempt, ...] = ()
     heads: tuple[Head, ...] = ()
@@ -321,6 +323,127 @@ def invalidate(heads: tuple[Head, ...], changed: str) -> tuple[Head, ...]:
         else head
         for head in heads
     )
+
+
+# --- scope extension (task 9.1, decision 0005 MC-9) ------------------------------------------
+
+Resolver = Callable[[str, Mapping[str, Head]], tuple[Input, ...]]
+
+
+def _binds_as_recorded(item: Input, current: Mapping[str, Head]) -> bool:
+    """Whether a recorded input still names its producer's head as it is now."""
+    head = current.get(item.input_id)
+    if head is None:
+        return True  # not a module head (the prepared pack, which scope never changes)
+    return head.status == item.status and head.result_sha256 == item.sha256
+
+
+def _changed_ids(
+    recorded: tuple[Input, ...],
+    resolved: tuple[Input, ...] | None,
+    edges: Collection[str],
+    current: Mapping[str, Head],
+    order: Sequence[str],
+) -> tuple[str, ...]:
+    """The input ids whose binding differs between `recorded` and the new resolution.
+
+    `resolved` is None when the head cannot be rebound; the changed ids are then the recorded
+    inputs that no longer bind as recorded and the producers the new graph adds to its edges
+    (in plan order). With the same bindings in another order, the inputs whose position moved."""
+    before = {item.input_id: item for item in recorded}
+    if resolved is None:
+        added = sorted((item for item in edges if item not in before), key=order.index)
+        unbound = (item.input_id for item in recorded if not _binds_as_recorded(item, current))
+        return tuple(dict.fromkeys((*unbound, *added)))
+    now = {item.input_id: item for item in resolved}
+    ids = tuple(key for key in dict.fromkeys((*before, *now)) if before.get(key) != now.get(key))
+    if ids:
+        return ids
+    return tuple(old.input_id for old, new in zip(recorded, resolved, strict=True) if old != new)
+
+
+def rebind_heads(
+    order: Sequence[str],
+    graph: Mapping[str, Collection[str]],
+    heads: tuple[Head, ...],
+    bound: Mapping[str, tuple[Input, ...]],
+    resolve: Resolver,
+) -> tuple[Head, ...]:
+    """The scope-extension staling rule (MC-9), without running anything.
+
+    Walks the heads in the new plan `order`, resolving each settled one against the heads as
+    already updated by this walk. `bound[module_id]` is what the journal bound the head to
+    when it settled (its attempt's `inputs`; `Head.inputs` may add a module's own non-journal
+    inputs, such as a submission hash). A head whose resolution equals that binding (same
+    ids, hashes, statuses and order) is kept as it is; otherwise, including when `resolve`
+    raises ValueError, it is staled with `Scope extended: inputs changed (<ids>); rerun
+    required`. An already-stale head stays as it is. `graph` is the new dependency map
+    (`registry.dependencies`), read only to name changed ids. Heads keep their tuple order.
+    """
+    current = {head.module_id: head for head in heads}
+    outside = sorted(set(current) - set(order))
+    if outside:
+        raise ValueError(f"Execution heads outside the run's dependency graph: {outside}")
+    for module_id in order:
+        head = current.get(module_id)
+        if head is None or head.status == "stale":
+            continue
+        recorded = bound[module_id]
+        reason = None
+        try:
+            resolved: tuple[Input, ...] | None = resolve(module_id, current)
+        except ValueError as error:  # unbindable under the new graph: the head is staled
+            resolved, reason = None, str(error)
+        if resolved == recorded:
+            continue
+        ids = _changed_ids(recorded, resolved, graph.get(module_id, ()), current, order)
+        named = ", ".join(ids) if ids else reason
+        current[module_id] = staled(
+            head, f"Scope extended: inputs changed ({named}); rerun required"
+        )
+    return tuple(current[head.module_id] for head in heads)
+
+
+def unassessed(added: Sequence[str], readiness: Head | None) -> tuple[str, ...]:
+    """Added modules CP-0 has no T8 `exact_command` row for (ruling B, task 9.1).
+
+    CP-0, CP-MODEL, CP-MEMO and CP-OS need no readiness row. Any other added module needs a
+    row (whatever its command) on a CP-0 head that is not stale; without one, every such
+    module is unassessed (fail closed)."""
+    rows = (
+        set()
+        if readiness is None or readiness.status == "stale"
+        else {item.row_id for item in readiness.commands}
+    )
+    return tuple(item for item in added if item not in NOT_CONSUMERS and item not in rows)
+
+
+class StaledHead(Contract):
+    module_id: Identifier
+    note: Text
+
+
+class ExtendReport(Contract):
+    """What `Execution.extend_scope` did. `extended` is False for a no-op (nothing written).
+
+    `added`: modules new to the dependency graph, in plan order (no head; runnable as today).
+    `kept`: heads this transition left unchanged (an already-stale head among them stays
+    stale). `staled`: heads it staled, with their notes, in plan order. `plan`: the new plan.
+    """
+
+    extended: bool
+    added: tuple[Identifier, ...]
+    kept: tuple[Identifier, ...]
+    staled: tuple[StaledHead, ...]
+    plan: tuple[Identifier, ...]
+
+
+def _scope_within(blob: Run, effective: Run) -> bool:
+    """The pack blob's run is the snapshot's, its requested modules a subset of the effective
+    (snapshot) set: scope only extends (task 9.1)."""
+    return blob.model_dump(exclude={"requested_modules"}) == effective.model_dump(
+        exclude={"requested_modules"}
+    ) and set(blob.requested_modules) <= set(effective.requested_modules)
 
 
 def blocked_ancestors(snapshot: ExecutionSnapshot, inputs: tuple[Input, ...]) -> frozenset[str]:
@@ -595,10 +718,14 @@ class Execution:
         return module
 
     def pack(self, snapshot: ExecutionSnapshot | None = None) -> PreparedPack:
-        """Return the prepared pack of `snapshot` (default: the current one), verified."""
+        """Return the prepared pack of `snapshot` (default: the current one), verified.
+
+        The blob's run is the snapshot's except that its requested modules may be a subset of
+        the snapshot's effective set (task 9.1): the blob keeps the scope it was prepared with.
+        """
         snapshot = self.read() if snapshot is None else snapshot
         pack = PreparedPack.model_validate_json(self._load(snapshot.pack_sha256))
-        if pack.run != snapshot.run or pack.content_hash() != snapshot.pack_sha256:
+        if not _scope_within(pack.run, snapshot.run) or pack.content_hash() != snapshot.pack_sha256:
             raise ValueError("Execution pack blob is not the canonical pack of this snapshot")
         return pack
 
@@ -862,7 +989,14 @@ class Execution:
         pack_json = pack.model_dump_json()
         with self._locked():
             snapshot = self.read()
-            if snapshot.run != pack.run:
+            # Identity never changes. The scope is the snapshot's effective set or the scope of
+            # the pack blob it replaces (task 9.1); before any extension the two are one run.
+            same_identity = pack.run.model_dump(exclude={"requested_modules"}) == (
+                snapshot.run.model_dump(exclude={"requested_modules"})
+            )
+            if not same_identity or (
+                pack.run != snapshot.run and pack.run != self.pack(snapshot).run
+            ):
                 raise ValueError("Run identity and scope are immutable; create a new execution")
             if any(item.status == "pending" for item in snapshot.attempts):
                 raise ValueError("Cannot change evidence while an attempt is pending")
@@ -879,6 +1013,83 @@ class Execution:
                         "heads": heads,
                     }
                 )
+            )
+
+    def extend_scope(self, requested: Sequence[str]) -> ExtendReport:
+        """Extend the run's requested modules to the superset `requested` (MC-9, task 9.1).
+
+        Refusals, in order, write nothing: a pending attempt; an unknown module; a set that is
+        not a superset of the current one; then, unless the set is unchanged (a no-op report),
+        any module new to the dependency graph that CP-0 has not assessed (`unassessed`).
+        Otherwise one transition records the extended set on `snapshot.run` (the pack blob is
+        not rewritten) and rebinds every settled head under the new graph (`rebind_heads`):
+        only the heads whose resolved inputs change are staled. Nothing runs.
+        """
+        with self._locked():
+            snapshot = self.read()
+            if any(item.status == "pending" for item in snapshot.attempts):
+                raise ValueError("Cannot change scope while an attempt is pending")
+            wanted = tuple(dict.fromkeys(canonical(entry) for entry in requested))
+            old = snapshot.run.requested_modules
+            held = {canonical(entry) for entry in old}
+            if not held <= set(wanted):
+                raise ValueError("Scope only extends; create a new execution to remove modules")
+            if set(wanted) == held:
+                return ExtendReport(
+                    extended=False,
+                    added=(),
+                    kept=tuple(head.module_id for head in snapshot.heads),
+                    staled=(),
+                    plan=plan(old),
+                )
+            extended = (*old, *(item for item in wanted if item not in held))
+            order = plan(extended)
+            before = dependencies(old)
+            added = tuple(item for item in order if item not in before)
+            readiness = next((head for head in snapshot.heads if head.module_id == "CP-0"), None)
+            missing = unassessed(added, readiness)
+            if missing:
+                raise ValueError(
+                    f"CP-0 has not assessed {', '.join(missing)}; create a new execution"
+                )
+            run = snapshot.run.model_copy(update={"requested_modules": extended})
+
+            def resolve(module_id: str, current: Mapping[str, Head]) -> tuple[Input, ...]:
+                probe = snapshot.model_copy(update={"run": run, "heads": tuple(current.values())})
+                return current_inputs(probe, module_id)
+
+            settled_by = {
+                (item.module_id, item.result_sha256): item.inputs
+                for item in snapshot.attempts
+                if item.result_sha256 is not None
+            }
+            bound: dict[str, tuple[Input, ...]] = {}
+            for head in snapshot.heads:
+                key = (head.module_id, head.result_sha256)
+                if key not in settled_by:
+                    raise ValueError(f"Execution head {head.module_id} has no settling attempt")
+                bound[head.module_id] = settled_by[key]
+            heads = rebind_heads(order, dependencies(extended), snapshot.heads, bound, resolve)
+            self._write(
+                snapshot.model_copy(
+                    update={"parent": snapshot.content_hash(), "run": run, "heads": heads}
+                )
+            )
+            changed = {
+                new.module_id: new.notes[-1]
+                for old_head, new in zip(snapshot.heads, heads, strict=True)
+                if new != old_head
+            }
+            return ExtendReport(
+                extended=True,
+                added=added,
+                kept=tuple(head.module_id for head in heads if head.module_id not in changed),
+                staled=tuple(
+                    StaledHead(module_id=item, note=changed[item])
+                    for item in order
+                    if item in changed
+                ),
+                plan=order,
             )
 
     def view(self, ticket_id: str | None = None) -> View:
@@ -900,7 +1111,7 @@ class Execution:
                 raise ValueError("Invalid candidate identity or provenance cannot render")
             heads[attempt.module_id] = candidate
         views: list[ModuleView] = []
-        idle = idle_statuses(pack.run)
+        idle = idle_statuses(snapshot.run)  # the effective scope, extended or not (task 9.1)
         for entry in modules():
             module = heads.get(entry.module_id)
             visible = module is not None and module.status in {

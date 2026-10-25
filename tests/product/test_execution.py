@@ -22,7 +22,7 @@ from deploy_vii.execution import (
     current_inputs,
 )
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
+from deploy_vii.readiness import NOT_CONSUMERS, ReadinessReview, build_readiness, validate_review
 from deploy_vii.registry import _NOT_CP5_FAN_IN, plan
 from deploy_vii.render import render
 from tests.product.evidence import evidence_path
@@ -534,7 +534,7 @@ def cp_model_store(
     consumers = tuple(
         review.consumers[0].model_copy(update={"module_id": module_id})
         for module_id in plan(scope)
-        if module_id not in {"CP-0", "CP-MODEL"}  # CP-MODEL needs no CP-0 consumer readiness
+        if module_id not in NOT_CONSUMERS  # CP-0, CP-MODEL, CP-MEMO, CP-OS need no readiness row
     )
     gap = review.gaps[0].model_copy(
         update={"affected_modules": tuple(item.module_id for item in consumers)}
@@ -1530,3 +1530,223 @@ def test_a_blocked_cp1_is_not_cp1a_context(tmp_path: Path) -> None:
         store.finish(ticket.ticket_id, "not json", lambda _: ())
     assert {head.module_id: head.status for head in store.read().heads}["CP-1"] == "blocked"
     assert "CP-1" not in [item.input_id for item in current_inputs(store.read(), "CP-1A")]
+
+
+# --- Scope extension (task 9.1, decision 0005 MC-9) -------------------------------------------
+
+
+def settled_store(tmp_path: Path, scope: tuple[str, ...]) -> Execution:
+    """A run of `scope` with CP-0 assessing exactly its consumers and every module settled."""
+    store = cp_model_store(tmp_path, scope)
+    for module_id in plan(scope):
+        if module_id != "CP-0":
+            settle_module(store, module_id)
+    return store
+
+
+def heads_by_id(store: Execution) -> dict[str, Head]:
+    return {head.module_id: head for head in store.read().heads}
+
+
+def bound_input(attempt: Attempt, module_id: str) -> Input:
+    return next(item for item in attempt.inputs if item.input_id == module_id)
+
+
+def test_adding_cp_model_refreshes_only_affected_consumers(tmp_path: Path) -> None:
+    """Plan M9.1 (amended, ruling B): CP-MODEL joins CP-5's fan-in, so only CP-5 is staled."""
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-5")
+    store = settled_store(tmp_path, scope)
+    before = store.read()
+    before_heads = heads_by_id(store)
+    blobs = blob_names(store)
+
+    report = store.extend_scope((*scope, "CP-MODEL"))
+
+    after = store.read()
+    assert report.extended and report.added == ("CP-MODEL",)
+    assert report.plan == plan((*scope, "CP-MODEL"))
+    assert report.plan.index("CP-MODEL") < report.plan.index("CP-5")
+    note = "Scope extended: inputs changed (CP-MODEL); rerun required"
+    assert [(item.module_id, item.note) for item in report.staled] == [("CP-5", note)]
+    assert set(report.kept) == set(before_heads) - {"CP-5"}
+    assert after.parent == before.content_hash()
+    assert after.run == before.run.model_copy(update={"requested_modules": (*scope, "CP-MODEL")})
+    assert after.pack_sha256 == before.pack_sha256 and after.attempts == before.attempts
+    assert blob_names(store) == blobs  # the pack blob is not rewritten
+    assert store.pack().run == before.run  # readers of the blob keep the original scope
+    after_heads = heads_by_id(store)
+    assert [head.module_id for head in after.heads] == [head.module_id for head in before.heads]
+    for module_id, head in before_heads.items():
+        if module_id == "CP-5":
+            assert after_heads[module_id] == head.model_copy(
+                update={"status": "stale", "notes": (*head.notes, note)}
+            )
+        else:
+            assert after_heads[module_id].model_dump_json() == head.model_dump_json()
+            # Kept means the journal still resolves the binding it settled on: no fresh budget.
+            with pytest.raises(ValueError, match="Input set is settled"):
+                store.begin(module_id)
+
+    # CP-MODEL is runnable in plan order; CP-5 then reruns on a new input set.
+    with pytest.raises(ValueError, match="upstream is unrun"):
+        store.begin("CP-5")
+    cp_model = settle_module(store, "CP-MODEL")
+    rerun = store.begin("CP-5")
+    assert rerun.number == 0
+    assert bound_input(rerun, "CP-MODEL").sha256 == cp_model.content_hash()
+
+
+def test_scope_extension_stales_the_transitive_consumers_of_a_staled_head(
+    tmp_path: Path,
+) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-3", "CP-5", "CP-6", "CP-MEMO")
+    store = settled_store(tmp_path, scope)
+    before = heads_by_id(store)
+
+    report = store.extend_scope((*scope, "CP-MODEL"))
+
+    assert [(item.module_id, item.note) for item in report.staled] == [
+        ("CP-5", "Scope extended: inputs changed (CP-MODEL); rerun required"),
+        ("CP-6", "Scope extended: inputs changed (CP-5); rerun required"),
+        ("CP-MEMO", "Scope extended: inputs changed (CP-6); rerun required"),
+    ]
+    after = heads_by_id(store)
+    for module_id in ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-3"):
+        assert after[module_id] == before[module_id]
+    views = {item.module_id: item for item in store.view().modules}
+    assert {views[item].status for item in ("CP-5", "CP-6", "CP-MEMO")} == {"stale"}
+    assert views["CP-MODEL"].status == "unrun"
+
+
+def test_scope_extension_keeps_every_head_whose_inputs_do_not_change(tmp_path: Path) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2")
+    store = settled_store(tmp_path, scope)
+    before = store.read()
+    views_before = {item.module_id: item for item in store.view().modules}
+    assert views_before["CP-MODEL"].status == "not_in_pathway"
+    assert views_before["CP-OS"].status == "not_in_pathway"
+
+    report = store.extend_scope(("CP-OS", *scope, "CP-MODEL"))
+
+    assert report.added == ("CP-OS", "CP-MODEL") and report.staled == ()  # plan order
+    assert report.kept == tuple(head.module_id for head in before.heads)
+    after = store.read()
+    assert after.heads == before.heads
+    assert after.run.requested_modules == (*scope, "CP-OS", "CP-MODEL")
+    views = {item.module_id: item for item in store.view().modules}
+    for module_id in scope:
+        assert views[module_id] == views_before[module_id]  # kept heads render unchanged
+    assert views["CP-MODEL"].status == "unrun" and views["CP-OS"].status == "unrun"
+    assert store.begin("CP-MODEL").inputs[-1].input_id == "CP-1"
+
+
+def test_a_requested_module_already_in_the_closure_adds_nothing_but_is_recorded(
+    tmp_path: Path,
+) -> None:
+    store = settled_store(tmp_path, ("CP-0", "CP-2"))  # CP-1 and CP-1A are required producers
+    before = store.read()
+    report = store.extend_scope(("CP-0", "CP-2", "CP-1A"))
+    after = store.read()
+    assert report.extended and report.added == () and report.staled == ()
+    assert after.heads == before.heads and after.parent == before.content_hash()
+    assert after.run.requested_modules == ("CP-0", "CP-2", "CP-1A")
+
+
+def test_scope_extension_refusals_write_nothing(tmp_path: Path) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2")
+    store = settled_store(tmp_path, scope)
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+
+    def unchanged() -> None:
+        assert current_digest(store) == pointer
+        assert set((store.directory / "snapshots").iterdir()) == snapshots
+
+    with pytest.raises(ValueError, match=r"^Unknown r14 entry: CP-99$"):
+        store.extend_scope((*scope, "CP-99"))
+    unchanged()
+    superset = r"^Scope only extends; create a new execution to remove modules$"
+    with pytest.raises(ValueError, match=superset):
+        store.extend_scope(("CP-0", "CP-1", "CP-MODEL"))
+    unchanged()
+    # Ruling (B): CP-0 never assessed CP-4, so it cannot be added; closure modules count too.
+    with pytest.raises(ValueError, match=r"^CP-0 has not assessed CP-4; create a new execution$"):
+        store.extend_scope((*scope, "CP-4"))
+    unchanged()
+    with pytest.raises(
+        ValueError, match=r"^CP-0 has not assessed CP-2A, CP-2G, CP-2H; create a new execution$"
+    ):
+        store.extend_scope((*scope, "CP-MODEL", "CP-2H"))
+    unchanged()
+
+    # No-op: the same set after canonicalisation (order and aliases do not count).
+    report = store.extend_scope(("CP-2", "CP-1A", "CP-1", "CP-PARSE"))
+    assert not report.extended and report.added == () and report.staled == ()
+    assert report.kept == tuple(head.module_id for head in store.read().heads)
+    assert report.plan == plan(scope)
+    unchanged()
+
+    # A pending attempt refuses first, ahead of every other check.
+    assert store.extend_scope((*scope, "CP-MODEL")).extended
+    store.begin("CP-MODEL")
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+    for requested in ((*scope, "CP-MODEL", "CP-OS"), ("CP-99",), ("CP-0",), (*scope, "CP-4")):
+        with pytest.raises(ValueError, match=r"^Cannot change scope while an attempt is pending$"):
+            store.extend_scope(requested)
+        unchanged()
+
+
+def test_the_assessed_guard_fails_closed_without_a_settled_cp0_head() -> None:
+    from deploy_vii.execution import unassessed
+
+    def cp0(status: Literal["accepted", "restricted", "blocked", "stale"]) -> Head:
+        return Head(
+            module_id="CP-0",
+            status=status,
+            result_sha256="0" * 64,
+            inputs=(),
+            commands=(
+                Command(row_id="CP-4", text="Run CP-4"),
+                Command(row_id="CP-3", text="DO NOT RUN"),
+            ),
+        )
+
+    added = ("CP-MODEL", "CP-3", "CP-4", "CP-OS", "CP-2A")
+    assert unassessed(added, cp0("restricted")) == ("CP-2A",)  # a DO NOT RUN row is assessed
+    assert unassessed(added, cp0("accepted")) == ("CP-2A",)
+    assert unassessed(added, cp0("stale")) == ("CP-3", "CP-4", "CP-2A")
+    assert unassessed(added, None) == ("CP-3", "CP-4", "CP-2A")
+    assert unassessed(("CP-MODEL", "CP-MEMO", "CP-OS", "CP-0"), None) == ()
+
+
+def test_the_pack_blob_keeps_its_scope_and_replace_pack_accepts_either_run(
+    tmp_path: Path,
+) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2")
+    store = settled_store(tmp_path, scope)
+    original = store.pack()
+    store.extend_scope((*scope, "CP-MODEL"))
+    snapshot = store.read()
+    assert store.pack() == original and original.run != snapshot.run
+
+    source = original.sources[0].model_copy(update={"limitation": "Different evidence"})
+    store.replace_pack(original.model_copy(update={"sources": (source,)}))  # the blob's run
+    assert {head.status for head in store.read().heads} == {"stale"}
+    widened = original.model_copy(update={"run": snapshot.run})
+    store.replace_pack(widened)  # a pack prepared on the extended run
+    assert store.pack().run == store.read().run == snapshot.run
+    narrower = original.run.model_copy(update={"requested_modules": ("CP-0",)})
+    renamed = snapshot.run.model_copy(update={"issuer_id": "someone-else"})
+    for run in (narrower, renamed):
+        with pytest.raises(ValueError, match="immutable"):
+            store.replace_pack(original.model_copy(update={"run": run}))
+
+
+def test_the_pack_blob_scope_must_lie_within_the_snapshot_scope(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    snapshot = store.read()
+    narrower = snapshot.run.model_copy(update={"requested_modules": ("CP-0", "CP-1")})
+    store._write(snapshot.model_copy(update={"run": narrower}))
+    with pytest.raises(ValueError, match="canonical pack"):
+        store.pack()  # the blob requests modules the snapshot does not
