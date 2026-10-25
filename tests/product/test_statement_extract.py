@@ -22,6 +22,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from deploy_vii.statement_extract import (
+    LABEL_ENDS_NUMERIC,
+    MORE_VALUES_THAN_HEADER_YEARS,
     ExtractedLine,
     ExtractedTable,
     extract_pack_statements,
@@ -194,8 +196,17 @@ def test_pack_extraction_reads_every_span_in_pack_order() -> None:
     pack = _pack(("a", (("page:2", _ROW), ("page:1", "prose only"))), ("b", (("sheet:x", _ROW),)))
     tables = extract_pack_statements(pack)
     assert [table.locator for table in tables] == ["page:2", "page:1", "sheet:x"]
-    assert tables[0] == extract_statement_lines(_ROW, "page:2")
-    assert tables[1] == ExtractedTable(locator="page:1", headers=(), lines=())
+    assert [table.source_id for table in tables] == ["a", "a", "b"]
+    assert tables[0] == extract_statement_lines(_ROW, "page:2", source_id="a")
+    assert tables[1] == ExtractedTable(locator="page:1", headers=(), lines=(), source_id="a")
+
+
+def test_a_page_table_has_no_source_unless_named() -> None:
+    assert extract_statement_lines(_ROW, "page:2").source_id is None
+    assert extract_statement_lines(_ROW, "page:2", source_id="a").source_id == "a"
+    # The lines themselves do not depend on the source named.
+    named = extract_statement_lines(_ROW, "page:2", source_id="a")
+    assert named.lines == extract_statement_lines(_ROW, "page:2").lines
 
 
 def test_pack_extraction_restricts_to_the_given_locators_and_is_read_only() -> None:
@@ -219,12 +230,40 @@ def test_pack_extraction_refuses_a_bare_string_of_locators() -> None:
         extract_pack_statements(pack, "page:1")
 
 
-def test_pack_extraction_refuses_a_locator_two_sources_share() -> None:
-    pack = _pack(("a", (("page:1", _ROW),)), ("b", (("page:1", _ROW),)))
-    with pytest.raises(ValueError, match=r"page:1.*sources 'a' and 'b'"):
-        extract_pack_statements(pack)
-    with pytest.raises(ValueError, match=r"page:1.*sources 'a' and 'b'"):
-        extract_pack_statements(pack, ["page:1"])
+def test_pack_extraction_binds_a_shared_locator_to_each_source() -> None:
+    other = "Goodwill        1        2"
+    pack = _pack(("a", (("page:1", _ROW),)), ("b", (("page:1", other), ("page:2", _ROW))))
+    for tables in (extract_pack_statements(pack), extract_pack_statements(pack, ["page:1"])):
+        shared = [table for table in tables if table.locator == "page:1"]
+        assert [(table.source_id, table.lines[0].raw_values) for table in shared] == [
+            ("a", ("10,441", "10,601")),
+            ("b", ("1", "2")),
+        ]
+    (only_b,) = extract_pack_statements(pack, ["page:1"], source_id="b")
+    assert (only_b.source_id, only_b.lines[0].raw_values) == ("b", ("1", "2"))
+    assert [t.locator for t in extract_pack_statements(pack, source_id="b")] == ["page:1", "page:2"]
+
+
+def test_pack_extraction_refuses_a_locator_missing_from_the_named_source() -> None:
+    pack = _pack(("a", (("page:1", _ROW), ("page:2", _ROW))), ("b", (("page:1", _ROW),)))
+    with pytest.raises(ValueError, match=r"not in source 'b': \['page:2'\]"):
+        extract_pack_statements(pack, ["page:1", "page:2"], source_id="b")
+
+
+def test_pack_extraction_refuses_an_unknown_source() -> None:
+    pack = _pack(("a", (("page:1", _ROW),)), ("b", ()))
+    assert extract_pack_statements(pack, source_id="b") == ()
+    with pytest.raises(ValueError, match=r"source 'c' is not in the pack"):
+        extract_pack_statements(pack, source_id="c")
+
+
+def test_pack_extraction_refuses_a_locator_ambiguous_within_one_source() -> None:
+    pack = _pack(("a", (("page:1", _ROW), ("page:1", "Goodwill        1        2"))), ("b", ()))
+    for locators in (None, ["page:1"]):
+        with pytest.raises(ValueError, match=r"page:1.*twice in source 'a'"):
+            extract_pack_statements(pack, locators)
+    # Out of scope, the ambiguity is not read.
+    assert extract_pack_statements(pack, source_id="b") == ()
 
 
 @pytest.mark.parametrize(
@@ -359,7 +398,72 @@ def test_czr_prose_page_yields_nothing() -> None:
 def test_czr_pack_built_from_the_fixtures_matches_the_page_calls() -> None:
     spans = tuple((f"page:{number}", _page(number)) for number in sorted(_COUNTS))
     tables = extract_pack_statements(_pack(("czr-2025-10k", spans)), ["page:56", "page:60"])
-    assert tables == (_table(56), _table(60))
+    assert [table.source_id for table in tables] == ["czr-2025-10k"] * 2
+    assert [(t.locator, t.headers, t.lines) for t in tables] == [
+        (t.locator, t.headers, t.lines) for t in (_table(56), _table(60))
+    ]
+
+
+@pytest.mark.parametrize("number", sorted(_COUNTS))
+def test_no_czr_fixture_line_is_flagged(number: int) -> None:
+    assert [line.flags for line in _table(number).lines] == [()] * _COUNTS[number]
+
+
+def test_a_line_with_more_values_than_the_header_has_years_is_flagged_not_dropped() -> None:
+    text = "\n".join(
+        (
+            "(In millions)        2025          2024",
+            "Revenue        (1)        100        200",
+            "Cost        50        60",
+        )
+    )
+    revenue, cost = extract_statement_lines(text, "page:1").lines
+    assert revenue.raw_values == ("(1)", "100", "200")
+    assert revenue.flags == (MORE_VALUES_THAN_HEADER_YEARS,)
+    assert cost.flags == ()
+
+
+def test_without_a_header_year_no_line_is_flagged_for_its_value_count() -> None:
+    text = "\n".join(
+        ("                Paid-in     Accumulated", "Balance        1        2        3")
+    )
+    (line,) = extract_statement_lines(text, "page:1").lines
+    assert line.flags == ()
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        # Squeezed columns (review risk 2): `1,234 5,678` one space apart is one text cell, so
+        # the scan stops there and both numbers stay in the label.
+        "Revenue        1,234 5,678",
+        "Revenue $1,234",
+        "Revenue (12)",
+        "Revenue \u2014",
+        # A label ending in a year is flagged too: the flag says the label ends in a number.
+        "Balance, January 1, 2023",
+    ],
+)
+def test_a_label_ending_in_a_number_is_flagged_not_dropped(label: str) -> None:
+    (line,) = extract_statement_lines(label + "        9,012        3,456", "page:1").lines
+    assert line.label == label
+    assert line.flags == (LABEL_ENDS_NUMERIC,)
+    assert line.raw_values == ("9,012", "3,456")
+
+
+def test_both_flags_are_reported_in_a_fixed_order() -> None:
+    text = "(In millions)  2025  2024\nRevenue        1,234 5,678        1        2        3"
+    (line,) = extract_statement_lines(text, "page:1").lines
+    assert line.flags == (MORE_VALUES_THAN_HEADER_YEARS, LABEL_ENDS_NUMERIC)
+
+
+def test_a_line_whose_cells_are_all_year_like_is_omitted_as_a_header() -> None:
+    # Review risk 3: bare 1900-2099 values with no `$` read as a header line (docstring).
+    assert (
+        extract_statement_lines("Shares outstanding        2025        1999", "page:1").lines == ()
+    )
+    (kept,) = extract_statement_lines("Shares outstanding    $ 2025    1999", "page:1").lines
+    assert kept.values == (Decimal("2025"), Decimal("1999"))
 
 
 # Verbatim lines 16-20 of span `page:59` (statement of stockholders' equity), same pack.
@@ -434,7 +538,25 @@ def test_generated_data_line_round_trips(row: Row) -> None:
     assert (extracted.label, extracted.indent, extracted.line_no) == (label, indent, 1)
     assert all(raw in line for raw in extracted.raw_values)
     assert list(extracted.values) == values
+    # Equal Decimals can differ in exponent (1.50 == 1.5): the printed digits are kept.
+    assert [None if v is None else str(v) for v in extracted.values] == [
+        None if v is None else str(v) for v in values
+    ]
     assert all(value is None or type(value) is Decimal for value in extracted.values)
+    assert extracted.flags == ()
+
+
+@settings(max_examples=200, deadline=None)
+@given(st.integers(min_value=1, max_value=6), _row(st.integers(min_value=2, max_value=8)))
+def test_a_line_is_flagged_iff_it_has_more_values_than_the_header_years(
+    years: int, row: Row
+) -> None:
+    header = "December 31," + "".join(f"        {2025 - i}" for i in range(years))
+    line, label, _, values = row
+    (extracted,) = extract_statement_lines(header + "\n" + line, "page:1").lines
+    assert extracted.label == label
+    flagged = (MORE_VALUES_THAN_HEADER_YEARS,) if len(values) > years else ()
+    assert extracted.flags == flagged
 
 
 @settings(max_examples=200, deadline=None)

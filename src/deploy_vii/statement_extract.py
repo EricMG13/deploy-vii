@@ -22,12 +22,30 @@ Rules (docs/development/live-runner.md, "Statement extraction"):
   lines that follow until the next caption.
 - `headers` are the raw lines nearest above the first data line holding two or more four-digit
   years or a month name, with the adjacent such lines above them (blank lines between allowed).
+- A line whose numeric cells are all bare four-digit years from 1900 to 2099 with no `$` is
+  omitted as a header line, even when it has a label: a note table of such values (share counts
+  without commas, say) loses those lines (review risk 3; decision "C"'s completeness check
+  must allow for it).
+
+Flags (task 8.10b, review risks 1-2) inform the model and never drop a line:
+
+- `more_values_than_header_years`: the line has more numeric cells than the table's header
+  lines hold four-digit years (counted over all header lines; none counted when the headers
+  name no year). A footnote marker `(1)` two spaces before the values reads as a value of -1.
+- `label_ends_numeric`: the label's last token is a numeric cell (`1,234`, `$5`, `(12)`, a nil
+  dash). Two numbers one space apart are one text cell, so the scan stops there and they stay
+  in the label; a label ending in a year (`Balance, January 1, 2023`) is flagged too.
+
+`ExtractedTable.source_id` names the table's source: `extract_pack_statements` sets it and
+binds locators per source, so two sources may share a locator; `extract_statement_lines` sets
+it only when given one.
 """
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
+from typing import Literal
 
 _NUMBER = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
 _NIL_TOKENS = ("\u2014", "\u2013", "-")  # em dash, en dash, hyphen
@@ -43,12 +61,16 @@ _MONTH_NAMES = (
     *("September", "October", "November", "December"),
 )
 _MONTHS = frozenset((*_MONTH_NAMES, *(name.upper() for name in _MONTH_NAMES)))
+LineFlag = Literal["more_values_than_header_years", "label_ends_numeric"]
+MORE_VALUES_THAN_HEADER_YEARS: LineFlag = "more_values_than_header_years"
+LABEL_ENDS_NUMERIC: LineFlag = "label_ends_numeric"
 
 
 @dataclass(frozen=True)
 class ExtractedLine:
     """One printed data line. `line_no` is the 1-based line of the page text holding the values;
     `raw_values[i]` is printed on that line and `values[i]` is its exact Decimal (None for a nil).
+    `flags` (module docstring) are computed, in a fixed order; they never drop the line.
     """
 
     locator: str
@@ -58,15 +80,18 @@ class ExtractedLine:
     values: tuple[Decimal | None, ...]
     indent: int
     caption: str | None
+    flags: tuple[LineFlag, ...] = ()
 
 
 @dataclass(frozen=True)
 class ExtractedTable:
-    """The data lines of one page's text, in page order, with the raw header lines."""
+    """The data lines of one page's text, in page order, with the raw header lines. `source_id`
+    names the source the page belongs to (None: the text was given without one)."""
 
     locator: str
     headers: tuple[str, ...]
     lines: tuple[ExtractedLine, ...]
+    source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +167,23 @@ def _headers(lines: Sequence[str], first: int) -> tuple[str, ...]:
     return tuple(reversed(block))
 
 
-def extract_statement_lines(text: str, locator: str) -> ExtractedTable:
+def _label_ends_numeric(label: str) -> bool:
+    tokens = label.split()
+    return bool(tokens) and _NUMERIC_CELL.fullmatch(tokens[-1]) is not None
+
+
+def _flags(line: ExtractedLine, years: int) -> tuple[LineFlag, ...]:
+    flags: list[LineFlag] = []
+    if years and len(line.raw_values) > years:
+        flags.append(MORE_VALUES_THAN_HEADER_YEARS)
+    if _label_ends_numeric(line.label):
+        flags.append(LABEL_ENDS_NUMERIC)
+    return tuple(flags)
+
+
+def extract_statement_lines(
+    text: str, locator: str, source_id: str | None = None
+) -> ExtractedTable:
     """The printed data lines of one page's text (module docstring rules); prose yields none."""
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     found: list[ExtractedLine] = []
@@ -175,7 +216,9 @@ def extract_statement_lines(text: str, locator: str) -> ExtractedTable:
         else:
             pending = []
     headers = () if first is None else _headers(lines, first)
-    return ExtractedTable(locator=locator, headers=headers, lines=tuple(found))
+    years = sum(len(_YEAR.findall(header)) for header in headers)
+    flagged = tuple(replace(line, flags=_flags(line, years)) for line in found)
+    return ExtractedTable(locator=locator, headers=headers, lines=flagged, source_id=source_id)
 
 
 def _objects(value: object, missing: str, not_object: str) -> list[Mapping[str, object]]:
@@ -189,14 +232,17 @@ def _objects(value: object, missing: str, not_object: str) -> list[Mapping[str, 
     return objects
 
 
-def _pack_spans(pack_json: Mapping[str, object]) -> list[tuple[str, str, str]]:
-    """(source_id, locator, text) of every span in pack order; a malformed pack raises."""
+def _pack_spans(pack_json: Mapping[str, object]) -> tuple[list[str], list[tuple[str, str, str]]]:
+    """The source ids, and (source_id, locator, text) of every span, in pack order; a malformed
+    pack raises."""
+    ids: list[str] = []
     found: list[tuple[str, str, str]] = []
     sources = pack_json.get("sources")
     for source in _objects(sources, "pack has no sources list", "a source is not an object"):
         source_id = source.get("source_id")
         if not isinstance(source_id, str):
             raise ValueError("a source has no string source_id")
+        ids.append(source_id)
         of = f"of source {source_id!r}"
         spans = source.get("spans")
         for span in _objects(
@@ -208,35 +254,45 @@ def _pack_spans(pack_json: Mapping[str, object]) -> list[tuple[str, str, str]]:
             if not isinstance(text, str):
                 raise ValueError(f"span {locator!r} {of} has no string text")
             found.append((source_id, locator, text))
-    return found
+    return ids, found
 
 
 def extract_pack_statements(
-    pack_json: Mapping[str, object], locators: Iterable[str] | None = None
+    pack_json: Mapping[str, object],
+    locators: Iterable[str] | None = None,
+    source_id: str | None = None,
 ) -> tuple[ExtractedTable, ...]:
     """One table per span of `sources[*].spans`, in pack order; read-only, no file I/O.
 
-    With `locators` given, only those spans (phase 2 binds them to the step's declared sources).
-    A table names its span by locator only, so a locator two sources share in scope raises
-    rather than return a table whose source is ambiguous; a requested locator that no span has
-    raises too. Every span in scope yields a table, an empty one for a page without data lines.
+    With `source_id` given, only that source's spans (an id the pack lacks raises); with
+    `locators` given, only those spans. Each table carries its `source_id`, so a locator two
+    sources share yields one table per source (task 8.10b); a locator twice in one source in
+    scope raises, as its table would be ambiguous. A requested locator that no span in scope
+    has raises too. Every span in scope yields a table, an empty one for a page without data
+    lines.
     """
     if isinstance(locators, str):
         # A str is an Iterable[str] of characters; reading it so would miss every page.
         raise TypeError("locators must be an iterable of locators, not one string")
     wanted = None if locators is None else frozenset(locators)
-    owners: dict[str, str] = {}
+    ids, spans = _pack_spans(pack_json)
+    if source_id is not None and source_id not in ids:
+        raise ValueError(f"source {source_id!r} is not in the pack")
+    bound: set[tuple[str, str]] = set()
     tables: list[ExtractedTable] = []
-    for source_id, locator, text in _pack_spans(pack_json):
-        if wanted is not None and locator not in wanted:
+    for owner, locator, text in spans:
+        if (source_id is not None and owner != source_id) or (
+            wanted is not None and locator not in wanted
+        ):
             continue
-        if locator in owners:
+        if (owner, locator) in bound:
             raise ValueError(
-                f"locator {locator!r} is in sources {owners[locator]!r} and {source_id!r}; an "
-                "extracted table names its span by locator only"
+                f"locator {locator!r} is twice in source {owner!r}; an extracted table names "
+                "its span by source and locator"
             )
-        owners[locator] = source_id
-        tables.append(extract_statement_lines(text, locator))
-    if wanted is not None and (missing := sorted(wanted - owners.keys())):
-        raise ValueError(f"locators not in the pack: {missing}")
+        bound.add((owner, locator))
+        tables.append(extract_statement_lines(text, locator, source_id=owner))
+    if wanted is not None and (missing := sorted(wanted - {loc for _, loc in bound})):
+        where = "the pack" if source_id is None else f"source {source_id!r}"
+        raise ValueError(f"locators not in {where}: {missing}")
     return tuple(tables)
