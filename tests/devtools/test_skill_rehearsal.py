@@ -3,10 +3,15 @@
 import hashlib
 import json
 import sys
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
+from deploy_vii.live.ledger import Ledger
 from devtools import skill_rehearsal as rehearsal
 
 PY = sys.executable
@@ -203,3 +208,131 @@ def test_main_refuses_a_foreign_cohort_with_exit_2(
     (directory / "rehearsal.json").write_text(json.dumps({"cohort": "sol"}), encoding="utf-8")
     assert rehearsal.main(["run", "--rehearsal", str(directory), "--", "plan", "CP-0"]) == 2
     assert "cohort" in capsys.readouterr().err
+
+
+# -- cost -----------------------------------------------------------------------------------
+
+
+def cost_args(
+    directory: Path, *extra: str, tokens: tuple[int, int] = (1_000_000, 1_000_000)
+) -> list[str]:
+    return [
+        "cost",
+        "--rehearsal",
+        str(directory),
+        "--model",
+        "claude-test",
+        "--input-tokens",
+        str(tokens[0]),
+        "--output-tokens",
+        str(tokens[1]),
+        "--usd-per-m-input",
+        "3.10",
+        "--usd-per-m-output",
+        "15.25",
+        "--price-source",
+        "vendor list 24 Oct 2026",
+        *extra,
+    ]
+
+
+def ledger_of(directory: Path) -> Ledger:
+    return Ledger(directory / "ledger.jsonl", Decimal("12"), provider="anthropic")
+
+
+def started(tmp_path: Path) -> Path:
+    directory = tmp_path / "r"
+    rehearsal.run_command(directory, child("pass"))
+    return directory
+
+
+def test_cost_is_exact_decimal_arithmetic() -> None:
+    assert rehearsal.cost_usd(1, 1, Decimal("0.1"), Decimal("0.2")) == Decimal("0.0000003")
+    assert rehearsal.cost_usd(1_000_000, 0, Decimal("3.1"), Decimal("9")) == Decimal("3.1")
+
+
+@given(
+    st.integers(0, 10**9),
+    st.integers(0, 10**9),
+    st.decimals(0, 1000, places=4),
+    st.decimals(0, 1000, places=4),
+)
+def test_cost_matches_a_fraction_reference(
+    tokens_in: int, tokens_out: int, price_in: Decimal, price_out: Decimal
+) -> None:
+    reference = (
+        Fraction(tokens_in) * Fraction(price_in) + Fraction(tokens_out) * Fraction(price_out)
+    ) / 10**6
+    assert Fraction(rehearsal.cost_usd(tokens_in, tokens_out, price_in, price_out)) == reference
+
+
+def test_first_cost_reserves_the_cap_and_final_settles_the_total(tmp_path: Path) -> None:
+    directory = started(tmp_path)
+    assert rehearsal.main(cost_args(directory, tokens=(1000, 2000))) == 0
+    state = ledger_of(directory).state()
+    assert (state.reserved, state.spent) == (Decimal("12"), Decimal("0"))
+    assert rehearsal.main(cost_args(directory, "--final", tokens=(1000, 2000))) == 0
+    state = ledger_of(directory).state()
+    each = Decimal("1000") * Decimal("3.10") / 10**6 + Decimal("2000") * Decimal("15.25") / 10**6
+    assert (state.reserved, state.spent) == (Decimal("0"), each * 2)
+    (attempt,) = state.attempts
+    assert attempt.actual_usd == each * 2
+    reason = json.loads(attempt.basis or "")
+    assert reason["estimated"] is True
+    assert reason["price_source"] == "vendor list 24 Oct 2026"
+    assert reason["model"] == "claude-test"
+    opening = json.loads((directory / "ledger.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert (opening["cap_usd"], opening["provider"]) == ("12", "anthropic")
+
+
+def test_a_single_cost_above_the_cap_exits_3_and_writes_no_ledger(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = started(tmp_path)
+    code = rehearsal.main(cost_args(directory, "--final", tokens=(0, 1_000_000)))  # 15.25 > 12
+    assert code == 3
+    shown = capsys.readouterr().err
+    assert "15.25" in shown
+    assert "12" in shown
+    assert not (directory / "ledger.jsonl").exists()
+
+
+def test_cumulative_cost_above_the_cap_exits_3_and_keeps_the_earlier_figures(
+    tmp_path: Path,
+) -> None:
+    directory = started(tmp_path)
+    assert rehearsal.main(cost_args(directory, tokens=(0, 600_000))) == 0  # 9.15
+    assert rehearsal.main(cost_args(directory, tokens=(0, 600_000))) == 3  # 18.30 > 12
+    state = ledger_of(directory).state()
+    assert state.reserved == Decimal("12")
+    assert len((directory / "usage.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_cost_exactly_at_the_cap_is_accepted(tmp_path: Path) -> None:
+    directory = started(tmp_path)
+    args = cost_args(directory, "--final", tokens=(0, 0))
+    args[args.index("--usd-per-m-input") + 1] = "12"
+    args[args.index("--input-tokens") + 1] = "1000000"
+    assert rehearsal.main(args) == 0
+    assert ledger_of(directory).state().spent == Decimal("12")
+
+
+def test_cost_after_final_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    directory = started(tmp_path)
+    assert rehearsal.main(cost_args(directory, "--final", tokens=(10, 10))) == 0
+    assert rehearsal.main(cost_args(directory, tokens=(10, 10))) == 2
+    assert "final" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "bad", [["--usd-per-m-input", "-1"], ["--usd-per-m-output", "NaN"], ["--input-tokens", "-5"]]
+)
+def test_negative_or_non_finite_figures_are_refused(tmp_path: Path, bad: list[str]) -> None:
+    directory = started(tmp_path)
+    with pytest.raises(SystemExit) as stop:
+        rehearsal.main([*cost_args(directory), *bad])
+    assert stop.value.code == 2
+
+
+def test_cost_needs_an_existing_rehearsal_directory(tmp_path: Path) -> None:
+    assert rehearsal.main(cost_args(tmp_path / "none", tokens=(1, 1))) == 2

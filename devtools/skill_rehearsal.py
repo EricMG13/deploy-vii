@@ -16,13 +16,19 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, BinaryIO
+
+from deploy_vii.live.ledger import CapExceeded, Ledger, LedgerError  # type: ignore[import-untyped]
 
 COHORT = "proxy-claude"
 PROVIDER = "anthropic"
 CAP_USD = "12"
 STAMP = "%Y-%m-%dT%H:%M:%SZ"
+ATTEMPT = "rehearsal"
+EXIT_CAP = 3
+PER_MILLION = Decimal(10) ** 6
 
 
 class RehearsalError(Exception):
@@ -166,6 +172,90 @@ def run_command(directory: Path, argv: list[str], interrupt_after: float | None 
     return code
 
 
+def cost_usd(
+    input_tokens: int, output_tokens: int, usd_per_m_input: Decimal, usd_per_m_output: Decimal
+) -> Decimal:
+    """List-price cost in USD; Decimal throughout, never a float."""
+    return (input_tokens * usd_per_m_input + output_tokens * usd_per_m_output) / PER_MILLION
+
+
+def _usage_entries(directory: Path) -> list[dict[str, Any]]:
+    path = directory / "usage.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def record_cost(
+    directory: Path,
+    *,
+    model: str,
+    usd: Decimal,
+    price_source: str,
+    tokens: tuple[int, int],
+    final: bool,
+) -> tuple[Decimal, Decimal]:
+    """Add one usage report to the rehearsal's ledger; return (this cost, cumulative cost).
+
+    The first call reserves the cap; `final` settles the cumulative figure as an estimate.
+    A cumulative cost above the cap raises CapExceeded and records nothing (never clamped)."""
+    open_rehearsal(directory, create=False)
+    entries = _usage_entries(directory)
+    if any(entry["final"] for entry in entries):
+        raise RehearsalError("the cost is already final; start a new rehearsal directory")
+    cap = Decimal(CAP_USD)
+    before = sum((Decimal(entry["usd"]) for entry in entries), Decimal(0))
+    total = before + usd
+    if total > cap:
+        raise CapExceeded(usd, before, cap)
+    ledger = Ledger(directory / "ledger.jsonl", cap, provider=PROVIDER)
+    if not any(a.attempt_id == ATTEMPT for a in ledger.state().attempts):
+        ledger.reserve(ATTEMPT, cap)
+    entry = {
+        "utc": utc_now(),
+        "model": model,
+        "input_tokens": tokens[0],
+        "output_tokens": tokens[1],
+        "usd": format(usd, "f"),
+        "price_source": price_source,
+        "estimated": True,
+        "final": final,
+    }
+    with (directory / "usage.jsonl").open("a", encoding="utf-8") as log:
+        log.write(json.dumps(entry) + "\n")
+    if final:
+        reason = json.dumps(
+            {
+                "estimated": True,
+                "price_source": price_source,
+                "model": model,
+                "reports": len(entries) + 1,
+            }
+        )
+        ledger.settle(ATTEMPT, total, reason)
+    return usd, total
+
+
+def _count(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError("a token count cannot be negative")
+    return value
+
+
+def _price(text: str) -> Decimal:
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a decimal price") from None
+    if not value.is_finite() or value < 0:
+        raise argparse.ArgumentTypeError("a price must be finite and not negative")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -173,6 +263,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--rehearsal", type=Path, required=True)
     run.add_argument("--interrupt-after", type=float, metavar="SECONDS")
     run.add_argument("deploy_vii", nargs="*", help="after `--`: the deploy-vii arguments")
+    cost = commands.add_parser("cost", help="add a usage report to the capped ledger")
+    cost.add_argument("--rehearsal", type=Path, required=True)
+    cost.add_argument("--model", required=True)
+    cost.add_argument("--input-tokens", type=_count, required=True)
+    cost.add_argument("--output-tokens", type=_count, required=True)
+    cost.add_argument("--usd-per-m-input", type=_price, required=True)
+    cost.add_argument("--usd-per-m-output", type=_price, required=True)
+    cost.add_argument("--price-source", required=True, help="where the list prices came from")
+    cost.add_argument("--final", action="store_true", help="settle the ledger at the total")
     return parser
 
 
@@ -189,7 +288,30 @@ def main(argv: list[str] | None = None) -> int:
                 [sys.executable, "-m", "deploy_vii", *command],
                 args.interrupt_after,
             )
-    except RehearsalError as refused:
+        if args.command == "cost":
+            usd = cost_usd(
+                args.input_tokens, args.output_tokens, args.usd_per_m_input, args.usd_per_m_output
+            )
+            this, total = record_cost(
+                args.rehearsal,
+                model=args.model,
+                usd=usd,
+                price_source=args.price_source,
+                tokens=(args.input_tokens, args.output_tokens),
+                final=args.final,
+            )
+            figures = {"usd": format(this, "f"), "cumulative_usd": format(total, "f")}
+            print(json.dumps({**figures, "cap_usd": CAP_USD, "final": args.final}))
+            return 0
+    except CapExceeded as over:
+        print(
+            f"skill_rehearsal: cost above the cap: {over} "
+            f"(this report {format(over.requested, 'f')}, earlier {format(over.committed, 'f')}, "
+            f"cap {format(over.cap, 'f')})",
+            file=sys.stderr,
+        )
+        return EXIT_CAP
+    except (RehearsalError, LedgerError) as refused:
         print(f"skill_rehearsal refused: {refused}", file=sys.stderr)
         return 2
     raise AssertionError(args.command)
