@@ -2,21 +2,42 @@ import argparse
 import sys
 from pathlib import Path
 
-from deploy_vii.contracts import Run
-from deploy_vii.delivery import deliver_cp0
-from deploy_vii.delivery_dir import run_paths
-from deploy_vii.doctor import render as render_doctor
-from deploy_vii.execution_cli import configure, execute
-from deploy_vii.inputs import KINDS
-from deploy_vii.live.cli import configure as configure_live
-from deploy_vii.live.cli import execute as execute_live
-from deploy_vii.preparation import PreparationRequest, load_pack, prepare
-from deploy_vii.readiness import ReadinessReview
-from deploy_vii.registry import plan
-from deploy_vii.render import write_preview
-
 
 def main() -> None:
+    # Doctor must start before any dependency-backed product imports.
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--out", type=Path)
+    bootstrap.add_argument("command", nargs="?")
+    selected, _ = bootstrap.parse_known_args()
+    if selected.command == "doctor":
+        from deploy_vii.doctor import render as render_doctor
+
+        parser = argparse.ArgumentParser(description="Deploy VII evidence workbench")
+        parser.add_argument("--out", type=Path, help="delivery root (or DEPLOY_VII_OUT)")
+        commands = parser.add_subparsers(dest="command", required=True)
+        doctor = commands.add_parser("doctor", help="check this offline installation")
+        doctor.add_argument("--request", type=Path)
+        doctor.add_argument("--inputs", type=Path, nargs="*")
+        doctor.add_argument("--json", action="store_true")
+        args = parser.parse_args()
+        doctor_output, code = render_doctor(
+            args.request, tuple(args.inputs or ()), args.out, args.json
+        )
+        print(doctor_output)
+        sys.exit(code)
+
+    from deploy_vii.contracts import Run
+    from deploy_vii.delivery import deliver_cp0
+    from deploy_vii.delivery_dir import run_paths
+    from deploy_vii.execution_cli import configure, execute
+    from deploy_vii.inputs import KINDS
+    from deploy_vii.live.cli import configure as configure_live
+    from deploy_vii.live.cli import execute as execute_live
+    from deploy_vii.preparation import PreparationRequest, load_pack, prepare
+    from deploy_vii.readiness import ReadinessReview
+    from deploy_vii.registry import plan
+    from deploy_vii.render import write_preview
+
     parser = argparse.ArgumentParser(description="Deploy VII evidence workbench")
     parser.add_argument("--out", type=Path, help="delivery root (or DEPLOY_VII_OUT)")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -78,10 +99,6 @@ def main() -> None:
         report = KINDS[args.kind](args.file)
         print(report.model_dump_json(indent=2) if args.json else "\n".join(report.lines()))
         sys.exit(0 if report.ok else 1)
-    elif args.command == "doctor":
-        output, code = render_doctor(args.request, tuple(args.inputs or ()), args.out, args.json)
-        print(output)
-        sys.exit(code)
     elif args.command == "run":
         from deploy_vii.execution_cli import run_offline
 

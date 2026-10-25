@@ -15,7 +15,7 @@ Copilot host behaviour remains unverified; see `docs/native-delivery.md`.
 - Repository skill: `.github/skills/deploy-vii/`. User scope can copy the directory to
   `~/.copilot/skills/deploy-vii/`.
 - Use a safe run id (letters, digits, dot, underscore and hyphen). Each run owns `pack/`,
-  `journal/`, `reviews/` and `report/` below the delivery root.
+  `journal/`, `reviews/`, `cp-model/` and `report/` below the delivery root.
 
 ## Offline review loop
 
@@ -30,6 +30,8 @@ deploy-vii run --request <request.json> --root <source-root> --run <run-id>
    names the `<module>-<step>.review.json` file to write. Use the instructions, write the review
    as JSON and rerun the same command. It submits through the production validators, in plan
    order, and stops on a rejected review (exit 1) with issue lines. Exit 2 means refused input.
+   Repair prompts preserve the first file and add a ticket/repair suffix. CP-MODEL publishes
+   deterministically into `cp-model/`; it does not ask for a review.
 3. To inspect a pending ticket, run `deploy-vii --out <delivery-root> execution --run <run-id>
    resume`. To resubmit explicitly, add `--ticket <ticket> --review <file>`.
 4. When the run is complete, open the printed report path with `deploy-vii --out <delivery-root>

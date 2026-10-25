@@ -112,3 +112,10 @@ deploy-vii execution --directory <journal> status
 deploy-vii execution --directory <journal> interrupt --ticket <ticket> --reason <reason>
 deploy-vii live module --directory <directory> --module CP-2 --cap 1
 ```
+
+The run-all command preserves the initial instructions and writes journal-bound repair prompts
+with a ticket/repair suffix. Review filenames stay unchanged. CP-MODEL publishes through its
+existing deterministic publisher into `<out>/<run-id>/cp-model/`, separate from `report/`.
+Report reuse verifies both HTML and receipt against the current journal; stale, partial,
+conflicting or symlinked files are refused and preserved. Use a fresh explicit report destination
+when an earlier report must be retained.

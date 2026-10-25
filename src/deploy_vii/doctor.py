@@ -12,8 +12,6 @@ from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
 from deploy_vii.delivery_dir import delivery_root
-from deploy_vii.inputs import KINDS
-from deploy_vii.preparation import PreparationRequest
 
 
 def checks(
@@ -102,6 +100,8 @@ def checks(
         add("request", None, "Pass --request to validate a preparation-request/1 file.")
     else:
         try:
+            from deploy_vii.preparation import PreparationRequest
+
             parsed = PreparationRequest.model_validate_json(request.read_bytes())
             missing = []
             for item in parsed.sources:
@@ -112,6 +112,8 @@ def checks(
                     missing.append(item.path)
             ok = not missing
             detail = "missing/unreadable: " + ", ".join(missing) if missing else ""
+        except ImportError as error:
+            ok, detail = False, f"request validation dependency unavailable: {error.name}"
         except (OSError, ValueError):
             ok, detail = False, "request is unreadable or invalid"
         add(
@@ -123,6 +125,8 @@ def checks(
     for file in inputs:
         kind = "rv or portfolio"
         try:
+            from deploy_vii.inputs import KINDS
+
             reports = [(kind, validator(file)) for kind, validator in KINDS.items()]
             valid = next(((kind, report) for kind, report in reports if report.ok), None)
             if valid is None:
@@ -131,6 +135,8 @@ def checks(
             else:
                 kind, report = valid
                 ok, detail = True, "; ".join(report.lines())
+        except ImportError as error:
+            ok, detail = False, f"input validation dependency unavailable: {error.name}"
         except (
             OSError,
             ValueError,

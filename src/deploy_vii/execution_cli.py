@@ -221,10 +221,8 @@ def instructions_text(store: Execution, args: argparse.Namespace) -> str:
         raise refusal_exit(f"step-instructions refused: {refusal}") from refusal
 
 
-def write_report(store: Execution, pathway_id: str, output: Path) -> str:
-    """Render the journal's accepted heads as the run's Pathway into `output`: `index.html` and
-    the `report.json` receipt (modules by status, the call band's state). A module that has not
-    run or is blocked renders in its own state, never as an error."""
+def report_files(store: Execution, pathway_id: str) -> dict[str, str]:
+    """Re-derive the complete report bytes from the current verified journal."""
     view = store.view()
     if pathway_id != view.run.pathway:
         raise refusal_exit(
@@ -247,13 +245,43 @@ def write_report(store: Execution, pathway_id: str, output: Path) -> str:
             "words": None if words is None else {"glyph": words[0], "word": words[1]},
         },
     }
+    return {"index.html": html, "report.json": json.dumps(receipt, indent=2)}
+
+
+def write_report(store: Execution, pathway_id: str, output: Path) -> str:
+    """Write a new report directory; preserve the explicit command's no-overwrite contract."""
+    files = report_files(store, pathway_id)
     try:
         output.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exists:
         raise refusal_exit(f"report refused: {output} already exists") from exists
-    (output / "index.html").write_text(html, encoding="utf-8")
-    (output / "report.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
-    return json.dumps(receipt)
+    for name, text in files.items():
+        (output / name).write_text(text, encoding="utf-8")
+    return json.dumps(json.loads(files["report.json"]))
+
+
+def report_index(store: Execution, pathway_id: str, output: Path) -> str:
+    """Reuse only a complete current report, refusing partial or unrelated private artifacts."""
+    if output.is_symlink():
+        raise refusal_exit("report refused: report paths must not be symlinks")
+    if not output.exists():
+        write_report(store, pathway_id, output)
+    else:
+        for name, expected in report_files(store, pathway_id).items():
+            path = output / name
+            if path.is_symlink():
+                raise refusal_exit("report refused: report paths must not be symlinks")
+            try:
+                found = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                raise refusal_exit(
+                    f"report refused: incomplete or unreadable report at {path}"
+                ) from error
+            if found != expected:
+                raise refusal_exit(
+                    f"report refused: existing report differs from the journal: {path}"
+                )
+    return str((output / "index.html").resolve())
 
 
 def run_offline(args: argparse.Namespace) -> str:
@@ -283,14 +311,25 @@ def run_offline(args: argparse.Namespace) -> str:
         store = Execution.create(journal, pack)
     else:
         store = Execution(journal)
-        if tuple(store.read().run.requested_modules) != requested:
+        bound_pack = store.pack()
+        if bound_pack != pack or bound_pack.content_hash() != pack.content_hash():
             raise refusal_exit(
-                "run refused: existing journal has a different requested module plan; "
-                "choose a new run id"
+                "run refused: existing journal is bound to a different prepared pack"
             )
-    modules_to_run = ("CP-0", *plan(requested))
+    modules_to_run = ("CP-0", *plan(store.read().run.requested_modules))
     if reviews.is_symlink():
         raise refusal_exit(f"run refused: review directory must not be a symlink: {reviews}")
+    snapshot = store.read()
+    if any(head.module_id == "CP-MODEL" for head in snapshot.heads):
+        output = journal.parent / "cp-model"
+        if output.is_symlink() or any(
+            (output / name).is_symlink()
+            for name in ("model.html", "calculation.json", "receipt.json")
+        ):
+            raise refusal_exit("run refused: CP-MODEL output must not contain symlinks")
+        issues = verify_cp_model_publication(store, output)
+        if issues:
+            raise refusal_exit("run refused: " + "; ".join(issues))
     while True:
         snapshot = store.read()
         pending = next((item for item in snapshot.attempts if item.status == "pending"), None)
@@ -299,43 +338,60 @@ def run_offline(args: argparse.Namespace) -> str:
             module_id = next((item for item in modules_to_run if item not in settled), None)
             if module_id is None:
                 report = paths["report"]
-                if (report / "index.html").is_file():
-                    return str((report / "index.html").resolve())
-                return write_report(store, store.read().run.pathway, report)
+                return report_index(store, snapshot.run.pathway, report)
+            if module_id == "CP-MODEL":
+                # The deterministic publisher owns begin and settlement, with its own receipt.
+                output = paths["journal"].parent / "cp-model"
+                if output.is_symlink():
+                    raise refusal_exit("run refused: CP-MODEL output must not be a symlink")
+                try:
+                    publish_cp_model(store, output=output)
+                except CpModelRefused as error:
+                    raise refusal_exit(f"run refused: {error}") from error
+                continue
             pending = store.begin(module_id)
         chain = step_chain(pending.module_id).steps
         valid = {item.step_id for item in pending.steps if item.status == "valid"}
         step = next((item for item in chain if item not in valid), chain[-1])
-        instructions = step_instructions(
-            store, pending.module_id, pending.ticket_id, step, with_sources=False
-        )
-        try:
-            reviews.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            raise refusal_exit(f"run refused: cannot create review directory {reviews}") from error
-        instruction_path = reviews / f"{pending.module_id}-{step}.instructions.txt"
-        if instruction_path.is_symlink():
-            raise refusal_exit(
-                f"run refused: instructions path must not be a symlink: {instruction_path}"
+        retained = next((item for item in pending.steps if item.step_id == step), None)
+        if retained is None and pending.payload_sha256 is None:
+            instructions = step_instructions(
+                store, pending.module_id, pending.ticket_id, step, with_sources=False
             )
-        try:
-            with instruction_path.open("x", encoding="utf-8") as stream:
-                stream.write(instructions)
-        except FileExistsError:
             try:
-                existing_instructions = instruction_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
+                reviews.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
                 raise refusal_exit(
-                    f"run refused: cannot read existing instructions at {instruction_path}"
+                    f"run refused: cannot create review directory {reviews}"
                 ) from error
-            if existing_instructions != instructions:
+            revision = (
+                f".{pending.ticket_id}.{len(pending.step_repairs)}"
+                if pending.repair_of or any(item.step_id == step for item in pending.step_repairs)
+                else ""
+            )
+            instruction_path = reviews / f"{pending.module_id}-{step}{revision}.instructions.txt"
+            if instruction_path.is_symlink():
                 raise refusal_exit(
-                    f"run refused: conflicting instructions file at {instruction_path}"
-                ) from None
-        except OSError as error:
-            raise refusal_exit(
-                f"run refused: cannot write instructions at {instruction_path}"
-            ) from error
+                    f"run refused: instructions path must not be a symlink: {instruction_path}"
+                )
+            try:
+                with instruction_path.open("x", encoding="utf-8") as stream:
+                    stream.write(instructions)
+            except FileExistsError:
+                try:
+                    existing_instructions = instruction_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as error:
+                    raise refusal_exit(
+                        f"run refused: cannot read existing instructions at {instruction_path}"
+                    ) from error
+                if existing_instructions != instructions:
+                    raise refusal_exit(
+                        f"run refused: conflicting instructions file at {instruction_path}"
+                    ) from None
+            except OSError as error:
+                raise refusal_exit(
+                    f"run refused: cannot write instructions at {instruction_path}"
+                ) from error
         review_path = reviews / f"{pending.module_id}-{step}.review.json"
         if review_path.is_symlink():
             raise refusal_exit(f"run refused: review path must not be a symlink: {review_path}")
@@ -343,14 +399,19 @@ def run_offline(args: argparse.Namespace) -> str:
             print(f"write {review_path} then rerun", file=sys.stderr)
             raise SystemExit(3)
         payload = read_review_file(review_path, "run")
-        if pending.module_id == "CP-0":
-            attempt = submit_cp0_review(store, pending.ticket_id, payload)
-        elif pending.module_id == "CP-1" and step == "quality":
-            attempt = promote_cp1(store, pending.ticket_id, payload)
-        elif pending.module_id == "CP-1":
-            attempt = submit_cp1_step(store, pending.ticket_id, step, payload)
-        else:
-            attempt = submit_module_step(store, pending.module_id, pending.ticket_id, step, payload)
+        try:
+            if pending.module_id == "CP-0":
+                attempt = submit_cp0_review(store, pending.ticket_id, payload)
+            elif pending.module_id == "CP-1" and step == "quality":
+                attempt = promote_cp1(store, pending.ticket_id, payload)
+            elif pending.module_id == "CP-1":
+                attempt = submit_cp1_step(store, pending.ticket_id, step, payload)
+            else:
+                attempt = submit_module_step(
+                    store, pending.module_id, pending.ticket_id, step, payload
+                )
+        except ValueError as error:
+            raise refusal_exit(f"run refused: {error}") from error
         settled_json(store, attempt)
 
 
@@ -478,12 +539,7 @@ def execute(args: argparse.Namespace) -> str:
         return write_report(store, args.pathway, output)
     elif args.action == "report-open":
         output = paths.get("report", args.directory.parent / "report")
-        index = output / "index.html"
-        if output.is_symlink() or index.is_symlink():
-            raise refusal_exit("report-open refused: report paths must not be symlinks")
-        if not index.is_file():
-            write_report(store, args.pathway or store.read().run.pathway, output)
-        absolute = index.resolve()
+        absolute = Path(report_index(store, args.pathway or store.read().run.pathway, output))
         if args.browser:
             webbrowser.open(absolute.as_uri())
         return str(absolute)
