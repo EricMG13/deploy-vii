@@ -1,10 +1,15 @@
 import hashlib
 import json
+import tempfile
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from playwright.sync_api import expect, sync_playwright
 
 from deploy_vii.contracts import PATHWAY_MODULES, Citation, Claim, Fact, Input, Module, PathwayId
@@ -16,14 +21,17 @@ from deploy_vii.execution import (
     Execution,
     Head,
     NotAuthorized,
+    Resolver,
     StepSubmission,
     StepValidation,
     candidate_issues,
     current_inputs,
+    rebind_heads,
+    staled,
 )
 from deploy_vii.preparation import PreparedPack
 from deploy_vii.readiness import NOT_CONSUMERS, ReadinessReview, build_readiness, validate_review
-from deploy_vii.registry import _NOT_CP5_FAN_IN, plan
+from deploy_vii.registry import _NOT_CP5_FAN_IN, dependencies, modules, plan
 from deploy_vii.render import render
 from tests.product.evidence import evidence_path
 from tests.product.test_readiness import readiness_fixture
@@ -1750,3 +1758,254 @@ def test_the_pack_blob_scope_must_lie_within_the_snapshot_scope(tmp_path: Path) 
     store._write(snapshot.model_copy(update={"run": narrower}))
     with pytest.raises(ValueError, match="canonical pack"):
         store.pack()  # the blob requests modules the snapshot does not
+
+
+# --- Scope extension properties (task 9.1, decision 0012: execution ordering) -----------------
+
+EdgeKind = Literal["none", "required", "optional"]
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """A synthetic registry: module `M<j>` may consume `M<i>` for i < j (so it is a DAG)."""
+
+    edges: tuple[tuple[EdgeKind, ...], ...]  # edges[j][i] for i < j
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        return tuple(f"M{index}" for index in range(len(self.edges)))
+
+    def dependencies(self, requested: frozenset[str]) -> dict[str, set[str]]:
+        """`registry.dependencies` on this catalog: required closure, optional when selected."""
+        ids = self.ids
+
+        def producers(module_id: str, kind: EdgeKind) -> set[str]:
+            row = self.edges[ids.index(module_id)]
+            return {ids[i] for i, edge in enumerate(row) if edge == kind}
+
+        selected = set(requested)
+        pending = list(selected)
+        while pending:
+            for producer in producers(pending.pop(), "required"):
+                if producer not in selected:
+                    selected.add(producer)
+                    pending.append(producer)
+        return {
+            module_id: producers(module_id, "required")
+            | (producers(module_id, "optional") & selected)
+            for module_id in selected
+        }
+
+    def plan(self, graph: Mapping[str, set[str]]) -> tuple[str, ...]:
+        """`registry.plan`'s layering: each round takes every ready module in catalog order."""
+        remaining = {key: set(value) for key, value in graph.items()}
+        ordered: list[str] = []
+        while remaining:
+            ready = [item for item in self.ids if item in remaining and not remaining[item]]
+            for item in ready:
+                ordered.append(item)
+                del remaining[item]
+                for producers in remaining.values():
+                    producers.discard(item)
+        return tuple(ordered)
+
+
+def synthetic_resolver(graph: Mapping[str, set[str]], order: tuple[str, ...]) -> Resolver:
+    """`current_inputs` on a synthetic graph: every edge must be a settled head, in plan order."""
+
+    def resolve(module_id: str, heads: Mapping[str, Head]) -> tuple[Input, ...]:
+        bound: list[Input] = []
+        for item in order:
+            if item not in graph[module_id]:
+                continue
+            head = heads.get(item)
+            if head is None or head.status == "stale":
+                raise ValueError("Required upstream is unrun, stale or blocked")
+            status: Literal["accepted", "restricted"] = (
+                "accepted" if head.status == "accepted" else "restricted"
+            )
+            bound.append(Input(input_id=item, sha256=head.result_sha256, status=status))
+        return tuple(bound)
+
+    return resolve
+
+
+HASHES = st.integers(0, 40).map(lambda value: hashlib.sha256(str(value).encode()).hexdigest())
+
+
+@st.composite
+def extensions(
+    draw: st.DrawFn,
+) -> tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]]:
+    """A catalog, three nested requested sets S0 ⊆ S1 ⊆ S2 and the settled heads of S0's graph.
+
+    Each head's recorded binding is its S0 resolution (a consistent journal) or, where drawn, a
+    binding with drawn hashes (an input that has since changed); some heads are already stale.
+    """
+    size = draw(st.integers(2, 8))
+    kinds = st.sampled_from(("none", "required", "optional"))
+    edges = tuple(tuple(draw(kinds) for _ in range(j)) for j in range(size))
+    catalog = Catalog(edges)
+    ids = catalog.ids
+    first = frozenset(draw(st.sets(st.sampled_from(ids), min_size=1)))
+    second = first | draw(st.sets(st.sampled_from(ids)))
+    third = second | draw(st.sets(st.sampled_from(ids)))
+    graph = catalog.dependencies(first)
+    order = catalog.plan(graph)
+    resolve = synthetic_resolver(graph, order)
+    heads: dict[str, Head] = {}
+    for module_id in order:
+        if not draw(st.booleans()):
+            continue
+        try:
+            recorded = resolve(module_id, heads)
+            consistent = draw(st.booleans())
+        except ValueError:
+            consistent = False
+        if not consistent:
+            recorded = tuple(
+                Input(input_id=item, sha256=draw(HASHES))
+                for item in order
+                if item in graph[module_id]
+            )
+        heads[module_id] = Head(
+            module_id=module_id,
+            status=draw(st.sampled_from(("accepted", "restricted", "accepted", "stale"))),
+            result_sha256=draw(HASHES),
+            inputs=recorded,
+        )
+    shuffled = draw(st.permutations(tuple(heads.values())))  # head order is the journal's own
+    return catalog, (first, second, third), tuple(shuffled)
+
+
+def rebound(
+    catalog: Catalog, requested: frozenset[str], heads: tuple[Head, ...]
+) -> tuple[Head, ...]:
+    graph = catalog.dependencies(requested)
+    order = catalog.plan(graph)
+    bound = {head.module_id: head.inputs for head in heads}
+    return rebind_heads(order, graph, heads, bound, synthetic_resolver(graph, order))
+
+
+def newly_stale(before: tuple[Head, ...], after: tuple[Head, ...]) -> set[str]:
+    return {
+        new.module_id
+        for old, new in zip(before, after, strict=True)
+        if old.status != "stale" and new.status == "stale"
+    }
+
+
+def changes(resolve: Resolver, head: Head, heads: Mapping[str, Head]) -> bool:
+    try:
+        return resolve(head.module_id, heads) != head.inputs
+    except ValueError:
+        return True
+
+
+@settings(max_examples=300, deadline=None)
+@given(extensions())
+def test_scope_extension_stales_exactly_the_heads_whose_resolved_inputs_change(
+    case: tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]],
+) -> None:
+    catalog, (_, _, target), heads = case
+    graph = catalog.dependencies(target)
+    order = catalog.plan(graph)
+    resolve = synthetic_resolver(graph, order)
+    after = rebound(catalog, target, heads)
+    final = {head.module_id: head for head in after}
+    staled_now = newly_stale(heads, after)
+
+    assert [head.module_id for head in after] == [head.module_id for head in heads]
+    for old, new in zip(heads, after, strict=True):
+        if old.status == "stale" or new.module_id not in staled_now:
+            assert new == old  # kept heads and already-stale heads are untouched
+        else:
+            assert new.notes == (*old.notes, new.notes[-1])
+            assert new.notes[-1].startswith("Scope extended: inputs changed (")
+            assert new.model_copy(update={"status": old.status, "notes": old.notes}) == old
+    # (a) staled iff the resolved input tuple changes, judged on the final heads.
+    for head in heads:
+        if head.status != "stale":
+            assert (head.module_id in staled_now) == changes(resolve, head, final)
+
+    # Differential: an order-free fixpoint over "an input of mine is now stale" agrees.
+    fixpoint: set[str] = set()
+    while True:
+        view = {
+            head.module_id: staled(head, "x") if head.module_id in fixpoint else head
+            for head in heads
+        }
+        grown = fixpoint | {
+            head.module_id
+            for head in heads
+            if head.status != "stale" and changes(resolve, head, view)
+        }
+        if grown == fixpoint:
+            break
+        fixpoint = grown
+    assert fixpoint == staled_now
+
+    # (d) nothing outside the transitive consumers of a directly changed binding is staled.
+    original = {head.module_id: head for head in heads}
+    reach = {
+        head.module_id
+        for head in heads
+        if head.status != "stale" and changes(resolve, head, original)
+    }
+    while True:
+        grown = reach | {
+            head.module_id for head in heads if any(i.input_id in reach for i in head.inputs)
+        }
+        if grown == reach:
+            break
+        reach = grown
+    assert staled_now <= reach
+
+
+@settings(max_examples=300, deadline=None)
+@given(extensions())
+def test_scope_extension_is_idempotent_and_path_independent(
+    case: tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]],
+) -> None:
+    catalog, (_, middle, target), heads = case
+    direct = rebound(catalog, target, heads)
+    # (b) extending again to the same set changes nothing.
+    assert rebound(catalog, target, direct) == direct
+    # (c) S0 -> S1 -> S2 stales the same heads as S0 -> S2.
+    stepwise = rebound(catalog, target, rebound(catalog, middle, heads))
+    assert newly_stale(heads, stepwise) == newly_stale(heads, direct)
+    assert [head.status for head in stepwise] == [head.status for head in direct]
+
+
+ASSESSABLE = tuple(m.module_id for m in modules() if m.module_id not in {"CP-0", "CP-OS"})
+
+
+@settings(max_examples=25, deadline=None)
+@given(
+    st.sets(st.sampled_from(ASSESSABLE), max_size=3),
+    st.sets(st.sampled_from((*ASSESSABLE, "CP-OS")), min_size=1, max_size=3),
+)
+def test_a_module_cp0_has_not_assessed_is_always_refused_and_writes_nothing(
+    first: set[str], more: set[str]
+) -> None:
+    """Ruling (B): CP-0 assesses its run's consumers only; adding any other consumer (directly
+    or through the required closure) is refused, and the journal is untouched."""
+    scope = ("CP-0", *sorted(first))
+    requested = (*scope, *sorted(more - first))
+    before = set(dependencies(scope))
+    added = [item for item in plan(requested) if item not in before]
+    expected = [item for item in added if item not in NOT_CONSUMERS]
+    with tempfile.TemporaryDirectory() as directory:
+        store = cp_model_store(Path(directory), scope)
+        pointer = current_digest(store)
+        snapshot = store.read()
+        if expected:
+            message = f"CP-0 has not assessed {', '.join(expected)}; create a new execution"
+            with pytest.raises(ValueError) as refused:
+                store.extend_scope(requested)
+            assert str(refused.value) == message
+            assert current_digest(store) == pointer and store.read() == snapshot
+        else:
+            report = store.extend_scope(requested)
+            assert report.added == tuple(added)
+            assert store.read().heads == snapshot.heads  # CP-0's inputs never change
