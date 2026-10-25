@@ -20,6 +20,8 @@ from devtools import skill_rehearsal as rehearsal
 from tests.product.test_readiness import readiness_fixture
 
 PY = sys.executable
+# First statements of a SIGINT-stub child: the handler is installed before anything else.
+HANDLER = "import signal\nsignal.signal(signal.SIGINT, signal.default_int_handler)\n"
 
 
 def child(code: str) -> list[str]:
@@ -130,7 +132,7 @@ def test_interrupt_after_sends_sigint_and_marks_the_line(tmp_path: Path) -> None
     code = rehearsal.run_command(
         directory,
         child(
-            "import sys, time\n"
+            HANDLER + "import sys, time\n"
             "try:\n"
             "    print('ready', flush=True)\n"
             "    time.sleep(30)\n"
@@ -138,7 +140,7 @@ def test_interrupt_after_sends_sigint_and_marks_the_line(tmp_path: Path) -> None
             "    print('caught', flush=True)\n"
             "    sys.exit(130)\n"
         ),
-        interrupt_after=1.0,
+        interrupt_after=3.0,
     )
     assert code == 130
     (entry,) = lines(directory)
@@ -161,7 +163,7 @@ def test_a_child_killed_by_the_signal_reports_the_shell_convention(tmp_path: Pat
             "print('ready', flush=True)\n"
             "time.sleep(30)\n"
         ),
-        interrupt_after=1.0,
+        interrupt_after=3.0,
     )
     assert code == 128 + signal.SIGINT
     assert lines(directory)[0]["exit_code"] == 128 + signal.SIGINT
@@ -461,7 +463,7 @@ def test_the_interruption_and_its_resume_are_reported(tmp_path: Path) -> None:
     directory = started(tmp_path)
     marker = tmp_path / "resumed"
     slow = (
-        "import sys, time, pathlib\n"
+        HANDLER + "import sys, time, pathlib\n"
         f"f = pathlib.Path({str(marker)!r})\n"
         "if f.exists():\n"
         "    sys.exit(0)\n"
@@ -472,7 +474,7 @@ def test_the_interruption_and_its_resume_are_reported(tmp_path: Path) -> None:
         "except KeyboardInterrupt:\n"
         "    sys.exit(130)\n"
     )
-    rehearsal.run_command(directory, child(slow), interrupt_after=1.0)
+    rehearsal.run_command(directory, child(slow), interrupt_after=3.0)
     rehearsal.run_command(directory, child(slow))
     assert summarise(directory, journal) == 0
     expected = "Interruption: command 2 interrupted (exit 130); resumed by command 3 (exit 0)"
@@ -482,7 +484,11 @@ def test_the_interruption_and_its_resume_are_reported(tmp_path: Path) -> None:
 def test_an_interruption_never_resumed_is_reported_and_fails(tmp_path: Path) -> None:
     journal = settled_journal(tmp_path)
     directory = started(tmp_path)
-    rehearsal.run_command(directory, child("import time; time.sleep(30)"), interrupt_after=1.0)
+    rehearsal.run_command(
+        directory,
+        child(HANDLER + "import time; time.sleep(30)"),
+        interrupt_after=3.0,
+    )
     assert summarise(directory, journal) == 1
     assert "not resumed" in text_of(directory)
 
