@@ -51,12 +51,19 @@ commands work in order, that a host loads or follows the skill, or any resume be
 - No fixed delivery directory; every command takes a caller-chosen path. The skill's
   convention `./deploy-vii-out/<run-id>/` is a convention only.
 - No `resume` command; resume is re-submitting the same ticket with the same text.
-- No submit or publish action in the CLI for CP-1A or the modules after CP-MODEL.
 - No command that opens the rendered report.
 - `deploy-vii live` dispatches to OpenRouter with a local credential, never the host's
   model, so nothing in the CLI dispatches the host's own models.
-- The skill covers CP-0, CP-1 and CP-MODEL only, and renders the CP-1 page; it does not
-  deliver a final Credit Snapshot.
+- Source scope differs from the runner: for CP-3 and CP-4 the runner sends only the sources
+  their upstream selects and normalises omitted defaults before validating; the host reads
+  the whole pack, and the module's own schema and validator govern the review it writes.
+- No command prints a step's response schema or rules yet, so the host cannot read the shape
+  of a review from the CLI (follow-up M8c).
+- Host-written reviews are not checked by the runner's tool-loop rules (absence claims need
+  a prior search, cited pages must have been read), which depend on a tool loop's record; the
+  module validators run in full.
+- Modules after CP-6 (CP-8, Portfolio Fit) do not exist yet, so the report holds only
+  what the registry has.
 
 ## Not accepted offline
 

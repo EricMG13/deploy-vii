@@ -1424,6 +1424,18 @@ spend, against US$0.0069 of provider usage; plan acceptance needs the ledger to 
   ruling, fix round 1); a reconcile stopped earlier says `not checked: the reconcile stopped
   before the cross-check`.
 
+## The CLI shares the module context (task M8b, 25 Oct 2026)
+
+`execution module-context` prints, for a ticket and step, the CONTEXT entries the runner adds to
+the prepared-pack block (`module_submits.host_context`, built from the runner's own functions):
+`live.context.module_context` for CP-2, CP-3, CP-4 and CP-6, `business_context.context_block` over
+`cp1_context_facts` for CP-1A, and `integrity_scope` under `integrity-scope` for CP-5, in the
+runner's serialisation (indent 1, sorted keys). The pack facts, the SOURCE blocks and the prompt
+rules are not printed (`{}` with a stderr note for a step with no entries).
+`module-submit` calls the module's `submit_<m>_step` through `module_submits.MODULE_SUBMITS`, the
+function `live.submission.MODULE_STEP_ENTRIES` also names, and `report` renders the journal through
+`report_view.build` and `render.render`. The runner is unchanged.
+
 ## Not covered here
 
 Model-facing submissions for `source_context`, `financials` and the narrative steps (they keep

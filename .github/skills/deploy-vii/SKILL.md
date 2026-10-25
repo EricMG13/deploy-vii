@@ -1,6 +1,6 @@
 ---
 name: deploy-vii
-description: Run the Deploy VII evidence workbench on a named issuer source pack - freeze the sources, keep a local execution journal, submit CP-0 and CP-1 reviews step by step, publish the CP-MODEL page and render the CP-1 report - using the deploy-vii command line. Use when asked to produce, resume or interrupt a Deploy VII credit run.
+description: Run the Deploy VII evidence workbench on a named issuer source pack - freeze the sources, keep a local execution journal, submit the CP-0, CP-1 and later module reviews step by step, publish the CP-MODEL page and render the full report - using the deploy-vii command line. Use when asked to produce, resume or interrupt a Deploy VII credit run.
 ---
 
 # Deploy VII delivery skill
@@ -12,7 +12,6 @@ No part of this has been tried on a real Copilot host (see `docs/native-delivery
 each shell command, so expect a prompt per step.
 
 ## Prerequisites
-
 - A checkout of the Deploy VII repository, Python 3.13 and uv. Run `make setup` once
   (it runs `uv sync --locked`). Then run the CLI as `uv run --locked deploy-vii ...`, or
   as `deploy-vii ...` with `.venv/bin` on PATH. The commands below omit the prefix.
@@ -21,17 +20,13 @@ each shell command, so expect a prompt per step.
 - A request file (JSON, schema `preparation-request/1`) naming the run and the source
   files, and a pack root directory holding those files (`references/commands.md`).
 
-## Where outputs land
-
 **Gap:** the product fixes no delivery directory; every command takes a caller-chosen
 path. This skill's convention is `./deploy-vii-out/<run-id>/`, holding `pack/`,
 `journal/`, `reviews/` and one directory per published artifact below. Several commands
 refuse an output path that already exists: use a new directory each time.
 
 ## Flow
-
-Module order follows `deploy-vii plan`. This skill covers what the CLI can submit today:
-CP-0, CP-1 and CP-MODEL.
+Module order follows `deploy-vii plan`. The CLI submits CP-0 to CP-6 and publishes CP-MODEL.
 
 1. Show the order for the modules requested (prints only, runs nothing):
 
@@ -52,8 +47,8 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal create --pack
 ```
 
 4. CP-0. Begin an attempt (prints JSON; keep its `ticket_id`), write the source-readiness
-   review to `reviews/cp0.txt`, then submit it. Printed `issues` mean the review was
-   rejected; one repair attempt is allowed (`references/resume.md`).
+   review to `reviews/cp0.txt`, then submit it. Printed `issues` mean it was rejected; one
+   repair attempt is allowed (`references/resume.md`).
 
 ```
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal begin CP-0
@@ -71,10 +66,9 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp1-quality-i
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp1-promote --ticket <ticket> --review ./deploy-vii-out/<run-id>/reviews/cp1-quality.txt
 ```
 
-   `step-output` prints a retained valid step output (read what a step produced before
-   writing the next review); `cp1-quality-inputs` prints the registers for the QA review;
-   `cp1-promote` submits that QA review and settles CP-1. Repeat `cp1-submit` for each
-   step name.
+   `step-output` prints a retained step output (read it before the next review);
+   `cp1-quality-inputs` prints the registers for the QA review; `cp1-promote` settles CP-1.
+   Repeat `cp1-submit` for each step name.
 
 6. Optional preview while CP-1 is pending (never settles a ticket):
 
@@ -90,9 +84,7 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal render --enve
 ```
 
    The page is `report/accepted.html`, or `refused.html` which states why. Rendering does
-   not accept the page: browser acceptance stays unrun. **Gap:** no command opens it.
-   **Gap:** no command delivers a final Credit Snapshot; the CP-1 render above is the
-   nearest output.
+   not accept the page: browser acceptance stays unrun. This is the CP-1 page; see step 10.
 
 8. CP-MODEL, only when the run requests it and CP-1 is accepted or restricted:
 
@@ -101,14 +93,29 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp-model-publ
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal cp-model-verify --output ./deploy-vii-out/<run-id>/model
 ```
 
-9. Inspect the journal at any point (prints the snapshot as JSON):
+9. Each later module (CP-1A, CP-2 to CP-6; names in `references/commands.md`): begin, print
+   the step's CONTEXT (`{}` if none), write the review, submit. A rejected review prints
+   the validator's issues on stderr and exits 1: repair, then `begin` again. Exit 2 refuses.
+
+```
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal module-context --module CP-2 --ticket <ticket> --step credit_synthesis
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal module-submit --module CP-2 --ticket <ticket> --step credit_synthesis --review ./deploy-vii-out/<run-id>/reviews/cp2.txt
+```
+
+10. Deliver the full report in the run's pathway (`status` shows it); unrun or blocked
+   modules show their state. Refuses an existing directory. **Gap:** nothing opens it.
+
+```
+deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal report --pathway credit_snapshot --output ./deploy-vii-out/<run-id>/front-page
+```
+
+11. Inspect the journal at any point (prints the snapshot as JSON):
 
 ```
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal status
 ```
 
 ## Interrupt and resume
-
 - Interrupt a pending attempt. This records a reason in the journal; it does not stop any
   process the host is running:
 
@@ -116,17 +123,11 @@ deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal status
 deploy-vii execution --directory ./deploy-vii-out/<run-id>/journal interrupt --ticket <ticket> --reason "<why>"
 ```
 
-- **Gap:** there is no `resume` command. `begin` refuses while any attempt is pending
-  ("resume or explicitly interrupt it first"). To resume a step or response left pending
-  (for example a crash during validation), re-run the same `*-submit` with the same ticket
-  and the same review text; a step already valid is refused, and different text for the
-  same step is refused. Details and line references: `references/resume.md`.
-  Behaviour after a killed host session is not verified.
-- **Gap:** only CP-0, CP-1 and CP-MODEL have submit or publish actions in the CLI. CP-1A
-  and the later modules in `deploy-vii plan` cannot be submitted from here.
+- **Gap:** there is no `resume` command, and `begin` refuses while any attempt is pending.
+  To resume a pending step, re-run the same `*-submit` with the same ticket and the same
+  review text (`references/resume.md`). Behaviour after a killed host session is not verified.
 
 ## Model dispatch
-
 You (the host model) write the review texts. `deploy-vii live` is a different thing: a
 capped OpenRouter test runner for development, using a local credential file, never the
 host model. **Gap:** nothing dispatches the host's own models, and there is no single
@@ -134,7 +135,6 @@ run-all command. Do not run `deploy-vii live` unless the user asks for a capped
 development test and names the cap (`references/commands.md`).
 
 ## Stop rules
-
 - Never exceed a cap in `settings/project.toml` (`recurring_caps_usd`,
   `cumulative_ceiling_usd`); read the numbers there, they are not copied here. Never pass
   a larger `--cap` to `live`. The cumulative ceiling spans OpenRouter and Anthropic spend

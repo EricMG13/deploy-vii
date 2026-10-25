@@ -60,6 +60,7 @@ shard-b tests/product/test_live_cli_make.py
 shard-b tests/product/test_live_client.py
 shard-c tests/product/test_live_cohort.py
 shard-b tests/product/test_live_context.py
+shard-b tests/product/test_module_submits.py
 shard-b tests/product/test_live_credential.py
 shard-b tests/product/test_live_credit.py
 shard-b tests/product/test_live_draw.py
