@@ -2064,6 +2064,35 @@ def test_a_part_with_a_null_for_a_defaulted_field_is_held_with_the_default(case:
     assert held.held["BS"]["books"][0]["balance_movements"] == []
 
 
+@settings(max_examples=24, deadline=None)
+@given(
+    field=st.sampled_from(("line_id", "period_id")),
+    value=st.one_of(
+        st.none(),
+        st.booleans(),
+        st.integers(),
+        st.floats(allow_nan=False, allow_infinity=False),
+        st.lists(st.integers(), max_size=2),
+        st.dictionaries(st.text(max_size=2), st.integers(), max_size=2),
+    ),
+)
+@example(field="line_id", value=[])
+@example(field="period_id", value={})
+def test_malformed_statement_identifiers_reject_without_replacing_held_parts(
+    case: Case, field: str, value: object
+) -> None:
+    payload = split(case.payload)["IS"]
+    held = Parts()
+    assert held.submit("IS", payload) == ()
+    before = assemble(held)
+    malformed = json.loads(payload)
+    malformed["books"][0]["statement_lines"][0][field] = value
+    issues = held.submit("IS", json.dumps(malformed))
+    assert any(issue.startswith(f"books.0.statement_lines.0.{field}:") for issue in issues)
+    assert assemble(held) == before
+    assert held.submit("IS", payload) == ()
+
+
 def contract_issues(document: dict[str, Any]) -> tuple[str, ...]:
     """The stored contract's own shape issues of an assembled payload."""
     try:
@@ -2241,6 +2270,51 @@ def test_an_assembly_the_validators_reject_lists_the_parts_held(
     assert "parts held" not in texts[3] and texts[3].startswith("rejected (1 submits left):\n- ")
     step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
     assert step["assemblies"] == 1
+
+
+def test_malformed_part_identifiers_can_be_repaired_without_spending_a_submit(
+    tmp_path: Path, paged_case: PagedCase
+) -> None:
+    parts = split(paged_case.payload)
+    malformed = []
+    for field, value in (("line_id", []), ("period_id", {})):
+        document = json.loads(parts["IS"])
+        document["books"][0]["statement_lines"][0][field] = value
+        malformed.append(exact_json(document))
+    rig = paged_rig(tmp_path, paged_case)
+    script = rig.script(
+        tool_reply(
+            ("search", "search_pack", json.dumps({"query": "cash"})),
+            *[part_call(kind, kind, parts[kind]) for kind in ("frame", "IS", "CFS", "BS")],
+            *[part_call(f"bad-{i}", "IS", payload) for i, payload in enumerate(malformed)],
+            ("first", "submit_financials", "{}"),
+        ),
+        tool_reply(
+            part_call("repair", "IS", parts["IS"]),
+            part_call("other", "other", parts["other"]),
+            ("final", "submit_financials", "{}"),
+        ),
+    )
+    result = rig.run(script, step_id="financials")
+    assert (result.status, result.verdict) == ("accepted", "accepted")
+    assert [submit["outcome"] for submit in result.submits] == ["rejected", "accepted"]
+    first = json.loads((rig.directory(result.attempt_ids[0]) / "output.md").read_text())
+    assert [
+        line
+        for line in first["financial"]["books"][0]["statement_lines"]
+        if line["statement"] == "IS"
+    ] == json.loads(parts["IS"])["books"][0]["statement_lines"]
+    records = {entry["call_id"]: entry for entry in transcript(rig, result) if "call_id" in entry}
+    for index, field in enumerate(("line_id", "period_id")):
+        entry = records[f"bad-{index}"]
+        assert entry["status"] == "part rejected"
+        assert (
+            f"books.0.statement_lines.0.{field}: Input should be a valid string" in entry["issues"]
+        )
+    assert records["repair"]["status"] == "part accepted"
+    step = rig.metrics(result.attempt_id)["tool_loop"]["step"]
+    assert step["assemblies"] == 2
+    assert step["parts_submitted"]["IS"] == {"accepted": 2, "rejected": 2}
 
 
 def test_a_step_without_parts_is_refused_the_part_tool(tmp_path: Path) -> None:

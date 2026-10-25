@@ -1227,7 +1227,7 @@ def _checked(kind: str, payload: str) -> _Checked:
             else set()
         )
         issues = [issue for issue in shape_issues(error) if issue not in unset]
-    if document is None:  # not a JSON object: the shape issue says so
+    if document is None or issues:  # split references need shape-valid identifiers
         return _Checked(tuple(issues), None, resolved)
     issues += _split_issues(kind, document)
     found = tuple(dict.fromkeys(issues))
