@@ -13,7 +13,7 @@ from pathlib import Path
 from deploy_vii.contracts import Module, ModuleView, View
 from deploy_vii.cp1_workflow import EnvelopeRefused, read_cp1_envelope
 from deploy_vii.envelope import Envelope
-from deploy_vii.execution import Execution
+from deploy_vii.execution import Execution, scope_within
 from deploy_vii.render import empty_view, render
 
 
@@ -59,10 +59,12 @@ def envelope_view(base: View, envelope: Envelope) -> View:
     """`base` with its CP-1 module replaced by the envelope's settled module.
 
     `base` supplies every other module (the journal's accepted view, or an idle one); only an
-    accepted or restricted envelope module is shown, and only for the base view's own run.
+    accepted or restricted envelope module is shown, and only for the base view's own run:
+    the same identity, the envelope's requested modules a subset of the view's (the envelope
+    keeps the pack blob's scope after a scope extension, task 9.1).
     """
     module = envelope.module
-    if base.run != envelope.run:
+    if not scope_within(envelope.run, base.run):
         raise ValueError("The envelope belongs to another run than the view")
     if module.status not in ("accepted", "restricted"):
         raise ValueError(f"A {module.status} envelope module is not shown")
@@ -99,7 +101,8 @@ def model_destination_html(store: Execution, directory: Path, model: Module) -> 
     # The base is idle, not the journal's view: the page is a function of the envelope and the
     # CP-MODEL module alone, so it re-derives (`verify_cp_model_publication`) after later
     # modules settle.
-    base = empty_view(store.read().run, candidate=False)
+    # The pack blob's run: the page keeps the scope CP-1 was promoted under (task 9.1).
+    base = empty_view(store.pack().run, candidate=False)
     view = envelope_view(base, read_cp1_envelope(store, directory))
     shown = next(item for item in view.modules if item.module_id == "CP-MODEL")
     return render(_with_module(view, "CP-MODEL", _settled(shown, model)))

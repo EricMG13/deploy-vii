@@ -15,7 +15,15 @@ from pydantic import Field, ValidationError
 from deploy_vii.canonical_audit import DefinitionReview, validate_definition_review
 from deploy_vii.canonical_tables import REGISTER_NOTE, CanonicalTables, canonical_tables
 from deploy_vii.context_binding import FinancialContextBinding, validate_financial_context
-from deploy_vii.contracts import PREFILLED_MARKER, Contract, Hash, Identifier, Module, Text
+from deploy_vii.contracts import (
+    PREFILLED_MARKER,
+    Contract,
+    Hash,
+    Identifier,
+    Module,
+    Run,
+    Text,
+)
 from deploy_vii.cp1_quality import cp1_quality_inputs
 from deploy_vii.downstream_readiness import (
     DownstreamInputs,
@@ -513,7 +521,7 @@ def _recheck_handoff(
         )
     markdown, sidecar = write_envelope(
         Envelope(
-            run=snapshot.run,
+            run=store.pack(snapshot).run,  # the run promotion hashed: the pack blob's (task 9.1)
             module=candidate,
             registers_sha256=handoff.registers_sha256,
             gap_limitations=handoff.gap_limitations,
@@ -552,7 +560,7 @@ def write_cp1_envelope(store: Execution, destination: Path) -> Path:
     handoff = CP1Handoff.model_validate_json(store.step_output(step.output_sha256))
     _recheck_handoff(store, snapshot, attempt, handoff)
     envelope = Envelope(
-        run=snapshot.run,
+        run=store.pack(snapshot).run,  # the pack blob's run, as promotion hashed it (task 9.1)
         module=store.head_module(head),
         registers_sha256=handoff.registers_sha256,
         gap_limitations=handoff.gap_limitations,
@@ -599,20 +607,22 @@ _EXPORTED_FILES = ("envelope.md", "envelope.json")
 
 
 def cp1_binding_issues(
-    envelope: Envelope, receipt: dict[str, object], snapshot: ExecutionSnapshot
+    envelope: Envelope, receipt: dict[str, object], snapshot: ExecutionSnapshot, *, run: Run
 ) -> tuple[str, ...]:
     """What ties a verified envelope to the journal that promoted it.
 
     `read_envelope` checks the Markdown only against its own sidecar, so a consistently
     rewritten pair passes it. The pair is genuine only when its module is the CP-1 head's
     settled blob, built on the journal's run and prepared pack, with the head's status, and
-    when the receipt records the same hashes, QA report and statuses.
+    when the receipt records the same hashes, QA report and statuses. `run` is the journal's
+    pack blob run, which keeps the scope CP-1 was promoted under when the run's scope is
+    extended (task 9.1).
     """
     head = next((h for h in snapshot.heads if h.module_id == "CP-1"), None)
     if head is None or head.status not in ("accepted", "restricted"):
         return ("CP-1 has no accepted or restricted head in the journal",)
     issues: list[str] = []
-    if envelope.run != snapshot.run:
+    if envelope.run != run:
         issues.append("Envelope run differs from the journal's run")
     if envelope.pack_sha256 != snapshot.pack_sha256:
         issues.append("Envelope pack differs from the journal's prepared pack")
@@ -668,6 +678,9 @@ def read_cp1_envelope(store: Execution, directory: Path) -> Envelope:
         envelope = read_envelope(raw["envelope.md"], raw["envelope.json"])
     except EnvelopeError as error:
         raise EnvelopeRefused(error.issues) from error
-    if issues := list(cp1_binding_issues(envelope, receipt, store.read())):
+    snapshot = store.read()
+    if issues := list(
+        cp1_binding_issues(envelope, receipt, snapshot, run=store.pack(snapshot).run)
+    ):
         raise EnvelopeRefused(tuple(issues))
     return envelope

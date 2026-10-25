@@ -561,6 +561,36 @@ def published(promoted: Execution, tmp_path: Path) -> tuple[Execution, Path]:
     return store, tmp_path / "model"
 
 
+def test_cp_model_added_by_a_scope_extension_publishes_and_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 9.1 fix round 1 (R2): a run promoted without CP-MODEL, extended by CP-MODEL."""
+    without = tuple(m for m in PATHWAY_MODULES["credit_snapshot"] if m != "CP-MODEL")
+    monkeypatch.setattr(financials, "Run", lambda **kw: Run(**{**kw, "requested_modules": without}))
+    store, attempt = staged(tmp_path / "journal")
+    inputs = cp1_quality_inputs(cp1_registers(store, attempt.ticket_id))
+    promote_cp1(store, attempt.ticket_id, at_ceiling(inputs).model_dump_json())
+    assert "CP-MODEL" not in store.read().run.requested_modules
+
+    report = store.extend_scope((*without, "CP-MODEL"))
+    assert report.added == ("CP-MODEL",) and report.staled == ()
+
+    finished = publish_cp_model(store, output=tmp_path / "model")
+    assert finished.status == "finished" and not finished.issues
+    assert heads(store)["CP-MODEL"].status in ("accepted", "restricted")
+    assert verify_cp_model_publication(store, tmp_path / "model") == ()
+
+
+def test_a_published_cp_model_still_verifies_after_a_scope_extension(
+    promoted: Execution, tmp_path: Path
+) -> None:
+    store, output = published(promoted, tmp_path)
+    assert verify_cp_model_publication(store, output) == ()
+    report = store.extend_scope((*store.read().run.requested_modules, "CP-OS"))
+    assert report.added == ("CP-OS",) and report.staled == ()
+    assert verify_cp_model_publication(store, output) == ()
+
+
 def test_an_untouched_publication_verifies_even_after_later_modules_settle(
     promoted: Execution, tmp_path: Path
 ) -> None:

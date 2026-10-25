@@ -1,10 +1,16 @@
 import hashlib
 import json
+import re
+import tempfile
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from playwright.sync_api import expect, sync_playwright
 
 from deploy_vii.contracts import PATHWAY_MODULES, Citation, Claim, Fact, Input, Module, PathwayId
@@ -16,14 +22,18 @@ from deploy_vii.execution import (
     Execution,
     Head,
     NotAuthorized,
+    Resolver,
     StepSubmission,
     StepValidation,
     candidate_issues,
     current_inputs,
+    rebind_heads,
+    resolution,
+    staled,
 )
 from deploy_vii.preparation import PreparedPack
-from deploy_vii.readiness import ReadinessReview, build_readiness, validate_review
-from deploy_vii.registry import _NOT_CP5_FAN_IN, plan
+from deploy_vii.readiness import NOT_CONSUMERS, ReadinessReview, build_readiness, validate_review
+from deploy_vii.registry import _NOT_CP5_FAN_IN, dependencies, modules, plan
 from deploy_vii.render import render
 from tests.product.evidence import evidence_path
 from tests.product.test_readiness import readiness_fixture
@@ -534,7 +544,7 @@ def cp_model_store(
     consumers = tuple(
         review.consumers[0].model_copy(update={"module_id": module_id})
         for module_id in plan(scope)
-        if module_id not in {"CP-0", "CP-MODEL"}  # CP-MODEL needs no CP-0 consumer readiness
+        if module_id not in NOT_CONSUMERS  # CP-0, CP-MODEL, CP-MEMO, CP-OS need no readiness row
     )
     gap = review.gaps[0].model_copy(
         update={"affected_modules": tuple(item.module_id for item in consumers)}
@@ -1530,3 +1540,629 @@ def test_a_blocked_cp1_is_not_cp1a_context(tmp_path: Path) -> None:
         store.finish(ticket.ticket_id, "not json", lambda _: ())
     assert {head.module_id: head.status for head in store.read().heads}["CP-1"] == "blocked"
     assert "CP-1" not in [item.input_id for item in current_inputs(store.read(), "CP-1A")]
+
+
+# --- Scope extension (task 9.1, decision 0005 MC-9) -------------------------------------------
+
+
+def settled_store(tmp_path: Path, scope: tuple[str, ...]) -> Execution:
+    """A run of `scope` with CP-0 assessing exactly its consumers and every module settled."""
+    store = cp_model_store(tmp_path, scope)
+    for module_id in plan(scope):
+        if module_id != "CP-0":
+            settle_module(store, module_id)
+    return store
+
+
+def heads_by_id(store: Execution) -> dict[str, Head]:
+    return {head.module_id: head for head in store.read().heads}
+
+
+def bound_input(attempt: Attempt, module_id: str) -> Input:
+    return next(item for item in attempt.inputs if item.input_id == module_id)
+
+
+def test_adding_cp_model_refreshes_only_affected_consumers(tmp_path: Path) -> None:
+    """Plan M9.1 (amended, ruling B): CP-MODEL joins CP-5's fan-in, so only CP-5 is staled."""
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-5")
+    store = settled_store(tmp_path, scope)
+    before = store.read()
+    before_heads = heads_by_id(store)
+    blobs = blob_names(store)
+
+    report = store.extend_scope((*scope, "CP-MODEL"))
+
+    after = store.read()
+    assert report.extended and report.added == ("CP-MODEL",)
+    assert report.plan == plan((*scope, "CP-MODEL"))
+    assert report.plan.index("CP-MODEL") < report.plan.index("CP-5")
+    note = "Scope extended: inputs changed (CP-MODEL); rerun required"
+    assert [(item.module_id, item.note) for item in report.staled] == [("CP-5", note)]
+    assert set(report.kept) == set(before_heads) - {"CP-5"}
+    assert after.parent == before.content_hash()
+    assert after.run == before.run.model_copy(update={"requested_modules": (*scope, "CP-MODEL")})
+    assert after.pack_sha256 == before.pack_sha256 and after.attempts == before.attempts
+    assert blob_names(store) == blobs  # the pack blob is not rewritten
+    assert store.pack().run == before.run  # readers of the blob keep the original scope
+    after_heads = heads_by_id(store)
+    assert [head.module_id for head in after.heads] == [head.module_id for head in before.heads]
+    for module_id, head in before_heads.items():
+        if module_id == "CP-5":
+            assert after_heads[module_id] == head.model_copy(
+                update={"status": "stale", "notes": (*head.notes, note)}
+            )
+        else:
+            assert after_heads[module_id].model_dump_json() == head.model_dump_json()
+            # Kept means the journal still resolves the binding it settled on: no fresh budget.
+            with pytest.raises(ValueError, match="Input set is settled"):
+                store.begin(module_id)
+
+    # CP-MODEL is runnable in plan order; CP-5 then reruns on a new input set.
+    with pytest.raises(ValueError, match="upstream is unrun"):
+        store.begin("CP-5")
+    cp_model = settle_module(store, "CP-MODEL")
+    rerun = store.begin("CP-5")
+    assert rerun.number == 0
+    assert bound_input(rerun, "CP-MODEL").sha256 == cp_model.content_hash()
+
+
+def test_scope_extension_stales_the_transitive_consumers_of_a_staled_head(
+    tmp_path: Path,
+) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-3", "CP-5", "CP-6", "CP-MEMO")
+    store = settled_store(tmp_path, scope)
+    before = heads_by_id(store)
+
+    report = store.extend_scope((*scope, "CP-MODEL"))
+
+    assert [(item.module_id, item.note) for item in report.staled] == [
+        ("CP-5", "Scope extended: inputs changed (CP-MODEL); rerun required"),
+        ("CP-6", "Scope extended: inputs changed (CP-5); rerun required"),
+        ("CP-MEMO", "Scope extended: inputs changed (CP-6); rerun required"),
+    ]
+    after = heads_by_id(store)
+    for module_id in ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-3"):
+        assert after[module_id] == before[module_id]
+    views = {item.module_id: item for item in store.view().modules}
+    assert {views[item].status for item in ("CP-5", "CP-6", "CP-MEMO")} == {"stale"}
+    assert views["CP-MODEL"].status == "unrun"
+
+
+def test_scope_extension_keeps_every_head_whose_inputs_do_not_change(tmp_path: Path) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2")
+    store = settled_store(tmp_path, scope)
+    before = store.read()
+    views_before = {item.module_id: item for item in store.view().modules}
+    assert views_before["CP-MODEL"].status == "not_in_pathway"
+    assert views_before["CP-OS"].status == "not_in_pathway"
+
+    report = store.extend_scope(("CP-OS", *scope, "CP-MODEL"))
+
+    assert report.added == ("CP-OS", "CP-MODEL") and report.staled == ()  # plan order
+    assert report.kept == tuple(head.module_id for head in before.heads)
+    after = store.read()
+    assert after.heads == before.heads
+    assert after.run.requested_modules == (*scope, "CP-OS", "CP-MODEL")
+    views = {item.module_id: item for item in store.view().modules}
+    for module_id in scope:
+        assert views[module_id] == views_before[module_id]  # kept heads render unchanged
+    assert views["CP-MODEL"].status == "unrun" and views["CP-OS"].status == "unrun"
+    assert store.begin("CP-MODEL").inputs[-1].input_id == "CP-1"
+
+
+def test_a_requested_module_already_in_the_closure_adds_nothing_but_is_recorded(
+    tmp_path: Path,
+) -> None:
+    store = settled_store(tmp_path, ("CP-0", "CP-2"))  # CP-1 and CP-1A are required producers
+    before = store.read()
+    report = store.extend_scope(("CP-0", "CP-2", "CP-1A"))
+    after = store.read()
+    assert report.extended and report.added == () and report.staled == ()
+    assert after.heads == before.heads and after.parent == before.content_hash()
+    assert after.run.requested_modules == ("CP-0", "CP-2", "CP-1A")
+
+
+def test_scope_extension_refusals_write_nothing(tmp_path: Path) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2")
+    store = settled_store(tmp_path, scope)
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+
+    def unchanged() -> None:
+        assert current_digest(store) == pointer
+        assert set((store.directory / "snapshots").iterdir()) == snapshots
+
+    with pytest.raises(ValueError, match=r"^Unknown r14 entry: CP-99$"):
+        store.extend_scope((*scope, "CP-99"))
+    unchanged()
+    superset = r"^Scope only extends; create a new execution to remove modules$"
+    with pytest.raises(ValueError, match=superset):
+        store.extend_scope(("CP-0", "CP-1", "CP-MODEL"))
+    unchanged()
+    # Ruling (B): CP-0 never assessed CP-4, so it cannot be added; closure modules count too.
+    with pytest.raises(ValueError, match=r"^CP-0 has not assessed CP-4; create a new execution$"):
+        store.extend_scope((*scope, "CP-4"))
+    unchanged()
+    with pytest.raises(
+        ValueError, match=r"^CP-0 has not assessed CP-2A, CP-2G, CP-2H; create a new execution$"
+    ):
+        store.extend_scope((*scope, "CP-MODEL", "CP-2H"))
+    unchanged()
+
+    # No-op: the same set after canonicalisation (order and aliases do not count).
+    report = store.extend_scope(("CP-2", "CP-1A", "CP-1", "CP-PARSE"))
+    assert not report.extended and report.added == () and report.staled == ()
+    assert report.kept == tuple(head.module_id for head in store.read().heads)
+    assert report.plan == plan(scope)
+    unchanged()
+
+    # A pending attempt refuses first, ahead of every other check.
+    assert store.extend_scope((*scope, "CP-MODEL")).extended
+    store.begin("CP-MODEL")
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+    for requested in ((*scope, "CP-MODEL", "CP-OS"), ("CP-99",), ("CP-0",), (*scope, "CP-4")):
+        with pytest.raises(ValueError, match=r"^Cannot change scope while an attempt is pending$"):
+            store.extend_scope(requested)
+        unchanged()
+
+
+def test_a_consumer_cp0_did_assess_is_added_and_only_its_consumers_are_staled(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1, R4: CP-0's readiness (as a 9.1b addendum would) also assesses CP-4, which the
+    run does not request; adding CP-4 is accepted and stales only CP-5, whose fan-in gains it."""
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-5")
+    pack, review = readiness_fixture()
+    pack = pack.model_copy(update={"run": pack.run.model_copy(update={"requested_modules": scope})})
+    wider = pack.model_copy(
+        update={"run": pack.run.model_copy(update={"requested_modules": (*scope, "CP-4")})}
+    )
+    consumers = tuple(
+        review.consumers[0].model_copy(update={"module_id": module_id})
+        for module_id in plan(wider.run.requested_modules)
+        if module_id not in NOT_CONSUMERS
+    )
+    gap = review.gaps[0].model_copy(
+        update={"affected_modules": tuple(item.module_id for item in consumers)}
+    )
+    review = review.model_copy(
+        update={"pack_sha256": wider.content_hash(), "consumers": consumers, "gaps": (gap,)}
+    )
+    store = Execution.create(tmp_path / "execution", pack)
+    ticket = store.begin("CP-0")
+    readiness = build_readiness(wider, review)
+    rebound_inputs = tuple(
+        Input(input_id=item.input_id, sha256=store.read().pack_sha256)
+        if item.input_id == "prepared-pack"
+        else item
+        for item in readiness.inputs
+    )
+    payload = readiness.model_copy(update={"inputs": rebound_inputs}).model_dump_json()
+    assert settled(store, store.finish(ticket.ticket_id, payload, lambda _: ())).status in (
+        "accepted",
+        "restricted",
+    )
+    assert any(c.row_id == "CP-4" for c in heads_by_id(store)["CP-0"].commands)
+    for module_id in plan(scope):
+        if module_id != "CP-0":
+            settle_module(store, module_id)
+    before = heads_by_id(store)
+
+    report = store.extend_scope((*scope, "CP-4"))
+
+    assert report.added == ("CP-4",)
+    assert [(item.module_id, item.note) for item in report.staled] == [
+        ("CP-5", "Scope extended: inputs changed (CP-4); rerun required")
+    ]
+    after = heads_by_id(store)
+    for module_id in ("CP-0", "CP-1", "CP-1A", "CP-2"):
+        assert after[module_id] == before[module_id]
+    assert store.begin("CP-4").number == 0  # authorised by CP-0's row, runnable as today
+
+
+def test_refusal_order_pairs_name_the_earlier_refusal(tmp_path: Path) -> None:
+    """Fix round 1, R3: unknown before non-superset; non-superset before unassessed."""
+    store = settled_store(tmp_path, ("CP-0", "CP-1", "CP-1A", "CP-2"))
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+    for requested, message in (
+        (("CP-0", "CP-99"), r"^Unknown r14 entry: CP-99$"),
+        (
+            ("CP-0", "CP-1", "CP-1A", "CP-4"),
+            r"^Scope only extends; create a new execution to remove modules$",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            store.extend_scope(requested)
+        assert current_digest(store) == pointer
+        assert set((store.directory / "snapshots").iterdir()) == snapshots
+
+
+def test_a_head_outside_the_new_graph_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    """Fix round 1, R3: a journal whose heads lie outside its own scope (tampered) is refused."""
+    store = settled_store(tmp_path, ("CP-0", "CP-1", "CP-1A", "CP-2"))
+    snapshot = store.read()
+    narrowed = snapshot.run.model_copy(update={"requested_modules": ("CP-0", "CP-1")})
+    store._write(snapshot.model_copy(update={"run": narrowed}))
+    pointer = current_digest(store)
+    snapshots = set((store.directory / "snapshots").iterdir())
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Execution heads outside the run's dependency graph: ['CP-1A', 'CP-2']"),
+    ):
+        store.extend_scope(("CP-0", "CP-1", "CP-OS"))
+    assert current_digest(store) == pointer
+    assert set((store.directory / "snapshots").iterdir()) == snapshots
+
+
+def test_the_assessed_guard_fails_closed_without_a_settled_cp0_head() -> None:
+    from deploy_vii.execution import unassessed
+
+    def cp0(status: Literal["accepted", "restricted", "blocked", "stale"]) -> Head:
+        return Head(
+            module_id="CP-0",
+            status=status,
+            result_sha256="0" * 64,
+            inputs=(),
+            commands=(
+                Command(row_id="CP-4", text="Run CP-4"),
+                Command(row_id="CP-3", text="DO NOT RUN"),
+            ),
+        )
+
+    added = ("CP-MODEL", "CP-3", "CP-4", "CP-OS", "CP-2A")
+    assert unassessed(added, cp0("restricted")) == ("CP-2A",)  # a DO NOT RUN row is assessed
+    assert unassessed(added, cp0("accepted")) == ("CP-2A",)
+    assert unassessed(added, cp0("stale")) == ("CP-3", "CP-4", "CP-2A")
+    assert unassessed(added, None) == ("CP-3", "CP-4", "CP-2A")
+    assert unassessed(("CP-MODEL", "CP-MEMO", "CP-OS", "CP-0"), None) == ()
+
+
+def test_the_pack_blob_keeps_its_scope_and_replace_pack_accepts_either_run(
+    tmp_path: Path,
+) -> None:
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2")
+    store = settled_store(tmp_path, scope)
+    original = store.pack()
+    store.extend_scope((*scope, "CP-MODEL"))
+    snapshot = store.read()
+    assert store.pack() == original and original.run != snapshot.run
+
+    source = original.sources[0].model_copy(update={"limitation": "Different evidence"})
+    store.replace_pack(original.model_copy(update={"sources": (source,)}))  # the blob's run
+    assert {head.status for head in store.read().heads} == {"stale"}
+    widened = original.model_copy(update={"run": snapshot.run})
+    store.replace_pack(widened)  # a pack prepared on the extended run
+    assert store.pack().run == store.read().run == snapshot.run
+    narrower = original.run.model_copy(update={"requested_modules": ("CP-0",)})
+    renamed = snapshot.run.model_copy(update={"issuer_id": "someone-else"})
+    for run in (narrower, renamed):
+        with pytest.raises(ValueError, match="immutable"):
+            store.replace_pack(original.model_copy(update={"run": run}))
+
+
+def test_the_pack_blob_scope_must_lie_within_the_snapshot_scope(tmp_path: Path) -> None:
+    store = fixture_store(tmp_path)
+    snapshot = store.read()
+    narrower = snapshot.run.model_copy(update={"requested_modules": ("CP-0", "CP-1")})
+    store._write(snapshot.model_copy(update={"run": narrower}))
+    with pytest.raises(ValueError, match="canonical pack"):
+        store.pack()  # the blob requests modules the snapshot does not
+
+
+def test_the_extend_scope_command_prints_the_report_and_refuses_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from deploy_vii.__main__ import main
+
+    scope = ("CP-0", "CP-1", "CP-1A", "CP-2", "CP-5")
+    store = settled_store(tmp_path, scope)
+
+    def cli(*arguments: str) -> str:
+        argv = ["deploy-vii", "execution", "--directory", str(store.directory), *arguments]
+        monkeypatch.setattr("sys.argv", argv)
+        main()
+        return capsys.readouterr().out
+
+    pointer = current_digest(store)
+    for refused, message in (
+        ((*scope, "CP-4"), "CP-0 has not assessed CP-4; create a new execution"),
+        (("CP-0",), "Scope only extends; create a new execution to remove modules"),
+        ((*scope, "CP-99"), "Unknown r14 entry: CP-99"),
+    ):
+        with pytest.raises(SystemExit) as exit_:
+            cli("extend-scope", *refused)
+        assert exit_.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == f"extend-scope refused: {message}\n"
+        assert current_digest(store) == pointer
+
+    kept = [head.module_id for head in store.read().heads if head.module_id != "CP-5"]
+    assert json.loads(cli("extend-scope", *scope, "CP-MODEL")) == {
+        "extended": True,
+        "added": ["CP-MODEL"],
+        "kept": kept,
+        "staled": [
+            {
+                "module_id": "CP-5",
+                "note": "Scope extended: inputs changed (CP-MODEL); rerun required",
+            }
+        ],
+        "plan": list(plan((*scope, "CP-MODEL"))),
+    }
+    assert json.loads(cli("extend-scope", "CP-MODEL", *scope))["extended"] is False  # exit 0
+    begun = json.loads(cli("begin", "CP-MODEL"))  # a newly added module begins as today
+    assert begun["module_id"] == "CP-MODEL" and begun["number"] == 0
+
+
+def test_drift_that_predates_an_extension_is_kept_and_stays_refreshable(tmp_path: Path) -> None:
+    """Fix round 1, R1: CP-1A settled before CP-1, so it now resolves CP-1 as context; that
+    drift is not the extension's, so +CP-OS stales nothing and CP-1A refreshes as before."""
+    store = fixture_store(tmp_path)
+    accept_cp0(store)
+    first = store.begin("CP-1")
+    store.finish(first.ticket_id, "not json", lambda _: ())  # rejected: CP-1 has no head
+    ticket = store.begin("CP-1A")
+    store.finish(ticket.ticket_id, candidate_for(store, "CP-1A").model_dump_json(), lambda _: ())
+    repair = store.begin("CP-1")
+    store.finish(repair.ticket_id, candidate_for(store, "CP-1", 1).model_dump_json(), lambda _: ())
+    before = store.read()
+
+    report = store.extend_scope((*before.run.requested_modules, "CP-OS"))
+
+    assert report.extended and report.added == ("CP-OS",) and report.staled == ()
+    assert store.read().heads == before.heads
+    refresh = store.begin("CP-1A")  # as in the test above: a new input set, CP-1 as context
+    assert refresh.number == 0 and refresh.inputs[-1].input_id == "CP-1"
+
+
+# --- Scope extension properties (task 9.1, decision 0012: execution ordering) -----------------
+
+EdgeKind = Literal["none", "required", "optional"]
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """A synthetic registry: module `M<j>` may consume `M<i>` for i < j (so it is a DAG)."""
+
+    edges: tuple[tuple[EdgeKind, ...], ...]  # edges[j][i] for i < j
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        return tuple(f"M{index}" for index in range(len(self.edges)))
+
+    def dependencies(self, requested: frozenset[str]) -> dict[str, set[str]]:
+        """`registry.dependencies` on this catalog: required closure, optional when selected."""
+        ids = self.ids
+
+        def producers(module_id: str, kind: EdgeKind) -> set[str]:
+            row = self.edges[ids.index(module_id)]
+            return {ids[i] for i, edge in enumerate(row) if edge == kind}
+
+        selected = set(requested)
+        pending = list(selected)
+        while pending:
+            for producer in producers(pending.pop(), "required"):
+                if producer not in selected:
+                    selected.add(producer)
+                    pending.append(producer)
+        return {
+            module_id: producers(module_id, "required")
+            | (producers(module_id, "optional") & selected)
+            for module_id in selected
+        }
+
+    def plan(self, graph: Mapping[str, set[str]]) -> tuple[str, ...]:
+        """`registry.plan`'s layering: each round takes every ready module in catalog order."""
+        remaining = {key: set(value) for key, value in graph.items()}
+        ordered: list[str] = []
+        while remaining:
+            ready = [item for item in self.ids if item in remaining and not remaining[item]]
+            for item in ready:
+                ordered.append(item)
+                del remaining[item]
+                for producers in remaining.values():
+                    producers.discard(item)
+        return tuple(ordered)
+
+
+def synthetic_resolver(graph: Mapping[str, set[str]], order: tuple[str, ...]) -> Resolver:
+    """`current_inputs` on a synthetic graph: every edge must be a settled head, in plan order."""
+
+    def resolve(module_id: str, heads: Mapping[str, Head]) -> tuple[Input, ...]:
+        bound: list[Input] = []
+        for item in order:
+            if item not in graph[module_id]:
+                continue
+            head = heads.get(item)
+            if head is None or head.status == "stale":
+                raise ValueError("Required upstream is unrun, stale or blocked")
+            status: Literal["accepted", "restricted"] = (
+                "accepted" if head.status == "accepted" else "restricted"
+            )
+            bound.append(Input(input_id=item, sha256=head.result_sha256, status=status))
+        return tuple(bound)
+
+    return resolve
+
+
+HASHES = st.integers(0, 40).map(lambda value: hashlib.sha256(str(value).encode()).hexdigest())
+
+
+@st.composite
+def extensions(
+    draw: st.DrawFn,
+) -> tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]]:
+    """A catalog, three nested requested sets S0 ⊆ S1 ⊆ S2 and the settled heads of S0's graph.
+
+    Each head's recorded binding is its S0 resolution (a consistent journal) or, where drawn, a
+    binding with drawn hashes: drift that predates the extension (an upstream refreshed since,
+    or a head settled before an upstream it now resolves); some heads are already stale and
+    some resolve nothing because an upstream never settled.
+    """
+    size = draw(st.integers(2, 8))
+    kinds = st.sampled_from(("none", "required", "optional"))
+    edges = tuple(tuple(draw(kinds) for _ in range(j)) for j in range(size))
+    catalog = Catalog(edges)
+    ids = catalog.ids
+    first = frozenset(draw(st.sets(st.sampled_from(ids), min_size=1)))
+    second = first | draw(st.sets(st.sampled_from(ids)))
+    third = second | draw(st.sets(st.sampled_from(ids)))
+    graph = catalog.dependencies(first)
+    order = catalog.plan(graph)
+    resolve = synthetic_resolver(graph, order)
+    heads: dict[str, Head] = {}
+    for module_id in order:
+        if not draw(st.booleans()):
+            continue
+        recorded = resolution(resolve, module_id, heads)
+        if recorded is None or not draw(st.booleans()):
+            recorded = tuple(
+                Input(input_id=item, sha256=draw(HASHES))
+                for item in order
+                if item in graph[module_id]
+            )
+        heads[module_id] = Head(
+            module_id=module_id,
+            status=draw(st.sampled_from(("accepted", "restricted", "accepted", "stale"))),
+            result_sha256=draw(HASHES),
+            inputs=recorded,
+        )
+    shuffled = draw(st.permutations(tuple(heads.values())))  # head order is the journal's own
+    return catalog, (first, second, third), tuple(shuffled)
+
+
+def resolver_of(catalog: Catalog, requested: frozenset[str]) -> Resolver:
+    graph = catalog.dependencies(requested)
+    return synthetic_resolver(graph, catalog.plan(graph))
+
+
+def rebound(
+    catalog: Catalog, old: frozenset[str], new: frozenset[str], heads: tuple[Head, ...]
+) -> tuple[Head, ...]:
+    """`extend_scope`'s use of the rule: the old resolution against the heads as they were."""
+    graph = catalog.dependencies(new)
+    order = catalog.plan(graph)
+    as_they_were = {head.module_id: head for head in heads}
+    previous = resolver_of(catalog, old)
+    before = {head.module_id: resolution(previous, head.module_id, as_they_were) for head in heads}
+    return rebind_heads(order, graph, heads, before, synthetic_resolver(graph, order))
+
+
+def newly_stale(before: tuple[Head, ...], after: tuple[Head, ...]) -> set[str]:
+    return {
+        new.module_id
+        for old, new in zip(before, after, strict=True)
+        if old.status != "stale" and new.status == "stale"
+    }
+
+
+@settings(max_examples=300, deadline=None)
+@given(extensions())
+def test_scope_extension_stales_exactly_the_heads_whose_resolution_it_changes(
+    case: tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]],
+) -> None:
+    catalog, (first, _, target), heads = case
+    graph = catalog.dependencies(target)
+    new, old = resolver_of(catalog, target), resolver_of(catalog, first)
+    original = {head.module_id: head for head in heads}
+    before = {head.module_id: resolution(old, head.module_id, original) for head in heads}
+    after = rebound(catalog, first, target, heads)
+    final = {head.module_id: head for head in after}
+    staled_now = newly_stale(heads, after)
+
+    assert [head.module_id for head in after] == [head.module_id for head in heads]
+    for was, now in zip(heads, after, strict=True):
+        if was.status == "stale" or now.module_id not in staled_now:
+            assert now == was  # kept heads and already-stale heads are untouched
+        else:
+            assert now.notes == (*was.notes, now.notes[-1])
+            assert now.notes[-1].startswith("Scope extended: inputs changed (")
+            assert now.model_copy(update={"status": was.status, "notes": was.notes}) == was
+    # (a) staled iff the new resolution differs from the pre-extension one (final heads).
+    live = [head for head in heads if head.status != "stale"]
+    for head in live:
+        changed = resolution(new, head.module_id, final) != before[head.module_id]
+        assert (head.module_id in staled_now) == changed
+    # Drift that predates the extension is never the extension's: no extension, no staling.
+    assert rebound(catalog, first, first, heads) == heads
+
+    # Differential: an order-free fixpoint over "my resolution moved" agrees.
+    fixpoint: set[str] = set()
+    while True:
+        view = {
+            head.module_id: staled(head, "x") if head.module_id in fixpoint else head
+            for head in heads
+        }
+        grown = fixpoint | {
+            head.module_id
+            for head in live
+            if resolution(new, head.module_id, view) != before[head.module_id]
+        }
+        if grown == fixpoint:
+            break
+        fixpoint = grown
+    assert fixpoint == staled_now
+
+    # (d) nothing outside the transitive consumers (new graph) of a directly changed head.
+    reach = {
+        head.module_id
+        for head in live
+        if resolution(new, head.module_id, original) != before[head.module_id]
+    }
+    while True:
+        grown = reach | {head.module_id for head in heads if graph[head.module_id] & reach}
+        if grown == reach:
+            break
+        reach = grown
+    assert staled_now <= reach
+
+
+@settings(max_examples=300, deadline=None)
+@given(extensions())
+def test_scope_extension_is_idempotent_and_path_independent(
+    case: tuple[Catalog, tuple[frozenset[str], ...], tuple[Head, ...]],
+) -> None:
+    catalog, (first, middle, target), heads = case
+    direct = rebound(catalog, first, target, heads)
+    # (b) extending again to the same set changes nothing.
+    assert rebound(catalog, target, target, direct) == direct
+    # (c) S0 -> S1 -> S2 stales the same heads as S0 -> S2.
+    stepwise = rebound(catalog, middle, target, rebound(catalog, first, middle, heads))
+    assert newly_stale(heads, stepwise) == newly_stale(heads, direct)
+    assert [head.status for head in stepwise] == [head.status for head in direct]
+
+
+ASSESSABLE = tuple(m.module_id for m in modules() if m.module_id not in {"CP-0", "CP-OS"})
+
+
+@settings(max_examples=25, deadline=None)
+@given(
+    st.sets(st.sampled_from(ASSESSABLE), max_size=3),
+    st.sets(st.sampled_from((*ASSESSABLE, "CP-OS")), min_size=1, max_size=3),
+)
+def test_a_module_cp0_has_not_assessed_is_always_refused_and_writes_nothing(
+    first: set[str], more: set[str]
+) -> None:
+    """Ruling (B): CP-0 assesses its run's consumers only; adding any other consumer (directly
+    or through the required closure) is refused, and the journal is untouched."""
+    scope = ("CP-0", *sorted(first))
+    requested = (*scope, *sorted(more - first))
+    before = set(dependencies(scope))
+    added = [item for item in plan(requested) if item not in before]
+    expected = [item for item in added if item not in NOT_CONSUMERS]
+    with tempfile.TemporaryDirectory() as directory:
+        store = cp_model_store(Path(directory), scope)
+        pointer = current_digest(store)
+        snapshot = store.read()
+        if expected:
+            message = f"CP-0 has not assessed {', '.join(expected)}; create a new execution"
+            with pytest.raises(ValueError) as refused:
+                store.extend_scope(requested)
+            assert str(refused.value) == message
+            assert current_digest(store) == pointer and store.read() == snapshot
+        else:
+            report = store.extend_scope(requested)
+            assert report.added == tuple(added)
+            assert store.read().heads == snapshot.heads  # CP-0's inputs never change
