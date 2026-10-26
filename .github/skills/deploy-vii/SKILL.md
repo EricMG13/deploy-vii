@@ -68,8 +68,8 @@ deploy-vii execution --directory <journal> module-submit --module CP-2 --ticket 
 
 `deploy-vii live` is a capped OpenRouter development runner using a local credential. Do not run
 it for host delivery. `textutil` is unavailable in some environments; offline tests use a
-qualified test double there. Keep live/native checks paused unless the coordinator lifts the
-pause. Modules after CP-6 (including CP-8 and Portfolio Fit) are not implemented.
+qualified test double there. Keep live/native checks paused unless the user explicitly lifts
+the pause. Modules after CP-6 (including CP-8 and Portfolio Fit) are not implemented.
 
 Command details: `references/commands.md`; retained journal semantics: `references/resume.md`;
 acceptance and deferred host checks: `references/acceptance.md`.
