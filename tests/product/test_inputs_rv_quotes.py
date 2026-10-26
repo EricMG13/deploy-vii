@@ -953,6 +953,7 @@ def test_reader_never_reuses_another_sources_refs() -> None:
         numeric_cell_bytes("yield_pct", "0.075", fmt="0.00%"),
         numeric_cell_bytes("bid", "1e9999999999999999999", "str"),
     ],
+    ids=("bool-cache", "error-cache", "percent-format", "huge-exponent"),
 )
 def test_cli_numeric_boundary_refusals_are_actionable(
     raw: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

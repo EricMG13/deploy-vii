@@ -1,4 +1,4 @@
-.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage coverage-shard product-static audit secrets diff dev-check dev-test rehearsal-check product-check
+.PHONY: replay live-probe live-module live-regression live-canary setup check format types test coverage coverage-shard product-static audit secrets diff dev-check dev-test rehearsal-check product-check linux-parity
 
 setup:
 	uv sync --locked
@@ -28,6 +28,14 @@ rehearsal-check:
 
 product-check: product-static
 	$(MAKE) coverage
+
+# Local-only Docker reproduction of docs/ci-gates.md; not part of hosted CI.
+# shortcut: an 8 GiB Docker VM OOMs with two pytest workers; lift this cap when memory grows.
+linux-parity:
+	@set -eu; D=$$(mktemp -d "$(HOME)/deploy-vii-linux-parity.XXXXXX"); trap 'rm -rf "$$D"' EXIT; \
+	git archive HEAD -o "$$D/tree.tar"; \
+	printf '%s\n' '#!/bin/bash' 'set -eu' 'apt-get update -qq && apt-get install -y -qq curl ca-certificates git make nodejs' 'mkdir /w && tar -x -C /w -f /lx/tree.tar && cd /w' 'curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh' 'export PATH="/root/.local/bin:$$PATH"' 'uv sync --locked' 'uv run --locked playwright install --with-deps chromium' 'make product-check' > "$$D/run.sh"; \
+	docker run --rm -e PYTEST_XDIST_AUTO_NUM_WORKERS=1 -v "$$D":/lx:ro ubuntu:24.04 bash /lx/run.sh
 
 product-static:
 	uv run --locked ruff check src tests/product

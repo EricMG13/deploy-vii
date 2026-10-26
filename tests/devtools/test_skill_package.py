@@ -127,6 +127,10 @@ def test_commands_parse_with_the_real_parser(
         )
     # Every command of the documented flow is present, so none can be dropped silently.
     flow = {
+        "doctor",
+        "run",
+        "execution:resume",
+        "execution:report-open",
         "plan",
         "prepare",
         "execution:create",

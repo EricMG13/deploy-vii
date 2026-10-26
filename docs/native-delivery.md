@@ -24,8 +24,8 @@ directory holding `SKILL.md` with `name` (lowercase, hyphens, matching the direc
   skill ..."); automatic invocation matches the description.
 
 The skill declares no `allowed-tools`, so the host asks before running shell commands.
-The checkout also needs `make setup` (Python 3.13, uv) before the commands work; the
-skill does not install anything. The repository has no `LICENSE` file, so the skill sets no
+Install with `uv sync --locked` and check with `uv run --locked deploy-vii doctor`; the skill
+does not install anything. The repository has no `LICENSE` file, so the skill sets no
 `license` field.
 
 ## Offline checks
@@ -44,14 +44,10 @@ skill does not install anything. The repository has no `LICENSE` file, so the sk
 These prove package shape and that the documented flags exist. They do not prove that the
 commands work in order, that a host loads or follows the skill, or any resume behaviour.
 
-## Gaps (also labelled `Gap:` in `SKILL.md`)
+## Remaining gaps
 
-- No `setup` or `doctor` command; `make setup` is the only install route and nothing checks it.
-- No single run-all command; the host runs each module step by command.
-- No fixed delivery directory; every command takes a caller-chosen path. The skill's
-  convention `./deploy-vii-out/<run-id>/` is a convention only.
-- No `resume` command; resume is re-submitting the same ticket with the same text.
-- No command that opens the rendered report.
+- The host's behaviour for `doctor`, `run`, derived delivery paths, `resume` and `report-open`
+  has only offline checks; none is qualified on a real Copilot host.
 - `deploy-vii live` dispatches to OpenRouter with a local credential, never the host's
   model, so nothing in the CLI dispatches the host's own models.
 - Source scope differs from the runner: for CP-3 and CP-4 the runner sends only the sources
@@ -77,9 +73,14 @@ M11 native-delivery research of 24 October 2026:
 - Whether `/skills info` shows it and description matching dispatches it.
 - Shell permission prompts and the effect of `allowed-tools`.
 - Tool-output and context limits (no numbers are documented).
-- Interruption, resume and long-running behaviour (process kill, session loss, reload).
+- Interruption, resume and long-running behaviour on the host (process kill, session loss, reload).
 - Backend injection blocking versus source-derived text.
-- Where report files land and whether the user can open them.
-- The missing commands listed under Gaps.
+- Where report files land on the host and whether the user can open them.
+
+## Live checks still to do
+
+- The final rehearsal through CP-0 to CP-6, including the Credit Snapshot.
+- Interrupt and resume a host session and verify retained pending work.
+- Confirm the report location and opening behaviour on the host.
 
 Not verified: any live Copilot host behaviour; the GitHub docs pages are undated.

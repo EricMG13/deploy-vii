@@ -43,6 +43,7 @@ shard-a tests/product/test_cp_model_workflow.py
 shard-b tests/product/test_credit_snapshot.py
 shard-b tests/product/test_delivery.py
 shard-b tests/product/test_display.py
+shard-b tests/product/test_doctor.py
 shard-b tests/product/test_downstream_readiness.py
 shard-c tests/product/test_envelope.py
 shard-b tests/product/test_evidence.py

@@ -51,6 +51,9 @@ Read from `src/deploy_vii/execution.py` (task 9.1 fix round 1); functions are ci
   the Model page. The earlier defect (after an extension the CP-1 envelope export, render and
   `cp-model-publish` refused) is fixed (task 9.1 fix round 1, commit 61cce94).
 
-Gap: no `resume` command and no listing of resumable tickets other than `status`.
-Not verified: behaviour after the host process is killed mid-command; the offline test
-only checks that commands parse.
+`execution resume` inspects the pending ticket and retained response, or identifies the next
+runnable module when none is pending. For host reviews, `--ticket <ticket> --review <file>`
+resubmits through the existing workflow with the same retained bytes. Offline tests exercise
+production validation, injected interruptions and same-ticket resumption.
+
+Not verified: native host behaviour or recovery after an actual host process kill mid-command.
