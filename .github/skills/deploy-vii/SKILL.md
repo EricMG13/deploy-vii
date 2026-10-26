@@ -10,7 +10,10 @@ Copilot host behaviour remains unverified; see `docs/native-delivery.md`.
 
 ## Setup and delivery
 
-- Install Python 3.13 and uv 0.12.5, then run `uv sync --locked` and `deploy-vii doctor`.
+- Install Python 3.13 and uv 0.12.5, then run `uv sync --locked` and
+  `uv run --locked deploy-vii doctor`.
+- The examples below omit `uv run --locked`; prefix each command with it or put
+  `.venv/bin` on `PATH`.
 - The default delivery root is `./deploy-vii-out`; set `DEPLOY_VII_OUT` or pass global `--out`.
 - Repository skill: `.github/skills/deploy-vii/`. User scope can copy the directory to
   `~/.copilot/skills/deploy-vii/`.

@@ -24,8 +24,8 @@ directory holding `SKILL.md` with `name` (lowercase, hyphens, matching the direc
   skill ..."); automatic invocation matches the description.
 
 The skill declares no `allowed-tools`, so the host asks before running shell commands.
-Install with `uv sync --locked` and check with `deploy-vii doctor`; the skill does not install
-anything. The repository has no `LICENSE` file, so the skill sets no
+Install with `uv sync --locked` and check with `uv run --locked deploy-vii doctor`; the skill
+does not install anything. The repository has no `LICENSE` file, so the skill sets no
 `license` field.
 
 ## Offline checks
