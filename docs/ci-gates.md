@@ -61,7 +61,7 @@ live-runner tests run on both platforms; real-pack replay entries stay counted s
 To reproduce the hosted run, commit, write the committed tree to a tar under a directory the
 Docker VM can mount (with Colima, under `$HOME`), and run a clean container with no key file,
 no artifacts and no textutil: `git archive HEAD -o "$DIR/tree.tar"`, then
-`docker run --rm -v "$DIR":/lx:ro ubuntu:24.04 bash /lx/run.sh`, where `run.sh` does
+`docker run --rm -e PYTEST_XDIST_AUTO_NUM_WORKERS=1 -v "$DIR":/lx:ro ubuntu:24.04 bash /lx/run.sh`, where `run.sh` does
 `apt-get update -qq && apt-get install -y -qq curl ca-certificates git make nodejs`,
 `mkdir /w && tar -x -C /w -f /lx/tree.tar && cd /w`, installs uv 0.12.5
 (`curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh`), then `uv sync --locked`,
@@ -74,8 +74,10 @@ file with `--cov-append`.
 
 Run `make linux-parity` after committing the candidate. The target archives `HEAD`, creates the
 temporary container recipe described above, and runs the hosted `product-check` gates in Ubuntu
-24.04. It needs Docker, network access for image/packages and enough memory for coverage. This
-target is local-only and adds no work or budget to CI.
+24.04. It caps local pytest to one worker after a two-worker run exceeded an 8 GiB Docker VM;
+the same tests and 90% combined coverage floor still run. It needs Docker, network access for
+image/packages and enough memory for coverage. This target is local-only and adds no work or
+budget to CI.
 
 **Parallel execution.** `make coverage` runs `pytest -n auto --dist loadfile` (decision
 [0011](decisions/0011-parallel-test-execution.md)): one worker per CPU, all tests of a file on
